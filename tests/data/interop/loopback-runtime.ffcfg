@@ -1,0 +1,7 @@
+engine.worker_count=2
+engine.enable_metrics=true
+engine.trace_mode=ring
+engine.trace_capacity=32
+profile=loopback-profile.art
+counterparty|loop-a|3001|1001|FIX.4.4|BUY1|SELL1|mmap|loopback-a.store|warm|inline|30|true
+counterparty|loop-b|3002|1001|FIX.4.4|BUY2|SELL2|memory||memory|inline|30|false

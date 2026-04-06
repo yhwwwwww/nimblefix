@@ -1,0 +1,184 @@
+#include <cstdint>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <iostream>
+#include <sstream>
+#include <string>
+#include <string_view>
+#include <vector>
+
+#include "fastfix/profile/builder_codegen.h"
+#include "fastfix/profile/dictgen_input.h"
+#include "fastfix/profile/overlay.h"
+#include "xml2ffd.h"
+
+namespace {
+
+auto PrintUsage() -> void {
+    std::cerr << "usage:\n"
+              << "  fastfix-xml2ffd --xml <FIX44.xml> --output <output.ffd> --profile-id <uint64> [--cpp-builders <output.h>]\n"
+              << "  fastfix-xml2ffd --input <baseline.ffd> [--input <overlay.ffd> ...] --cpp-builders <output.h>\n";
+}
+
+auto ResolveProjectPath(const std::filesystem::path& path) -> std::filesystem::path {
+    if (path.is_absolute()) {
+        return path;
+    }
+    return std::filesystem::path(FASTFIX_PROJECT_DIR) / path;
+}
+
+auto ReadFile(const std::filesystem::path& path) -> std::string {
+    std::ifstream stream(path);
+    if (!stream) {
+        std::cerr << "error: cannot open file: " << path << '\n';
+        std::exit(1);
+    }
+    std::ostringstream buffer;
+    buffer << stream.rdbuf();
+    return buffer.str();
+}
+
+}  // namespace
+
+int main(int argc, char** argv) {
+    std::filesystem::path xml_path;
+    std::filesystem::path output_path;
+    std::filesystem::path builder_output_path;
+    std::vector<std::filesystem::path> input_paths;
+    std::uint64_t profile_id = 0;
+
+    for (int index = 1; index < argc; ++index) {
+        const std::string_view arg(argv[index]);
+        if (arg == "--xml" && index + 1 < argc) {
+            xml_path = argv[++index];
+            continue;
+        }
+        if (arg == "--output" && index + 1 < argc) {
+            output_path = argv[++index];
+            continue;
+        }
+        if (arg == "--profile-id" && index + 1 < argc) {
+            profile_id = std::stoull(argv[++index], nullptr, 0);
+            continue;
+        }
+        if (arg == "--input" && index + 1 < argc) {
+            input_paths.emplace_back(argv[++index]);
+            continue;
+        }
+        if (arg == "--cpp-builders" && index + 1 < argc) {
+            builder_output_path = argv[++index];
+            continue;
+        }
+        PrintUsage();
+        return 1;
+    }
+
+    // Validate: either --xml mode or --input mode
+    const bool xml_mode = !xml_path.empty();
+    const bool input_mode = !input_paths.empty();
+
+    if (xml_mode && input_mode) {
+        std::cerr << "error: --xml and --input are mutually exclusive\n";
+        return 1;
+    }
+
+    if (!xml_mode && !input_mode) {
+        PrintUsage();
+        return 1;
+    }
+
+    if (xml_mode && (output_path.empty() || profile_id == 0)) {
+        std::cerr << "error: --xml mode requires --output and --profile-id\n";
+        return 1;
+    }
+
+    if (input_mode && builder_output_path.empty()) {
+        std::cerr << "error: --input mode requires --cpp-builders\n";
+        return 1;
+    }
+
+    // Phase 1: XML → .ffd (if xml mode)
+    std::string ffd_text;
+
+    if (xml_mode) {
+        xml_path = ResolveProjectPath(xml_path);
+        output_path = ResolveProjectPath(output_path);
+
+        const auto xml_content = ReadFile(xml_path);
+        try {
+            ffd_text = fastfix::tools::ConvertXmlToFfd(xml_content, profile_id);
+        } catch (const std::exception& e) {
+            std::cerr << "error: " << e.what() << '\n';
+            return 1;
+        }
+
+        if (const auto parent = output_path.parent_path(); !parent.empty()) {
+            std::filesystem::create_directories(parent);
+        }
+
+        std::ofstream out(output_path);
+        if (!out) {
+            std::cerr << "error: cannot write to: " << output_path << '\n';
+            return 1;
+        }
+        out << ffd_text;
+        std::cout << "generated dictionary '" << output_path.string() << "'\n";
+    }
+
+    // Phase 2: Generate C++ header (if requested)
+    if (!builder_output_path.empty()) {
+        builder_output_path = ResolveProjectPath(builder_output_path);
+
+        fastfix::profile::NormalizedDictionary dictionary;
+
+        if (xml_mode) {
+            // Use the .ffd text we just generated
+            auto parsed = fastfix::profile::LoadNormalizedDictionaryText(ffd_text);
+            if (!parsed.ok()) {
+                std::cerr << "error: " << parsed.status().message() << '\n';
+                return 1;
+            }
+            dictionary = std::move(parsed).value();
+        } else {
+            // Load and merge input .ffd files
+            for (auto& p : input_paths) {
+                p = ResolveProjectPath(p);
+            }
+
+            auto baseline = fastfix::profile::LoadNormalizedDictionaryFile(input_paths[0]);
+            if (!baseline.ok()) {
+                std::cerr << "error: " << baseline.status().message() << '\n';
+                return 1;
+            }
+            dictionary = std::move(baseline).value();
+
+            for (std::size_t i = 1; i < input_paths.size(); ++i) {
+                auto additional = fastfix::profile::LoadNormalizedDictionaryFile(input_paths[i]);
+                if (!additional.ok()) {
+                    std::cerr << "error: " << additional.status().message() << '\n';
+                    return 1;
+                }
+                auto merged = fastfix::profile::ApplyOverlay(dictionary, additional.value());
+                if (!merged.ok()) {
+                    std::cerr << "error: " << merged.status().message() << '\n';
+                    return 1;
+                }
+                dictionary = std::move(merged).value();
+            }
+        }
+
+        if (const auto parent = builder_output_path.parent_path(); !parent.empty()) {
+            std::filesystem::create_directories(parent);
+        }
+
+        const auto status = fastfix::profile::WriteCppBuildersHeader(builder_output_path, dictionary);
+        if (!status.ok()) {
+            std::cerr << "error: " << status.message() << '\n';
+            return 1;
+        }
+        std::cout << "generated builder header '" << builder_output_path.string() << "'\n";
+    }
+
+    return 0;
+}

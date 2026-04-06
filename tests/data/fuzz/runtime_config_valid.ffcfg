@@ -1,0 +1,6 @@
+engine.worker_count=2
+engine.enable_metrics=true
+engine.trace_mode=ring
+engine.trace_capacity=8
+profile=../interop/loopback-profile.art
+counterparty|parser-a|4001|1001|FIX.4.4|BUYA|SELLA|memory||memory|inline|30|true

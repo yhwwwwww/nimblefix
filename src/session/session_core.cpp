@@ -1,0 +1,209 @@
+#include "fastfix/session/session_core.h"
+
+#include <functional>
+
+namespace fastfix::session {
+
+namespace {
+
+constexpr std::size_t kHashCombineMix = 0x9e3779b9U;
+
+auto HashOptional(const std::optional<std::string>& value) -> std::size_t {
+    if (!value.has_value()) {
+        return 0U;
+    }
+    return std::hash<std::string>{}(*value);
+}
+
+auto CombineHash(std::size_t seed, std::size_t value) -> std::size_t {
+    return seed ^ (value + kHashCombineMix + (seed << 6U) + (seed >> 2U));
+}
+
+}  // namespace
+
+auto SessionKeyHash::operator()(const SessionKey& key) const -> std::size_t {
+    std::size_t seed = std::hash<std::string>{}(key.begin_string);
+    seed = CombineHash(seed, std::hash<std::string>{}(key.sender_comp_id));
+    seed = CombineHash(seed, std::hash<std::string>{}(key.target_comp_id));
+    seed = CombineHash(seed, HashOptional(key.sender_sub_id));
+    seed = CombineHash(seed, HashOptional(key.target_sub_id));
+    seed = CombineHash(seed, HashOptional(key.session_qualifier));
+    return seed;
+}
+
+SessionCore::SessionCore(SessionConfig config)
+    : config_(std::move(config)) {
+}
+
+auto SessionCore::OnTransportConnected() -> base::Status {
+    if (state_ != SessionState::kDisconnected) {
+        return base::Status::InvalidArgument("transport can only connect from the disconnected state");
+    }
+
+    state_ = SessionState::kConnected;
+    return base::Status::Ok();
+}
+
+auto SessionCore::BeginRecovery() -> base::Status {
+    if (state_ == SessionState::kRecovering) {
+        return base::Status::InvalidArgument("session is already recovering");
+    }
+
+    resume_state_ = state_;
+    state_ = SessionState::kRecovering;
+    return base::Status::Ok();
+}
+
+auto SessionCore::FinishRecovery() -> base::Status {
+    if (state_ != SessionState::kRecovering) {
+        return base::Status::InvalidArgument("session is not recovering");
+    }
+
+    state_ = resume_state_;
+    return base::Status::Ok();
+}
+
+auto SessionCore::BeginLogon() -> base::Status {
+    if (state_ != SessionState::kConnected) {
+        return base::Status::InvalidArgument("logon can only begin from the connected state");
+    }
+
+    state_ = SessionState::kPendingLogon;
+    return base::Status::Ok();
+}
+
+auto SessionCore::RestoreSequenceState(std::uint32_t next_in_seq, std::uint32_t next_out_seq) -> base::Status {
+    if (next_in_seq == 0 || next_out_seq == 0) {
+        return base::Status::InvalidArgument("sequence numbers must be positive");
+    }
+
+    next_in_seq_ = next_in_seq;
+    next_out_seq_ = next_out_seq;
+    pending_resend_.reset();
+    return base::Status::Ok();
+}
+
+auto SessionCore::AdvanceInboundExpectedSeq(std::uint32_t next_in_seq) -> base::Status {
+    if (next_in_seq == 0) {
+        return base::Status::InvalidArgument("sequence numbers must be positive");
+    }
+    if (next_in_seq < next_in_seq_) {
+        return base::Status::InvalidArgument("cannot move inbound sequence backwards");
+    }
+
+    next_in_seq_ = next_in_seq;
+    if (state_ == SessionState::kResendProcessing && pending_resend_.has_value() &&
+        next_in_seq_ > pending_resend_->end_seq) {
+        pending_resend_.reset();
+        state_ = resume_state_;
+    }
+    return base::Status::Ok();
+}
+
+auto SessionCore::OnLogonAccepted() -> base::Status {
+    if (state_ != SessionState::kConnected && state_ != SessionState::kPendingLogon) {
+        return base::Status::InvalidArgument("logon can only be accepted from the connected or pending-logon state");
+    }
+
+    state_ = SessionState::kActive;
+    return base::Status::Ok();
+}
+
+auto SessionCore::BeginLogout() -> base::Status {
+    if (state_ != SessionState::kActive && state_ != SessionState::kResendProcessing) {
+        return base::Status::InvalidArgument("logout can only begin from the active or resend-processing state");
+    }
+
+    pending_resend_.reset();
+    state_ = SessionState::kAwaitingLogout;
+    return base::Status::Ok();
+}
+
+auto SessionCore::OnTransportClosed() -> base::Status {
+    state_ = SessionState::kDisconnected;
+    return base::Status::Ok();
+}
+
+auto SessionCore::AllocateOutboundSeq() -> base::Result<std::uint32_t> {
+    if (state_ != SessionState::kConnected && state_ != SessionState::kPendingLogon &&
+        state_ != SessionState::kActive && state_ != SessionState::kAwaitingLogout &&
+        state_ != SessionState::kResendProcessing) {
+        return base::Status::InvalidArgument("outbound sequence numbers can only be allocated for an active session");
+    }
+
+    return next_out_seq_++;
+}
+
+auto SessionCore::ObserveInboundSeq(std::uint32_t seq_num) -> base::Status {
+    if (state_ != SessionState::kConnected && state_ != SessionState::kPendingLogon &&
+        state_ != SessionState::kActive && state_ != SessionState::kAwaitingLogout &&
+        state_ != SessionState::kResendProcessing) {
+        return base::Status::InvalidArgument("inbound sequence numbers can only be observed for an active session");
+    }
+    if (seq_num < next_in_seq_) {
+        return base::Status::InvalidArgument("received a duplicate or stale inbound sequence number");
+    }
+    if (seq_num > next_in_seq_) {
+        pending_resend_ = ResendRange{.begin_seq = next_in_seq_, .end_seq = seq_num - 1};
+        resume_state_ = state_;
+        state_ = SessionState::kResendProcessing;
+        return base::Status::InvalidArgument("inbound sequence gap detected");
+    }
+
+    ++next_in_seq_;
+    return base::Status::Ok();
+}
+
+auto SessionCore::BeginResend(std::uint32_t begin_seq, std::uint32_t end_seq) -> base::Status {
+    if (state_ != SessionState::kActive && state_ != SessionState::kAwaitingLogout) {
+        return base::Status::InvalidArgument("resend can only begin from an active session");
+    }
+    if (begin_seq == 0 || end_seq == 0 || begin_seq > end_seq) {
+        return base::Status::InvalidArgument("invalid resend range");
+    }
+
+    pending_resend_ = ResendRange{.begin_seq = begin_seq, .end_seq = end_seq};
+    resume_state_ = state_;
+    state_ = SessionState::kResendProcessing;
+    return base::Status::Ok();
+}
+
+auto SessionCore::CompleteResend() -> base::Status {
+    if (state_ != SessionState::kResendProcessing) {
+        return base::Status::InvalidArgument("session is not processing a resend");
+    }
+
+    pending_resend_.reset();
+    state_ = resume_state_;
+    return base::Status::Ok();
+}
+
+auto SessionCore::RecordInboundActivity(std::uint64_t timestamp_ns) -> base::Status {
+    last_inbound_ns_ = timestamp_ns;
+    return base::Status::Ok();
+}
+
+auto SessionCore::RecordOutboundActivity(std::uint64_t timestamp_ns) -> base::Status {
+    last_outbound_ns_ = timestamp_ns;
+    return base::Status::Ok();
+}
+
+auto SessionCore::Snapshot() const -> SessionSnapshot {
+    return SessionSnapshot{
+        .session_id = config_.session_id,
+        .state = state_,
+        .profile_id = config_.profile_id,
+        .next_in_seq = next_in_seq_,
+        .next_out_seq = next_out_seq_,
+        .last_inbound_ns = last_inbound_ns_,
+        .last_outbound_ns = last_outbound_ns_,
+        .has_pending_resend = pending_resend_.has_value(),
+        .pending_resend = pending_resend_.value_or(ResendRange{}),
+    };
+}
+
+auto SessionCore::handle(std::uint32_t worker_id) const -> SessionHandle {
+    return SessionHandle(config_.session_id, worker_id);
+}
+
+}  // namespace fastfix::session

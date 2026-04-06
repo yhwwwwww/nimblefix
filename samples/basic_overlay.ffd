@@ -1,0 +1,5 @@
+# Basic overlay that adds stable custom fields to the baseline profile.
+field|5001|VenueOrderType|string|1
+field|5002|VenueAccount|string|1
+
+message|D|NewOrderSingle|0|5001:r,5002:o

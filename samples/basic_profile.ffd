@@ -1,0 +1,16 @@
+# Basic normalized dictionary input for local dictgen testing.
+profile_id=1001
+schema_hash=0x1001001001001001
+
+field|35|MsgType|string|0
+field|49|SenderCompID|string|0
+field|56|TargetCompID|string|0
+field|453|NoPartyIDs|int|0
+field|448|PartyID|string|0
+field|447|PartyIDSource|char|0
+field|452|PartyRole|int|0
+
+message|0|Heartbeat|1|35:r,49:r,56:r
+message|D|NewOrderSingle|0|35:r,49:r,56:r,453:o
+
+group|453|448|Parties|0|448:r,447:r,452:r

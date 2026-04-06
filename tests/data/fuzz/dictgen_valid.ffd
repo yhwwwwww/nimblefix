@@ -1,0 +1,9 @@
+profile_id=2001
+schema_hash=0x2001200120012001
+
+field|35|MsgType|string|0
+field|49|SenderCompID|string|0
+field|56|TargetCompID|string|0
+field|453|NoPartyIDs|int|0
+
+message|D|NewOrderSingle|0|35:r,49:r,56:r

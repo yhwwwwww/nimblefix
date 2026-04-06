@@ -1,0 +1,7 @@
+engine.worker_count=1
+engine.enable_metrics=true
+engine.trace_mode=disabled
+profile=../../../build/sample-basic.art
+listener|main|127.0.0.1|9921|0
+counterparty|fix42|4201|1001|FIX.4.2|SELL|BUY|memory||memory|inline|5|false
+counterparty|fixt11|5101|1001|FIXT.1.1|SELL|BUY|memory||memory|inline|5|false|9
