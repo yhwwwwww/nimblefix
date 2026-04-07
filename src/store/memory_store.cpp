@@ -228,6 +228,21 @@ auto MemorySessionStore::SaveRecoveryState(const SessionRecoveryState& state) ->
     return base::Status::Ok();
 }
 
+auto MemorySessionStore::SaveInboundViewAndRecoveryState(
+    const MessageRecordView& record,
+    const SessionRecoveryState& state) -> base::Status {
+    auto status = ValidateRecordView(record);
+    if (!status.ok()) {
+        return status;
+    }
+
+    auto& session = sessions_[record.session_id];
+    session.inbound.push_back(MakeStoredRecord(&session.payload_arena, record));
+    session.recovery = state;
+    session.has_recovery = true;
+    return base::Status::Ok();
+}
+
 auto MemorySessionStore::LoadRecoveryState(std::uint64_t session_id) const
     -> base::Result<SessionRecoveryState> {
     const auto it = sessions_.find(session_id);

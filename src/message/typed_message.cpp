@@ -90,13 +90,13 @@ auto ValidateRequiredRules(
             return MissingRequiredField(rule.tag, missing_tag);
         }
 
-        const auto* group_def = dictionary.find_group(rule.tag);
-        if (group_def == nullptr) {
+        const auto group = message.group(rule.tag);
+        if (!group.has_value()) {
             continue;
         }
 
-        const auto group = message.group(rule.tag);
-        if (!group.has_value()) {
+        const auto* group_def = dictionary.find_group(rule.tag);
+        if (group_def == nullptr) {
             continue;
         }
 

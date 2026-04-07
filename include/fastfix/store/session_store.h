@@ -168,6 +168,15 @@ class SessionStore {
         return base::Status::Ok();
     }
     virtual auto SaveRecoveryState(const SessionRecoveryState& state) -> base::Status = 0;
+    virtual auto SaveInboundViewAndRecoveryState(
+        const MessageRecordView& record,
+        const SessionRecoveryState& state) -> base::Status {
+        auto status = SaveInboundView(record);
+        if (!status.ok()) {
+            return status;
+        }
+        return SaveRecoveryState(state);
+    }
     virtual auto LoadRecoveryState(std::uint64_t session_id) const
         -> base::Result<SessionRecoveryState> = 0;
 };

@@ -397,16 +397,10 @@ auto AdminProtocol::ValidateApplicationMessage(
         return true;
     }
 
-    auto typed = message::TypedMessageView::Bind(dictionary_, decoded.message.view());
-    if (!typed.ok()) {
-        *ref_tag_id = 35U;
-        *reject_reason = kSessionRejectInvalidMsgType;
-        *text = typed.status().message();
-        return false;
-    }
+    auto typed = message::TypedMessageView::FromParts(dictionary_, decoded.message.view(), message_def);
 
     std::uint32_t missing_tag = 0U;
-    auto status = typed.value().validate_required_fields(&missing_tag);
+    auto status = typed.validate_required_fields(&missing_tag);
     if (status.ok()) {
         return true;
     }
@@ -980,10 +974,6 @@ auto AdminProtocol::OnInbound(const codec::DecodedMessageView& decoded, std::uin
     if (!status.ok()) {
         return status;
     }
-    status = PersistRecoveryState();
-    if (!status.ok()) {
-        return status;
-    }
 
     if (store_ != nullptr) {
         std::uint16_t inbound_flags = 0U;
@@ -993,13 +983,28 @@ auto AdminProtocol::OnInbound(const codec::DecodedMessageView& decoded, std::uin
         if (decoded.header.poss_dup) {
             inbound_flags |= MessageRecordFlagValue(store::MessageRecordFlags::kPossDup);
         }
-        status = store_->SaveInboundView(store::MessageRecordView{
-            .session_id = session_.session_id(),
-            .seq_num = decoded.header.msg_seq_num,
-            .timestamp_ns = timestamp_ns,
-            .flags = inbound_flags,
-            .payload = decoded.raw,
-        });
+        const auto snapshot = session_.Snapshot();
+        status = store_->SaveInboundViewAndRecoveryState(
+            store::MessageRecordView{
+                .session_id = session_.session_id(),
+                .seq_num = decoded.header.msg_seq_num,
+                .timestamp_ns = timestamp_ns,
+                .flags = inbound_flags,
+                .payload = decoded.raw,
+            },
+            store::SessionRecoveryState{
+                .session_id = snapshot.session_id,
+                .next_in_seq = snapshot.next_in_seq,
+                .next_out_seq = snapshot.next_out_seq,
+                .last_inbound_ns = snapshot.last_inbound_ns,
+                .last_outbound_ns = snapshot.last_outbound_ns,
+                .active = snapshot.state != SessionState::kDisconnected,
+            });
+        if (!status.ok()) {
+            return status;
+        }
+    } else {
+        status = PersistRecoveryState();
         if (!status.ok()) {
             return status;
         }

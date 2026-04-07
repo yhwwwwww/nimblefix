@@ -1,5 +1,4 @@
 #include <algorithm>
-#include <atomic>
 #include <array>
 #include <chrono>
 #include <cmath>
@@ -716,11 +715,22 @@ auto RunSessionBenchmark(
     }
 
     const auto sample = BuildSampleMessage();
+    fastfix::message::Message augmented_sample;
+    const auto& bench_message = [&]() -> const fastfix::message::Message& {
+        if (dictionary.find_field(5001U) != nullptr) {
+            fastfix::message::MessageBuilder builder{"D"};
+            PopulateFix44MessageBuilder(builder, BuildFix44BusinessOrder());
+            builder.set(5001U, "L");
+            augmented_sample = std::move(builder).build();
+            return augmented_sample;
+        }
+        return sample;
+    }();
     std::vector<std::vector<std::byte>> inbound_frames;
     inbound_frames.reserve(iterations);
     for (std::uint32_t index = 0; index < iterations; ++index) {
         auto frame = BuildFrame(
-            sample,
+            bench_message,
             dictionary,
             begin_string,
             "BUY",

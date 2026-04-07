@@ -41,6 +41,9 @@ class MemorySessionStore : public SessionStore {
         std::size_t outbound_records,
         std::size_t payload_bytes) -> void;
     auto SaveRecoveryState(const SessionRecoveryState& state) -> base::Status override;
+    auto SaveInboundViewAndRecoveryState(
+        const MessageRecordView& record,
+        const SessionRecoveryState& state) -> base::Status override;
     auto LoadRecoveryState(std::uint64_t session_id) const
         -> base::Result<SessionRecoveryState> override;
 
