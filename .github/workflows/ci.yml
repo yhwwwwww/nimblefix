@@ -39,6 +39,30 @@ jobs:
       - name: Configure
         run: xmake f -m release --toolchain=gcc -y
 
+      - name: Build tools
+        run: |
+          xmake build fastfix-xml2ffd 
+          xmake build fastfix-dictgen
+
+      - name: Generate FIX44 artifacts
+        run: |
+          mkdir -p build/bench build/generated
+          wget -q https://raw.githubusercontent.com/quickfix/quickfix/master/spec/FIX44.xml \
+               -O build/bench/quickfix_FIX44.xml
+          ./build/linux/x86_64/release/fastfix-xml2ffd \
+              --xml build/bench/quickfix_FIX44.xml \
+              --output build/bench/quickfix_FIX44.ffd \
+              --profile-id 4400
+          ./build/linux/x86_64/release/fastfix-dictgen \
+              --input build/bench/quickfix_FIX44.ffd \
+              --output build/bench/quickfix_FIX44.art \
+              --cpp-builders build/generated/fix44_builders.h
+          ./build/linux/x86_64/release/fastfix-dictgen \
+              --input samples/basic_profile.ffd \
+              --merge samples/basic_overlay.ffd \
+              --output build/sample-basic.art \
+              --cpp-builders build/generated/sample_basic_builders.h
+
       - name: Build
         run: xmake build -y
 
