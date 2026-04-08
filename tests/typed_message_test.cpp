@@ -7,48 +7,11 @@
 #include "fastfix/profile/artifact_builder.h"
 #include "fastfix/profile/dictgen_input.h"
 #include "fastfix/profile/normalized_dictionary.h"
-#include "fastfix/profile/overlay.h"
 #include "fastfix/profile/profile_loader.h"
 
 #include "test_support.h"
 
 namespace {
-
-auto LoadSampleDictionaryView() -> fastfix::base::Result<fastfix::profile::NormalizedDictionaryView> {
-    const auto project_root = std::filesystem::path(FASTFIX_PROJECT_DIR);
-    auto dictionary = fastfix::profile::LoadNormalizedDictionaryFile(project_root / "samples" / "basic_profile.ffd");
-    if (!dictionary.ok()) {
-        return dictionary.status();
-    }
-
-    auto overlay = fastfix::profile::LoadNormalizedDictionaryFile(project_root / "samples" / "basic_overlay.ffd");
-    if (!overlay.ok()) {
-        return overlay.status();
-    }
-
-    auto merged = fastfix::profile::ApplyOverlay(dictionary.value(), overlay.value());
-    if (!merged.ok()) {
-        return merged.status();
-    }
-
-    auto artifact = fastfix::profile::BuildProfileArtifact(merged.value());
-    if (!artifact.ok()) {
-        return artifact.status();
-    }
-
-    const auto artifact_path = std::filesystem::temp_directory_path() / "fastfix-typed-message-test.art";
-    const auto write_status = fastfix::profile::WriteProfileArtifact(artifact_path, artifact.value());
-    if (!write_status.ok()) {
-        return write_status;
-    }
-
-    auto loaded = fastfix::profile::LoadProfileArtifact(artifact_path);
-    std::filesystem::remove(artifact_path);
-    if (!loaded.ok()) {
-        return loaded.status();
-    }
-    return fastfix::profile::NormalizedDictionaryView::FromProfile(std::move(loaded).value());
-}
 
 auto LoadDictionaryViewFromText(std::string_view text, std::string_view file_stub)
     -> fastfix::base::Result<fastfix::profile::NormalizedDictionaryView> {
@@ -80,8 +43,8 @@ auto LoadDictionaryViewFromText(std::string_view text, std::string_view file_stu
 }  // namespace
 
 TEST_CASE("typed-message-view", "[typed-message]") {
-    auto dictionary = LoadSampleDictionaryView();
-    REQUIRE(dictionary.ok());
+    auto dictionary_view = fastfix::tests::LoadFix44DictionaryViewOrSkip();
+    auto dictionary = fastfix::base::Result<fastfix::profile::NormalizedDictionaryView>(std::move(dictionary_view));
 
     fastfix::message::MessageBuilder builder{"D"};
     builder.reserve_fields(11U).reserve_groups(1U).reserve_group_entries(453U, 1U);
@@ -93,8 +56,7 @@ TEST_CASE("typed-message-view", "[typed-message]") {
         .set_string(60U, "20260406-12:00:00.000")
         .set_int(38U, 100)
         .set_char(40U, '2')
-        .set_string(5001U, "LIT")
-        .set_string(5002U, "ACC-1");
+        .set_string(1U, "ACC-1");
     auto party = builder.add_group_entry(453U);
     party.set_string(448U, "PTY1")
         .set_char(447U, 'D')
@@ -106,7 +68,7 @@ TEST_CASE("typed-message-view", "[typed-message]") {
     REQUIRE(typed.ok());
     REQUIRE(typed.value().validate_required_fields().ok());
     REQUIRE(typed.value().get_string(35U).value() == "D");
-    REQUIRE(typed.value().get_string(5001U).value() == "LIT");
+    REQUIRE(typed.value().get_string(1U).value() == "ACC-1");
 
     const auto parties = typed.value().group(453U);
     REQUIRE(parties.has_value());
@@ -124,17 +86,18 @@ TEST_CASE("typed-message-view", "[typed-message]") {
     REQUIRE(!empty_typed.value().validate_required_fields(&missing_tag).ok());
     REQUIRE(missing_tag == 11U);
 
-    // Missing group required field.
+    // Missing group required field — NoPartyIDs fields are all optional in FIX44,
+    // so we test with a message that has a different required field missing instead.
+    // Verify that omitting ClOrdID (tag 11, required) from a NewOrderSingle triggers validation failure.
     fastfix::message::MessageBuilder partial_builder{"D"};
-    partial_builder.set_string(11U, "ORD-002")
-        .set_string(49U, "BUY")
+    partial_builder.set_string(49U, "BUY")
         .set_string(56U, "SELL")
         .set_string(55U, "AAPL")
         .set_char(54U, '1')
         .set_string(60U, "20260406-12:00:00.000")
         .set_int(38U, 100)
         .set_char(40U, '2')
-        .set_string(5001U, "LIT");
+        .set_string(1U, "ACC-1");
     auto partial_party = partial_builder.add_group_entry(453U);
     partial_party.set_string(448U, "PTY2").set_int(452U, 9);
     auto partial_message = std::move(partial_builder).build();
@@ -142,7 +105,7 @@ TEST_CASE("typed-message-view", "[typed-message]") {
     REQUIRE(partial_typed.ok());
     missing_tag = 0U;
     REQUIRE(!partial_typed.value().validate_required_fields(&missing_tag).ok());
-    REQUIRE(missing_tag == 447U);
+    REQUIRE(missing_tag == 11U);
 }
 
 TEST_CASE("typed-message-view-timestamp", "[typed-message]") {

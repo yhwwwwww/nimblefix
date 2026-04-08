@@ -11,7 +11,6 @@
 #include "fastfix/profile/artifact_builder.h"
 #include "fastfix/profile/dictgen_input.h"
 #include "fastfix/profile/normalized_dictionary.h"
-#include "fastfix/profile/overlay.h"
 #include "fastfix/profile/profile_loader.h"
 #include "fastfix/session/admin_protocol.h"
 #include "fastfix/store/memory_store.h"
@@ -36,27 +35,6 @@ struct AdminCorpusStats {
 auto IsApplicationMsgType(std::string_view msg_type) -> bool {
     return msg_type != "0" && msg_type != "1" && msg_type != "2" && msg_type != "3" &&
            msg_type != "4" && msg_type != "5" && msg_type != "A";
-}
-
-auto BuildAdminCorpusArtifact(const std::filesystem::path& artifact_path) -> fastfix::base::Status {
-    const auto project_root = std::filesystem::path(FASTFIX_PROJECT_DIR);
-    auto dictionary = fastfix::profile::LoadNormalizedDictionaryFile(project_root / "samples" / "basic_profile.ffd");
-    if (!dictionary.ok()) {
-        return dictionary.status();
-    }
-    auto overlay = fastfix::profile::LoadNormalizedDictionaryFile(project_root / "samples" / "basic_overlay.ffd");
-    if (!overlay.ok()) {
-        return overlay.status();
-    }
-    auto merged = fastfix::profile::ApplyOverlay(dictionary.value(), overlay.value());
-    if (!merged.ok()) {
-        return merged.status();
-    }
-    auto artifact = fastfix::profile::BuildProfileArtifact(merged.value());
-    if (!artifact.ok()) {
-        return artifact.status();
-    }
-    return fastfix::profile::WriteProfileArtifact(artifact_path, artifact.value());
 }
 
 auto ReadText(const std::filesystem::path& path) -> std::string {
@@ -248,14 +226,8 @@ auto RunAdminCorpus(
 
 }  // namespace
 
-TEST_CASE("admin-fuzz-corpus", "[admin-fuzz-corpus]") {    const auto artifact_path = std::filesystem::temp_directory_path() / "fastfix-admin-fuzz-corpus.art";
-    REQUIRE(BuildAdminCorpusArtifact(artifact_path).ok());
-
-    auto loaded = fastfix::profile::LoadProfileArtifact(artifact_path);
-    REQUIRE(loaded.ok());
-
-    auto dictionary = fastfix::profile::NormalizedDictionaryView::FromProfile(std::move(loaded).value());
-    REQUIRE(dictionary.ok());
+TEST_CASE("admin-fuzz-corpus", "[admin-fuzz-corpus]") {    auto dictionary_view = fastfix::tests::LoadFix44DictionaryViewOrSkip();
+    auto& dictionary = dictionary_view;
 
     const auto root = std::filesystem::path(FASTFIX_PROJECT_DIR) / "tests" / "data" / "fuzz" / "admin_protocol";
     std::vector<std::filesystem::path> corpora;
@@ -268,7 +240,7 @@ TEST_CASE("admin-fuzz-corpus", "[admin-fuzz-corpus]") {    const auto artifact_p
 
     AdminCorpusStats stats;
     for (const auto& corpus : corpora) {
-        auto status = RunAdminCorpus(ReadText(corpus), dictionary.value(), &stats);
+        auto status = RunAdminCorpus(ReadText(corpus), dictionary, &stats);
         REQUIRE(status.ok());
         ++stats.corpus_count;
     }
@@ -281,6 +253,4 @@ TEST_CASE("admin-fuzz-corpus", "[admin-fuzz-corpus]") {    const auto artifact_p
     REQUIRE(stats.outbound_frames > 0U);
     REQUIRE(stats.application_inputs > 0U);
     REQUIRE(stats.timer_callbacks > 0U);
-
-    std::filesystem::remove(artifact_path);
 }

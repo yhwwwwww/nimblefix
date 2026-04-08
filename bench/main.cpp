@@ -25,11 +25,12 @@
 #include <unistd.h>
 #endif
 
+#include "fastfix/codec/compiled_decoder.h"
 #include "fastfix/codec/fix_codec.h"
 #include "fastfix/message/message.h"
 #include "fastfix/message/fixed_layout_writer.h"
 #include "fastfix/profile/normalized_dictionary.h"
-#include "sample_basic_builders.h"
+#include "fix44_builders.h"
 #include "fastfix/profile/profile_loader.h"
 #include "fastfix/session/admin_protocol.h"
 #include "fastfix/store/memory_store.h"
@@ -177,7 +178,7 @@ auto RunEncodeBenchmark(
     result.samples_ns.reserve(iterations);
     BenchmarkMeasurement measurement;
     fastfix::codec::EncodeBuffer encode_buffer;
-    fastfix::generated::profile_1001::NewOrderSingleWriter writer(layout.value());
+    fastfix::generated::profile_4400::NewOrderSingleWriter writer(layout.value());
     auto options = base_options;
     for (std::uint32_t index = 0; index < iterations; ++index) {
         const auto sample_started = std::chrono::steady_clock::now();
@@ -192,8 +193,8 @@ auto RunEncodeBenchmark(
         if (business_order.price.has_value()) {
             writer.set_price(business_order.price.value());
         }
-        writer.reserve_parties(1U);
-        writer.add_parties()
+        writer.reserve_no_party_i_ds(1U);
+        writer.add_no_party_i_ds()
             .set_party_id(business_order.party_id)
             .set_party_id_source(business_order.party_id_source)
             .set_party_role(business_order.party_role);
@@ -451,7 +452,7 @@ auto RunLoopbackBenchmark(
 
     bool active = false;
     while (!active) {
-        auto frame = connection.value().ReceiveFrameView(std::chrono::seconds(10));
+        auto frame = connection.value().BusyReceiveFrameView(std::chrono::seconds(10));
         if (!frame.ok()) {
             return frame.status();
         }
@@ -481,23 +482,42 @@ auto RunLoopbackBenchmark(
     std::uint32_t acknowledged = 0;
     BenchmarkResult result;
     result.samples_ns.reserve(iterations);
+
+    std::int64_t total_session_outbound_ns = 0;
+    std::int64_t total_transport_send_ns = 0;
+    std::int64_t total_transport_recv_ns = 0;
+    std::int64_t total_session_inbound_ns = 0;
+
     BenchmarkMeasurement measurement;
     for (std::uint32_t index = 0; index < iterations; ++index) {
         const auto started = std::chrono::steady_clock::now();
+
+        auto t0 = std::chrono::steady_clock::now();
         auto outbound = initiator.SendApplication(sample, NowNs());
         if (!outbound.ok()) {
             return outbound.status();
         }
-        auto status = connection.value().Send(outbound.value().bytes, std::chrono::seconds(10));
+        auto t1 = std::chrono::steady_clock::now();
+        total_session_outbound_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count();
+
+        t0 = std::chrono::steady_clock::now();
+        auto status = connection.value().BusySend(outbound.value().bytes, std::chrono::seconds(10));
         if (!status.ok()) {
             return status;
         }
+        t1 = std::chrono::steady_clock::now();
+        total_transport_send_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count();
 
         while (acknowledged <= index) {
-            auto frame = connection.value().ReceiveFrameView(std::chrono::seconds(10));
+            t0 = std::chrono::steady_clock::now();
+            auto frame = connection.value().BusyReceiveFrameView(std::chrono::seconds(10));
             if (!frame.ok()) {
                 return frame.status();
             }
+            t1 = std::chrono::steady_clock::now();
+            total_transport_recv_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count();
+
+            t0 = std::chrono::steady_clock::now();
             auto decoded = fastfix::codec::DecodeFixMessageView(frame.value(), dictionary);
             if (!decoded.ok()) {
                 return decoded.status();
@@ -506,11 +526,17 @@ auto RunLoopbackBenchmark(
             if (!event.ok()) {
                 return event.status();
             }
+            t1 = std::chrono::steady_clock::now();
+            total_session_inbound_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count();
+
             for (const auto& outbound_frame : event.value().outbound_frames) {
-                status = connection.value().Send(outbound_frame.bytes, std::chrono::seconds(10));
+                t0 = std::chrono::steady_clock::now();
+                status = connection.value().BusySend(outbound_frame.bytes, std::chrono::seconds(10));
                 if (!status.ok()) {
                     return status;
                 }
+                t1 = std::chrono::steady_clock::now();
+                total_transport_send_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count();
             }
             for (const auto& app : event.value().application_messages) {
                 if (app.view().msg_type() != "8") {
@@ -524,6 +550,19 @@ auto RunLoopbackBenchmark(
     }
     measurement.Finish(result);
 
+    {
+        const auto n = static_cast<std::int64_t>(iterations);
+        std::cout << "  loopback-breakdown:\n"
+                  << "    session-outbound  avg=" << (total_session_outbound_ns / n)
+                  << "ns  total=" << (total_session_outbound_ns / 1000) << "us\n"
+                  << "    transport-send    avg=" << (total_transport_send_ns / n)
+                  << "ns  total=" << (total_transport_send_ns / 1000) << "us\n"
+                  << "    transport-recv    avg=" << (total_transport_recv_ns / n)
+                  << "ns  total=" << (total_transport_recv_ns / 1000) << "us\n"
+                  << "    session-inbound   avg=" << (total_session_inbound_ns / n)
+                  << "ns  total=" << (total_session_inbound_ns / 1000) << "us\n";
+    }
+
     auto logout = initiator.BeginLogout({}, NowNs());
     if (!logout.ok()) {
         return logout.status();
@@ -532,7 +571,7 @@ auto RunLoopbackBenchmark(
     if (!status.ok()) {
         return status;
     }
-    auto logout_ack = connection.value().ReceiveFrameView(std::chrono::seconds(10));
+    auto logout_ack = connection.value().BusyReceiveFrameView(std::chrono::seconds(10));
     if (!logout_ack.ok()) {
         return logout_ack.status();
     }
@@ -923,7 +962,7 @@ int main(int argc, char** argv) {
     }
 
     if (artifact_path.empty() && dictionary_paths.empty()) {
-        artifact_path = std::filesystem::path(FASTFIX_PROJECT_DIR) / "build/sample-basic.art";
+        artifact_path = std::filesystem::path(FASTFIX_PROJECT_DIR) / "build/bench/quickfix_FIX44.art";
     } else if (!artifact_path.is_absolute()) {
         artifact_path = std::filesystem::path(FASTFIX_PROJECT_DIR) / artifact_path;
     }
@@ -980,13 +1019,15 @@ int main(int argc, char** argv) {
     peek_measurement.Finish(peek_result);
     results.push_back({"peek", std::move(peek_result)});
 
+    auto compiled_decoders = fastfix::codec::CompiledDecoderTable::Build(dictionary.value());
+
     BenchmarkResult parse_result;
     parse_result.samples_ns.reserve(iterations);
     BenchmarkMeasurement parse_measurement;
     double parse_sink = 0.0;
     for (std::uint32_t index = 0; index < iterations; ++index) {
         const auto sample_started = std::chrono::steady_clock::now();
-        auto decoded = fastfix::codec::DecodeFixMessageView(warmup.value(), dictionary.value());
+        auto decoded = fastfix::codec::DecodeFixMessageView(warmup.value(), dictionary.value(), compiled_decoders);
         if (!decoded.ok()) {
             std::cerr << decoded.status().message() << '\n';
             return 1;

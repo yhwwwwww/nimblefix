@@ -42,6 +42,7 @@ target("fastfix")
     add_includedirs("include", {public = true})
     add_defines("FASTFIX_PROJECT_DIR=\"$(projectdir)\"", {public = true})
     add_files("src/profile/*.cpp", "src/runtime/*.cpp", "src/session/*.cpp", "src/store/*.cpp", "src/message/*.cpp", "src/codec/*.cpp", "src/transport/*.cpp")
+    add_syslinks("uring")
 
 target("fastfix-dictgen")
     set_kind("binary")

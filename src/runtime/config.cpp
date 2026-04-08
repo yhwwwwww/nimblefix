@@ -148,6 +148,20 @@ auto ParsePollMode(std::string_view token) -> base::Result<PollMode> {
     return base::Status::InvalidArgument("unknown poll_mode in runtime config");
 }
 
+auto ParseIoBackend(std::string_view token) -> base::Result<IoBackend> {
+    const auto value = Trim(token);
+    if (value.empty() || value == "poll") {
+        return IoBackend::kPoll;
+    }
+    if (value == "epoll") {
+        return IoBackend::kEpoll;
+    }
+    if (value == "io_uring") {
+        return IoBackend::kIoUring;
+    }
+    return base::Status::InvalidArgument("unknown io_backend in runtime config");
+}
+
 auto ParseCpuAffinityList(std::string_view token) -> base::Result<std::vector<std::uint32_t>> {
     std::vector<std::uint32_t> cpu_ids;
     const auto value = Trim(token);
@@ -451,6 +465,12 @@ auto LoadEngineConfigText(std::string_view text, const std::filesystem::path& ba
                     return parsed.status();
                 }
                 config.poll_mode = parsed.value();
+            } else if (key == "engine.io_backend") {
+                auto parsed = ParseIoBackend(value);
+                if (!parsed.ok()) {
+                    return parsed.status();
+                }
+                config.io_backend = parsed.value();
             } else if (key == "engine.profile_madvise") {
                 auto parsed = ParseBool(value);
                 if (!parsed.ok()) {

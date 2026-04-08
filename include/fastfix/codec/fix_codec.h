@@ -26,7 +26,6 @@ enum class ValidationIssueKind : std::uint32_t {
     kUnknownField,
     kFieldNotAllowed,
     kDuplicateField,
-    kFieldOutOfOrder,
     kIncorrectNumInGroupCount,
 };
 
@@ -282,6 +281,14 @@ auto DecodeFixMessage(
 auto DecodeFixMessageView(
     std::span<const std::byte> bytes,
     const profile::NormalizedDictionaryView& dictionary,
+    char delimiter = kFixSoh) -> base::Result<DecodedMessageView>;
+
+class CompiledDecoderTable;
+
+auto DecodeFixMessageView(
+    std::span<const std::byte> bytes,
+    const profile::NormalizedDictionaryView& dictionary,
+    const CompiledDecoderTable& compiled_decoders,
     char delimiter = kFixSoh) -> base::Result<DecodedMessageView>;
 
 auto PeekSessionHeader(

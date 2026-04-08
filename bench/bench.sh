@@ -104,7 +104,6 @@ build_quickfix_bench() {
 build_all() {
     build_fastfix_tools
     prepare_quickfix_dictionary
-    prepare_builder_dictionary
     build_quickfix_bench
 }
 

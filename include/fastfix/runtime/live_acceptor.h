@@ -112,7 +112,10 @@ class LiveAcceptor {
               connection_indices(std::move(other.connection_indices)),
               session_connection_indices(std::move(other.session_connection_indices)),
               command_sink(std::move(other.command_sink)),
-              inbox(std::move(other.inbox)) {
+              inbox(std::move(other.inbox)),
+              poll_scratch(std::move(other.poll_scratch)),
+              poll_state_scratch(std::move(other.poll_state_scratch)),
+              io_ready_state(std::move(other.io_ready_state)) {
             other.active_connections.store(0U, std::memory_order_relaxed);
         }
 
@@ -129,6 +132,9 @@ class LiveAcceptor {
             session_connection_indices = std::move(other.session_connection_indices);
             command_sink = std::move(other.command_sink);
             inbox = std::move(other.inbox);
+            poll_scratch = std::move(other.poll_scratch);
+            poll_state_scratch = std::move(other.poll_state_scratch);
+            io_ready_state = std::move(other.io_ready_state);
             other.active_connections.store(0U, std::memory_order_relaxed);
             return *this;
         }
@@ -141,6 +147,9 @@ class LiveAcceptor {
         std::unordered_map<std::uint64_t, std::size_t> session_connection_indices;
         std::shared_ptr<CommandSink> command_sink;
         std::unique_ptr<WorkerInbox> inbox;
+        std::vector<pollfd> poll_scratch;
+        ShardPoller::PollState poll_state_scratch;
+        ShardPoller::IoReadyState io_ready_state;
     };
 
     auto PollOnce(std::chrono::milliseconds timeout) -> base::Status;
@@ -254,6 +263,7 @@ class LiveAcceptor {
 
     Engine* engine_{nullptr};
     Options options_{};
+    std::vector<pollfd> main_poll_scratch_;
     std::vector<ListenerState> listeners_;
     std::vector<WorkerShardState> worker_shards_;
     std::vector<std::jthread> worker_threads_;

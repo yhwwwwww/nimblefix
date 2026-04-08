@@ -38,6 +38,14 @@ struct WorkerMetrics {
     std::atomic<std::uint64_t> checksum_failures{0};
     std::atomic<std::uint64_t> outbound_queue_depth{0};
     std::atomic<std::uint64_t> last_store_flush_latency_ns{0};
+
+    // Steady-state breakdown timing (nanoseconds, relaxed stores from worker thread).
+    std::atomic<std::uint64_t> poll_wait_ns{0};
+    std::atomic<std::uint64_t> recv_dispatch_ns{0};
+    std::atomic<std::uint64_t> app_callback_ns{0};
+    std::atomic<std::uint64_t> timer_process_ns{0};
+    std::atomic<std::uint64_t> send_ns{0};
+    std::atomic<std::uint64_t> poll_iterations{0};
 };
 
 struct RuntimeMetricsSnapshot {
@@ -67,6 +75,12 @@ struct RuntimeMetricsSnapshot {
         std::uint64_t checksum_failures{0};
         std::uint64_t outbound_queue_depth{0};
         std::uint64_t last_store_flush_latency_ns{0};
+        std::uint64_t poll_wait_ns{0};
+        std::uint64_t recv_dispatch_ns{0};
+        std::uint64_t app_callback_ns{0};
+        std::uint64_t timer_process_ns{0};
+        std::uint64_t send_ns{0};
+        std::uint64_t poll_iterations{0};
     };
 
     std::vector<WorkerEntry> workers;
@@ -90,6 +104,7 @@ class MetricsRegistry {
     [[nodiscard]] auto Snapshot() const -> RuntimeMetricsSnapshot;
     [[nodiscard]] auto FindSession(std::uint64_t session_id) const -> const SessionMetrics*;
     [[nodiscard]] auto FindWorker(std::uint32_t worker_id) const -> const WorkerMetrics*;
+    [[nodiscard]] auto FindWorker(std::uint32_t worker_id) -> WorkerMetrics*;
 
   private:
     auto FindMutableSession(std::uint64_t session_id) -> SessionMetrics*;

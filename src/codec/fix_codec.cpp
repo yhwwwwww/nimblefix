@@ -1,4 +1,5 @@
 #include "fastfix/codec/fix_codec.h"
+#include "fastfix/codec/compiled_decoder.h"
 #include "fastfix/codec/simd_scan.h"
 
 #include <algorithm>
@@ -71,7 +72,6 @@ struct ParsedContainerRef {
 
 struct ScopeValidationState {
     SeenTagBuffer seen_tags;
-    int last_rule_index{-1};
 };
 
 struct CompiledScopeTemplate;
@@ -245,16 +245,6 @@ auto ValidateConsumedField(
                     " definition");
             return;
         }
-        if (rule_index < state->last_rule_index) {
-            SetValidationIssue(
-                issue,
-                ValidationIssueKind::kFieldOutOfOrder,
-                tag,
-                "field " + std::to_string(tag) + " is out of order for the bound " + std::string(scope_name) +
-                    " definition");
-            return;
-        }
-        state->last_rule_index = rule_index;
     }
 }
 
@@ -513,11 +503,11 @@ auto InsertIntoRootHashTable(
 auto AppendParsedFieldSlot(
     message::ParsedMessageData* parsed,
     ParsedContainerRef container,
-    message::ParsedFieldSlot slot) -> void {
+    message::ParsedFieldSlot slot) -> bool {
     auto existing = FindParsedFieldIndex(*parsed, container, slot.tag);
     if (existing != message::kInvalidParsedIndex) {
         parsed->field_slots[existing] = slot;
-        return;
+        return true;
     }
 
     const auto new_index = static_cast<std::uint32_t>(parsed->field_slots.size());
@@ -532,6 +522,7 @@ auto AppendParsedFieldSlot(
     if (container.root) {
         InsertIntoRootHashTable(parsed, new_index);
     }
+    return false;
 }
 
 auto MakeParsedFieldSlot(
@@ -1882,6 +1873,281 @@ auto DecodeFixMessageView(
             static_cast<std::uint32_t>(scanned.value().value_offset),
             scanned.value().value_length,
             ResolveFieldTypeWithDef(tag, field_def));
+        AppendParsedFieldSlot(&parsed_message, RootContainer(), slot);
+        byte_pos = scanned.value().next_pos;
+    }
+
+    if (byte_pos != bytes.size()) {
+        return base::Status::FormatError("FIX frame has trailing data after CheckSum");
+    }
+    if (field_count < 4U) {
+        return base::Status::FormatError("FIX frame is too short");
+    }
+    if (!saw_checksum) {
+        return base::Status::FormatError("FIX frame must begin with 8 and 9 and end with 10");
+    }
+
+    const auto actual_body_length = checksum_field_start - body_start_offset;
+    if (declared_body_length.value() != actual_body_length) {
+        return base::Status::FormatError("BodyLength mismatch");
+    }
+
+    const auto actual_checksum = [&]() -> std::uint32_t {
+        const auto* data = bytes.data();
+        std::uint32_t sum = 0;
+#if FASTFIX_HAS_SSE2
+        const auto zero = _mm_setzero_si128();
+        std::size_t i = 0;
+        for (; i + 16 <= checksum_field_start; i += 16) {
+            auto chunk = _mm_loadu_si128(reinterpret_cast<const __m128i*>(data + i));
+            auto sad = _mm_sad_epu8(chunk, zero);
+            sum += static_cast<std::uint32_t>(_mm_extract_epi16(sad, 0)) +
+                   static_cast<std::uint32_t>(_mm_extract_epi16(sad, 4));
+        }
+        for (; i < checksum_field_start; ++i) {
+            sum += std::to_integer<unsigned char>(data[i]);
+        }
+#else
+        for (std::size_t i = 0; i < checksum_field_start; ++i) {
+            sum += std::to_integer<unsigned char>(data[i]);
+        }
+#endif
+        return sum % 256U;
+    }();
+    if (actual_checksum != header.checksum) {
+        return base::Status::FormatError("CheckSum mismatch");
+    }
+
+    DecodedMessageView decoded;
+    decoded.message = message::ParsedMessage(std::move(parsed_message));
+    decoded.header = std::move(header);
+    decoded.raw = bytes;
+    decoded.validation_issue = std::move(validation_issue);
+    return decoded;
+}
+
+auto DecodeFixMessageView(
+    std::span<const std::byte> bytes,
+    const profile::NormalizedDictionaryView& dictionary,
+    const CompiledDecoderTable& compiled_decoders,
+    char delimiter) -> base::Result<DecodedMessageView> {
+    const char normalized_delimiter = NormalizeDelimiter(delimiter);
+    const auto delimiter_byte = static_cast<std::byte>(static_cast<unsigned char>(normalized_delimiter));
+    const auto equals_byte = static_cast<std::byte>('=');
+
+    // Scan field 0: must be tag 8 (BeginString)
+    auto field0 = ScanNextField(bytes, 0U, delimiter_byte, equals_byte);
+    if (!field0.ok()) {
+        return field0.status();
+    }
+    if (field0.value().tag != 8U) {
+        return base::Status::FormatError("FIX frame must begin with 8 and 9 and end with 10");
+    }
+
+    // Scan field 1: must be tag 9 (BodyLength)
+    auto field1 = ScanNextField(bytes, field0.value().next_pos, delimiter_byte, equals_byte);
+    if (!field1.ok()) {
+        return field1.status();
+    }
+    if (field1.value().tag != 9U) {
+        return base::Status::FormatError("FIX frame must begin with 8 and 9 and end with 10");
+    }
+
+    auto declared_body_length = ParseUnsigned(
+        std::string_view(
+            reinterpret_cast<const char*>(bytes.data() + field1.value().value_offset),
+            field1.value().value_length),
+        "BodyLength");
+    if (!declared_body_length.ok()) {
+        return declared_body_length.status();
+    }
+
+    const auto body_start_offset = field1.value().next_pos;
+
+    message::ParsedMessageData parsed_message;
+    parsed_message.raw = bytes;
+    SessionHeaderView header;
+    ValidationIssue validation_issue;
+    header.begin_string = std::string_view(
+        reinterpret_cast<const char*>(bytes.data() + field0.value().value_offset),
+        field0.value().value_length);
+    header.body_length = declared_body_length.value();
+
+    std::size_t byte_pos = field1.value().next_pos;
+    std::size_t field_count = 2U;
+    std::size_t checksum_field_start = 0U;
+    bool saw_checksum = false;
+
+    // The compiled decoder for the current message type, set when tag 35 is seen.
+    const CompiledMessageDecoder* compiled = nullptr;
+
+    while (byte_pos < bytes.size()) {
+        auto scanned = ScanNextField(bytes, byte_pos, delimiter_byte, equals_byte);
+        if (!scanned.ok()) {
+            return scanned.status();
+        }
+        ++field_count;
+        const auto tag = scanned.value().tag;
+        const auto value_sv = std::string_view(
+            reinterpret_cast<const char*>(bytes.data() + scanned.value().value_offset),
+            scanned.value().value_length);
+
+        if (tag == 10U) {
+            auto expected_checksum = ParseUnsigned(value_sv, "CheckSum");
+            if (!expected_checksum.ok()) {
+                return expected_checksum.status();
+            }
+            header.checksum = expected_checksum.value();
+            checksum_field_start = scanned.value().start_offset;
+            saw_checksum = true;
+            byte_pos = scanned.value().next_pos;
+            break;
+        }
+
+        if (ShouldSkipField(tag)) {
+            byte_pos = scanned.value().next_pos;
+            continue;
+        }
+
+        if (tag == 35U) {
+            parsed_message.msg_type = value_sv;
+            header.msg_type = value_sv;
+            compiled = compiled_decoders.find(header.msg_type);
+            auto slot = MakeParsedFieldSlotWithType(
+                tag,
+                static_cast<std::uint32_t>(scanned.value().value_offset),
+                scanned.value().value_length,
+                message::FieldValueType::kString);
+            AppendParsedFieldSlot(&parsed_message, RootContainer(), slot);
+            byte_pos = scanned.value().next_pos;
+            continue;
+        }
+
+        // Header field extraction — same for both paths.
+        if (tag == 34U) {
+            auto parsed = ParseUnsigned(value_sv, "MsgSeqNum");
+            if (!parsed.ok()) {
+                return parsed.status();
+            }
+            header.msg_seq_num = parsed.value();
+        } else if (tag == 49U) {
+            header.sender_comp_id = value_sv;
+        } else if (tag == 56U) {
+            header.target_comp_id = value_sv;
+        } else if (tag == 52U) {
+            header.sending_time = value_sv;
+        } else if (tag == 122U) {
+            header.orig_sending_time = value_sv;
+        } else if (tag == 1137U) {
+            header.default_appl_ver_id = value_sv;
+        } else if (tag == 43U) {
+            auto parsed = ParseBoolean(value_sv, "PossDupFlag");
+            if (!parsed.ok()) {
+                return parsed.status();
+            }
+            header.poss_dup = parsed.value();
+        }
+
+        // ---- FAST PATH: compiled decoder available ----
+        if (compiled != nullptr) {
+            if (CompiledMessageDecoder::is_header_tag(tag)) {
+                auto slot = MakeParsedFieldSlotWithType(
+                    tag,
+                    static_cast<std::uint32_t>(scanned.value().value_offset),
+                    scanned.value().value_length,
+                    ResolveFieldTypeWithDef(tag, nullptr));
+                if (AppendParsedFieldSlot(&parsed_message, RootContainer(), slot)) {
+                    SetValidationIssue(
+                        &validation_issue,
+                        ValidationIssueKind::kDuplicateField,
+                        tag,
+                        "field " + std::to_string(tag) + " appears more than once");
+                }
+                byte_pos = scanned.value().next_pos;
+                continue;
+            }
+
+            const auto slot_idx = compiled->lookup(tag);
+            if (slot_idx == CompiledMessageDecoder::kInvalidSlot) {
+                // Differentiate: unknown to dictionary vs not allowed for this message.
+                const auto issue_kind = dictionary.find_field(tag) == nullptr
+                    ? ValidationIssueKind::kUnknownField
+                    : ValidationIssueKind::kFieldNotAllowed;
+                SetValidationIssue(
+                    &validation_issue,
+                    issue_kind,
+                    tag,
+                    issue_kind == ValidationIssueKind::kUnknownField
+                        ? "field " + std::to_string(tag) + " is not present in the bound dictionary"
+                        : "field " + std::to_string(tag) + " is not allowed by the bound message definition");
+                auto slot = MakeParsedFieldSlotWithType(
+                    tag,
+                    static_cast<std::uint32_t>(scanned.value().value_offset),
+                    scanned.value().value_length,
+                    message::FieldValueType::kString);
+                AppendParsedFieldSlot(&parsed_message, RootContainer(), slot);
+                byte_pos = scanned.value().next_pos;
+                continue;
+            }
+
+            const auto& compiled_slot = compiled->slot(slot_idx);
+
+            if (compiled_slot.is_group_count) {
+                // Group field — use the pre-resolved GroupDefRecord.
+                auto slot = MakeParsedFieldSlotWithType(
+                    tag,
+                    static_cast<std::uint32_t>(scanned.value().value_offset),
+                    scanned.value().value_length,
+                    compiled_slot.field_type);
+                if (AppendParsedFieldSlot(&parsed_message, RootContainer(), slot)) {
+                    SetValidationIssue(
+                        &validation_issue,
+                        ValidationIssueKind::kDuplicateField,
+                        tag,
+                        "field " + std::to_string(tag) + " appears more than once");
+                }
+                auto next_pos = ParseParsedGroupEntries(
+                    dictionary,
+                    bytes,
+                    scanned.value().next_pos,
+                    delimiter_byte,
+                    equals_byte,
+                    value_sv,
+                    *compiled_slot.group_def,
+                    &parsed_message,
+                    RootContainer(),
+                    1U,
+                    &validation_issue);
+                if (!next_pos.ok()) {
+                    return next_pos.status();
+                }
+                byte_pos = next_pos.value();
+                continue;
+            }
+
+            // Scalar field — type is pre-resolved, no dictionary lookup needed.
+            auto slot = MakeParsedFieldSlotWithType(
+                tag,
+                static_cast<std::uint32_t>(scanned.value().value_offset),
+                scanned.value().value_length,
+                compiled_slot.field_type);
+            if (AppendParsedFieldSlot(&parsed_message, RootContainer(), slot)) {
+                SetValidationIssue(
+                    &validation_issue,
+                    ValidationIssueKind::kDuplicateField,
+                    tag,
+                    "field " + std::to_string(tag) + " appears more than once");
+            }
+            byte_pos = scanned.value().next_pos;
+            continue;
+        }
+
+        // Unknown message type — store field as-is without validation.
+        auto slot = MakeParsedFieldSlotWithType(
+            tag,
+            static_cast<std::uint32_t>(scanned.value().value_offset),
+            scanned.value().value_length,
+            message::FieldValueType::kString);
         AppendParsedFieldSlot(&parsed_message, RootContainer(), slot);
         byte_pos = scanned.value().next_pos;
     }

@@ -7,7 +7,6 @@
 #include "fastfix/message/message.h"
 #include "fastfix/profile/artifact_builder.h"
 #include "fastfix/profile/dictgen_input.h"
-#include "fastfix/profile/overlay.h"
 #include "fastfix/runtime/config.h"
 #include "fastfix/runtime/config_io.h"
 #include "fastfix/runtime/engine.h"
@@ -17,21 +16,13 @@
 namespace {
 
 auto BuildSampleArtifact(const std::filesystem::path& artifact_path, std::uint64_t profile_id) -> fastfix::base::Status {
-    const auto project_root = std::filesystem::path(FASTFIX_PROJECT_DIR);
-    auto dictionary = fastfix::profile::LoadNormalizedDictionaryFile(project_root / "samples" / "basic_profile.ffd");
+    const auto ffd_path = std::filesystem::path(FASTFIX_PROJECT_DIR) / "build" / "bench" / "quickfix_FIX44.ffd";
+    auto dictionary = fastfix::profile::LoadNormalizedDictionaryFile(ffd_path);
     if (!dictionary.ok()) {
         return dictionary.status();
     }
-    auto overlay = fastfix::profile::LoadNormalizedDictionaryFile(project_root / "samples" / "basic_overlay.ffd");
-    if (!overlay.ok()) {
-        return overlay.status();
-    }
-    auto merged = fastfix::profile::ApplyOverlay(dictionary.value(), overlay.value());
-    if (!merged.ok()) {
-        return merged.status();
-    }
-    merged.value().profile_id = profile_id;
-    auto artifact = fastfix::profile::BuildProfileArtifact(merged.value());
+    dictionary.value().profile_id = profile_id;
+    auto artifact = fastfix::profile::BuildProfileArtifact(dictionary.value());
     if (!artifact.ok()) {
         return artifact.status();
     }
@@ -45,8 +36,8 @@ TEST_CASE("runtime-config", "[runtime-config]") {    const auto temp_root = std:
 
     const auto artifact_path = temp_root / "sample-profile.art";
     const auto transport_artifact_path = temp_root / "sample-transport-profile.art";
-    REQUIRE(BuildSampleArtifact(artifact_path, 1001U).ok());
-    REQUIRE(BuildSampleArtifact(transport_artifact_path, 1002U).ok());
+    REQUIRE(BuildSampleArtifact(artifact_path, 4400U).ok());
+    REQUIRE(BuildSampleArtifact(transport_artifact_path, 4401U).ok());
 
     const auto config_path = temp_root / "engine.ffcfg";
     const auto store_path = temp_root / "session-2002.store";
@@ -64,13 +55,13 @@ TEST_CASE("runtime-config", "[runtime-config]") {    const auto temp_root = std:
     out << "profile=sample-profile.art\n";
     out << "profile=sample-transport-profile.art\n";
     out << "listener|main|127.0.0.1|9878|0\n";
-    out << "counterparty|buy-sell-a|2001|1001|FIX.4.4|BUY1|SELL1|memory||memory|inline|30|true||compatible\n";
-    out << "counterparty|buy-sell-b|2002|1001|FIX.4.4|BUY2|SELL2|mmap|" << store_path.filename().string() << "|warm|queue|20|false\n";
-    out << "counterparty|transport-fixt|2003|1002|FIXT.1.1|SELLT|BUYT|memory||memory|inline|30|false|9\n";
-    out << "counterparty|buy-sell-d|2004|1001|FIX.4.4|BUYD|SELLD|durable|"
+    out << "counterparty|buy-sell-a|2001|4400|FIX.4.4|BUY1|SELL1|memory||memory|inline|30|true||compatible\n";
+    out << "counterparty|buy-sell-b|2002|4400|FIX.4.4|BUY2|SELL2|mmap|" << store_path.filename().string() << "|warm|queue|20|false\n";
+    out << "counterparty|transport-fixt|2003|4401|FIXT.1.1|SELLT|BUYT|memory||memory|inline|30|false|9\n";
+    out << "counterparty|buy-sell-d|2004|4400|FIX.4.4|BUYD|SELLD|durable|"
         << durable_store_path.filename().string()
         << "|warm|queue|25|false||strict|2|external|3\n";
-    out << "counterparty|buy-sell-e|2005|1001|FIX.4.4|BUYE|SELLE|durable|"
+    out << "counterparty|buy-sell-e|2005|4400|FIX.4.4|BUYE|SELLE|durable|"
         << durable_local_store_path.filename().string()
         << "|warm|inline|15|false||strict|0|local-time|4|true|100|1000|0|3600|false\n";
     out.close();
@@ -114,13 +105,13 @@ TEST_CASE("runtime-config", "[runtime-config]") {    const auto temp_root = std:
     REQUIRE(engine.runtime() != nullptr);
     REQUIRE(engine.runtime()->worker_count() == 2U);
     REQUIRE(engine.runtime()->session_count() == 5U);
-    REQUIRE(engine.profiles().Find(1001U) != nullptr);
-    REQUIRE(engine.profiles().Find(1002U) != nullptr);
+    REQUIRE(engine.profiles().Find(4400U) != nullptr);
+    REQUIRE(engine.profiles().Find(4401U) != nullptr);
     REQUIRE(engine.FindCounterpartyConfig(2002U) != nullptr);
     REQUIRE(engine.FindCounterpartyConfig(2002U)->dispatch_mode == fastfix::runtime::AppDispatchMode::kQueueDecoupled);
     REQUIRE(engine.FindListenerConfig("main") != nullptr);
 
-    auto transport_dictionary = engine.LoadDictionaryView(1002U);
+    auto transport_dictionary = engine.LoadDictionaryView(4401U);
     REQUIRE(transport_dictionary.ok());
 
     fastfix::message::MessageBuilder logon_builder("A");
@@ -162,7 +153,7 @@ TEST_CASE("runtime-config", "[runtime-config]") {    const auto temp_root = std:
     REQUIRE(resolved.ok());
     REQUIRE(resolved.value().counterparty.session.session_id == 2003U);
     REQUIRE(resolved.value().counterparty.default_appl_ver_id == "9");
-    REQUIRE(resolved.value().dictionary.profile().header().profile_id == 1002U);
+    REQUIRE(resolved.value().dictionary.profile().header().profile_id == 4401U);
 
     const auto metrics = engine.metrics().Snapshot();
     REQUIRE(metrics.sessions.size() == 5U);
@@ -176,7 +167,7 @@ TEST_CASE("runtime-config", "[runtime-config]") {    const auto temp_root = std:
         "engine.worker_count=1\n"
         "engine.worker_cpu_affinity=1,2\n"
         "profile=sample-transport-profile.art\n"
-        "counterparty|bad-fixt|3001|1002|FIXT.1.1|SELLX|BUYX|memory||memory|inline|30|false\n");
+        "counterparty|bad-fixt|3001|4401|FIXT.1.1|SELLX|BUYX|memory||memory|inline|30|false\n");
     auto invalid = fastfix::runtime::LoadEngineConfigText(invalid_config_text, temp_root);
     REQUIRE(!invalid.ok());
 

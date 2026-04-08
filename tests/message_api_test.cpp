@@ -5,51 +5,14 @@
 #include "fastfix/message/message.h"
 #include "fastfix/profile/artifact_builder.h"
 #include "fastfix/profile/dictgen_input.h"
-#include "fastfix/profile/overlay.h"
 #include "fastfix/profile/profile_loader.h"
-#include "sample_basic_builders.h"
+#include "fix44_builders.h"
 
 #include "test_support.h"
 
-namespace {
-
-auto LoadMessageApiDictionary() -> fastfix::base::Result<fastfix::profile::NormalizedDictionaryView> {
-    const auto project_root = std::filesystem::path(FASTFIX_PROJECT_DIR);
-    auto dictionary = fastfix::profile::LoadNormalizedDictionaryFile(project_root / "samples" / "basic_profile.ffd");
-    if (!dictionary.ok()) {
-        return dictionary.status();
-    }
-    auto overlay = fastfix::profile::LoadNormalizedDictionaryFile(project_root / "samples" / "basic_overlay.ffd");
-    if (!overlay.ok()) {
-        return overlay.status();
-    }
-    auto merged = fastfix::profile::ApplyOverlay(dictionary.value(), overlay.value());
-    if (!merged.ok()) {
-        return merged.status();
-    }
-    auto artifact = fastfix::profile::BuildProfileArtifact(merged.value());
-    if (!artifact.ok()) {
-        return artifact.status();
-    }
-
-    const auto artifact_path = std::filesystem::temp_directory_path() / "fastfix-message-api-test.art";
-    const auto write_status = fastfix::profile::WriteProfileArtifact(artifact_path, artifact.value());
-    if (!write_status.ok()) {
-        return write_status;
-    }
-    auto loaded = fastfix::profile::LoadProfileArtifact(artifact_path);
-    std::filesystem::remove(artifact_path);
-    if (!loaded.ok()) {
-        return loaded.status();
-    }
-    return fastfix::profile::NormalizedDictionaryView::FromProfile(std::move(loaded).value());
-}
-
-}  // namespace
-
 TEST_CASE("message-api", "[message-api]") {
-    auto dictionary = LoadMessageApiDictionary();
-    REQUIRE(dictionary.ok());
+    auto dictionary_view = fastfix::tests::LoadFix44DictionaryViewOrSkip();
+    auto dictionary = fastfix::base::Result<fastfix::profile::NormalizedDictionaryView>(std::move(dictionary_view));
 
     fastfix::message::MessageBuilder builder("D");
     builder.set_string(35U, "D").set_string(49U, "BUY").set_string(56U, "SELL").set_int(38U, 1000);
@@ -96,8 +59,8 @@ TEST_CASE("message-api", "[message-api]") {
 }
 
 TEST_CASE("fixed-layout-build", "[message-api][fixed-layout]") {
-    auto dictionary = LoadMessageApiDictionary();
-    REQUIRE(dictionary.ok());
+    auto dictionary_view = fastfix::tests::LoadFix44DictionaryViewOrSkip();
+    auto dictionary = fastfix::base::Result<fastfix::profile::NormalizedDictionaryView>(std::move(dictionary_view));
 
     auto layout = fastfix::message::FixedLayout::Build(dictionary.value(), "D");
     REQUIRE(layout.ok());
@@ -105,8 +68,8 @@ TEST_CASE("fixed-layout-build", "[message-api][fixed-layout]") {
     CHECK(layout.value().msg_type() == "D");
     CHECK(layout.value().field_count() > 0U);
 
-    // Scalar tag 49 (SenderCompID) should have a valid slot.
-    CHECK(layout.value().slot_index(49U) >= 0);
+    // Scalar tag 11 (ClOrdID) should have a valid slot.
+    CHECK(layout.value().slot_index(11U) >= 0);
     // Tag 0 should not be in layout.
     CHECK(layout.value().slot_index(0U) == -1);
     // Group count_tag 453 should be in the group index.
@@ -116,16 +79,16 @@ TEST_CASE("fixed-layout-build", "[message-api][fixed-layout]") {
 }
 
 TEST_CASE("fixed-layout-build-unknown-type", "[message-api][fixed-layout]") {
-    auto dictionary = LoadMessageApiDictionary();
-    REQUIRE(dictionary.ok());
+    auto dictionary_view = fastfix::tests::LoadFix44DictionaryViewOrSkip();
+    auto dictionary = fastfix::base::Result<fastfix::profile::NormalizedDictionaryView>(std::move(dictionary_view));
 
     auto layout = fastfix::message::FixedLayout::Build(dictionary.value(), "ZZ_NONEXIST");
     REQUIRE_FALSE(layout.ok());
 }
 
 TEST_CASE("fixed-layout-writer-scalar-fields", "[message-api][fixed-layout]") {
-    auto dictionary = LoadMessageApiDictionary();
-    REQUIRE(dictionary.ok());
+    auto dictionary_view = fastfix::tests::LoadFix44DictionaryViewOrSkip();
+    auto dictionary = fastfix::base::Result<fastfix::profile::NormalizedDictionaryView>(std::move(dictionary_view));
 
     auto layout = fastfix::message::FixedLayout::Build(dictionary.value(), "D");
     REQUIRE(layout.ok());
@@ -133,7 +96,7 @@ TEST_CASE("fixed-layout-writer-scalar-fields", "[message-api][fixed-layout]") {
     fastfix::message::FixedLayoutWriter writer(layout.value());
     writer.set_string(49U, "BUY");
     writer.set_string(56U, "SELL");
-    writer.set_string(5001U, "LIT");
+    writer.set_string(1U, "ACC-1");
 
     // Unknown tag silently ignored (no error reporting on hot path).
     writer.set_string(99999U, "NOPE");
@@ -158,13 +121,13 @@ TEST_CASE("fixed-layout-writer-scalar-fields", "[message-api][fixed-layout]") {
     CHECK(view.get_string(49U).value() == "BUY");
     REQUIRE(view.get_string(56U).has_value());
     CHECK(view.get_string(56U).value() == "SELL");
-    REQUIRE(view.get_string(5001U).has_value());
-    CHECK(view.get_string(5001U).value() == "LIT");
+    REQUIRE(view.get_string(1U).has_value());
+    CHECK(view.get_string(1U).value() == "ACC-1");
 }
 
 TEST_CASE("fixed-layout-writer-with-groups", "[message-api][fixed-layout]") {
-    auto dictionary = LoadMessageApiDictionary();
-    REQUIRE(dictionary.ok());
+    auto dictionary_view = fastfix::tests::LoadFix44DictionaryViewOrSkip();
+    auto dictionary = fastfix::base::Result<fastfix::profile::NormalizedDictionaryView>(std::move(dictionary_view));
 
     auto layout = fastfix::message::FixedLayout::Build(dictionary.value(), "D");
     REQUIRE(layout.ok());
@@ -172,7 +135,7 @@ TEST_CASE("fixed-layout-writer-with-groups", "[message-api][fixed-layout]") {
     fastfix::message::FixedLayoutWriter writer(layout.value());
     writer.set_string(49U, "BUY");
     writer.set_string(56U, "SELL");
-    writer.set_string(5001U, "LIT");
+    writer.set_string(1U, "ACC-1");
     auto party = writer.add_group_entry(453U);
     party.set_string(448U, "PTY1").set_char(447U, 'D').set_int(452U, 1);
 
@@ -200,12 +163,12 @@ TEST_CASE("fixed-layout-writer-with-groups", "[message-api][fixed-layout]") {
 }
 
 TEST_CASE("fixed-layout-writer-matches-message-builder", "[message-api][fixed-layout]") {
-    auto dictionary = LoadMessageApiDictionary();
-    REQUIRE(dictionary.ok());
+    auto dictionary_view = fastfix::tests::LoadFix44DictionaryViewOrSkip();
+    auto dictionary = fastfix::base::Result<fastfix::profile::NormalizedDictionaryView>(std::move(dictionary_view));
 
     // Build via MessageBuilder (same tags as FixedLayoutWriter below).
     fastfix::message::MessageBuilder mb("D");
-    mb.set_string(49U, "BUY").set_string(56U, "SELL").set_string(5001U, "LIT");
+    mb.set_string(49U, "BUY").set_string(56U, "SELL").set_string(1U, "ACC-1");
     auto mb_party = mb.add_group_entry(453U);
     mb_party.set_string(448U, "PTY1").set_char(447U, 'D').set_int(452U, 1);
 
@@ -226,7 +189,7 @@ TEST_CASE("fixed-layout-writer-matches-message-builder", "[message-api][fixed-la
     fastfix::message::FixedLayoutWriter writer(layout.value());
     writer.set_string(49U, "BUY");
     writer.set_string(56U, "SELL");
-    writer.set_string(5001U, "LIT");
+    writer.set_string(1U, "ACC-1");
     auto fw_party = writer.add_group_entry(453U);
     fw_party.set_string(448U, "PTY1").set_char(447U, 'D').set_int(452U, 1);
 
@@ -250,19 +213,19 @@ TEST_CASE("fixed-layout-writer-matches-message-builder", "[message-api][fixed-la
 }
 
 TEST_CASE("fixed-layout-writer-all-value-types", "[message-api][fixed-layout]") {
-    auto dictionary = LoadMessageApiDictionary();
-    REQUIRE(dictionary.ok());
+    auto dictionary_view = fastfix::tests::LoadFix44DictionaryViewOrSkip();
+    auto dictionary = fastfix::base::Result<fastfix::profile::NormalizedDictionaryView>(std::move(dictionary_view));
 
     auto layout = fastfix::message::FixedLayout::Build(dictionary.value(), "D");
     REQUIRE(layout.ok());
 
     fastfix::message::FixedLayoutWriter writer(layout.value());
 
-    // All tags in this profile are string/int/char type: 49=string, 56=string, 5001=string, 5002=string.
+    // Use standard FIX44 fields: 49=SenderCompID, 56=TargetCompID, 1=Account, 11=ClOrdID.
     writer.set_string(49U, "BUY");
     writer.set_string(56U, "SELL");
-    writer.set_string(5001U, "LIT");
-    writer.set_string(5002U, "ACC-1");
+    writer.set_string(1U, "ACC-1");
+    writer.set_string(11U, "ORD-001");
 
     // Encode + decode roundtrip to verify all value types.
     fastfix::codec::EncodeOptions options;
@@ -282,15 +245,15 @@ TEST_CASE("fixed-layout-writer-all-value-types", "[message-api][fixed-layout]") 
     CHECK(view.get_string(49U).value() == "BUY");
     REQUIRE(view.get_string(56U).has_value());
     CHECK(view.get_string(56U).value() == "SELL");
-    REQUIRE(view.get_string(5001U).has_value());
-    CHECK(view.get_string(5001U).value() == "LIT");
-    REQUIRE(view.get_string(5002U).has_value());
-    CHECK(view.get_string(5002U).value() == "ACC-1");
+    REQUIRE(view.get_string(1U).has_value());
+    CHECK(view.get_string(1U).value() == "ACC-1");
+    REQUIRE(view.get_string(11U).has_value());
+    CHECK(view.get_string(11U).value() == "ORD-001");
 }
 
 TEST_CASE("fixed-layout-writer-encode-roundtrip", "[message-api][fixed-layout]") {
-    auto dictionary = LoadMessageApiDictionary();
-    REQUIRE(dictionary.ok());
+    auto dictionary_view = fastfix::tests::LoadFix44DictionaryViewOrSkip();
+    auto dictionary = fastfix::base::Result<fastfix::profile::NormalizedDictionaryView>(std::move(dictionary_view));
 
     auto layout = fastfix::message::FixedLayout::Build(dictionary.value(), "D");
     REQUIRE(layout.ok());
@@ -298,8 +261,8 @@ TEST_CASE("fixed-layout-writer-encode-roundtrip", "[message-api][fixed-layout]")
     fastfix::message::FixedLayoutWriter writer(layout.value());
     writer.set_string(49U, "SENDER");
     writer.set_string(56U, "TARGET");
-    writer.set_string(5001U, "LIT");
-    writer.set_string(5002U, "ACC-1");
+    writer.set_string(1U, "ACC-1");
+    writer.set_string(11U, "ORD-001");
     auto party = writer.add_group_entry(453U);
     party.set_string(448U, "PTY1").set_char(447U, 'D').set_int(452U, 3);
 
@@ -321,8 +284,8 @@ TEST_CASE("fixed-layout-writer-encode-roundtrip", "[message-api][fixed-layout]")
     CHECK(view.msg_type() == "D");
     REQUIRE(view.get_string(49U).has_value());
     CHECK(view.get_string(49U).value() == "SENDER");
-    REQUIRE(view.get_string(5001U).has_value());
-    CHECK(view.get_string(5001U).value() == "LIT");
+    REQUIRE(view.get_string(1U).has_value());
+    CHECK(view.get_string(1U).value() == "ACC-1");
     auto group = view.group(453U);
     REQUIRE(group.has_value());
     REQUIRE(group->size() == 1U);
@@ -330,8 +293,8 @@ TEST_CASE("fixed-layout-writer-encode-roundtrip", "[message-api][fixed-layout]")
 }
 
 TEST_CASE("fixed-layout-writer-extra-fields-hybrid-path", "[message-api][fixed-layout]") {
-    auto dictionary = LoadMessageApiDictionary();
-    REQUIRE(dictionary.ok());
+    auto dictionary_view = fastfix::tests::LoadFix44DictionaryViewOrSkip();
+    auto dictionary = fastfix::base::Result<fastfix::profile::NormalizedDictionaryView>(std::move(dictionary_view));
 
     auto layout = fastfix::message::FixedLayout::Build(dictionary.value(), "D");
     REQUIRE(layout.ok());
@@ -341,7 +304,7 @@ TEST_CASE("fixed-layout-writer-extra-fields-hybrid-path", "[message-api][fixed-l
     // Set known layout fields via normal O(1) setters.
     writer.set_string(49U, "SENDER");
     writer.set_string(56U, "TARGET");
-    writer.set_string(5001U, "LIT");
+    writer.set_string(1U, "ACC-1");
 
     // Set extra fields NOT in the layout via hybrid path.
     writer.set_extra_string(9999U, "CUSTOM_VAL");
@@ -388,17 +351,17 @@ TEST_CASE("fixed-layout-writer-extra-fields-hybrid-path", "[message-api][fixed-l
 // Generated typed writer tests
 // ---------------------------------------------------------------------------
 
-using namespace fastfix::generated::profile_1001;
+using namespace fastfix::generated::profile_4400;
 
 TEST_CASE("generated-writer-scalar-fields", "[message-api][generated-writer]") {
-    auto dictionary = LoadMessageApiDictionary();
-    REQUIRE(dictionary.ok());
+    auto dictionary_view = fastfix::tests::LoadFix44DictionaryViewOrSkip();
+    auto dictionary = fastfix::base::Result<fastfix::profile::NormalizedDictionaryView>(std::move(dictionary_view));
 
     auto layout = fastfix::message::FixedLayout::Build(dictionary.value(), "D");
     REQUIRE(layout.ok());
 
     NewOrderSingleWriter writer(layout.value());
-    writer.set_venue_order_type("LIT").set_venue_account("ACC-1");
+    writer.set_account("ACC-1").set_cl_ord_id("ORD-001");
 
     fastfix::codec::EncodeOptions options;
     options.begin_string = "FIX.4.4";
@@ -415,26 +378,26 @@ TEST_CASE("generated-writer-scalar-fields", "[message-api][generated-writer]") {
     auto view = decoded.value().message.view();
 
     CHECK(view.msg_type() == "D");
-    REQUIRE(view.get_string(Tag::VenueOrderType).has_value());
-    CHECK(view.get_string(Tag::VenueOrderType).value() == "LIT");
-    REQUIRE(view.get_string(Tag::VenueAccount).has_value());
-    CHECK(view.get_string(Tag::VenueAccount).value() == "ACC-1");
+    REQUIRE(view.get_string(Tag::Account).has_value());
+    CHECK(view.get_string(Tag::Account).value() == "ACC-1");
+    REQUIRE(view.get_string(Tag::ClOrdID).has_value());
+    CHECK(view.get_string(Tag::ClOrdID).value() == "ORD-001");
 }
 
 TEST_CASE("generated-writer-with-groups", "[message-api][generated-writer]") {
-    auto dictionary = LoadMessageApiDictionary();
-    REQUIRE(dictionary.ok());
+    auto dictionary_view = fastfix::tests::LoadFix44DictionaryViewOrSkip();
+    auto dictionary = fastfix::base::Result<fastfix::profile::NormalizedDictionaryView>(std::move(dictionary_view));
 
     auto layout = fastfix::message::FixedLayout::Build(dictionary.value(), "D");
     REQUIRE(layout.ok());
 
     NewOrderSingleWriter writer(layout.value());
-    writer.set_venue_order_type("LIT");
-    writer.add_parties()
+    writer.set_account("ACC-1");
+    writer.add_no_party_i_ds()
         .set_party_id("PTY1")
         .set_party_id_source('D')
         .set_party_role(1);
-    writer.add_parties()
+    writer.add_no_party_i_ds()
         .set_party_id("PTY2")
         .set_party_id_source('G')
         .set_party_role(4);
@@ -465,8 +428,8 @@ TEST_CASE("generated-writer-with-groups", "[message-api][generated-writer]") {
 }
 
 TEST_CASE("generated-writer-matches-raw-fixed-layout-writer", "[message-api][generated-writer]") {
-    auto dictionary = LoadMessageApiDictionary();
-    REQUIRE(dictionary.ok());
+    auto dictionary_view = fastfix::tests::LoadFix44DictionaryViewOrSkip();
+    auto dictionary = fastfix::base::Result<fastfix::profile::NormalizedDictionaryView>(std::move(dictionary_view));
 
     auto layout = fastfix::message::FixedLayout::Build(dictionary.value(), "D");
     REQUIRE(layout.ok());
@@ -480,8 +443,8 @@ TEST_CASE("generated-writer-matches-raw-fixed-layout-writer", "[message-api][gen
 
     // Build via raw FixedLayoutWriter.
     fastfix::message::FixedLayoutWriter raw(layout.value());
-    raw.set_string(5001U, "LIT");
-    raw.set_string(5002U, "ACC-1");
+    raw.set_string(1U, "ACC-1");
+    raw.set_string(11U, "ORD-001");
     auto raw_party = raw.add_group_entry(453U);
     raw_party.set_string(448U, "PTY1").set_char(447U, 'D').set_int(452U, 1);
 
@@ -490,8 +453,8 @@ TEST_CASE("generated-writer-matches-raw-fixed-layout-writer", "[message-api][gen
 
     // Build via generated NewOrderSingleWriter.
     NewOrderSingleWriter typed(layout.value());
-    typed.set_venue_order_type("LIT").set_venue_account("ACC-1");
-    typed.add_parties()
+    typed.set_account("ACC-1").set_cl_ord_id("ORD-001");
+    typed.add_no_party_i_ds()
         .set_party_id("PTY1")
         .set_party_id_source('D')
         .set_party_role(1);
@@ -504,8 +467,8 @@ TEST_CASE("generated-writer-matches-raw-fixed-layout-writer", "[message-api][gen
 }
 
 TEST_CASE("generated-writer-clear-and-reuse", "[message-api][generated-writer]") {
-    auto dictionary = LoadMessageApiDictionary();
-    REQUIRE(dictionary.ok());
+    auto dictionary_view = fastfix::tests::LoadFix44DictionaryViewOrSkip();
+    auto dictionary = fastfix::base::Result<fastfix::profile::NormalizedDictionaryView>(std::move(dictionary_view));
 
     auto layout = fastfix::message::FixedLayout::Build(dictionary.value(), "D");
     REQUIRE(layout.ok());
@@ -520,15 +483,15 @@ TEST_CASE("generated-writer-clear-and-reuse", "[message-api][generated-writer]")
     options.sending_time = "20260406-12:00:00.000";
 
     // First encode.
-    writer.set_venue_order_type("LIT");
+    writer.set_account("ACC-1");
     options.msg_seq_num = 1U;
     fastfix::codec::EncodeBuffer buf1;
     REQUIRE(writer.encode_to_buffer(dictionary.value(), options, &buf1).ok());
 
     // Clear and reuse.
     writer.clear();
-    writer.set_venue_order_type("DARK");
-    writer.set_venue_account("ACC-2");
+    writer.set_account("ACC-2");
+    writer.set_cl_ord_id("ORD-002");
     options.msg_seq_num = 2U;
     fastfix::codec::EncodeBuffer buf2;
     REQUIRE(writer.encode_to_buffer(dictionary.value(), options, &buf2).ok());
@@ -538,26 +501,26 @@ TEST_CASE("generated-writer-clear-and-reuse", "[message-api][generated-writer]")
     auto view = decoded.value().message.view();
 
     CHECK(view.msg_type() == "D");
-    REQUIRE(view.get_string(Tag::VenueOrderType).has_value());
-    CHECK(view.get_string(Tag::VenueOrderType).value() == "DARK");
-    REQUIRE(view.get_string(Tag::VenueAccount).has_value());
-    CHECK(view.get_string(Tag::VenueAccount).value() == "ACC-2");
+    REQUIRE(view.get_string(Tag::Account).has_value());
+    CHECK(view.get_string(Tag::Account).value() == "ACC-2");
+    REQUIRE(view.get_string(Tag::ClOrdID).has_value());
+    CHECK(view.get_string(Tag::ClOrdID).value() == "ORD-002");
 
     // First-encode fields should NOT leak into second encode.
     const auto wire = buf2.text();
-    CHECK(wire.find("5001=DARK") != std::string_view::npos);
-    CHECK(wire.find("5001=LIT") == std::string_view::npos);
+    CHECK(wire.find("1=ACC-2") != std::string_view::npos);
+    CHECK(wire.find("1=ACC-1") == std::string_view::npos);
 }
 
 TEST_CASE("generated-writer-escape-hatch", "[message-api][generated-writer]") {
-    auto dictionary = LoadMessageApiDictionary();
-    REQUIRE(dictionary.ok());
+    auto dictionary_view = fastfix::tests::LoadFix44DictionaryViewOrSkip();
+    auto dictionary = fastfix::base::Result<fastfix::profile::NormalizedDictionaryView>(std::move(dictionary_view));
 
     auto layout = fastfix::message::FixedLayout::Build(dictionary.value(), "D");
     REQUIRE(layout.ok());
 
     NewOrderSingleWriter writer(layout.value());
-    writer.set_venue_order_type("LIT");
+    writer.set_account("ACC-1");
 
     // Use escape hatch for an unknown/extension field.
     writer.writer().set_extra_string(9999U, "CUSTOM");
@@ -574,5 +537,5 @@ TEST_CASE("generated-writer-escape-hatch", "[message-api][generated-writer]") {
 
     const auto wire = buf.text();
     CHECK(wire.find("9999=CUSTOM") != std::string_view::npos);
-    CHECK(wire.find("5001=LIT") != std::string_view::npos);
+    CHECK(wire.find("1=ACC-1") != std::string_view::npos);
 }

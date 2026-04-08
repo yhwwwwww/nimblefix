@@ -9,6 +9,7 @@
 
 #include "fastfix/base/result.h"
 #include "fastfix/base/status.h"
+#include "fastfix/runtime/io_poller.h"
 #include "fastfix/session/resend_recovery.h"
 #include "fastfix/session/session_core.h"
 #include "fastfix/session/validation_policy.h"
@@ -88,6 +89,7 @@ struct EngineConfig {
     std::vector<std::uint32_t> worker_cpu_affinity;
     QueueAppThreadingMode queue_app_mode{QueueAppThreadingMode::kCoScheduled};
     PollMode poll_mode{PollMode::kBlocking};
+    IoBackend io_backend{IoBackend::kPoll};
     std::vector<std::uint32_t> app_cpu_affinity;
     std::vector<std::filesystem::path> profile_artifacts;
     std::vector<std::vector<std::filesystem::path>> profile_dictionaries;

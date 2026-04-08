@@ -10,10 +10,9 @@
 #include <unordered_map>
 #include <vector>
 
-#include "fastfix/profile/artifact_builder.h"
-#include "fastfix/profile/profile_loader.h"
 #include "fastfix/runtime/application.h"
 #include "fastfix/runtime/engine.h"
+#include "fastfix/runtime/io_poller.h"
 #include "fastfix/runtime/live_acceptor.h"
 #include "fastfix/session/admin_protocol.h"
 #include "fastfix/store/memory_store.h"
@@ -306,63 +305,6 @@ auto NowNs() -> std::uint64_t {
                                               .count());
 }
 
-auto BuildLoopbackArtifact(const std::filesystem::path& artifact_path, std::uint64_t profile_id)
-    -> fastfix::base::Status {
-    fastfix::profile::NormalizedDictionary dictionary;
-    dictionary.profile_id = profile_id;
-    dictionary.schema_hash = 0x9001900190019001ULL;
-    dictionary.fields = {
-        {35U, "MsgType", fastfix::profile::ValueType::kString, 0U},
-        {49U, "SenderCompID", fastfix::profile::ValueType::kString, 0U},
-        {56U, "TargetCompID", fastfix::profile::ValueType::kString, 0U},
-        {453U, "NoPartyIDs", fastfix::profile::ValueType::kInt, 0U},
-        {448U, "PartyID", fastfix::profile::ValueType::kString, 0U},
-        {447U, "PartyIDSource", fastfix::profile::ValueType::kChar, 0U},
-        {452U, "PartyRole", fastfix::profile::ValueType::kInt, 0U},
-    };
-    dictionary.messages = {
-        fastfix::profile::MessageDef{
-            .msg_type = "D",
-            .name = "NewOrderSingle",
-            .field_rules = {
-                {35U, static_cast<std::uint32_t>(fastfix::profile::FieldRuleFlags::kRequired)},
-                {49U, static_cast<std::uint32_t>(fastfix::profile::FieldRuleFlags::kRequired)},
-                {56U, static_cast<std::uint32_t>(fastfix::profile::FieldRuleFlags::kRequired)},
-                {453U, 0U},
-            },
-            .flags = 0U,
-        },
-    };
-    dictionary.groups = {
-        fastfix::profile::GroupDef{
-            .count_tag = 453U,
-            .delimiter_tag = 448U,
-            .name = "Parties",
-            .field_rules = {
-                {448U, static_cast<std::uint32_t>(fastfix::profile::FieldRuleFlags::kRequired)},
-                {447U, static_cast<std::uint32_t>(fastfix::profile::FieldRuleFlags::kRequired)},
-                {452U, static_cast<std::uint32_t>(fastfix::profile::FieldRuleFlags::kRequired)},
-            },
-            .flags = 0U,
-        },
-    };
-
-    auto artifact = fastfix::profile::BuildProfileArtifact(dictionary);
-    if (!artifact.ok()) {
-        return artifact.status();
-    }
-    return fastfix::profile::WriteProfileArtifact(artifact_path, artifact.value());
-}
-
-auto LoadDictionary(const std::filesystem::path& artifact_path)
-    -> fastfix::base::Result<fastfix::profile::NormalizedDictionaryView> {
-    auto profile = fastfix::profile::LoadProfileArtifact(artifact_path);
-    if (!profile.ok()) {
-        return profile.status();
-    }
-    return fastfix::profile::NormalizedDictionaryView::FromProfile(std::move(profile).value());
-}
-
 auto RunInitiatorEchoSession(
     std::uint16_t port,
     const fastfix::profile::NormalizedDictionaryView& dictionary,
@@ -393,6 +335,7 @@ auto RunInitiatorEchoSession(
             .target_comp_id = target_comp_id,
             .default_appl_ver_id = default_appl_ver_id,
             .heartbeat_interval_seconds = 1U,
+            .validation_policy = fastfix::session::ValidationPolicy::Permissive(),
         },
         dictionary,
         &store);
@@ -527,6 +470,7 @@ auto RunInitiatorHeartbeatTimerSession(
             .target_comp_id = "SELL",
             .default_appl_ver_id = default_appl_ver_id,
             .heartbeat_interval_seconds = 1U,
+            .validation_policy = fastfix::session::ValidationPolicy::Permissive(),
         },
         dictionary,
         &store);
@@ -599,10 +543,13 @@ auto RunInitiatorHeartbeatTimerSession(
 }  // namespace
 
 TEST_CASE("live-runtime", "[live-runtime]") {
-    const auto temp_root = std::filesystem::temp_directory_path() / "fastfix-live-runtime-test";
-    std::filesystem::create_directories(temp_root);
-    const auto artifact_path = temp_root / "loopback-profile.art";
-    REQUIRE(BuildLoopbackArtifact(artifact_path, 8101U).ok());
+    auto dictionary = fastfix::tests::LoadFix44DictionaryView();
+    if (!dictionary.ok()) {
+        SKIP("FIX44 artifact not available: " << dictionary.status().message());
+    }
+    const auto artifact_path =
+        std::filesystem::path(FASTFIX_PROJECT_DIR) / "build" / "bench" / "quickfix_FIX44.art";
+    const auto profile_id = dictionary.value().profile().header().profile_id;
 
     fastfix::runtime::EngineConfig config;
     config.worker_count = 2U;
@@ -621,21 +568,23 @@ TEST_CASE("live-runtime", "[live-runtime]") {
     fix42.name = "sell-buy-42";
     fix42.session.session_id = 3101U;
     fix42.session.key = fastfix::session::SessionKey{"FIX.4.2", "SELL", "BUY"};
-    fix42.session.profile_id = 8101U;
+    fix42.session.profile_id = profile_id;
     fix42.session.heartbeat_interval_seconds = 1U;
     fix42.session.is_initiator = false;
     fix42.dispatch_mode = fastfix::runtime::AppDispatchMode::kInline;
+    fix42.validation_policy = fastfix::session::ValidationPolicy::Permissive();
 
     fastfix::runtime::CounterpartyConfig fixt;
     fixt.name = "sell-buy-fixt";
     fixt.session.session_id = 3102U;
     fixt.session.key = fastfix::session::SessionKey{"FIXT.1.1", "SELL", "BUY"};
-    fixt.session.profile_id = 8101U;
+    fixt.session.profile_id = profile_id;
     fixt.session.default_appl_ver_id = "9";
     fixt.session.heartbeat_interval_seconds = 1U;
     fixt.session.is_initiator = false;
     fixt.default_appl_ver_id = "9";
     fixt.dispatch_mode = fastfix::runtime::AppDispatchMode::kQueueDecoupled;
+    fixt.validation_policy = fastfix::session::ValidationPolicy::Permissive();
 
     config.counterparties.push_back(fix42);
     config.counterparties.push_back(fixt);
@@ -662,9 +611,6 @@ TEST_CASE("live-runtime", "[live-runtime]") {
     REQUIRE(engine.EnsureManagedQueueRunnerStarted(&managed_runner_owner, managed_runner_application.get(), nullptr).ok());
     REQUIRE(engine.ReleaseManagedQueueRunner(&managed_runner_owner).ok());
     REQUIRE(!engine.EnsureManagedQueueRunnerStarted(&managed_runner_owner, managed_runner_application.get(), nullptr).ok());
-
-    auto dictionary = LoadDictionary(artifact_path);
-    REQUIRE(dictionary.ok());
 
     auto application = std::make_shared<MixedApplication>(config.worker_count);
     fastfix::runtime::ManagedQueueApplicationRunnerOptions managed_queue_runner;
@@ -813,7 +759,7 @@ TEST_CASE("live-runtime", "[live-runtime]") {
         .session = fastfix::session::SessionConfig{
             .session_id = kShardMigratedSessionId,
             .key = fastfix::session::SessionKey{"FIX.4.4", "SELL", routed_target_comp_id},
-            .profile_id = 8101U,
+            .profile_id = profile_id,
             .heartbeat_interval_seconds = 1U,
             .is_initiator = false,
         },
@@ -822,6 +768,7 @@ TEST_CASE("live-runtime", "[live-runtime]") {
         .store_mode = fastfix::runtime::StoreMode::kMemory,
         .recovery_mode = fastfix::session::RecoveryMode::kMemoryOnly,
         .dispatch_mode = fastfix::runtime::AppDispatchMode::kQueueDecoupled,
+        .validation_policy = fastfix::session::ValidationPolicy::Permissive(),
     });
 
     fastfix::runtime::Engine shard_engine;
@@ -1008,7 +955,7 @@ TEST_CASE("live-runtime", "[live-runtime]") {
         .session = fastfix::session::SessionConfig{
             .session_id = 3105U,
             .key = fastfix::session::SessionKey{"FIX.4.4", "SELL", "BUY"},
-            .profile_id = 8101U,
+            .profile_id = profile_id,
             .heartbeat_interval_seconds = 1U,
             .is_initiator = false,
         },
@@ -1017,6 +964,7 @@ TEST_CASE("live-runtime", "[live-runtime]") {
         .store_mode = fastfix::runtime::StoreMode::kMemory,
         .recovery_mode = fastfix::session::RecoveryMode::kMemoryOnly,
         .dispatch_mode = fastfix::runtime::AppDispatchMode::kQueueDecoupled,
+        .validation_policy = fastfix::session::ValidationPolicy::Permissive(),
     });
 
     fastfix::runtime::Engine threaded_engine;
@@ -1069,7 +1017,7 @@ TEST_CASE("live-runtime", "[live-runtime]") {
         .session = fastfix::session::SessionConfig{
             .session_id = 3103U,
             .key = fastfix::session::SessionKey{"FIX.4.4", "SELL", "BUY"},
-            .profile_id = 8101U,
+            .profile_id = profile_id,
             .heartbeat_interval_seconds = 1U,
             .is_initiator = false,
         },
@@ -1078,6 +1026,7 @@ TEST_CASE("live-runtime", "[live-runtime]") {
         .store_mode = fastfix::runtime::StoreMode::kMemory,
         .recovery_mode = fastfix::session::RecoveryMode::kMemoryOnly,
         .dispatch_mode = fastfix::runtime::AppDispatchMode::kInline,
+        .validation_policy = fastfix::session::ValidationPolicy::Permissive(),
     });
 
     fastfix::runtime::Engine timer_engine;
@@ -1109,16 +1058,16 @@ TEST_CASE("live-runtime", "[live-runtime]") {
     const auto* timer_metrics = timer_engine.metrics().FindSession(3103U);
     REQUIRE(timer_metrics != nullptr);
     REQUIRE(timer_metrics->outbound_messages > 0U);
-
-    std::filesystem::remove(artifact_path);
-    std::filesystem::remove_all(temp_root);
 }
 
 TEST_CASE("live-backpressure", "[live-backpressure]") {
-    const auto temp_root = std::filesystem::temp_directory_path() / "fastfix-live-backpressure-test";
-    std::filesystem::create_directories(temp_root);
-    const auto artifact_path = temp_root / "loopback-profile.art";
-    REQUIRE(BuildLoopbackArtifact(artifact_path, 8102U).ok());
+    auto dictionary = fastfix::tests::LoadFix44DictionaryView();
+    if (!dictionary.ok()) {
+        SKIP("FIX44 artifact not available: " << dictionary.status().message());
+    }
+    const auto artifact_path =
+        std::filesystem::path(FASTFIX_PROJECT_DIR) / "build" / "bench" / "quickfix_FIX44.art";
+    const auto profile_id = dictionary.value().profile().header().profile_id;
 
     fastfix::runtime::EngineConfig config;
     config.worker_count = 1U;
@@ -1137,17 +1086,15 @@ TEST_CASE("live-backpressure", "[live-backpressure]") {
     counterparty.name = "sell-buy-backpressure";
     counterparty.session.session_id = 3201U;
     counterparty.session.key = fastfix::session::SessionKey{"FIX.4.4", "SELL", "BUY"};
-    counterparty.session.profile_id = 8102U;
+    counterparty.session.profile_id = profile_id;
     counterparty.session.heartbeat_interval_seconds = 1U;
     counterparty.session.is_initiator = false;
     counterparty.dispatch_mode = fastfix::runtime::AppDispatchMode::kQueueDecoupled;
+    counterparty.validation_policy = fastfix::session::ValidationPolicy::Permissive();
     config.counterparties.push_back(counterparty);
 
     fastfix::runtime::Engine engine;
     REQUIRE(engine.Boot(config).ok());
-
-    auto dictionary = LoadDictionary(artifact_path);
-    REQUIRE(dictionary.ok());
 
     auto application = std::make_shared<BackpressureApplication>(config.worker_count);
     REQUIRE(application->Prefill(0U).ok());
@@ -1195,16 +1142,16 @@ TEST_CASE("live-backpressure", "[live-backpressure]") {
     REQUIRE(queue_handler.queued_replies() == 1U);
     REQUIRE(application->overflow_events() >= 1U);
     REQUIRE(application->app_attempts() >= 2U);
-
-    std::filesystem::remove(artifact_path);
-    std::filesystem::remove_all(temp_root);
 }
 
 TEST_CASE("dynamic session factory accepts unknown CompID", "[live-session-factory]") {
-    const auto temp_root = std::filesystem::temp_directory_path() / "fastfix-live-session-factory-test";
-    std::filesystem::create_directories(temp_root);
-    const auto artifact_path = temp_root / "loopback-profile.art";
-    REQUIRE(BuildLoopbackArtifact(artifact_path, 8201U).ok());
+    auto dictionary = fastfix::tests::LoadFix44DictionaryView();
+    if (!dictionary.ok()) {
+        SKIP("FIX44 artifact not available: " << dictionary.status().message());
+    }
+    const auto artifact_path =
+        std::filesystem::path(FASTFIX_PROJECT_DIR) / "build" / "bench" / "quickfix_FIX44.art";
+    const auto profile_id = dictionary.value().profile().header().profile_id;
 
     fastfix::runtime::EngineConfig config;
     config.worker_count = 1U;
@@ -1230,16 +1177,14 @@ TEST_CASE("dynamic session factory accepts unknown CompID", "[live-session-facto
             .session = fastfix::session::SessionConfig{
                 .session_id = session_id,
                 .key = key,
-                .profile_id = 8201U,
+                .profile_id = profile_id,
                 .heartbeat_interval_seconds = 1U,
                 .is_initiator = false,
             },
             .dispatch_mode = fastfix::runtime::AppDispatchMode::kInline,
+        .validation_policy = fastfix::session::ValidationPolicy::Permissive(),
         };
     });
-
-    auto dictionary = LoadDictionary(artifact_path);
-    REQUIRE(dictionary.ok());
 
     auto application = std::make_shared<MixedApplication>(config.worker_count);
 
@@ -1269,16 +1214,16 @@ TEST_CASE("dynamic session factory accepts unknown CompID", "[live-session-facto
     REQUIRE(runtime_future.get().ok());
     REQUIRE(runtime.completed_session_count() == 1U);
     REQUIRE(application->application_events() == 1U);
-
-    std::filesystem::remove(artifact_path);
-    std::filesystem::remove_all(temp_root);
 }
 
 TEST_CASE("dynamic session factory rejects unknown CompID", "[live-session-factory]") {
-    const auto temp_root = std::filesystem::temp_directory_path() / "fastfix-live-session-factory-reject-test";
-    std::filesystem::create_directories(temp_root);
-    const auto artifact_path = temp_root / "loopback-profile.art";
-    REQUIRE(BuildLoopbackArtifact(artifact_path, 8202U).ok());
+    auto dictionary = fastfix::tests::LoadFix44DictionaryView();
+    if (!dictionary.ok()) {
+        SKIP("FIX44 artifact not available: " << dictionary.status().message());
+    }
+    const auto artifact_path =
+        std::filesystem::path(FASTFIX_PROJECT_DIR) / "build" / "bench" / "quickfix_FIX44.art";
+    const auto profile_id = dictionary.value().profile().header().profile_id;
 
     fastfix::runtime::EngineConfig config;
     config.worker_count = 1U;
@@ -1298,9 +1243,6 @@ TEST_CASE("dynamic session factory rejects unknown CompID", "[live-session-facto
     engine.SetSessionFactory([](const fastfix::session::SessionKey&) -> fastfix::base::Result<fastfix::runtime::CounterpartyConfig> {
         return fastfix::base::Status::NotFound("factory rejects this session");
     });
-
-    auto dictionary = LoadDictionary(artifact_path);
-    REQUIRE(dictionary.ok());
 
     fastfix::runtime::LiveAcceptor runtime(
         &engine,
@@ -1329,7 +1271,7 @@ TEST_CASE("dynamic session factory rejects unknown CompID", "[live-session-facto
             .session = fastfix::session::SessionConfig{
                 .session_id = 9901U,
                 .key = fastfix::session::SessionKey{"FIX.4.2", "REJECTED-BUYER", "SELL"},
-                .profile_id = 8202U,
+                .profile_id = profile_id,
                 .heartbeat_interval_seconds = 1U,
                 .is_initiator = true,
             },
@@ -1337,6 +1279,7 @@ TEST_CASE("dynamic session factory rejects unknown CompID", "[live-session-facto
             .sender_comp_id = "REJECTED-BUYER",
             .target_comp_id = "SELL",
             .heartbeat_interval_seconds = 1U,
+            .validation_policy = fastfix::session::ValidationPolicy::Permissive(),
         },
         dictionary.value(),
         &store);
@@ -1355,16 +1298,16 @@ TEST_CASE("dynamic session factory rejects unknown CompID", "[live-session-facto
     runtime.Stop();
     (void)runtime_future.get();
     REQUIRE(runtime.completed_session_count() == 0U);
-
-    std::filesystem::remove(artifact_path);
-    std::filesystem::remove_all(temp_root);
 }
 
 TEST_CASE("whitelist factory accepts listed CompID", "[live-session-factory]") {
-    const auto temp_root = std::filesystem::temp_directory_path() / "fastfix-whitelist-accept-test";
-    std::filesystem::create_directories(temp_root);
-    const auto artifact_path = temp_root / "loopback-profile.art";
-    REQUIRE(BuildLoopbackArtifact(artifact_path, 8203U).ok());
+    auto dictionary = fastfix::tests::LoadFix44DictionaryView();
+    if (!dictionary.ok()) {
+        SKIP("FIX44 artifact not available: " << dictionary.status().message());
+    }
+    const auto artifact_path =
+        std::filesystem::path(FASTFIX_PROJECT_DIR) / "build" / "bench" / "quickfix_FIX44.art";
+    const auto profile_id = dictionary.value().profile().header().profile_id;
 
     fastfix::runtime::EngineConfig config;
     config.worker_count = 1U;
@@ -1384,17 +1327,15 @@ TEST_CASE("whitelist factory accepts listed CompID", "[live-session-factory]") {
     fastfix::runtime::CounterpartyConfig tmpl;
     tmpl.name = "whitelist-template";
     tmpl.session.session_id = 7101U;
-    tmpl.session.profile_id = 8203U;
+    tmpl.session.profile_id = profile_id;
     tmpl.session.heartbeat_interval_seconds = 1U;
     tmpl.session.is_initiator = false;
     tmpl.dispatch_mode = fastfix::runtime::AppDispatchMode::kInline;
+    tmpl.validation_policy = fastfix::session::ValidationPolicy::Permissive();
 
     fastfix::runtime::WhitelistSessionFactory whitelist;
     whitelist.Allow("FIX.4.2", "SELL", tmpl);
     engine.SetSessionFactory(whitelist);
-
-    auto dictionary = LoadDictionary(artifact_path);
-    REQUIRE(dictionary.ok());
 
     auto application = std::make_shared<MixedApplication>(config.worker_count);
 
@@ -1424,16 +1365,16 @@ TEST_CASE("whitelist factory accepts listed CompID", "[live-session-factory]") {
     REQUIRE(runtime_future.get().ok());
     REQUIRE(runtime.completed_session_count() == 1U);
     REQUIRE(application->application_events() == 1U);
-
-    std::filesystem::remove(artifact_path);
-    std::filesystem::remove_all(temp_root);
 }
 
 TEST_CASE("whitelist factory rejects unlisted CompID", "[live-session-factory]") {
-    const auto temp_root = std::filesystem::temp_directory_path() / "fastfix-whitelist-reject-test";
-    std::filesystem::create_directories(temp_root);
-    const auto artifact_path = temp_root / "loopback-profile.art";
-    REQUIRE(BuildLoopbackArtifact(artifact_path, 8204U).ok());
+    auto dictionary = fastfix::tests::LoadFix44DictionaryView();
+    if (!dictionary.ok()) {
+        SKIP("FIX44 artifact not available: " << dictionary.status().message());
+    }
+    const auto artifact_path =
+        std::filesystem::path(FASTFIX_PROJECT_DIR) / "build" / "bench" / "quickfix_FIX44.art";
+    const auto profile_id = dictionary.value().profile().header().profile_id;
 
     fastfix::runtime::EngineConfig config;
     config.worker_count = 1U;
@@ -1453,10 +1394,11 @@ TEST_CASE("whitelist factory rejects unlisted CompID", "[live-session-factory]")
     fastfix::runtime::CounterpartyConfig tmpl;
     tmpl.name = "whitelist-template";
     tmpl.session.session_id = 7201U;
-    tmpl.session.profile_id = 8204U;
+    tmpl.session.profile_id = profile_id;
     tmpl.session.heartbeat_interval_seconds = 1U;
     tmpl.session.is_initiator = false;
     tmpl.dispatch_mode = fastfix::runtime::AppDispatchMode::kInline;
+    tmpl.validation_policy = fastfix::session::ValidationPolicy::Permissive();
 
     fastfix::runtime::WhitelistSessionFactory whitelist;
     // Only allow sender_comp_id "ALLOWED-SENDER" — we connect as initiator "NOT-ON-LIST"
@@ -1464,9 +1406,6 @@ TEST_CASE("whitelist factory rejects unlisted CompID", "[live-session-factory]")
     // sender_comp_id is "SELL", not "ALLOWED-SENDER".
     whitelist.Allow("FIX.4.2", "ALLOWED-SENDER", tmpl);
     engine.SetSessionFactory(whitelist);
-
-    auto dictionary = LoadDictionary(artifact_path);
-    REQUIRE(dictionary.ok());
 
     fastfix::runtime::LiveAcceptor runtime(
         &engine,
@@ -1494,7 +1433,7 @@ TEST_CASE("whitelist factory rejects unlisted CompID", "[live-session-factory]")
             .session = fastfix::session::SessionConfig{
                 .session_id = 9201U,
                 .key = fastfix::session::SessionKey{"FIX.4.2", "NOT-ON-LIST", "SELL"},
-                .profile_id = 8204U,
+                .profile_id = profile_id,
                 .heartbeat_interval_seconds = 1U,
                 .is_initiator = true,
             },
@@ -1502,6 +1441,7 @@ TEST_CASE("whitelist factory rejects unlisted CompID", "[live-session-factory]")
             .sender_comp_id = "NOT-ON-LIST",
             .target_comp_id = "SELL",
             .heartbeat_interval_seconds = 1U,
+            .validation_policy = fastfix::session::ValidationPolicy::Permissive(),
         },
         dictionary.value(),
         &store);
@@ -1520,16 +1460,16 @@ TEST_CASE("whitelist factory rejects unlisted CompID", "[live-session-factory]")
     runtime.Stop();
     (void)runtime_future.get();
     REQUIRE(runtime.completed_session_count() == 0U);
-
-    std::filesystem::remove(artifact_path);
-    std::filesystem::remove_all(temp_root);
 }
 
 TEST_CASE("busy-poll mode", "[live-runtime]") {
-    const auto temp_root = std::filesystem::temp_directory_path() / "fastfix-busy-poll-test";
-    std::filesystem::create_directories(temp_root);
-    const auto artifact_path = temp_root / "loopback-profile.art";
-    REQUIRE(BuildLoopbackArtifact(artifact_path, 8301U).ok());
+    auto dictionary = fastfix::tests::LoadFix44DictionaryView();
+    if (!dictionary.ok()) {
+        SKIP("FIX44 artifact not available: " << dictionary.status().message());
+    }
+    const auto artifact_path =
+        std::filesystem::path(FASTFIX_PROJECT_DIR) / "build" / "bench" / "quickfix_FIX44.art";
+    const auto profile_id = dictionary.value().profile().header().profile_id;
 
     fastfix::runtime::EngineConfig config;
     config.worker_count = 1U;
@@ -1547,7 +1487,7 @@ TEST_CASE("busy-poll mode", "[live-runtime]") {
         .session = fastfix::session::SessionConfig{
             .session_id = 3301U,
             .key = fastfix::session::SessionKey{"FIX.4.2", "SELL", "BUY"},
-            .profile_id = 8301U,
+            .profile_id = profile_id,
             .heartbeat_interval_seconds = 1U,
             .is_initiator = false,
         },
@@ -1556,13 +1496,11 @@ TEST_CASE("busy-poll mode", "[live-runtime]") {
         .store_mode = fastfix::runtime::StoreMode::kMemory,
         .recovery_mode = fastfix::session::RecoveryMode::kMemoryOnly,
         .dispatch_mode = fastfix::runtime::AppDispatchMode::kInline,
+        .validation_policy = fastfix::session::ValidationPolicy::Permissive(),
     });
 
     fastfix::runtime::Engine engine;
     REQUIRE(engine.Boot(config).ok());
-
-    auto dictionary = LoadDictionary(artifact_path);
-    REQUIRE(dictionary.ok());
 
     auto application = std::make_shared<MixedApplication>(config.worker_count);
     fastfix::runtime::LiveAcceptor runtime(
@@ -1588,16 +1526,16 @@ TEST_CASE("busy-poll mode", "[live-runtime]") {
     REQUIRE(runtime_future.get().ok());
     REQUIRE(runtime.completed_session_count() == 1U);
     REQUIRE(application->application_events() == 1U);
-
-    std::filesystem::remove(artifact_path);
-    std::filesystem::remove_all(temp_root);
 }
 
 TEST_CASE("busy-poll mode no missed events", "[live-runtime]") {
-    const auto temp_root = std::filesystem::temp_directory_path() / "fastfix-busy-poll-multi-test";
-    std::filesystem::create_directories(temp_root);
-    const auto artifact_path = temp_root / "loopback-profile.art";
-    REQUIRE(BuildLoopbackArtifact(artifact_path, 8302U).ok());
+    auto dictionary = fastfix::tests::LoadFix44DictionaryView();
+    if (!dictionary.ok()) {
+        SKIP("FIX44 artifact not available: " << dictionary.status().message());
+    }
+    const auto artifact_path =
+        std::filesystem::path(FASTFIX_PROJECT_DIR) / "build" / "bench" / "quickfix_FIX44.art";
+    const auto profile_id = dictionary.value().profile().header().profile_id;
 
     fastfix::runtime::EngineConfig config;
     config.worker_count = 1U;
@@ -1615,7 +1553,7 @@ TEST_CASE("busy-poll mode no missed events", "[live-runtime]") {
         .session = fastfix::session::SessionConfig{
             .session_id = 3302U,
             .key = fastfix::session::SessionKey{"FIX.4.2", "SELL", "BUYA"},
-            .profile_id = 8302U,
+            .profile_id = profile_id,
             .heartbeat_interval_seconds = 1U,
             .is_initiator = false,
         },
@@ -1624,13 +1562,14 @@ TEST_CASE("busy-poll mode no missed events", "[live-runtime]") {
         .store_mode = fastfix::runtime::StoreMode::kMemory,
         .recovery_mode = fastfix::session::RecoveryMode::kMemoryOnly,
         .dispatch_mode = fastfix::runtime::AppDispatchMode::kInline,
+        .validation_policy = fastfix::session::ValidationPolicy::Permissive(),
     });
     config.counterparties.push_back(fastfix::runtime::CounterpartyConfig{
         .name = "sell-buy-busy-b",
         .session = fastfix::session::SessionConfig{
             .session_id = 3303U,
             .key = fastfix::session::SessionKey{"FIX.4.2", "SELL", "BUYB"},
-            .profile_id = 8302U,
+            .profile_id = profile_id,
             .heartbeat_interval_seconds = 1U,
             .is_initiator = false,
         },
@@ -1639,13 +1578,11 @@ TEST_CASE("busy-poll mode no missed events", "[live-runtime]") {
         .store_mode = fastfix::runtime::StoreMode::kMemory,
         .recovery_mode = fastfix::session::RecoveryMode::kMemoryOnly,
         .dispatch_mode = fastfix::runtime::AppDispatchMode::kInline,
+        .validation_policy = fastfix::session::ValidationPolicy::Permissive(),
     });
 
     fastfix::runtime::Engine engine;
     REQUIRE(engine.Boot(config).ok());
-
-    auto dictionary = LoadDictionary(artifact_path);
-    REQUIRE(dictionary.ok());
 
     auto application = std::make_shared<MixedApplication>(config.worker_count);
     fastfix::runtime::LiveAcceptor runtime(
@@ -1675,7 +1612,142 @@ TEST_CASE("busy-poll mode no missed events", "[live-runtime]") {
     REQUIRE(runtime_future.get().ok());
     REQUIRE(runtime.completed_session_count() == 2U);
     REQUIRE(application->application_events() == 2U);
+}
 
-    std::filesystem::remove(artifact_path);
-    std::filesystem::remove_all(temp_root);
+TEST_CASE("epoll backend single session", "[live-runtime]") {
+    auto dictionary = fastfix::tests::LoadFix44DictionaryView();
+    if (!dictionary.ok()) {
+        SKIP("FIX44 artifact not available: " << dictionary.status().message());
+    }
+    if (!fastfix::runtime::IsIoBackendAvailable(fastfix::runtime::IoBackend::kEpoll)) {
+        SKIP("epoll not available");
+    }
+    const auto artifact_path =
+        std::filesystem::path(FASTFIX_PROJECT_DIR) / "build" / "bench" / "quickfix_FIX44.art";
+    const auto profile_id = dictionary.value().profile().header().profile_id;
+
+    fastfix::runtime::EngineConfig config;
+    config.worker_count = 1U;
+    config.enable_metrics = true;
+    config.io_backend = fastfix::runtime::IoBackend::kEpoll;
+    config.profile_artifacts.push_back(artifact_path);
+    config.listeners.push_back(fastfix::runtime::ListenerConfig{
+        .name = "epoll-main",
+        .host = "127.0.0.1",
+        .port = 0U,
+        .worker_hint = 0U,
+    });
+    config.counterparties.push_back(fastfix::runtime::CounterpartyConfig{
+        .name = "sell-buy-epoll",
+        .session = fastfix::session::SessionConfig{
+            .session_id = 3401U,
+            .key = fastfix::session::SessionKey{"FIX.4.2", "SELL", "BUY"},
+            .profile_id = profile_id,
+            .heartbeat_interval_seconds = 1U,
+            .is_initiator = false,
+        },
+        .store_path = {},
+        .default_appl_ver_id = {},
+        .store_mode = fastfix::runtime::StoreMode::kMemory,
+        .recovery_mode = fastfix::session::RecoveryMode::kMemoryOnly,
+        .dispatch_mode = fastfix::runtime::AppDispatchMode::kInline,
+        .validation_policy = fastfix::session::ValidationPolicy::Permissive(),
+    });
+
+    fastfix::runtime::Engine engine;
+    REQUIRE(engine.Boot(config).ok());
+
+    auto application = std::make_shared<MixedApplication>(config.worker_count);
+    fastfix::runtime::LiveAcceptor runtime(
+        &engine,
+        fastfix::runtime::LiveAcceptor::Options{
+            .poll_timeout = std::chrono::milliseconds(50),
+            .io_timeout = std::chrono::seconds(5),
+            .application = application,
+        });
+    REQUIRE(runtime.OpenListeners("epoll-main").ok());
+    auto port = runtime.listener_port("epoll-main");
+    REQUIRE(port.ok());
+
+    std::promise<fastfix::base::Status> runtime_result;
+    auto runtime_future = runtime_result.get_future();
+    std::jthread runtime_thread([&runtime, &runtime_result]() {
+        runtime_result.set_value(runtime.Run(1U, std::chrono::seconds(10)));
+    });
+
+    auto status = RunInitiatorEchoSession(port.value(), dictionary.value(), 4401U, "FIX.4.2", {}, "EPOLL-PARTY");
+    REQUIRE(status.ok());
+
+    REQUIRE(runtime_future.get().ok());
+    REQUIRE(runtime.completed_session_count() == 1U);
+    REQUIRE(application->application_events() == 1U);
+}
+
+TEST_CASE("io_uring backend single session", "[live-runtime]") {
+    auto dictionary = fastfix::tests::LoadFix44DictionaryView();
+    if (!dictionary.ok()) {
+        SKIP("FIX44 artifact not available: " << dictionary.status().message());
+    }
+    if (!fastfix::runtime::IsIoBackendAvailable(fastfix::runtime::IoBackend::kIoUring)) {
+        SKIP("io_uring not available");
+    }
+    const auto artifact_path =
+        std::filesystem::path(FASTFIX_PROJECT_DIR) / "build" / "bench" / "quickfix_FIX44.art";
+    const auto profile_id = dictionary.value().profile().header().profile_id;
+
+    fastfix::runtime::EngineConfig config;
+    config.worker_count = 1U;
+    config.enable_metrics = true;
+    config.io_backend = fastfix::runtime::IoBackend::kIoUring;
+    config.profile_artifacts.push_back(artifact_path);
+    config.listeners.push_back(fastfix::runtime::ListenerConfig{
+        .name = "uring-main",
+        .host = "127.0.0.1",
+        .port = 0U,
+        .worker_hint = 0U,
+    });
+    config.counterparties.push_back(fastfix::runtime::CounterpartyConfig{
+        .name = "sell-buy-uring",
+        .session = fastfix::session::SessionConfig{
+            .session_id = 3501U,
+            .key = fastfix::session::SessionKey{"FIX.4.2", "SELL", "BUY"},
+            .profile_id = profile_id,
+            .heartbeat_interval_seconds = 1U,
+            .is_initiator = false,
+        },
+        .store_path = {},
+        .default_appl_ver_id = {},
+        .store_mode = fastfix::runtime::StoreMode::kMemory,
+        .recovery_mode = fastfix::session::RecoveryMode::kMemoryOnly,
+        .dispatch_mode = fastfix::runtime::AppDispatchMode::kInline,
+        .validation_policy = fastfix::session::ValidationPolicy::Permissive(),
+    });
+
+    fastfix::runtime::Engine engine;
+    REQUIRE(engine.Boot(config).ok());
+
+    auto application = std::make_shared<MixedApplication>(config.worker_count);
+    fastfix::runtime::LiveAcceptor runtime(
+        &engine,
+        fastfix::runtime::LiveAcceptor::Options{
+            .poll_timeout = std::chrono::milliseconds(50),
+            .io_timeout = std::chrono::seconds(5),
+            .application = application,
+        });
+    REQUIRE(runtime.OpenListeners("uring-main").ok());
+    auto port = runtime.listener_port("uring-main");
+    REQUIRE(port.ok());
+
+    std::promise<fastfix::base::Status> runtime_result;
+    auto runtime_future = runtime_result.get_future();
+    std::jthread runtime_thread([&runtime, &runtime_result]() {
+        runtime_result.set_value(runtime.Run(1U, std::chrono::seconds(10)));
+    });
+
+    auto status = RunInitiatorEchoSession(port.value(), dictionary.value(), 4501U, "FIX.4.2", {}, "URING-PARTY");
+    REQUIRE(status.ok());
+
+    REQUIRE(runtime_future.get().ok());
+    REQUIRE(runtime.completed_session_count() == 1U);
+    REQUIRE(application->application_events() == 1U);
 }

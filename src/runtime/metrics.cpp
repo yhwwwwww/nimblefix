@@ -168,6 +168,12 @@ auto MetricsRegistry::Snapshot() const -> RuntimeMetricsSnapshot {
             .checksum_failures = w.checksum_failures.load(std::memory_order_relaxed),
             .outbound_queue_depth = w.outbound_queue_depth.load(std::memory_order_relaxed),
             .last_store_flush_latency_ns = w.last_store_flush_latency_ns.load(std::memory_order_relaxed),
+            .poll_wait_ns = w.poll_wait_ns.load(std::memory_order_relaxed),
+            .recv_dispatch_ns = w.recv_dispatch_ns.load(std::memory_order_relaxed),
+            .app_callback_ns = w.app_callback_ns.load(std::memory_order_relaxed),
+            .timer_process_ns = w.timer_process_ns.load(std::memory_order_relaxed),
+            .send_ns = w.send_ns.load(std::memory_order_relaxed),
+            .poll_iterations = w.poll_iterations.load(std::memory_order_relaxed),
         });
     }
     snapshot.sessions.reserve(sessions_.size());
@@ -207,6 +213,10 @@ auto MetricsRegistry::FindWorker(std::uint32_t worker_id) const -> const WorkerM
         return nullptr;
     }
     return workers_[worker_id].get();
+}
+
+auto MetricsRegistry::FindWorker(std::uint32_t worker_id) -> WorkerMetrics* {
+    return FindMutableWorker(worker_id);
 }
 
 }  // namespace fastfix::runtime

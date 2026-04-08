@@ -74,11 +74,14 @@ auto BuildApplicationMessage(
     bool with_group) -> message::Message {
     message::MessageBuilder builder("D");
     builder.set_string(35U, "D");
-    if (dictionary.find_field(5001U) != nullptr) {
-        builder.set_string(5001U, "LIMIT");
-    }
-    if (dictionary.find_field(5002U) != nullptr && (round % 2U) == 0U) {
-        builder.set_string(5002U, "ACCT-" + std::to_string(round + 1U));
+    builder.set_string(11U, "ORD-" + std::to_string(round + 1U));
+    builder.set_string(55U, "AAPL");
+    builder.set_char(54U, '1');
+    builder.set_string(60U, "20260406-12:00:00.000");
+    builder.set_int(38U, static_cast<std::int64_t>(100U + round));
+    builder.set_char(40U, '2');
+    if (dictionary.find_field(1U) != nullptr && (round % 2U) == 0U) {
+        builder.set_string(1U, "ACCT-" + std::to_string(round + 1U));
     }
     if (with_group) {
         auto party = builder.add_group_entry(453U);

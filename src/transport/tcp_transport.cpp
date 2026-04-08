@@ -1,5 +1,7 @@
 #include "fastfix/transport/tcp_transport.h"
 
+#include "fastfix/codec/simd_scan.h"
+
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <netdb.h>
@@ -27,11 +29,6 @@ constexpr char kFixTagValueSeparator = '=';
 constexpr char kFixFieldDelimiter = '\x01';
 constexpr int kSocketOptionEnabled = 1;
 
-enum class FrameExtractState {
-    kIncomplete,
-    kReady,
-};
-
 auto SetNonBlocking(int fd) -> base::Status {
     const int flags = fcntl(fd, F_GETFL, 0);
     if (flags < 0) {
@@ -49,6 +46,19 @@ auto SetNoDelay(int fd) -> base::Status {
         return base::Status::IoError(std::string("setsockopt(TCP_NODELAY) failed: ") + std::strerror(errno));
     }
     return base::Status::Ok();
+}
+
+auto TrySetBusyPoll(int fd) -> void {
+    int busy_poll_us = 50;
+    // EPERM-tolerant: unprivileged processes can't set SO_BUSY_POLL
+    setsockopt(fd, SOL_SOCKET, SO_BUSY_POLL, &busy_poll_us, sizeof(busy_poll_us));
+}
+
+auto TrySetQuickAck(int fd) -> void {
+    int enabled = 1;
+    // TCP_QUICKACK disables delayed ACKs; the kernel may reset it after
+    // each recv, so this is only an initial hint.
+    setsockopt(fd, IPPROTO_TCP, TCP_QUICKACK, &enabled, sizeof(enabled));
 }
 
 auto SetReuseAddr(int fd) -> base::Status {
@@ -114,38 +124,35 @@ auto ExtractAssignedPort(int fd) -> base::Result<std::uint16_t> {
 }
 
 template <typename Sink>
-auto TryExtractFrame(std::vector<std::byte>& buffer, Sink&& sink) -> base::Result<FrameExtractState> {
+auto TryExtractFrame(std::span<const std::byte> buffer, Sink&& sink) -> base::Result<std::size_t> {
     if (buffer.size() < kMinimumFrameProbeBytes) {
-        return FrameExtractState::kIncomplete;
+        return std::size_t{0};
     }
-    if (std::to_integer<char>(buffer[0]) != kFixBeginStringTag ||
-        std::to_integer<char>(buffer[1]) != kFixTagValueSeparator) {
+    if (static_cast<char>(buffer[0]) != kFixBeginStringTag ||
+        static_cast<char>(buffer[1]) != kFixTagValueSeparator) {
         return base::Status::FormatError("FIX frame must begin with tag 8");
     }
 
-    std::size_t first_delimiter = 0;
-    while (first_delimiter < buffer.size() &&
-           std::to_integer<char>(buffer[first_delimiter]) != kFixFieldDelimiter) {
-        ++first_delimiter;
-    }
+    constexpr auto kDelim = std::byte{'\x01'};
+    const auto* first_ptr = codec::FindByte(buffer.data(), buffer.size(), kDelim);
+    const auto first_delimiter = static_cast<std::size_t>(first_ptr - buffer.data());
     if (first_delimiter >= buffer.size()) {
-        return base::Status::IoError("incomplete frame");
+        return std::size_t{0};
     }
     if (first_delimiter + kBodyLengthFieldPrefixSize >= buffer.size()) {
-        return base::Status::IoError("incomplete frame");
+        return std::size_t{0};
     }
-    if (std::to_integer<char>(buffer[first_delimiter + 1U]) != kFixBodyLengthTag ||
-        std::to_integer<char>(buffer[first_delimiter + 2U]) != kFixTagValueSeparator) {
+    if (static_cast<char>(buffer[first_delimiter + 1U]) != kFixBodyLengthTag ||
+        static_cast<char>(buffer[first_delimiter + 2U]) != kFixTagValueSeparator) {
         return base::Status::FormatError("FIX frame must place BodyLength immediately after BeginString");
     }
 
-    std::size_t second_delimiter = first_delimiter + kBodyLengthFieldPrefixSize;
-    while (second_delimiter < buffer.size() &&
-           std::to_integer<char>(buffer[second_delimiter]) != kFixFieldDelimiter) {
-        ++second_delimiter;
-    }
+    const auto* scan_start = buffer.data() + first_delimiter + kBodyLengthFieldPrefixSize;
+    const auto scan_len = buffer.size() - first_delimiter - kBodyLengthFieldPrefixSize;
+    const auto* second_ptr = codec::FindByte(scan_start, scan_len, kDelim);
+    const auto second_delimiter = static_cast<std::size_t>(second_ptr - buffer.data());
     if (second_delimiter >= buffer.size()) {
-        return base::Status::IoError("incomplete frame");
+        return std::size_t{0};
     }
 
     std::uint32_t body_length = 0;
@@ -158,12 +165,11 @@ auto TryExtractFrame(std::vector<std::byte>& buffer, Sink&& sink) -> base::Resul
 
     const std::size_t total_size = (second_delimiter + 1U) + body_length + kChecksumFieldWireSize;
     if (buffer.size() < total_size) {
-        return FrameExtractState::kIncomplete;
+        return std::size_t{0};
     }
 
-    sink(std::span<const std::byte>(buffer.data(), total_size));
-    buffer.erase(buffer.begin(), buffer.begin() + static_cast<std::ptrdiff_t>(total_size));
-    return FrameExtractState::kReady;
+    sink(buffer.subspan(0, total_size));
+    return total_size;
 }
 
 }  // namespace
@@ -199,6 +205,7 @@ auto TcpConnection::Swap(TcpConnection& other) noexcept -> void {
     std::swap(fd_, other.fd_);
     std::swap(read_buffer_, other.read_buffer_);
     std::swap(frame_buffer_, other.frame_buffer_);
+    std::swap(read_cursor_, other.read_cursor_);
 }
 
 auto TcpConnection::Connect(
@@ -249,6 +256,8 @@ auto TcpConnection::Connect(
             ReleaseAddress(results);
             return status;
         }
+        TrySetBusyPoll(fd);
+        TrySetQuickAck(fd);
 
         ReleaseAddress(results);
         return TcpConnection(fd);
@@ -286,17 +295,50 @@ auto TcpConnection::Send(const std::vector<std::byte>& bytes, std::chrono::milli
     return Send(std::span<const std::byte>(bytes.data(), bytes.size()), timeout);
 }
 
+auto TcpConnection::BusySend(std::span<const std::byte> bytes, std::chrono::milliseconds timeout) -> base::Status {
+    std::size_t sent = 0;
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (sent < bytes.size()) {
+        const auto rc = send(fd_, bytes.data() + sent, bytes.size() - sent, MSG_NOSIGNAL);
+        if (rc < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                if (std::chrono::steady_clock::now() >= deadline) {
+                    return base::Status::IoError("timed out while busy-sending");
+                }
+                continue;
+            }
+            return base::Status::IoError(std::string("send failed: ") + std::strerror(errno));
+        }
+        if (rc == 0) {
+            return base::Status::IoError("peer closed the socket during send");
+        }
+        sent += static_cast<std::size_t>(rc);
+    }
+    return base::Status::Ok();
+}
+
 auto TcpConnection::TryReceiveFrameView() -> base::Result<std::optional<std::span<const std::byte>>> {
     while (true) {
-        auto extracted = TryExtractFrame(read_buffer_, [&](std::span<const std::byte> frame) {
+        auto unconsumed = std::span<const std::byte>(
+            read_buffer_.data() + read_cursor_, read_buffer_.size() - read_cursor_);
+        auto consumed = TryExtractFrame(unconsumed, [&](std::span<const std::byte> frame) {
             frame_buffer_.assign(frame.begin(), frame.end());
         });
-        if (extracted.ok() && extracted.value() == FrameExtractState::kReady) {
+        if (consumed.ok() && consumed.value() > 0) {
+            read_cursor_ += consumed.value();
+            if (read_cursor_ == read_buffer_.size()) {
+                read_buffer_.clear();
+                read_cursor_ = 0;
+            } else if (read_cursor_ > read_buffer_.capacity() / 2) {
+                read_buffer_.erase(read_buffer_.begin(),
+                    read_buffer_.begin() + static_cast<std::ptrdiff_t>(read_cursor_));
+                read_cursor_ = 0;
+            }
             return std::optional<std::span<const std::byte>>(
                 std::span<const std::byte>(frame_buffer_.data(), frame_buffer_.size()));
         }
-        if (extracted.status().code() == base::ErrorCode::kFormatError) {
-            return extracted.status();
+        if (consumed.status().code() == base::ErrorCode::kFormatError) {
+            return consumed.status();
         }
 
         std::byte buffer[kDefaultReadBufferCapacity];
@@ -323,14 +365,25 @@ auto TcpConnection::TryReceiveFrameView() -> base::Result<std::optional<std::spa
 auto TcpConnection::ReceiveFrameView(std::chrono::milliseconds timeout) -> base::Result<std::span<const std::byte>> {
     const auto deadline = std::chrono::steady_clock::now() + timeout;
     while (true) {
-        auto extracted = TryExtractFrame(read_buffer_, [&](std::span<const std::byte> frame) {
+        auto unconsumed = std::span<const std::byte>(
+            read_buffer_.data() + read_cursor_, read_buffer_.size() - read_cursor_);
+        auto consumed = TryExtractFrame(unconsumed, [&](std::span<const std::byte> frame) {
             frame_buffer_.assign(frame.begin(), frame.end());
         });
-        if (extracted.ok() && extracted.value() == FrameExtractState::kReady) {
+        if (consumed.ok() && consumed.value() > 0) {
+            read_cursor_ += consumed.value();
+            if (read_cursor_ == read_buffer_.size()) {
+                read_buffer_.clear();
+                read_cursor_ = 0;
+            } else if (read_cursor_ > read_buffer_.capacity() / 2) {
+                read_buffer_.erase(read_buffer_.begin(),
+                    read_buffer_.begin() + static_cast<std::ptrdiff_t>(read_cursor_));
+                read_cursor_ = 0;
+            }
             return std::span<const std::byte>(frame_buffer_.data(), frame_buffer_.size());
         }
-        if (extracted.status().code() == base::ErrorCode::kFormatError) {
-            return extracted.status();
+        if (consumed.status().code() == base::ErrorCode::kFormatError) {
+            return consumed.status();
         }
 
         const auto now = std::chrono::steady_clock::now();
@@ -348,6 +401,54 @@ auto TcpConnection::ReceiveFrameView(std::chrono::milliseconds timeout) -> base:
         const auto rc = recv(fd_, buffer, sizeof(buffer), 0);
         if (rc < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                continue;
+            }
+            return base::Status::IoError(std::string("recv failed: ") + std::strerror(errno));
+        }
+        if (rc == 0) {
+            return base::Status::IoError("peer closed the socket");
+        }
+
+        read_buffer_.insert(read_buffer_.end(), buffer, buffer + rc);
+
+        if (read_buffer_.size() > kMaxReadBufferSize) {
+            Close();
+            return base::Status::IoError("TCP read buffer exceeded maximum size limit");
+        }
+    }
+}
+
+auto TcpConnection::BusyReceiveFrameView(std::chrono::milliseconds timeout) -> base::Result<std::span<const std::byte>> {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (true) {
+        auto unconsumed = std::span<const std::byte>(
+            read_buffer_.data() + read_cursor_, read_buffer_.size() - read_cursor_);
+        auto consumed = TryExtractFrame(unconsumed, [&](std::span<const std::byte> frame) {
+            frame_buffer_.assign(frame.begin(), frame.end());
+        });
+        if (consumed.ok() && consumed.value() > 0) {
+            read_cursor_ += consumed.value();
+            if (read_cursor_ == read_buffer_.size()) {
+                read_buffer_.clear();
+                read_cursor_ = 0;
+            } else if (read_cursor_ > read_buffer_.capacity() / 2) {
+                read_buffer_.erase(read_buffer_.begin(),
+                    read_buffer_.begin() + static_cast<std::ptrdiff_t>(read_cursor_));
+                read_cursor_ = 0;
+            }
+            return std::span<const std::byte>(frame_buffer_.data(), frame_buffer_.size());
+        }
+        if (consumed.status().code() == base::ErrorCode::kFormatError) {
+            return consumed.status();
+        }
+
+        std::byte buffer[kDefaultReadBufferCapacity];
+        const auto rc = recv(fd_, buffer, sizeof(buffer), 0);
+        if (rc < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                if (std::chrono::steady_clock::now() >= deadline) {
+                    return base::Status::IoError("timed out while busy-waiting for a FIX frame");
+                }
                 continue;
             }
             return base::Status::IoError(std::string("recv failed: ") + std::strerror(errno));
@@ -391,6 +492,7 @@ auto TcpConnection::Close() -> void {
         fd_ = -1;
     }
     read_buffer_.clear();
+    read_cursor_ = 0;
 }
 
 TcpAcceptor::TcpAcceptor(int fd, std::uint16_t port)
@@ -504,6 +606,8 @@ auto TcpAcceptor::TryAccept() -> base::Result<std::optional<TcpConnection>> {
         close(connection_fd);
         return status;
     }
+    TrySetBusyPoll(connection_fd);
+    TrySetQuickAck(connection_fd);
 
     return std::optional<TcpConnection>(TcpConnection(connection_fd));
 }

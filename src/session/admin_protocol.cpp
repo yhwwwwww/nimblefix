@@ -20,7 +20,6 @@ constexpr std::uint32_t kSessionRejectValueIncorrect = 5U;
 constexpr std::uint32_t kSessionRejectCompIdProblem = 9U;
 constexpr std::uint32_t kSessionRejectInvalidMsgType = 11U;
 constexpr std::uint32_t kSessionRejectTagAppearsMoreThanOnce = 13U;
-constexpr std::uint32_t kSessionRejectTagOutOfOrder = 14U;
 constexpr std::uint32_t kSessionRejectIncorrectNumInGroupCount = 16U;
 constexpr std::size_t kInitialEncodeBufferBytes = 1024U;
 
@@ -79,8 +78,6 @@ auto ShouldRejectValidationIssue(
             return policy.reject_unknown_fields;
         case codec::ValidationIssueKind::kDuplicateField:
             return policy.reject_duplicate_fields;
-        case codec::ValidationIssueKind::kFieldOutOfOrder:
-            return policy.enforce_field_order;
         case codec::ValidationIssueKind::kIncorrectNumInGroupCount:
             return policy.reject_invalid_group_structure;
         default:
@@ -96,8 +93,6 @@ auto ValidationIssueRejectReason(const codec::ValidationIssue& issue) -> std::ui
             return kSessionRejectUndefinedTag;
         case codec::ValidationIssueKind::kDuplicateField:
             return kSessionRejectTagAppearsMoreThanOnce;
-        case codec::ValidationIssueKind::kFieldOutOfOrder:
-            return kSessionRejectTagOutOfOrder;
         case codec::ValidationIssueKind::kIncorrectNumInGroupCount:
             return kSessionRejectIncorrectNumInGroupCount;
         default:
@@ -154,6 +149,8 @@ AdminProtocol::AdminProtocol(
     if (table.ok()) {
         encode_templates_ = std::move(table).value();
     }
+
+    decode_table_ = codec::CompiledDecoderTable::Build(dictionary_);
 
     if (store_ == nullptr) {
         return;
@@ -786,7 +783,7 @@ auto AdminProtocol::OnTransportClosed() -> base::Status {
 }
 
 auto AdminProtocol::OnInbound(std::span<const std::byte> frame, std::uint64_t timestamp_ns) -> base::Result<ProtocolEvent> {
-    auto decoded = codec::DecodeFixMessageView(frame, dictionary_);
+    auto decoded = codec::DecodeFixMessageView(frame, dictionary_, decode_table_);
     if (!decoded.ok()) {
         return decoded.status();
     }
@@ -807,7 +804,7 @@ auto AdminProtocol::OnInbound(std::span<const std::byte> frame, std::uint64_t ti
 }
 
 auto AdminProtocol::OnInbound(std::vector<std::byte>&& frame, std::uint64_t timestamp_ns) -> base::Result<ProtocolEvent> {
-    auto decoded = codec::DecodeFixMessageView(std::span<const std::byte>(frame.data(), frame.size()), dictionary_);
+    auto decoded = codec::DecodeFixMessageView(std::span<const std::byte>(frame.data(), frame.size()), dictionary_, decode_table_);
     if (!decoded.ok()) {
         return decoded.status();
     }

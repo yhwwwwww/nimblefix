@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "fastfix/base/result.h"
+#include "fastfix/codec/compiled_decoder.h"
 #include "fastfix/codec/fix_codec.h"
 #include "fastfix/message/message.h"
 #include "fastfix/profile/normalized_dictionary.h"
@@ -609,6 +610,7 @@ class AdminProtocol {
     std::string outstanding_test_request_id_;
     std::optional<base::Status> initialization_error_;
     codec::PrecompiledTemplateTable encode_templates_;
+    codec::CompiledDecoderTable decode_table_;
     codec::EncodeBuffer encode_buffer_;
     store::MessageRecordViewRange replay_range_buffer_;
     std::array<std::shared_ptr<ProtocolFrameList>, kReplayFrameBufferPoolSize> replay_frame_buffers_{};

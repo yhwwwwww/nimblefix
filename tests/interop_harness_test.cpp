@@ -5,7 +5,6 @@
 
 #include "fastfix/profile/artifact_builder.h"
 #include "fastfix/profile/dictgen_input.h"
-#include "fastfix/profile/overlay.h"
 #include "fastfix/runtime/interop_harness.h"
 
 #include "test_support.h"
@@ -13,20 +12,13 @@
 namespace {
 
 auto BuildInteropArtifact(const std::filesystem::path& artifact_path) -> fastfix::base::Status {
-    const auto project_root = std::filesystem::path(FASTFIX_PROJECT_DIR);
-    auto dictionary = fastfix::profile::LoadNormalizedDictionaryFile(project_root / "samples" / "basic_profile.ffd");
+    const auto ffd_path = std::filesystem::path(FASTFIX_PROJECT_DIR) / "build" / "bench" / "quickfix_FIX44.ffd";
+    auto dictionary = fastfix::profile::LoadNormalizedDictionaryFile(ffd_path);
     if (!dictionary.ok()) {
         return dictionary.status();
     }
-    auto overlay = fastfix::profile::LoadNormalizedDictionaryFile(project_root / "samples" / "basic_overlay.ffd");
-    if (!overlay.ok()) {
-        return overlay.status();
-    }
-    auto merged = fastfix::profile::ApplyOverlay(dictionary.value(), overlay.value());
-    if (!merged.ok()) {
-        return merged.status();
-    }
-    auto artifact = fastfix::profile::BuildProfileArtifact(merged.value());
+    dictionary.value().profile_id = 4400U;
+    auto artifact = fastfix::profile::BuildProfileArtifact(dictionary.value());
     if (!artifact.ok()) {
         return artifact.status();
     }
@@ -72,10 +64,10 @@ TEST_CASE("interop-harness", "[interop-harness]") {    const auto root = std::fi
         config_out << "engine.trace_mode=ring\n";
         config_out << "engine.trace_capacity=32\n";
         config_out << "profile=" << durable_artifact_path.filename().string() << "\n";
-        config_out << "counterparty|loop-a|3001|1001|FIX.4.4|BUY1|SELL1|durable|"
+        config_out << "counterparty|loop-a|3001|4400|FIX.4.4|BUY1|SELL1|durable|"
                    << durable_store_path.filename().string()
                    << "|warm|inline|30|true||strict|2|utc-day|2\n";
-        config_out << "counterparty|loop-b|3002|1001|FIX.4.4|BUY2|SELL2|memory||memory|inline|30|false\n";
+        config_out << "counterparty|loop-b|3002|4400|FIX.4.4|BUY2|SELL2|memory||memory|inline|30|false\n";
     }
 
     {

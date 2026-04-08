@@ -12,8 +12,6 @@
 #include <unordered_set>
 #include <vector>
 
-#include "fastfix/profile/artifact_builder.h"
-#include "fastfix/profile/profile_loader.h"
 #include "fastfix/runtime/application.h"
 #include "fastfix/runtime/engine.h"
 #include "fastfix/runtime/live_initiator.h"
@@ -29,63 +27,6 @@ auto NowNs() -> std::uint64_t {
     return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
         std::chrono::steady_clock::now().time_since_epoch())
                                               .count());
-}
-
-auto BuildLoopbackArtifact(const std::filesystem::path& artifact_path, std::uint64_t profile_id)
-    -> fastfix::base::Status {
-    fastfix::profile::NormalizedDictionary dictionary;
-    dictionary.profile_id = profile_id;
-    dictionary.schema_hash = 0x9101910191019101ULL;
-    dictionary.fields = {
-        {35U, "MsgType", fastfix::profile::ValueType::kString, 0U},
-        {49U, "SenderCompID", fastfix::profile::ValueType::kString, 0U},
-        {56U, "TargetCompID", fastfix::profile::ValueType::kString, 0U},
-        {453U, "NoPartyIDs", fastfix::profile::ValueType::kInt, 0U},
-        {448U, "PartyID", fastfix::profile::ValueType::kString, 0U},
-        {447U, "PartyIDSource", fastfix::profile::ValueType::kChar, 0U},
-        {452U, "PartyRole", fastfix::profile::ValueType::kInt, 0U},
-    };
-    dictionary.messages = {
-        fastfix::profile::MessageDef{
-            .msg_type = "D",
-            .name = "NewOrderSingle",
-            .field_rules = {
-                {35U, static_cast<std::uint32_t>(fastfix::profile::FieldRuleFlags::kRequired)},
-                {49U, static_cast<std::uint32_t>(fastfix::profile::FieldRuleFlags::kRequired)},
-                {56U, static_cast<std::uint32_t>(fastfix::profile::FieldRuleFlags::kRequired)},
-                {453U, 0U},
-            },
-            .flags = 0U,
-        },
-    };
-    dictionary.groups = {
-        fastfix::profile::GroupDef{
-            .count_tag = 453U,
-            .delimiter_tag = 448U,
-            .name = "Parties",
-            .field_rules = {
-                {448U, static_cast<std::uint32_t>(fastfix::profile::FieldRuleFlags::kRequired)},
-                {447U, static_cast<std::uint32_t>(fastfix::profile::FieldRuleFlags::kRequired)},
-                {452U, static_cast<std::uint32_t>(fastfix::profile::FieldRuleFlags::kRequired)},
-            },
-            .flags = 0U,
-        },
-    };
-
-    auto artifact = fastfix::profile::BuildProfileArtifact(dictionary);
-    if (!artifact.ok()) {
-        return artifact.status();
-    }
-    return fastfix::profile::WriteProfileArtifact(artifact_path, artifact.value());
-}
-
-auto LoadDictionary(const std::filesystem::path& artifact_path)
-    -> fastfix::base::Result<fastfix::profile::NormalizedDictionaryView> {
-    auto profile = fastfix::profile::LoadProfileArtifact(artifact_path);
-    if (!profile.ok()) {
-        return profile.status();
-    }
-    return fastfix::profile::NormalizedDictionaryView::FromProfile(std::move(profile).value());
 }
 
 auto BuildInitiatorMessage() -> fastfix::message::Message {
@@ -125,6 +66,7 @@ auto RunAcceptorEchoSession(
             .sender_comp_id = sender_comp_id,
             .target_comp_id = target_comp_id,
             .heartbeat_interval_seconds = 1U,
+            .validation_policy = fastfix::session::ValidationPolicy::Permissive(),
         },
         dictionary,
         &store);
@@ -197,6 +139,7 @@ auto RunAcceptorHeartbeatTimerSession(
             .sender_comp_id = "SELL",
             .target_comp_id = "BUY",
             .heartbeat_interval_seconds = 1U,
+            .validation_policy = fastfix::session::ValidationPolicy::Permissive(),
         },
         dictionary,
         &store);
@@ -284,6 +227,7 @@ auto RunAcceptorAwaitLogoutSession(
             .sender_comp_id = "SELL",
             .target_comp_id = "BUY",
             .heartbeat_interval_seconds = 30U,
+            .validation_policy = fastfix::session::ValidationPolicy::Permissive(),
         },
         dictionary,
         &store);
@@ -741,13 +685,13 @@ class QueueInitiatorHandler final : public fastfix::runtime::QueueApplicationEve
 }  // namespace
 
 TEST_CASE("live-initiator", "[live-initiator]") {
-    const auto temp_root = std::filesystem::temp_directory_path() / "fastfix-live-initiator-test";
-    std::filesystem::create_directories(temp_root);
-    const auto artifact_path = temp_root / "loopback-profile.art";
-    REQUIRE(BuildLoopbackArtifact(artifact_path, 8201U).ok());
-
-    auto dictionary = LoadDictionary(artifact_path);
-    REQUIRE(dictionary.ok());
+    auto dictionary = fastfix::tests::LoadFix44DictionaryView();
+    if (!dictionary.ok()) {
+        SKIP("FIX44 artifact not available: " << dictionary.status().message());
+    }
+    const auto artifact_path =
+        std::filesystem::path(FASTFIX_PROJECT_DIR) / "build" / "bench" / "quickfix_FIX44.art";
+    const auto profile_id = dictionary.value().profile().header().profile_id;
 
     auto acceptor = fastfix::transport::TcpAcceptor::Listen("127.0.0.1", 0U);
     REQUIRE(acceptor.ok());
@@ -773,6 +717,7 @@ TEST_CASE("live-initiator", "[live-initiator]") {
                 .sender_comp_id = "SELL",
                 .target_comp_id = "BUY",
                 .heartbeat_interval_seconds = 1U,
+                .validation_policy = fastfix::session::ValidationPolicy::Permissive(),
             },
             dictionary,
             &store);
@@ -844,7 +789,7 @@ TEST_CASE("live-initiator", "[live-initiator]") {
         .session = fastfix::session::SessionConfig{
             .session_id = 1201U,
             .key = fastfix::session::SessionKey{"FIX.4.4", "BUY", "SELL"},
-            .profile_id = 8201U,
+            .profile_id = profile_id,
             .default_appl_ver_id = {},
             .heartbeat_interval_seconds = 1U,
             .is_initiator = true,
@@ -854,6 +799,7 @@ TEST_CASE("live-initiator", "[live-initiator]") {
         .store_mode = fastfix::runtime::StoreMode::kMemory,
         .recovery_mode = fastfix::session::RecoveryMode::kMemoryOnly,
         .dispatch_mode = fastfix::runtime::AppDispatchMode::kInline,
+        .validation_policy = fastfix::session::ValidationPolicy::Permissive(),
     });
 
     fastfix::runtime::Engine engine;
@@ -941,7 +887,7 @@ TEST_CASE("live-initiator", "[live-initiator]") {
         .session = fastfix::session::SessionConfig{
             .session_id = 1206U,
             .key = fastfix::session::SessionKey{"FIX.4.4", "BUY", "SELL"},
-            .profile_id = 8201U,
+            .profile_id = profile_id,
             .default_appl_ver_id = {},
             .heartbeat_interval_seconds = 30U,
             .is_initiator = true,
@@ -951,6 +897,7 @@ TEST_CASE("live-initiator", "[live-initiator]") {
         .store_mode = fastfix::runtime::StoreMode::kMemory,
         .recovery_mode = fastfix::session::RecoveryMode::kMemoryOnly,
         .dispatch_mode = fastfix::runtime::AppDispatchMode::kInline,
+        .validation_policy = fastfix::session::ValidationPolicy::Permissive(),
     });
 
     fastfix::runtime::Engine logout_engine;
@@ -1038,7 +985,7 @@ TEST_CASE("live-initiator", "[live-initiator]") {
         .session = fastfix::session::SessionConfig{
             .session_id = 1204U,
             .key = fastfix::session::SessionKey{"FIX.4.4", routed_sender_0, "SELL"},
-            .profile_id = 8201U,
+            .profile_id = profile_id,
             .default_appl_ver_id = {},
             .heartbeat_interval_seconds = 1U,
             .is_initiator = true,
@@ -1048,13 +995,14 @@ TEST_CASE("live-initiator", "[live-initiator]") {
         .store_mode = fastfix::runtime::StoreMode::kMemory,
         .recovery_mode = fastfix::session::RecoveryMode::kMemoryOnly,
         .dispatch_mode = fastfix::runtime::AppDispatchMode::kInline,
+        .validation_policy = fastfix::session::ValidationPolicy::Permissive(),
     });
     shard_config.counterparties.push_back(fastfix::runtime::CounterpartyConfig{
         .name = "buy-sell-initiator-shard-1",
         .session = fastfix::session::SessionConfig{
             .session_id = 1205U,
             .key = fastfix::session::SessionKey{"FIX.4.4", routed_sender_1, "SELL"},
-            .profile_id = 8201U,
+            .profile_id = profile_id,
             .default_appl_ver_id = {},
             .heartbeat_interval_seconds = 1U,
             .is_initiator = true,
@@ -1064,6 +1012,7 @@ TEST_CASE("live-initiator", "[live-initiator]") {
         .store_mode = fastfix::runtime::StoreMode::kMemory,
         .recovery_mode = fastfix::session::RecoveryMode::kMemoryOnly,
         .dispatch_mode = fastfix::runtime::AppDispatchMode::kInline,
+        .validation_policy = fastfix::session::ValidationPolicy::Permissive(),
     });
 
     fastfix::runtime::Engine shard_engine;
@@ -1119,7 +1068,7 @@ TEST_CASE("live-initiator", "[live-initiator]") {
         .session = fastfix::session::SessionConfig{
             .session_id = 1203U,
             .key = fastfix::session::SessionKey{"FIX.4.4", "BUY", "SELL"},
-            .profile_id = 8201U,
+            .profile_id = profile_id,
             .default_appl_ver_id = {},
             .heartbeat_interval_seconds = 1U,
             .is_initiator = true,
@@ -1129,6 +1078,7 @@ TEST_CASE("live-initiator", "[live-initiator]") {
         .store_mode = fastfix::runtime::StoreMode::kMemory,
         .recovery_mode = fastfix::session::RecoveryMode::kMemoryOnly,
         .dispatch_mode = fastfix::runtime::AppDispatchMode::kInline,
+        .validation_policy = fastfix::session::ValidationPolicy::Permissive(),
     });
 
     fastfix::runtime::Engine timer_engine;
@@ -1150,19 +1100,16 @@ TEST_CASE("live-initiator", "[live-initiator]") {
     const auto* timer_metrics = timer_engine.metrics().FindSession(1203U);
     REQUIRE(timer_metrics != nullptr);
     REQUIRE(timer_metrics->outbound_messages > 0U);
-
-    std::filesystem::remove(artifact_path);
-    std::filesystem::remove_all(temp_root);
 }
 
 TEST_CASE("live-initiator-queue", "[live-initiator-queue]") {
-    const auto temp_root = std::filesystem::temp_directory_path() / "fastfix-live-initiator-queue-test";
-    std::filesystem::create_directories(temp_root);
-    const auto artifact_path = temp_root / "loopback-profile.art";
-    REQUIRE(BuildLoopbackArtifact(artifact_path, 8202U).ok());
-
-    auto dictionary = LoadDictionary(artifact_path);
-    REQUIRE(dictionary.ok());
+    auto dictionary = fastfix::tests::LoadFix44DictionaryView();
+    if (!dictionary.ok()) {
+        SKIP("FIX44 artifact not available: " << dictionary.status().message());
+    }
+    const auto artifact_path =
+        std::filesystem::path(FASTFIX_PROJECT_DIR) / "build" / "bench" / "quickfix_FIX44.art";
+    const auto profile_id = dictionary.value().profile().header().profile_id;
 
     auto acceptor = fastfix::transport::TcpAcceptor::Listen("127.0.0.1", 0U);
     REQUIRE(acceptor.ok());
@@ -1188,6 +1135,7 @@ TEST_CASE("live-initiator-queue", "[live-initiator-queue]") {
                 .sender_comp_id = "SELL",
                 .target_comp_id = "BUY",
                 .heartbeat_interval_seconds = 1U,
+                .validation_policy = fastfix::session::ValidationPolicy::Permissive(),
             },
             dictionary,
             &store);
@@ -1259,7 +1207,7 @@ TEST_CASE("live-initiator-queue", "[live-initiator-queue]") {
         .session = fastfix::session::SessionConfig{
             .session_id = 1202U,
             .key = fastfix::session::SessionKey{"FIX.4.4", "BUY", "SELL"},
-            .profile_id = 8202U,
+            .profile_id = profile_id,
             .default_appl_ver_id = {},
             .heartbeat_interval_seconds = 1U,
             .is_initiator = true,
@@ -1269,6 +1217,7 @@ TEST_CASE("live-initiator-queue", "[live-initiator-queue]") {
         .store_mode = fastfix::runtime::StoreMode::kMemory,
         .recovery_mode = fastfix::session::RecoveryMode::kMemoryOnly,
         .dispatch_mode = fastfix::runtime::AppDispatchMode::kQueueDecoupled,
+        .validation_policy = fastfix::session::ValidationPolicy::Permissive(),
     });
 
     fastfix::runtime::Engine engine;
@@ -1360,7 +1309,7 @@ TEST_CASE("live-initiator-queue", "[live-initiator-queue]") {
         .session = fastfix::session::SessionConfig{
             .session_id = 1206U,
             .key = fastfix::session::SessionKey{"FIX.4.4", "BUY-MISMATCH", "SELL-MISMATCH"},
-            .profile_id = 8202U,
+            .profile_id = profile_id,
             .default_appl_ver_id = {},
             .heartbeat_interval_seconds = 1U,
             .is_initiator = true,
@@ -1370,6 +1319,7 @@ TEST_CASE("live-initiator-queue", "[live-initiator-queue]") {
         .store_mode = fastfix::runtime::StoreMode::kMemory,
         .recovery_mode = fastfix::session::RecoveryMode::kMemoryOnly,
         .dispatch_mode = fastfix::runtime::AppDispatchMode::kQueueDecoupled,
+        .validation_policy = fastfix::session::ValidationPolicy::Permissive(),
     });
 
     fastfix::runtime::Engine mismatch_engine;
@@ -1427,7 +1377,7 @@ TEST_CASE("live-initiator-queue", "[live-initiator-queue]") {
         .session = fastfix::session::SessionConfig{
             .session_id = 1207U,
             .key = fastfix::session::SessionKey{"FIX.4.4", "BUY", "SELL"},
-            .profile_id = 8202U,
+            .profile_id = profile_id,
             .default_appl_ver_id = {},
             .heartbeat_interval_seconds = 1U,
             .is_initiator = true,
@@ -1437,6 +1387,7 @@ TEST_CASE("live-initiator-queue", "[live-initiator-queue]") {
         .store_mode = fastfix::runtime::StoreMode::kMemory,
         .recovery_mode = fastfix::session::RecoveryMode::kMemoryOnly,
         .dispatch_mode = fastfix::runtime::AppDispatchMode::kQueueDecoupled,
+        .validation_policy = fastfix::session::ValidationPolicy::Permissive(),
     });
 
     fastfix::runtime::Engine threaded_engine;
@@ -1472,8 +1423,6 @@ TEST_CASE("live-initiator-queue", "[live-initiator-queue]") {
     REQUIRE(threaded_runtime.completed_session_count() == 1U);
     REQUIRE(threaded_application->received_echo());
 
-    std::filesystem::remove(artifact_path);
-    std::filesystem::remove_all(temp_root);
 }
 
 namespace {
@@ -1496,6 +1445,7 @@ auto RunAcceptorDropAndReconnectEcho(
             .sender_comp_id = "SELL",
             .target_comp_id = "BUY",
             .heartbeat_interval_seconds = 30U,
+            .validation_policy = fastfix::session::ValidationPolicy::Permissive(),
         },
         dictionary,
         &store);
@@ -1604,6 +1554,7 @@ auto RunAcceptorDropOnce(
             .sender_comp_id = "SELL",
             .target_comp_id = "BUY",
             .heartbeat_interval_seconds = 30U,
+            .validation_policy = fastfix::session::ValidationPolicy::Permissive(),
         },
         dictionary,
         &store);
@@ -1732,13 +1683,13 @@ class TimingInitiatorApplication final : public fastfix::runtime::ApplicationCal
 }  // namespace
 
 TEST_CASE("live-initiator-reconnect-after-disconnect", "[live-initiator]") {
-    const auto temp_root = std::filesystem::temp_directory_path() / "fastfix-live-initiator-reconnect-test";
-    std::filesystem::create_directories(temp_root);
-    const auto artifact_path = temp_root / "loopback-profile.art";
-    REQUIRE(BuildLoopbackArtifact(artifact_path, 8301U).ok());
-
-    auto dictionary = LoadDictionary(artifact_path);
-    REQUIRE(dictionary.ok());
+    auto dictionary = fastfix::tests::LoadFix44DictionaryView();
+    if (!dictionary.ok()) {
+        SKIP("FIX44 artifact not available: " << dictionary.status().message());
+    }
+    const auto artifact_path =
+        std::filesystem::path(FASTFIX_PROJECT_DIR) / "build" / "bench" / "quickfix_FIX44.art";
+    const auto profile_id = dictionary.value().profile().header().profile_id;
 
     auto acceptor = fastfix::transport::TcpAcceptor::Listen("127.0.0.1", 0U);
     REQUIRE(acceptor.ok());
@@ -1763,7 +1714,7 @@ TEST_CASE("live-initiator-reconnect-after-disconnect", "[live-initiator]") {
         .session = fastfix::session::SessionConfig{
             .session_id = 1401U,
             .key = fastfix::session::SessionKey{"FIX.4.4", "BUY", "SELL"},
-            .profile_id = 8301U,
+            .profile_id = profile_id,
             .default_appl_ver_id = {},
             .heartbeat_interval_seconds = 30U,
             .is_initiator = true,
@@ -1773,6 +1724,7 @@ TEST_CASE("live-initiator-reconnect-after-disconnect", "[live-initiator]") {
         .store_mode = fastfix::runtime::StoreMode::kMemory,
         .recovery_mode = fastfix::session::RecoveryMode::kMemoryOnly,
         .dispatch_mode = fastfix::runtime::AppDispatchMode::kInline,
+        .validation_policy = fastfix::session::ValidationPolicy::Permissive(),
         .reconnect_enabled = true,
         .reconnect_initial_ms = 100,
         .reconnect_max_ms = 2000,
@@ -1799,19 +1751,16 @@ TEST_CASE("live-initiator-reconnect-after-disconnect", "[live-initiator]") {
     REQUIRE(application->received_echo());
     REQUIRE(application->close_count() >= 1U);
     REQUIRE(application->active_count() >= 1U);
-
-    std::filesystem::remove(artifact_path);
-    std::filesystem::remove_all(temp_root);
 }
 
 TEST_CASE("live-initiator-reconnect-max-retries", "[live-initiator]") {
-    const auto temp_root = std::filesystem::temp_directory_path() / "fastfix-live-initiator-reconnect-retries-test";
-    std::filesystem::create_directories(temp_root);
-    const auto artifact_path = temp_root / "loopback-profile.art";
-    REQUIRE(BuildLoopbackArtifact(artifact_path, 8302U).ok());
-
-    auto dictionary = LoadDictionary(artifact_path);
-    REQUIRE(dictionary.ok());
+    auto dictionary = fastfix::tests::LoadFix44DictionaryView();
+    if (!dictionary.ok()) {
+        SKIP("FIX44 artifact not available: " << dictionary.status().message());
+    }
+    const auto artifact_path =
+        std::filesystem::path(FASTFIX_PROJECT_DIR) / "build" / "bench" / "quickfix_FIX44.art";
+    const auto profile_id = dictionary.value().profile().header().profile_id;
 
     auto acceptor = fastfix::transport::TcpAcceptor::Listen("127.0.0.1", 0U);
     REQUIRE(acceptor.ok());
@@ -1836,7 +1785,7 @@ TEST_CASE("live-initiator-reconnect-max-retries", "[live-initiator]") {
         .session = fastfix::session::SessionConfig{
             .session_id = 1402U,
             .key = fastfix::session::SessionKey{"FIX.4.4", "BUY", "SELL"},
-            .profile_id = 8302U,
+            .profile_id = profile_id,
             .default_appl_ver_id = {},
             .heartbeat_interval_seconds = 30U,
             .is_initiator = true,
@@ -1846,6 +1795,7 @@ TEST_CASE("live-initiator-reconnect-max-retries", "[live-initiator]") {
         .store_mode = fastfix::runtime::StoreMode::kMemory,
         .recovery_mode = fastfix::session::RecoveryMode::kMemoryOnly,
         .dispatch_mode = fastfix::runtime::AppDispatchMode::kInline,
+        .validation_policy = fastfix::session::ValidationPolicy::Permissive(),
         .reconnect_enabled = true,
         .reconnect_initial_ms = 50,
         .reconnect_max_ms = 200,
@@ -1876,19 +1826,16 @@ TEST_CASE("live-initiator-reconnect-max-retries", "[live-initiator]") {
     REQUIRE(run_status.message().find("reconnect gave up") != std::string::npos);
     REQUIRE(runtime.completed_session_count() == 0U);
     REQUIRE(runtime.pending_reconnect_count() == 0U);
-
-    std::filesystem::remove(artifact_path);
-    std::filesystem::remove_all(temp_root);
 }
 
 TEST_CASE("live-initiator-reconnect-backoff-timing", "[live-initiator]") {
-    const auto temp_root = std::filesystem::temp_directory_path() / "fastfix-live-initiator-reconnect-timing-test";
-    std::filesystem::create_directories(temp_root);
-    const auto artifact_path = temp_root / "loopback-profile.art";
-    REQUIRE(BuildLoopbackArtifact(artifact_path, 8303U).ok());
-
-    auto dictionary = LoadDictionary(artifact_path);
-    REQUIRE(dictionary.ok());
+    auto dictionary = fastfix::tests::LoadFix44DictionaryView();
+    if (!dictionary.ok()) {
+        SKIP("FIX44 artifact not available: " << dictionary.status().message());
+    }
+    const auto artifact_path =
+        std::filesystem::path(FASTFIX_PROJECT_DIR) / "build" / "bench" / "quickfix_FIX44.art";
+    const auto profile_id = dictionary.value().profile().header().profile_id;
 
     auto acceptor = fastfix::transport::TcpAcceptor::Listen("127.0.0.1", 0U);
     REQUIRE(acceptor.ok());
@@ -1915,7 +1862,7 @@ TEST_CASE("live-initiator-reconnect-backoff-timing", "[live-initiator]") {
         .session = fastfix::session::SessionConfig{
             .session_id = 1403U,
             .key = fastfix::session::SessionKey{"FIX.4.4", "BUY", "SELL"},
-            .profile_id = 8303U,
+            .profile_id = profile_id,
             .default_appl_ver_id = {},
             .heartbeat_interval_seconds = 30U,
             .is_initiator = true,
@@ -1925,6 +1872,7 @@ TEST_CASE("live-initiator-reconnect-backoff-timing", "[live-initiator]") {
         .store_mode = fastfix::runtime::StoreMode::kMemory,
         .recovery_mode = fastfix::session::RecoveryMode::kMemoryOnly,
         .dispatch_mode = fastfix::runtime::AppDispatchMode::kInline,
+        .validation_policy = fastfix::session::ValidationPolicy::Permissive(),
         .reconnect_enabled = true,
         .reconnect_initial_ms = initial_ms,
         .reconnect_max_ms = 5000,
@@ -1989,7 +1937,4 @@ TEST_CASE("live-initiator-reconnect-backoff-timing", "[live-initiator]") {
 
     const auto elapsed_ms = (bound_ns - close_ns) / 1000000ULL;
     REQUIRE(elapsed_ms >= initial_ms);
-
-    std::filesystem::remove(artifact_path);
-    std::filesystem::remove_all(temp_root);
 }

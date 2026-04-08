@@ -43,8 +43,10 @@ class TcpConnection {
 
     auto Send(std::span<const std::byte> bytes, std::chrono::milliseconds timeout) -> base::Status;
     auto Send(const std::vector<std::byte>& bytes, std::chrono::milliseconds timeout) -> base::Status;
+    auto BusySend(std::span<const std::byte> bytes, std::chrono::milliseconds timeout) -> base::Status;
     auto TryReceiveFrameView() -> base::Result<std::optional<std::span<const std::byte>>>;
     auto ReceiveFrameView(std::chrono::milliseconds timeout) -> base::Result<std::span<const std::byte>>;
+    auto BusyReceiveFrameView(std::chrono::milliseconds timeout) -> base::Result<std::span<const std::byte>>;
     auto TryReceiveFrame() -> base::Result<std::optional<std::vector<std::byte>>>;
     auto ReceiveFrame(std::chrono::milliseconds timeout) -> base::Result<std::vector<std::byte>>;
     auto Close() -> void;
@@ -55,6 +57,7 @@ class TcpConnection {
     int fd_{-1};
     std::vector<std::byte> read_buffer_;
     std::vector<std::byte> frame_buffer_;
+    std::size_t read_cursor_{0};
 };
 
 class TcpAcceptor {

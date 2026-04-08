@@ -25,4 +25,24 @@ auto ShardPoller::CaptureReady(std::span<const pollfd> pollfds, PollState& state
     }
 }
 
+auto ShardPoller::InitBackend(IoBackend backend) -> base::Status {
+    if (backend == IoBackend::kPoll) {
+        return base::Status::Ok();
+    }
+
+    io_poller_ = CreateIoPoller(backend);
+    if (io_poller_ == nullptr) {
+        return base::Status::InvalidArgument("unsupported io backend");
+    }
+    auto status = io_poller_->Init();
+    if (!status.ok()) return status;
+
+    // Register wakeup fd with sentinel tag.
+    if (wakeup_.valid()) {
+        status = io_poller_->AddFd(wakeup_.read_fd(), kWakeupTag);
+        if (!status.ok()) return status;
+    }
+    return base::Status::Ok();
+}
+
 }  // namespace fastfix::runtime

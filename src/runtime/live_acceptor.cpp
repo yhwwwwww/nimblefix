@@ -250,6 +250,19 @@ auto LiveAcceptor::ResetWorkerShards(std::uint32_t worker_count) -> base::Status
             worker_shards_.clear();
             return status;
         }
+        {
+            auto backend = IoBackend::kPoll;
+            if (engine_ != nullptr && engine_->config() != nullptr) {
+                backend = engine_->config()->io_backend;
+            }
+            if (backend != IoBackend::kPoll) {
+                status = shard.poller.InitBackend(backend);
+                if (!status.ok()) {
+                    worker_shards_.clear();
+                    return status;
+                }
+            }
+        }
         shard.command_sink = std::make_shared<CommandSink>(this, worker_id, options_.command_queue_capacity);
         shard.inbox = std::make_unique<WorkerInbox>();
     }
@@ -685,23 +698,22 @@ auto LiveAcceptor::PollOnce(std::chrono::milliseconds timeout) -> base::Status {
     const auto poll_started_ns = NowNs();
     const auto effective_timeout = ComputePollTimeout(timeout, poll_started_ns);
 
-    std::vector<pollfd> pollfds;
+    main_poll_scratch_.clear();
     std::size_t connection_count = 0U;
     for (const auto& shard : worker_shards_) {
         connection_count += shard.connections.size();
     }
-    pollfds.reserve(listeners_.size() + connection_count + worker_shards_.size());
+    main_poll_scratch_.reserve(listeners_.size() + connection_count + worker_shards_.size());
 
     std::vector<bool> listener_ready(listeners_.size(), false);
     struct ShardPollState {
         WorkerShardState* shard{nullptr};
-        ShardPoller::PollState poll_state;
     };
     std::vector<ShardPollState> shard_states;
     shard_states.reserve(worker_shards_.size());
 
     for (const auto& listener : listeners_) {
-        pollfds.push_back(pollfd{.fd = listener.acceptor.fd(), .events = POLLIN, .revents = 0});
+        main_poll_scratch_.push_back(pollfd{.fd = listener.acceptor.fd(), .events = POLLIN, .revents = 0});
     }
 
     for (auto& shard : worker_shards_) {
@@ -712,12 +724,12 @@ auto LiveAcceptor::PollOnce(std::chrono::milliseconds timeout) -> base::Status {
             [&](std::size_t index) {
                 return shard.connections[index].connection.fd();
             },
-            pollfds,
-            shard_state.poll_state);
+            main_poll_scratch_,
+            shard.poll_state_scratch);
     }
 
     const int timeout_ms = effective_timeout.count() < 0 ? -1 : static_cast<int>(effective_timeout.count());
-    const int rc = poll(pollfds.data(), pollfds.size(), timeout_ms);
+    const int rc = poll(main_poll_scratch_.data(), main_poll_scratch_.size(), timeout_ms);
     if (rc < 0) {
         if (errno == EINTR) {
             return base::Status::Ok();
@@ -726,10 +738,10 @@ auto LiveAcceptor::PollOnce(std::chrono::milliseconds timeout) -> base::Status {
     }
 
     for (std::size_t index = 0; index < listeners_.size(); ++index) {
-        listener_ready[index] = (pollfds[index].revents & POLLIN) != 0;
+        listener_ready[index] = (main_poll_scratch_[index].revents & POLLIN) != 0;
     }
     for (auto& shard_state : shard_states) {
-        shard_state.shard->poller.CaptureReady(pollfds, shard_state.poll_state);
+        shard_state.shard->poller.CaptureReady(main_poll_scratch_, shard_state.shard->poll_state_scratch);
     }
 
     const auto now = NowNs();
@@ -745,7 +757,7 @@ auto LiveAcceptor::PollOnce(std::chrono::milliseconds timeout) -> base::Status {
 
     for (auto& shard_state : shard_states) {
         auto status = shard_state.shard->poller.ProcessReadyConnections(
-            shard_state.poll_state,
+            shard_state.shard->poll_state_scratch,
             shard_state.shard->connections.size(),
             [&](std::size_t connection_index, bool readable) {
                 return ProcessConnection(*shard_state.shard, connection_index, readable, now);
@@ -796,68 +808,115 @@ auto LiveAcceptor::PollOnce(std::chrono::milliseconds timeout) -> base::Status {
 }
 
 auto LiveAcceptor::PollWorkerOnce(WorkerShardState& shard, std::chrono::milliseconds timeout) -> base::Status {
+    WorkerMetrics* wm = nullptr;
+    {
+        const auto* cfg = engine_->config();
+        if (cfg != nullptr && cfg->enable_metrics) {
+            wm = engine_->mutable_metrics()->FindWorker(shard.worker_id);
+        }
+    }
+
     const auto poll_started_ns = NowNs();
     const auto effective_timeout = ComputePollTimeout(shard, timeout, poll_started_ns);
 
-    std::vector<pollfd> pollfds;
-    pollfds.reserve(shard.connections.size() + 1U);
+    const auto t_poll_start = NowNs();
 
-    ShardPoller::PollState poll_state;
-    shard.poller.PreparePoll(
-        shard.connections.size(),
-        [&](std::size_t index) {
-            return shard.connections[index].connection.fd();
-        },
-        pollfds,
-        poll_state);
+    if (shard.poller.has_io_poller()) {
+        auto status = shard.poller.SyncAndWait(
+            shard.connections.size(),
+            [&](std::size_t index) { return shard.connections[index].connection.fd(); },
+            effective_timeout,
+            shard.io_ready_state);
+        if (!status.ok()) return status;
+    } else {
+        shard.poll_scratch.clear();
+        shard.poll_scratch.reserve(shard.connections.size() + 1U);
 
-    const int timeout_ms = effective_timeout.count() < 0 ? -1 : static_cast<int>(effective_timeout.count());
-    const int rc = poll(pollfds.data(), pollfds.size(), timeout_ms);
-    if (rc < 0) {
-        if (errno == EINTR) {
-            return base::Status::Ok();
+        shard.poller.PreparePoll(
+            shard.connections.size(),
+            [&](std::size_t index) {
+                return shard.connections[index].connection.fd();
+            },
+            shard.poll_scratch,
+            shard.poll_state_scratch);
+
+        const int timeout_ms = effective_timeout.count() < 0 ? -1 : static_cast<int>(effective_timeout.count());
+        const int rc = poll(shard.poll_scratch.data(), shard.poll_scratch.size(), timeout_ms);
+        if (rc < 0) {
+            if (errno == EINTR) {
+                return base::Status::Ok();
+            }
+            return base::Status::IoError(std::string("poll failed: ") + std::strerror(errno));
         }
-        return base::Status::IoError(std::string("poll failed: ") + std::strerror(errno));
+
+        shard.poller.CaptureReady(shard.poll_scratch, shard.poll_state_scratch);
     }
 
-    shard.poller.CaptureReady(pollfds, poll_state);
-
+    const auto t_poll_end = NowNs();
     const auto now = NowNs();
-    auto status = shard.poller.ProcessReadyConnections(
-        poll_state,
-        shard.connections.size(),
-        [&](std::size_t connection_index, bool readable) {
-            return ProcessConnection(shard, connection_index, readable, now);
-        });
-    if (!status.ok()) {
-        return status;
+
+    base::Status status;
+    if (shard.poller.has_io_poller()) {
+        for (auto it = shard.io_ready_state.ready_indices.rbegin();
+             it != shard.io_ready_state.ready_indices.rend(); ++it) {
+            const auto connection_index = *it;
+            if (connection_index < shard.connections.size()) {
+                status = ProcessConnection(shard, connection_index, true, now);
+                if (!status.ok()) return status;
+            }
+        }
+    } else {
+        status = shard.poller.ProcessReadyConnections(
+            shard.poll_state_scratch,
+            shard.connections.size(),
+            [&](std::size_t connection_index, bool readable) {
+                return ProcessConnection(shard, connection_index, readable, now);
+            });
+        if (!status.ok()) {
+            return status;
+        }
     }
+    const auto t_recv_done = NowNs();
 
     status = PollManagedApplicationWorker(shard.worker_id);
     if (!status.ok()) {
         return status;
     }
+    const auto t_app_done = NowNs();
 
     status = DrainWorkerCommands(shard.worker_id, now);
     if (!status.ok()) {
         return status;
     }
+    const auto t_send_done = NowNs();
 
-    const auto timers_now = NowNs();
+    const auto timers_now = t_send_done;
     status = ProcessDueTimers(shard, timers_now);
     if (!status.ok()) {
         return status;
     }
+    const auto t_timer_done = NowNs();
 
     status = PollManagedApplicationWorker(shard.worker_id);
     if (!status.ok()) {
         return status;
     }
+    const auto t_app2_done = NowNs();
 
-    const auto final_now = NowNs();
+    const auto final_now = t_app2_done;
     status = DrainWorkerCommands(shard.worker_id, final_now);
     if (!status.ok()) {
         return status;
+    }
+    const auto t_send2_done = NowNs();
+
+    if (wm != nullptr) {
+        wm->poll_wait_ns.fetch_add(t_poll_end - t_poll_start, std::memory_order_relaxed);
+        wm->recv_dispatch_ns.fetch_add(t_recv_done - t_poll_end, std::memory_order_relaxed);
+        wm->app_callback_ns.fetch_add((t_app_done - t_recv_done) + (t_app2_done - t_timer_done), std::memory_order_relaxed);
+        wm->send_ns.fetch_add((t_send_done - t_app_done) + (t_send2_done - t_app2_done), std::memory_order_relaxed);
+        wm->timer_process_ns.fetch_add(t_timer_done - t_send_done, std::memory_order_relaxed);
+        wm->poll_iterations.fetch_add(1, std::memory_order_relaxed);
     }
 
     AdoptPendingConnections(shard);

@@ -22,7 +22,6 @@ struct ValidationPolicy {
     bool require_required_fields_on_app_messages{true};
     bool reject_unknown_fields{true};
     bool reject_duplicate_fields{true};
-    bool enforce_field_order{true};
     bool reject_invalid_group_structure{true};
 
     [[nodiscard]] static auto Strict() -> ValidationPolicy {
@@ -40,7 +39,6 @@ struct ValidationPolicy {
             .require_required_fields_on_app_messages = true,
             .reject_unknown_fields = false,
             .reject_duplicate_fields = false,
-            .enforce_field_order = false,
             .reject_invalid_group_structure = false,
         };
     }
@@ -56,7 +54,6 @@ struct ValidationPolicy {
             .require_required_fields_on_app_messages = false,
             .reject_unknown_fields = false,
             .reject_duplicate_fields = false,
-            .enforce_field_order = false,
             .reject_invalid_group_structure = false,
         };
     }
@@ -72,7 +69,6 @@ struct ValidationPolicy {
             .require_required_fields_on_app_messages = false,
             .reject_unknown_fields = false,
             .reject_duplicate_fields = false,
-            .enforce_field_order = false,
             .reject_invalid_group_structure = false,
         };
     }
