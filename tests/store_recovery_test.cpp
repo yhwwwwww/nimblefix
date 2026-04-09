@@ -1,12 +1,13 @@
 #include <catch2/catch_test_macros.hpp>
 
+#include <fcntl.h>
+#include <unistd.h>
+
 #include <filesystem>
 
 #include "fastfix/store/durable_batch_store.h"
 #include "fastfix/store/memory_store.h"
 #include "fastfix/store/mmap_store.h"
-
-#include "test_support.h"
 
 namespace {
 
@@ -32,6 +33,24 @@ auto CountArchivedLogs(const std::filesystem::path& root) -> std::size_t {
         }
     }
     return count;
+}
+
+auto CanOpenReadWrite(const std::filesystem::path& path) -> bool {
+    const int fd = ::open(path.c_str(), O_RDWR);
+    if (fd < 0) {
+        return false;
+    }
+    ::close(fd);
+    return true;
+}
+
+auto ReadOnlyFilesBlockReadWriteOpen(const std::filesystem::path& root) -> bool {
+    for (const auto& entry : std::filesystem::recursive_directory_iterator(root)) {
+        if (entry.is_regular_file() && !CanOpenReadWrite(entry.path())) {
+            return true;
+        }
+    }
+    return false;
 }
 
 }  // namespace
@@ -1061,7 +1080,9 @@ TEST_CASE("write failure on read-only directory", "[store-recovery]") {
         }
     }
 
-    // Attempting to open a new store should fail (files can't be opened for writing)
+    const bool read_only_blocks_reopen = ReadOnlyFilesBlockReadWriteOpen(root);
+
+    // Some CI environments run as a privileged user that can still reopen read-only files.
     {
         fastfix::store::DurableBatchSessionStore store(
             root,
@@ -1071,8 +1092,12 @@ TEST_CASE("write failure on read-only directory", "[store-recovery]") {
                 .max_archived_segments = 2U,
             });
         const auto status = store.Open();
-        REQUIRE(!status.ok());
-        REQUIRE(status.code() == fastfix::base::ErrorCode::kIoError);
+        if (read_only_blocks_reopen) {
+            REQUIRE(!status.ok());
+            REQUIRE(status.code() == fastfix::base::ErrorCode::kIoError);
+        } else {
+            REQUIRE(status.ok());
+        }
     }
 
     // Restore permissions for cleanup and further testing
@@ -1140,6 +1165,8 @@ TEST_CASE("write failure recovery", "[store-recovery]") {
         }
     }
 
+    const bool read_only_blocks_reopen = ReadOnlyFilesBlockReadWriteOpen(root);
+
     {
         fastfix::store::DurableBatchSessionStore store(
             root,
@@ -1148,7 +1175,12 @@ TEST_CASE("write failure recovery", "[store-recovery]") {
                 .rollover_mode = fastfix::store::DurableStoreRolloverMode::kExternal,
                 .max_archived_segments = 2U,
             });
-        REQUIRE(!store.Open().ok());
+        const auto status = store.Open();
+        if (read_only_blocks_reopen) {
+            REQUIRE(!status.ok());
+        } else {
+            REQUIRE(status.ok());
+        }
     }
 
     // Phase 3: restore permissions, reopen and verify original data is intact

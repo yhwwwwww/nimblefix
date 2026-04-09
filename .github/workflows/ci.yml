@@ -7,7 +7,8 @@ on:
     branches: [main]
 
 jobs:
-  build-and-test:
+  ubuntu-build-and-test:
+    name: Ubuntu ${{ matrix.compiler }}
     strategy:
       fail-fast: false
       matrix:
@@ -16,6 +17,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Set up compiler
         run: |
@@ -31,40 +34,53 @@ jobs:
             echo "CXX=g++-14" >> $GITHUB_ENV
           fi
 
-      - name: Install xmake
-        uses: xmake-io/github-action-setup-xmake@v1
+      - name: Configure, build, test, and benchmark smoke
+        run: bash ./scripts/offline_build.sh --preset dev-release --bench smoke
+
+  rhel-build-and-test:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: RHEL 8.10 + GCC 12
+            image: registry.access.redhat.com/ubi8/ubi:8.10
+            preset: rhel8-gcc12
+            other: cmake make
+            toolchain_packages: gcc-toolset-12-gcc gcc-toolset-12-gcc-c++
+            toolchain_enable: source /opt/rh/gcc-toolset-12/enable
+          - name: RHEL 9.7 + GCC 14
+            image: registry.access.redhat.com/ubi9/ubi:9.7
+            preset: rhel9-gcc14
+            other: cmake make liburing-devel
+            toolchain_packages: gcc-toolset-14-gcc gcc-toolset-14-gcc-c++
+            toolchain_enable: source /opt/rh/gcc-toolset-14/enable
+    steps:
+      - uses: actions/checkout@v4
         with:
-          xmake-version: latest
+          submodules: recursive
 
-      - name: Configure
-        run: xmake f -m release --toolchain=gcc -y
+      - name: Pull container image
+        run: docker pull ${{ matrix.image }}
 
-      - name: Build tools
+      - name: Configure, build, test, and benchmark smoke in container
+        shell: bash
         run: |
-          xmake build fastfix-xml2ffd 
-          xmake build fastfix-dictgen
-
-      - name: Generate FIX44 artifacts
-        run: |
-          mkdir -p build/bench build/generated
-          wget -q https://raw.githubusercontent.com/quickfix/quickfix/master/spec/FIX44.xml \
-               -O build/bench/quickfix_FIX44.xml
-          ./build/linux/x86_64/release/fastfix-xml2ffd \
-              --xml build/bench/quickfix_FIX44.xml \
-              --output build/bench/quickfix_FIX44.ffd \
-              --profile-id 4400
-          ./build/linux/x86_64/release/fastfix-dictgen \
-              --input build/bench/quickfix_FIX44.ffd \
-              --output build/bench/quickfix_FIX44.art \
-              --cpp-builders build/generated/fix44_builders.h
-          ./build/linux/x86_64/release/fastfix-dictgen \
-              --input samples/basic_profile.ffd \
-              --merge samples/basic_overlay.ffd \
-              --output build/sample-basic.art \
-              --cpp-builders build/generated/sample_basic_builders.h
-
-      - name: Build
-        run: xmake build -y
-
-      - name: Run tests
-        run: xmake run fastfix-tests
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/workspace" \
+            -w /workspace \
+            "${{ matrix.image }}" \
+            bash -lc '
+              set -euo pipefail
+              dnf install -y -q --setopt=install_weak_deps=False \
+                ${{ matrix.other }} \
+                ${{ matrix.toolchain_packages }}
+              ${{ matrix.toolchain_enable }}
+              export CC="$(command -v gcc)"
+              export CXX="$(command -v g++)"
+              gcc --version
+              g++ --version
+              cmake --version
+              bash ./scripts/offline_build.sh --preset "${{ matrix.preset }}" --bench smoke
+            '

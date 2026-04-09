@@ -63,39 +63,72 @@ FastFix was designed to answer: *what if every design decision optimized for the
 ### Prerequisites
 
 - C++20 compiler (GCC 12+, Clang 15+)
-- [xmake](https://xmake.io/) build system
+- CMake 3.20+ and a native build tool (`make` or Ninja)
+- `xmake` is optional and remains supported for local development
+
+### Offline Dependency Layout
+
+FastFix now keeps the required third-party sources as pinned Git submodules for offline builds:
+
+- `deps/src/Catch2` — Catch2 v3.13.0
+- `deps/src/pugixml` — pugixml v1.15
+- `bench/vendor/quickfix` — QuickFIX pinned to commit `00dd20837c97578e725072e5514c8ffaa0e141d4`, including `spec/FIX44.xml`
+
+Initialize them once after cloning:
+
+```bash
+git submodule update --init --recursive
+```
+
+After the submodules are initialized, no build step downloads Catch2, pugixml, QuickFIX, or FIX dictionaries from the network.
 
 ### Build
 
 ```bash
-# Build all targets
-xmake
+# One command: configure, build, test, and run benchmark smoke
+bash ./scripts/offline_build.sh --preset dev-release --bench smoke
 
-# Build specific targets
-xmake build fastfix           # Static library
-xmake build fastfix-bench     # Benchmark
-xmake build fastfix-tests     # Test suite
-xmake build fastfix-dictgen   # Dictionary compiler
-xmake build fastfix-xml2ffd   # QuickFIX XML → .ffd converter
-xmake build fastfix-initiator # CLI initiator
-xmake build fastfix-acceptor  # CLI acceptor
+# Full benchmark run
+bash ./scripts/offline_build.sh --preset dev-release --bench full
+
+# Named CMake presets for the supported offline targets
+cmake --preset rhel8-gcc12
+cmake --build --preset rhel8-gcc12
+ctest --preset rhel8-gcc12
+
+cmake --preset rhel9-gcc14
+cmake --build --preset rhel9-gcc14
+ctest --preset rhel9-gcc14
+
+# Manual CMake flow without presets
+cmake -S . -B build/cmake/dev-release -DCMAKE_BUILD_TYPE=Release
+cmake --build build/cmake/dev-release
+ctest --test-dir build/cmake/dev-release --output-on-failure
+
+# Optional xmake flow, now using the pinned Catch2/pugixml submodules instead of package downloads
+xmake f -m release -y
+xmake build fastfix-tests
 ```
 
-After a release build on Linux x86_64, binaries live under `./build/linux/x86_64/release/`. The examples below invoke binaries directly; `xmake run <target>` remains a convenience alternative.
+GitHub Actions CI also exercises these two named RHEL presets via `ubi8/ubi:8.10` + `gcc-toolset-12` and `ubi9/ubi:9.7` + `gcc-toolset-14` container jobs on every push and pull request.
+
+When `build/generated/`, `build/bench/`, or `build/sample-basic.art` have been removed, `xmake build fastfix-tests` and `xmake build fastfix-bench` now regenerate the required shared assets automatically.
+
+Preset-based CMake builds write executables under `build/cmake/<preset>/bin/`. The helper script keeps using the shared repository-local assets under `build/generated/` and `build/bench/` so tests and benchmarks resolve the same files regardless of build system.
 
 ### Run Tests
 
 ```bash
-./build/linux/x86_64/release/fastfix-tests
-# Alternative: xmake run fastfix-tests
-# 152 test cases, 2619 assertions
+./build/cmake/dev-release/bin/fastfix-tests
+# Alternative: bash ./scripts/offline_build.sh --preset dev-release --bench skip
+# Alternative: ./build/linux/x86_64/release/fastfix-tests
 ```
 
 ### Integration
 
 FastFix compiles into a single static library `libfastfix.a`. To use it in your own program:
 
-1. **Build the library**: `xmake build fastfix` — produces `build/linux/x86_64/release/libfastfix.a`
+1. **Build the library**: `cmake --build build/cmake/dev-release --target fastfix` or `xmake build fastfix`
 2. **Compile a protocol profile**: Run `fastfix-dictgen` to produce a `.art` binary artifact from your dictionary (optional — `.ffd` files can also be loaded directly at runtime)
 3. **Link and include**: Point your compiler at `include/` for headers and link against `libfastfix.a`
 
@@ -115,11 +148,11 @@ target("my-trading-app")
 
 ```bash
 # 1. Build fastfix first
-cd path/to/fastfix && xmake build fastfix
+cd path/to/fastfix && cmake -S . -B build/cmake/dev-release -DCMAKE_BUILD_TYPE=Release && cmake --build build/cmake/dev-release --target fastfix
 
 # 2. In your build system, add:
 #    Include path:  path/to/fastfix/include
-#    Link library:  path/to/fastfix/build/linux/x86_64/release/libfastfix.a
+#    Link library:  path/to/fastfix/build/cmake/dev-release/lib/libfastfix.a
 #    Standard:      C++20
 ```
 
@@ -694,6 +727,8 @@ Key observations:
 ./bench/bench.sh builder        # Object-to-wire compare only
 ./bench/bench.sh compare        # Full cross-engine comparison
 ```
+
+Every benchmark command above intentionally uses the pinned QuickFIX 4.4 inputs: `bench/vendor/quickfix/spec/FIX44.xml`, `build/bench/quickfix_FIX44.ffd`, or `build/bench/quickfix_FIX44.art`.
 
 For detailed benchmark methodology, metric definitions, and full result tables, see [bench/README.md](bench/README.md).
 

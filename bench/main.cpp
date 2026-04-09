@@ -1,20 +1,15 @@
-#include <algorithm>
-#include <array>
 #include <chrono>
-#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
 #include <future>
-#include <iomanip>
 #include <iostream>
 #include <new>
 #include <optional>
 #include <string>
 #include <string_view>
 #include <thread>
-#include <time.h>
 #include <utility>
 #include <vector>
 
@@ -808,6 +803,15 @@ auto RunSessionBenchmark(
 
 }  // namespace
 
+#if defined(_MSC_VER)
+__declspec(noinline)
+#elif defined(__GNUC__) || defined(__clang__)
+__attribute__((noinline))
+#endif
+static void FreeBenchmarkMemory(void* memory) noexcept {
+    std::free(memory);
+}
+
 void* operator new(std::size_t size) {
     auto* memory = bench_support::AllocateRaw(size, alignof(std::max_align_t));
     if (memory == nullptr) {
@@ -877,35 +881,35 @@ void* operator new[](std::size_t size, std::align_val_t alignment, const std::no
 }
 
 void operator delete(void* memory) noexcept {
-    std::free(memory);
+    FreeBenchmarkMemory(memory);
 }
 
 void operator delete[](void* memory) noexcept {
-    std::free(memory);
+    FreeBenchmarkMemory(memory);
 }
 
 void operator delete(void* memory, std::size_t) noexcept {
-    std::free(memory);
+    FreeBenchmarkMemory(memory);
 }
 
 void operator delete[](void* memory, std::size_t) noexcept {
-    std::free(memory);
+    FreeBenchmarkMemory(memory);
 }
 
 void operator delete(void* memory, std::align_val_t) noexcept {
-    std::free(memory);
+    FreeBenchmarkMemory(memory);
 }
 
 void operator delete[](void* memory, std::align_val_t) noexcept {
-    std::free(memory);
+    FreeBenchmarkMemory(memory);
 }
 
 void operator delete(void* memory, std::size_t, std::align_val_t) noexcept {
-    std::free(memory);
+    FreeBenchmarkMemory(memory);
 }
 
 void operator delete[](void* memory, std::size_t, std::align_val_t) noexcept {
-    std::free(memory);
+    FreeBenchmarkMemory(memory);
 }
 
 int main(int argc, char** argv) {

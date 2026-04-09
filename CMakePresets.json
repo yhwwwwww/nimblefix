@@ -1,0 +1,77 @@
+{
+  "version": 2,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 20,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "base-release",
+      "hidden": true,
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/build/cmake/${presetName}",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "FASTFIX_BUILD_TESTS": "ON",
+        "FASTFIX_BUILD_BENCHMARKS": "ON",
+        "FASTFIX_BUILD_TOOLS": "ON",
+        "FASTFIX_BUILD_FUZZERS": "ON"
+      }
+    },
+    {
+      "name": "dev-release",
+      "inherits": "base-release",
+      "displayName": "Developer Release"
+    },
+    {
+      "name": "rhel8-gcc12",
+      "inherits": "base-release",
+      "displayName": "RHEL 8.10 + GCC 12",
+      "description": "Use after enabling the GCC 12 toolset in the shell of the target RHEL 8.10 host."
+    },
+    {
+      "name": "rhel9-gcc14",
+      "inherits": "base-release",
+      "displayName": "RHEL 9.7 + GCC 14",
+      "description": "Use after enabling the GCC 14 toolset in the shell of the target RHEL 9.7 host."
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "dev-release",
+      "configurePreset": "dev-release"
+    },
+    {
+      "name": "rhel8-gcc12",
+      "configurePreset": "rhel8-gcc12"
+    },
+    {
+      "name": "rhel9-gcc14",
+      "configurePreset": "rhel9-gcc14"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "dev-release",
+      "configurePreset": "dev-release",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "rhel8-gcc12",
+      "configurePreset": "rhel8-gcc12",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "rhel9-gcc14",
+      "configurePreset": "rhel9-gcc14",
+      "output": {
+        "outputOnFailure": true
+      }
+    }
+  ]
+}

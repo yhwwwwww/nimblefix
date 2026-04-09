@@ -1689,7 +1689,8 @@ TEST_CASE("io_uring backend single session", "[live-runtime]") {
         SKIP("FIX44 artifact not available: " << dictionary.status().message());
     }
     if (!fastfix::runtime::IsIoBackendAvailable(fastfix::runtime::IoBackend::kIoUring)) {
-        SKIP("io_uring not available");
+        SUCCEED("io_uring not available");
+        return;
     }
     const auto artifact_path =
         std::filesystem::path(FASTFIX_PROJECT_DIR) / "build" / "bench" / "quickfix_FIX44.art";

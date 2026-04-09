@@ -1,0 +1,9 @@
+[submodule "deps/src/Catch2"]
+	path = deps/src/Catch2
+	url = https://github.com/catchorg/Catch2.git
+[submodule "deps/src/pugixml"]
+	path = deps/src/pugixml
+	url = https://github.com/zeux/pugixml.git
+[submodule "bench/vendor/quickfix"]
+	path = bench/vendor/quickfix
+	url = https://github.com/quickfix/quickfix.git

@@ -14,6 +14,17 @@ This directory contains the benchmark sources, shared benchmark support code, an
 The script is the intended entry point:
 
 ```bash
+FASTFIX_CMAKE_PRESET=dev-release ./bench/bench.sh build
+FASTFIX_CMAKE_PRESET=dev-release ./bench/bench.sh fastfix
+FASTFIX_CMAKE_PRESET=dev-release ./bench/bench.sh fastfix-ffd
+FASTFIX_CMAKE_PRESET=dev-release ./bench/bench.sh quickfix
+FASTFIX_CMAKE_PRESET=dev-release ./bench/bench.sh builder
+FASTFIX_CMAKE_PRESET=dev-release ./bench/bench.sh compare
+
+# Optional xmake fallback
+FASTFIX_BUILD_SYSTEM=xmake ./bench/bench.sh build
+
+# Historical shorthand still works when the default dev-release preset is fine
 ./bench/bench.sh build
 ./bench/bench.sh fastfix
 ./bench/bench.sh fastfix-ffd
@@ -22,21 +33,26 @@ The script is the intended entry point:
 ./bench/bench.sh compare
 ```
 
+The xmake fallback also recreates the QuickFIX44 benchmark assets automatically if `build/generated/` or `build/bench/` were removed beforehand.
+
+Every benchmark command above intentionally uses QuickFIX FIX44 inputs: `bench/vendor/quickfix/spec/FIX44.xml`, `build/bench/quickfix_FIX44.ffd`, or `build/bench/quickfix_FIX44.art`. The sample profile artifact is only a shared test/codegen asset and is not a benchmark input.
+
 What each command does:
 
-- `build`: builds `fastfix-bench`, `fastfix-xml2ffd`, `fastfix-dictgen`, regenerates the FIX44 `.ffd/.art` files under `build/bench/`, regenerates the auxiliary `build/sample-basic-overlay.art`, configures/builds QuickFIX, and compiles `build/bench/quickfix-cpp-bench`.
+- `build`: builds `fastfix-bench`, `fastfix-xml2ffd`, `fastfix-dictgen`, regenerates the FIX44 `.ffd/.art` files under `build/bench/`, and compiles the QuickFIX comparison benchmark from the pinned submodule checkout.
 - `fastfix`: runs the main FastFix suite against `build/bench/quickfix_FIX44.art`. If no extra args are supplied, it uses `--iterations 100000 --loopback 1000 --replay 1000`.
 - `fastfix-ffd`: runs the same FastFix suite but loads `build/bench/quickfix_FIX44.ffd` directly at startup. Default args are `--iterations 30000 --loopback 200 --replay 200`.
-- `quickfix`: runs the QuickFIX comparison benchmark against the same upstream `FIX44.xml`. Default args are `--iterations 100000`.
+- `quickfix`: runs the QuickFIX comparison benchmark against the pinned `bench/vendor/quickfix/spec/FIX44.xml`. Default args are `--iterations 100000`.
 - `builder`: runs the main FastFix suite against `build/bench/quickfix_FIX44.art`, defaulting to `--iterations 100000 --loopback 0 --replay 0`. Use this to iterate on the encode metric without loopback/replay noise.
 - `compare`: runs the default FastFix artifact suite followed by the default QuickFIX comparison suite.
 
 Prerequisites:
 
-- `xmake`
 - `cmake`
 - `g++`
-- `git` if `build/_deps/quickfix-src` does not already exist
+- `make` or Ninja for the selected CMake generator
+
+The default path is now fully offline after `git submodule update --init --recursive`: Catch2, pugixml, QuickFIX, and `FIX44.xml` are all pinned inside this repository checkout.
 
 ## Measurement Boundaries
 
@@ -145,7 +161,7 @@ Each benchmark also emits a single raw line with the full counter set:
 
 - `build/bench/quickfix_FIX44.ffd`: FastFix text dictionary generated from QuickFIX `FIX44.xml`.
 - `build/bench/quickfix_FIX44.art`: compiled FastFix artifact for the main FIX44 comparison suite.
-- `build/sample-basic-overlay.art`: auxiliary merged sample profile artifact still generated during `build`; it is not required by the current FIX44 QuickFIX comparison suite.
+- `build/sample-basic.art`: auxiliary merged sample profile artifact used by shared test/codegen flows; benchmark commands do not consume it.
 - `build/bench/quickfix-cpp-bench`: compiled QuickFIX comparison binary.
 
 If you need the wider development workflow or tool inventory, see `docs/development.md`. This file is only about the benchmark subsystem.

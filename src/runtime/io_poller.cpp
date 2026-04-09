@@ -9,7 +9,7 @@
 #include <sys/epoll.h>
 #include <unistd.h>
 
-#if __has_include(<liburing.h>)
+#if !defined(FASTFIX_DISABLE_LIBURING) && __has_include(<liburing.h>)
 #define FASTFIX_HAS_LIBURING 1
 #include <liburing.h>
 #endif

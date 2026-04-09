@@ -6,12 +6,13 @@ This guide covers everything you need to contribute to or extend FastFix: buildi
 
 ## Build System
 
-FastFix uses [xmake](https://xmake.io/) as its build system.
+FastFix supports both offline CMake and offline xmake flows. CMake is the primary path for shared environments and the RHEL targets; xmake remains available for local development.
 
 ### Prerequisites
 
 - C++20 compiler (GCC 12+ or Clang 15+)
-- xmake (latest)
+- CMake 3.20+ and a native build backend (`make` or Ninja)
+- xmake (latest) if you prefer the optional xmake path
 - Linux x86_64 (primary platform)
 
 ### Build Targets
@@ -34,19 +35,30 @@ FastFix uses [xmake](https://xmake.io/) as its build system.
 ### Common Commands
 
 ```bash
-xmake                        # Build all targets (release)
-xmake -m debug               # Build debug mode
-xmake build fastfix-tests    # Build specific target
-xmake clean                  # Clean build directory
+cmake --preset dev-release   # Configure the default offline build
+cmake --build --preset dev-release
+ctest --preset dev-release
+
+bash ./scripts/offline_build.sh --preset dev-release --bench smoke
+
+xmake f -m release -y        # Optional xmake path
+xmake build fastfix-tests
+xmake clean
 ```
 
-After a release build, executables are written to `./build/linux/x86_64/release/`. The examples below assume `BIN_DIR=./build/linux/x86_64/release` and invoke binaries directly for reproducibility and predictable argument handling. `xmake run <target>` remains available as a convenience wrapper.
+Preset-based CMake builds write executables to `./build/cmake/<preset>/bin/`. The examples below assume `BIN_DIR=./build/cmake/dev-release/bin` for the CMake path and invoke binaries directly for reproducibility and predictable argument handling. The xmake path still writes to `./build/linux/x86_64/release/`.
+
+GitHub Actions CI covers the named RHEL presets through `ubi8/ubi:8.10` + `gcc-toolset-12` and `ubi9/ubi:9.7` + `gcc-toolset-14` container jobs, so those environments are regression-tested even when they are not reproduced locally.
 
 ### Dependencies
 
-Managed in `config/deps.lua`:
+Pinned as Git submodules for offline builds:
 
-- **Catch2 v3.4+** — test framework
+- **Catch2 v3.13.0** — `deps/src/Catch2`
+- **pugixml v1.15** — `deps/src/pugixml`
+- **QuickFIX commit 00dd20837c97578e725072e5514c8ffaa0e141d4** — `bench/vendor/quickfix`
+
+Initialize them with `git submodule update --init --recursive` before the first configure/build run.
 
 ### Compiler Defines
 
@@ -336,7 +348,7 @@ writer.encode_to_buffer(dictionary_view, options, &buf);
 ./bench/bench.sh builder
 ```
 
-The benchmark-specific breakdown now lives in [bench/README.md](../bench/README.md), including what each suite measures, the object-to-wire timing boundary, and the meaning of every printed metric. This section stays intentionally short and points to the canonical bench-local workflow.
+All of those benchmark entrypoints intentionally consume the pinned QuickFIX 4.4 inputs, either through `bench/vendor/quickfix/spec/FIX44.xml` or the generated `build/bench/quickfix_FIX44.ffd` / `build/bench/quickfix_FIX44.art` outputs. The benchmark-specific breakdown now lives in [bench/README.md](../bench/README.md), including what each suite measures, the object-to-wire timing boundary, and the meaning of every printed metric. This section stays intentionally short and points to the canonical bench-local workflow.
 
 ### What Gets Measured
 
