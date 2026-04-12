@@ -5,7 +5,6 @@
 #include <cstddef>
 #include <cstring>
 #include <memory>
-#include <poll.h>
 #include <random>
 #include <span>
 #include <string>
@@ -279,16 +278,14 @@ auto LiveInitiator::ResetWorkerShards(std::uint32_t worker_count) -> base::Statu
             return status;
         }
         {
-            auto backend = IoBackend::kPoll;
+            auto backend = IoBackend::kEpoll;
             if (engine_ != nullptr && engine_->config() != nullptr) {
                 backend = engine_->config()->io_backend;
             }
-            if (backend != IoBackend::kPoll) {
-                status = shard.poller.InitBackend(backend);
-                if (!status.ok()) {
-                    worker_shards_.clear();
-                    return status;
-                }
+            status = shard.poller.InitBackend(backend);
+            if (!status.ok()) {
+                worker_shards_.clear();
+                return status;
             }
         }
         shard.command_sink = std::make_shared<CommandSink>(this, worker_id, options_.command_queue_capacity);
@@ -719,49 +716,29 @@ auto LiveInitiator::PollOnce(std::chrono::milliseconds timeout) -> base::Status 
     const auto poll_started_ns = NowNs();
     const auto effective_timeout = ComputePollTimeout(timeout, poll_started_ns);
 
-    main_poll_scratch_.clear();
-    main_poll_scratch_.reserve(active_connection_count() + worker_shards_.size());
-
-    struct ShardPollState {
-        WorkerShardState* shard{nullptr};
-    };
-    std::vector<ShardPollState> shard_states;
-    shard_states.reserve(worker_shards_.size());
+    // SyncAndWait on each shard's connections via their IoPoller.
     for (auto& shard : worker_shards_) {
-        auto& shard_state = shard_states.emplace_back();
-        shard_state.shard = &shard;
-        shard.poller.PreparePoll(
+        auto status = shard.poller.SyncAndWait(
             shard.connections.size(),
             [&](std::size_t index) {
                 return shard.connections[index].connection.fd();
             },
-            main_poll_scratch_,
-            shard.poll_state_scratch);
-    }
-
-    const int timeout_ms = effective_timeout.count() < 0 ? -1 : static_cast<int>(effective_timeout.count());
-    const int rc = poll(main_poll_scratch_.data(), main_poll_scratch_.size(), timeout_ms);
-    if (rc < 0) {
-        if (errno == EINTR) {
-            return base::Status::Ok();
+            effective_timeout,
+            shard.io_ready_state);
+        if (!status.ok()) {
+            return status;
         }
-        return base::Status::IoError(std::string("poll failed: ") + std::strerror(errno));
-    }
-
-    for (auto& shard_state : shard_states) {
-        shard_state.shard->poller.CaptureReady(main_poll_scratch_, shard_state.shard->poll_state_scratch);
     }
 
     const auto now = NowNs();
-    for (auto& shard_state : shard_states) {
-        auto status = shard_state.shard->poller.ProcessReadyConnections(
-            shard_state.shard->poll_state_scratch,
-            shard_state.shard->connections.size(),
-            [&](std::size_t connection_index, bool readable) {
-                return ProcessConnection(*shard_state.shard, connection_index, readable, now);
-            });
-        if (!status.ok()) {
-            return status;
+    for (auto& shard : worker_shards_) {
+        for (auto it = shard.io_ready_state.ready_indices.rbegin();
+             it != shard.io_ready_state.ready_indices.rend(); ++it) {
+            const auto connection_index = *it;
+            if (connection_index < shard.connections.size()) {
+                auto status = ProcessConnection(shard, connection_index, true, now);
+                if (!status.ok()) return status;
+            }
         }
     }
 
@@ -826,59 +803,25 @@ auto LiveInitiator::PollWorkerOnce(WorkerShardState& shard, std::chrono::millise
 
     const auto t_poll_start = NowNs();
 
-    if (shard.poller.has_io_poller()) {
+    {
         auto status = shard.poller.SyncAndWait(
             shard.connections.size(),
             [&](std::size_t index) { return shard.connections[index].connection.fd(); },
             effective_timeout,
             shard.io_ready_state);
         if (!status.ok()) return status;
-    } else {
-        shard.poll_scratch.clear();
-        shard.poll_scratch.reserve(shard.connections.size() + 1U);
-
-        shard.poller.PreparePoll(
-            shard.connections.size(),
-            [&](std::size_t index) {
-                return shard.connections[index].connection.fd();
-            },
-            shard.poll_scratch,
-            shard.poll_state_scratch);
-
-        const int timeout_ms = effective_timeout.count() < 0 ? -1 : static_cast<int>(effective_timeout.count());
-        const int rc = poll(shard.poll_scratch.data(), shard.poll_scratch.size(), timeout_ms);
-        if (rc < 0) {
-            if (errno == EINTR) {
-                return base::Status::Ok();
-            }
-            return base::Status::IoError(std::string("poll failed: ") + std::strerror(errno));
-        }
-
-        shard.poller.CaptureReady(shard.poll_scratch, shard.poll_state_scratch);
     }
 
     const auto t_poll_end = NowNs();
     const auto now = NowNs();
 
     base::Status status;
-    if (shard.poller.has_io_poller()) {
-        for (auto it = shard.io_ready_state.ready_indices.rbegin();
-             it != shard.io_ready_state.ready_indices.rend(); ++it) {
-            const auto connection_index = *it;
-            if (connection_index < shard.connections.size()) {
-                status = ProcessConnection(shard, connection_index, true, now);
-                if (!status.ok()) return status;
-            }
-        }
-    } else {
-        status = shard.poller.ProcessReadyConnections(
-            shard.poll_state_scratch,
-            shard.connections.size(),
-            [&](std::size_t connection_index, bool readable) {
-                return ProcessConnection(shard, connection_index, readable, now);
-            });
-        if (!status.ok()) {
-            return status;
+    for (auto it = shard.io_ready_state.ready_indices.rbegin();
+         it != shard.io_ready_state.ready_indices.rend(); ++it) {
+        const auto connection_index = *it;
+        if (connection_index < shard.connections.size()) {
+            status = ProcessConnection(shard, connection_index, true, now);
+            if (!status.ok()) return status;
         }
     }
     const auto t_recv_done = NowNs();

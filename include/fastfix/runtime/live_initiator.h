@@ -112,8 +112,6 @@ class LiveInitiator {
         std::shared_ptr<CommandSink> command_sink;
         std::unique_ptr<WorkerInbox> inbox;
         std::vector<PendingReconnect> pending_reconnects;
-        std::vector<pollfd> poll_scratch;
-        ShardPoller::PollState poll_state_scratch;
         ShardPoller::IoReadyState io_ready_state;
     };
 
@@ -219,7 +217,6 @@ class LiveInitiator {
 
     Engine* engine_{nullptr};
     Options options_{};
-    std::vector<pollfd> main_poll_scratch_;
     std::vector<WorkerShardState> worker_shards_;
     std::vector<std::jthread> worker_threads_;
     mutable std::mutex control_mutex_;

@@ -6,13 +6,13 @@
 #include <cstring>
 #include <memory>
 #include <mutex>
-#include <poll.h>
 #include <span>
 #include <string>
 #include <string_view>
 #include <thread>
 #include <utility>
 
+#include <sys/epoll.h>
 #include <unistd.h>
 
 #include "fastfix/base/spsc_queue.h"
@@ -251,16 +251,14 @@ auto LiveAcceptor::ResetWorkerShards(std::uint32_t worker_count) -> base::Status
             return status;
         }
         {
-            auto backend = IoBackend::kPoll;
+            auto backend = IoBackend::kEpoll;
             if (engine_ != nullptr && engine_->config() != nullptr) {
                 backend = engine_->config()->io_backend;
             }
-            if (backend != IoBackend::kPoll) {
-                status = shard.poller.InitBackend(backend);
-                if (!status.ok()) {
-                    worker_shards_.clear();
-                    return status;
-                }
+            status = shard.poller.InitBackend(backend);
+            if (!status.ok()) {
+                worker_shards_.clear();
+                return status;
             }
         }
         shard.command_sink = std::make_shared<CommandSink>(this, worker_id, options_.command_queue_capacity);
@@ -590,53 +588,59 @@ auto LiveAcceptor::Run(std::size_t max_completed_sessions, std::chrono::millisec
             return status;
         }
 
-        while (!stop_requested_.load()) {
-            const auto terminal_status = LoadTerminalStatus();
-            if (terminal_status.has_value()) {
-                run_status = *terminal_status;
-                break;
-            }
-            if (max_completed_sessions != 0U && completed_sessions_.load() >= max_completed_sessions) {
-                break;
-            }
-
-            const auto now = NowNs();
-            const auto last_progress_ns = last_progress_ns_.load();
-            if (idle_timeout_ns != 0U && now > last_progress_ns + idle_timeout_ns) {
-                run_status = base::Status::IoError("live acceptor timed out while waiting for session progress");
-                break;
-            }
-
-            std::vector<pollfd> pollfds;
-            pollfds.reserve(listeners_.size());
-            for (const auto& listener : listeners_) {
-                pollfds.push_back(pollfd{.fd = listener.acceptor.fd(), .events = POLLIN, .revents = 0});
-            }
-
-            const int timeout_ms = options_.poll_timeout.count() < 0 ? -1 : static_cast<int>(options_.poll_timeout.count());
-            const int rc = poll(pollfds.data(), pollfds.size(), timeout_ms);
-            if (rc < 0) {
-                if (errno == EINTR) {
-                    continue;
-                }
-                run_status = base::Status::IoError(std::string("poll failed: ") + std::strerror(errno));
-                break;
-            }
-
-            const auto timestamp_ns = NowNs();
+        const int epfd = epoll_create1(EPOLL_CLOEXEC);
+        if (epfd < 0) {
+            run_status = base::Status::IoError(std::string("epoll_create1 failed: ") + std::strerror(errno));
+        } else {
             for (std::size_t index = 0; index < listeners_.size(); ++index) {
-                if ((pollfds[index].revents & POLLIN) == 0) {
-                    continue;
-                }
-                status = AcceptReadyListener(index, timestamp_ns);
-                if (!status.ok()) {
-                    run_status = status;
+                epoll_event ev{};
+                ev.events = EPOLLIN;
+                ev.data.u64 = static_cast<std::uint64_t>(index);
+                if (epoll_ctl(epfd, EPOLL_CTL_ADD, listeners_[index].acceptor.fd(), &ev) != 0) {
+                    run_status = base::Status::IoError(std::string("epoll_ctl ADD failed: ") + std::strerror(errno));
                     break;
                 }
             }
-            if (!run_status.ok()) {
-                break;
+
+            std::vector<epoll_event> epoll_events(listeners_.size());
+            while (run_status.ok() && !stop_requested_.load()) {
+                const auto terminal_status = LoadTerminalStatus();
+                if (terminal_status.has_value()) {
+                    run_status = *terminal_status;
+                    break;
+                }
+                if (max_completed_sessions != 0U && completed_sessions_.load() >= max_completed_sessions) {
+                    break;
+                }
+
+                const auto now = NowNs();
+                const auto last_progress_ns = last_progress_ns_.load();
+                if (idle_timeout_ns != 0U && now > last_progress_ns + idle_timeout_ns) {
+                    run_status = base::Status::IoError("live acceptor timed out while waiting for session progress");
+                    break;
+                }
+
+                const int timeout_ms = options_.poll_timeout.count() < 0 ? -1 : static_cast<int>(options_.poll_timeout.count());
+                const int n = epoll_wait(epfd, epoll_events.data(), static_cast<int>(epoll_events.size()), timeout_ms);
+                if (n < 0) {
+                    if (errno == EINTR) {
+                        continue;
+                    }
+                    run_status = base::Status::IoError(std::string("epoll_wait failed: ") + std::strerror(errno));
+                    break;
+                }
+
+                const auto timestamp_ns = NowNs();
+                for (int i = 0; i < n; ++i) {
+                    const auto index = static_cast<std::size_t>(epoll_events[i].data.u64);
+                    status = AcceptReadyListener(index, timestamp_ns);
+                    if (!status.ok()) {
+                        run_status = status;
+                        break;
+                    }
+                }
             }
+            ::close(epfd);
         }
         stop_requested_.store(true);
         StopWorkerThreads();
@@ -698,110 +702,92 @@ auto LiveAcceptor::PollOnce(std::chrono::milliseconds timeout) -> base::Status {
     const auto poll_started_ns = NowNs();
     const auto effective_timeout = ComputePollTimeout(timeout, poll_started_ns);
 
-    main_poll_scratch_.clear();
-    std::size_t connection_count = 0U;
-    for (const auto& shard : worker_shards_) {
-        connection_count += shard.connections.size();
-    }
-    main_poll_scratch_.reserve(listeners_.size() + connection_count + worker_shards_.size());
+    // In single-worker mode we combine listener fds and connection fds into the
+    // shard's IoPoller so that a single epoll_wait sees both incoming connections
+    // AND data on existing connections (just like the old poll() call did).
+    auto& shard = worker_shards_.front();
 
-    std::vector<bool> listener_ready(listeners_.size(), false);
-    struct ShardPollState {
-        WorkerShardState* shard{nullptr};
-    };
-    std::vector<ShardPollState> shard_states;
-    shard_states.reserve(worker_shards_.size());
-
-    for (const auto& listener : listeners_) {
-        main_poll_scratch_.push_back(pollfd{.fd = listener.acceptor.fd(), .events = POLLIN, .revents = 0});
-    }
-
-    for (auto& shard : worker_shards_) {
-        auto& shard_state = shard_states.emplace_back();
-        shard_state.shard = &shard;
-        shard.poller.PreparePoll(
-            shard.connections.size(),
-            [&](std::size_t index) {
-                return shard.connections[index].connection.fd();
-            },
-            main_poll_scratch_,
-            shard.poll_state_scratch);
-    }
-
-    const int timeout_ms = effective_timeout.count() < 0 ? -1 : static_cast<int>(effective_timeout.count());
-    const int rc = poll(main_poll_scratch_.data(), main_poll_scratch_.size(), timeout_ms);
-    if (rc < 0) {
-        if (errno == EINTR) {
-            return base::Status::Ok();
+    // Temporarily register listener fds on the shard poller using sentinel tags.
+    // Tag = kListenerTagBase + index to distinguish from connection fd tags.
+    static constexpr std::size_t kListenerTagBase = ~std::size_t{0} - 0x10000;
+    for (std::size_t i = 0; i < listeners_.size(); ++i) {
+        const int fd = listeners_[i].acceptor.fd();
+        if (fd >= 0) {
+            auto status = shard.poller.io_poller()->AddFd(fd, kListenerTagBase + i);
+            if (!status.ok()) {
+                // Cleanup already-added listener fds
+                for (std::size_t j = 0; j < i; ++j) {
+                    shard.poller.io_poller()->RemoveFd(listeners_[j].acceptor.fd());
+                }
+                return status;
+            }
         }
-        return base::Status::IoError(std::string("poll failed: ") + std::strerror(errno));
     }
 
-    for (std::size_t index = 0; index < listeners_.size(); ++index) {
-        listener_ready[index] = (main_poll_scratch_[index].revents & POLLIN) != 0;
+    // Combined SyncAndWait: polls both connections and listener fds.
+    auto status = shard.poller.SyncAndWait(
+        shard.connections.size(),
+        [&](std::size_t index) { return shard.connections[index].connection.fd(); },
+        effective_timeout,
+        shard.io_ready_state);
+
+    // Remove listener fds from the shard poller (they are managed separately).
+    for (std::size_t i = 0; i < listeners_.size(); ++i) {
+        shard.poller.io_poller()->RemoveFd(listeners_[i].acceptor.fd());
     }
-    for (auto& shard_state : shard_states) {
-        shard_state.shard->poller.CaptureReady(main_poll_scratch_, shard_state.shard->poll_state_scratch);
+
+    if (!status.ok()) {
+        return status;
     }
 
     const auto now = NowNs();
-    for (std::size_t index = 0; index < listeners_.size(); ++index) {
-        if (!listener_ready[index]) {
-            continue;
-        }
-        auto status = AcceptReadyListener(index, now);
-        if (!status.ok()) {
-            return status;
+
+    // Check if any listener tags became ready (they appear in io_poller's
+    // ready list via ReadyTag, but SyncAndWait maps tags to connection indices
+    // so listener events won't appear in ready_indices — we need to check the
+    // poller's raw result).  Since SyncAndWait filters by fd_to_index_ and
+    // listener fds are NOT in fd_to_index_, their events are silently dropped.
+    //
+    // Workaround: after the combined wait, do a non-blocking accept attempt on
+    // all listeners.  accept4(SOCK_NONBLOCK) returns EAGAIN if no connection.
+    for (std::size_t i = 0; i < listeners_.size(); ++i) {
+        auto accept_status = AcceptReadyListener(i, now);
+        if (!accept_status.ok()) return accept_status;
+    }
+
+    // Process ready connections.
+    for (auto it = shard.io_ready_state.ready_indices.rbegin();
+         it != shard.io_ready_state.ready_indices.rend(); ++it) {
+        const auto connection_index = *it;
+        if (connection_index < shard.connections.size()) {
+            auto conn_status = ProcessConnection(shard, connection_index, true, now);
+            if (!conn_status.ok()) return conn_status;
         }
     }
 
-    for (auto& shard_state : shard_states) {
-        auto status = shard_state.shard->poller.ProcessReadyConnections(
-            shard_state.shard->poll_state_scratch,
-            shard_state.shard->connections.size(),
-            [&](std::size_t connection_index, bool readable) {
-                return ProcessConnection(*shard_state.shard, connection_index, readable, now);
-            });
-        if (!status.ok()) {
-            return status;
-        }
+    {
+        auto app_status = PollManagedApplicationWorker(shard.worker_id);
+        if (!app_status.ok()) return app_status;
     }
-
-    for (const auto& shard : worker_shards_) {
-        auto status = PollManagedApplicationWorker(shard.worker_id);
-        if (!status.ok()) {
-            return status;
-        }
-    }
-
-    for (auto& shard : worker_shards_) {
-        auto status = DrainWorkerCommands(shard.worker_id, now);
-        if (!status.ok()) {
-            return status;
-        }
+    {
+        auto drain_status = DrainWorkerCommands(shard.worker_id, now);
+        if (!drain_status.ok()) return drain_status;
     }
 
     const auto timers_now = NowNs();
-    for (auto& shard : worker_shards_) {
-        auto status = ProcessDueTimers(shard, timers_now);
-        if (!status.ok()) {
-            return status;
-        }
+    {
+        auto timer_status = ProcessDueTimers(shard, timers_now);
+        if (!timer_status.ok()) return timer_status;
     }
-
-    for (const auto& shard : worker_shards_) {
-        auto status = PollManagedApplicationWorker(shard.worker_id);
-        if (!status.ok()) {
-            return status;
-        }
+    {
+        auto app_status = PollManagedApplicationWorker(shard.worker_id);
+        if (!app_status.ok()) return app_status;
     }
 
     const auto final_now = NowNs();
-    for (auto& shard : worker_shards_) {
-        auto status = DrainWorkerCommands(shard.worker_id, final_now);
-        if (!status.ok()) {
-            return status;
-        }
+    {
+        auto drain_status = DrainWorkerCommands(shard.worker_id, final_now);
+        if (!drain_status.ok()) return drain_status;
     }
 
     return base::Status::Ok();
@@ -821,59 +807,25 @@ auto LiveAcceptor::PollWorkerOnce(WorkerShardState& shard, std::chrono::millisec
 
     const auto t_poll_start = NowNs();
 
-    if (shard.poller.has_io_poller()) {
+    {
         auto status = shard.poller.SyncAndWait(
             shard.connections.size(),
             [&](std::size_t index) { return shard.connections[index].connection.fd(); },
             effective_timeout,
             shard.io_ready_state);
         if (!status.ok()) return status;
-    } else {
-        shard.poll_scratch.clear();
-        shard.poll_scratch.reserve(shard.connections.size() + 1U);
-
-        shard.poller.PreparePoll(
-            shard.connections.size(),
-            [&](std::size_t index) {
-                return shard.connections[index].connection.fd();
-            },
-            shard.poll_scratch,
-            shard.poll_state_scratch);
-
-        const int timeout_ms = effective_timeout.count() < 0 ? -1 : static_cast<int>(effective_timeout.count());
-        const int rc = poll(shard.poll_scratch.data(), shard.poll_scratch.size(), timeout_ms);
-        if (rc < 0) {
-            if (errno == EINTR) {
-                return base::Status::Ok();
-            }
-            return base::Status::IoError(std::string("poll failed: ") + std::strerror(errno));
-        }
-
-        shard.poller.CaptureReady(shard.poll_scratch, shard.poll_state_scratch);
     }
 
     const auto t_poll_end = NowNs();
     const auto now = NowNs();
 
     base::Status status;
-    if (shard.poller.has_io_poller()) {
-        for (auto it = shard.io_ready_state.ready_indices.rbegin();
-             it != shard.io_ready_state.ready_indices.rend(); ++it) {
-            const auto connection_index = *it;
-            if (connection_index < shard.connections.size()) {
-                status = ProcessConnection(shard, connection_index, true, now);
-                if (!status.ok()) return status;
-            }
-        }
-    } else {
-        status = shard.poller.ProcessReadyConnections(
-            shard.poll_state_scratch,
-            shard.connections.size(),
-            [&](std::size_t connection_index, bool readable) {
-                return ProcessConnection(shard, connection_index, readable, now);
-            });
-        if (!status.ok()) {
-            return status;
+    for (auto it = shard.io_ready_state.ready_indices.rbegin();
+         it != shard.io_ready_state.ready_indices.rend(); ++it) {
+        const auto connection_index = *it;
+        if (connection_index < shard.connections.size()) {
+            status = ProcessConnection(shard, connection_index, true, now);
+            if (!status.ok()) return status;
         }
     }
     const auto t_recv_done = NowNs();
