@@ -386,6 +386,7 @@ struct ProtocolEvent {
           session_active(other.session_active),
           disconnect(other.disconnect),
           poss_resend(other.poss_resend),
+          session_reject(other.session_reject),
           owned_application_message_(other.owned_application_message_) {
         RebindOwnedApplicationMessage();
     }
@@ -396,6 +397,7 @@ struct ProtocolEvent {
           session_active(other.session_active),
           disconnect(other.disconnect),
           poss_resend(other.poss_resend),
+          session_reject(other.session_reject),
           owned_application_message_(std::move(other.owned_application_message_)) {
         RebindOwnedApplicationMessage();
     }
@@ -409,6 +411,7 @@ struct ProtocolEvent {
         session_active = other.session_active;
         disconnect = other.disconnect;
         poss_resend = other.poss_resend;
+        session_reject = other.session_reject;
         owned_application_message_ = other.owned_application_message_;
         RebindOwnedApplicationMessage();
         return *this;
@@ -423,6 +426,7 @@ struct ProtocolEvent {
         session_active = other.session_active;
         disconnect = other.disconnect;
         poss_resend = other.poss_resend;
+        session_reject = other.session_reject;
         owned_application_message_ = std::move(other.owned_application_message_);
         RebindOwnedApplicationMessage();
         return *this;
@@ -433,6 +437,7 @@ struct ProtocolEvent {
     bool session_active{false};
     bool disconnect{false};
     bool poss_resend{false};
+    bool session_reject{false};
 
     auto MaterializeApplicationMessages() -> void {
         for (auto& message : application_messages) {
@@ -608,6 +613,7 @@ class AdminProtocol {
     store::SessionStore* store_{nullptr};
     SessionCore session_;
     std::string outstanding_test_request_id_;
+    bool logout_sent_{false};
     std::optional<base::Status> initialization_error_;
     codec::PrecompiledTemplateTable encode_templates_;
     codec::CompiledDecoderTable decode_table_;

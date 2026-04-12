@@ -5,7 +5,6 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILD_DIR="$ROOT_DIR/build"
 BENCH_DIR="$BUILD_DIR/bench"
-XMAKE_BIN_DIR="$BUILD_DIR/linux/x86_64/release"
 CMAKE_PRESET="${FASTFIX_CMAKE_PRESET:-dev-release}"
 CMAKE_BUILD_DIR="${FASTFIX_CMAKE_BUILD_DIR:-$ROOT_DIR/build/cmake/$CMAKE_PRESET}"
 CMAKE_BIN_DIR="$CMAKE_BUILD_DIR/bin"
@@ -17,32 +16,25 @@ QUICKFIX_XML="$QUICKFIX_SRC_DIR/spec/FIX44.xml"
 QUICKFIX_FFD="$BENCH_DIR/quickfix_FIX44.ffd"
 QUICKFIX_ART="$BENCH_DIR/quickfix_FIX44.art"
 
-build_system="${FASTFIX_BUILD_SYSTEM:-auto}"
-FASTFIX_BENCH_BIN=""
-XML2FFD_BIN=""
-DICTGEN_BIN=""
-QUICKFIX_BENCH_BIN=""
-FASTFIX_LOOPBACK_BIN=""
-QUICKFIX_LOOPBACK_BIN=""
+FASTFIX_BENCH_BIN="$CMAKE_BIN_DIR/fastfix-bench"
+XML2FFD_BIN="$CMAKE_BIN_DIR/fastfix-xml2ffd"
+DICTGEN_BIN="$CMAKE_BIN_DIR/fastfix-dictgen"
+QUICKFIX_BENCH_BIN="$CMAKE_BIN_DIR/quickfix-cpp-bench"
 
 usage() {
     cat <<'EOF'
 usage: ./bench/bench.sh <command> [args...]
 
 commands:
-  build              Build all benchmark binaries and benchmark input artifacts
-  fastfix            Run FastFix benchmark against build/bench/quickfix_FIX44.art
-  fastfix-ffd        Run FastFix benchmark against build/bench/quickfix_FIX44.ffd
-  quickfix           Run QuickFIX comparison benchmark (parse, encode, session-inbound, replay, loopback)
-  builder            Run the FIX44 encode-focused FastFix benchmark variant
-  compare            Run the default FastFix and QuickFIX comparison suites side by side
-  loopback           Run FastFix two-process loopback benchmark (35=D + 35=F, async)
-  quickfix-loopback  Run QuickFIX two-process loopback benchmark (35=D + 35=F, async)
-  loopback-compare   Run both two-process loopback benchmarks side by side
+  build         Build all benchmark binaries and benchmark input artifacts
+  fastfix       Run FastFix benchmark against build/bench/quickfix_FIX44.art
+  fastfix-ffd   Run FastFix benchmark against build/bench/quickfix_FIX44.ffd
+  quickfix      Run QuickFIX comparison benchmark (parse, encode, session-inbound, replay, loopback)
+    builder       Run the FIX44 encode-focused FastFix benchmark variant
+  compare       Run the default FastFix and QuickFIX comparison suites side by side
 
 environment overrides:
-    FASTFIX_BUILD_SYSTEM=cmake|xmake   Select the build system (default: auto, prefers cmake)
-    FASTFIX_CMAKE_PRESET=<name>        CMake preset used when FASTFIX_BUILD_SYSTEM=cmake
+    FASTFIX_CMAKE_PRESET=<name>        CMake preset used for the build (default: dev-release)
     FASTFIX_CMAKE_BUILD_DIR=<path>     Explicit CMake build directory override
 EOF
 }
@@ -59,40 +51,9 @@ has_flag() {
 }
 
 resolve_build_system() {
-    if [ "$build_system" = "auto" ]; then
-        if command -v cmake >/dev/null 2>&1; then
-            build_system="cmake"
-        elif command -v xmake >/dev/null 2>&1; then
-            build_system="xmake"
-        else
-            echo "error: neither cmake nor xmake is available" >&2
-            exit 1
-        fi
-    fi
-
-    case "$build_system" in
-        cmake|xmake)
-            ;;
-        *)
-            echo "error: unsupported FASTFIX_BUILD_SYSTEM '$build_system'" >&2
-            exit 1
-            ;;
-    esac
-
-    if [ "$build_system" = "cmake" ]; then
-        FASTFIX_BENCH_BIN="$CMAKE_BIN_DIR/fastfix-bench"
-        XML2FFD_BIN="$CMAKE_BIN_DIR/fastfix-xml2ffd"
-        DICTGEN_BIN="$CMAKE_BIN_DIR/fastfix-dictgen"
-        QUICKFIX_BENCH_BIN="$CMAKE_BIN_DIR/quickfix-cpp-bench"
-        FASTFIX_LOOPBACK_BIN="$CMAKE_BIN_DIR/fastfix-loopback"
-        QUICKFIX_LOOPBACK_BIN="$CMAKE_BIN_DIR/quickfix-loopback"
-    else
-        FASTFIX_BENCH_BIN="$XMAKE_BIN_DIR/fastfix-bench"
-        XML2FFD_BIN="$XMAKE_BIN_DIR/fastfix-xml2ffd"
-        DICTGEN_BIN="$XMAKE_BIN_DIR/fastfix-dictgen"
-        QUICKFIX_BENCH_BIN="$BENCH_DIR/quickfix-cpp-bench"
-        FASTFIX_LOOPBACK_BIN="$XMAKE_BIN_DIR/fastfix-loopback"
-        QUICKFIX_LOOPBACK_BIN="$BENCH_DIR/quickfix-loopback"
+    if ! command -v cmake >/dev/null 2>&1; then
+        echo "error: cmake is not available" >&2
+        exit 1
     fi
 }
 
@@ -127,69 +88,17 @@ cmake_build() {
 }
 
 build_fastfix_tools() {
-    if [ "$build_system" = "cmake" ]; then
-        cmake_build fastfix-bench fastfix-xml2ffd fastfix-dictgen
-    else
-        xmake build fastfix-bench
-        xmake build fastfix-xml2ffd
-        xmake build fastfix-dictgen
-    fi
+    cmake_build fastfix-bench fastfix-xml2ffd fastfix-dictgen
 }
 
 prepare_quickfix_dictionary() {
     ensure_quickfix_source
-
-    if [ "$build_system" = "cmake" ]; then
-        cmake_build fastfix-fix44-assets
-        return
-    fi
-
-    mkdir -p "$BENCH_DIR"
-
-    "$XML2FFD_BIN" \
-        --xml "$QUICKFIX_XML" \
-        --output "$QUICKFIX_FFD" \
-        --profile-id 4400
-
-    "$DICTGEN_BIN" \
-        --input "$QUICKFIX_FFD" \
-        --output "$QUICKFIX_ART"
+    cmake_build fastfix-fix44-assets
 }
 
 build_quickfix_bench() {
     ensure_quickfix_source
-
-    if [ "$build_system" = "cmake" ]; then
-        cmake_build fastfix-quickfix-cpp-bench fastfix-fix44-assets
-        return
-    fi
-
-    mkdir -p "$BENCH_DIR"
-
-    cmake -S "$QUICKFIX_SRC_DIR" -B "$QUICKFIX_BUILD_DIR" \
-        -DCMAKE_BUILD_TYPE=Release \
-        -DQUICKFIX_SHARED_LIBS=OFF \
-        -DQUICKFIX_EXAMPLES=OFF \
-        -DQUICKFIX_TESTS=OFF
-    cmake --build "$QUICKFIX_BUILD_DIR" -j
-
-    g++ -O2 -DNDEBUG -std=c++20 \
-        -I"$QUICKFIX_SRC_DIR/include/quickfix" \
-        -I"$QUICKFIX_SRC_DIR/src/C++" \
-        -I"$ROOT_DIR/bench" \
-        "$ROOT_DIR/bench/quickfix_main.cpp" \
-        "$QUICKFIX_BUILD_DIR/src/C++/libquickfix.a" \
-        -pthread \
-        -o "$QUICKFIX_BENCH_BIN"
-}
-
-build_loopback_bins() {
-    ensure_quickfix_source
-    if [ "$build_system" = "cmake" ]; then
-        cmake_build fastfix-loopback quickfix-loopback fastfix-fix44-assets
-    else
-        cmake_build fastfix-loopback quickfix-loopback fastfix-fix44-assets
-    fi
+    cmake_build fastfix-quickfix-cpp-bench fastfix-fix44-assets
 }
 
 build_all() {
@@ -197,7 +106,6 @@ build_all() {
     build_fastfix_tools
     prepare_quickfix_dictionary
     build_quickfix_bench
-    build_loopback_bins
 }
 
 run_fastfix_artifact() {
@@ -277,41 +185,6 @@ case "$command_name" in
         fi
         run_fastfix_artifact --iterations 100000 --loopback 1000 --replay 1000
         run_quickfix --iterations 100000 --replay 1000 --replay-span 128 --loopback 1000
-        ;;
-    loopback)
-        resolve_build_system
-        build_loopback_bins
-        prepare_quickfix_dictionary
-        if [ "$#" -eq 0 ]; then
-            set -- --iterations 1000 --warmup 50
-        fi
-        "$FASTFIX_LOOPBACK_BIN" --artifact "$QUICKFIX_ART" "$@"
-        ;;
-    quickfix-loopback)
-        resolve_build_system
-        build_loopback_bins
-        ensure_quickfix_source
-        if [ "$#" -eq 0 ]; then
-            set -- --iterations 1000 --warmup 50
-        fi
-        "$QUICKFIX_LOOPBACK_BIN" --xml "$QUICKFIX_XML" "$@"
-        ;;
-    loopback-compare)
-        resolve_build_system
-        build_loopback_bins
-        prepare_quickfix_dictionary
-        ensure_quickfix_source
-        loopback_compare_args=("$@")
-        if ! has_flag "--iterations" "${loopback_compare_args[@]}"; then
-            loopback_compare_args+=(--iterations 1000)
-        fi
-        if ! has_flag "--warmup" "${loopback_compare_args[@]}"; then
-            loopback_compare_args+=(--warmup 50)
-        fi
-        echo '=== FastFix two-process loopback ==='
-        "$FASTFIX_LOOPBACK_BIN" --artifact "$QUICKFIX_ART" "${loopback_compare_args[@]}"
-        echo '=== QuickFIX two-process loopback ==='
-        "$QUICKFIX_LOOPBACK_BIN" --xml "$QUICKFIX_XML" "${loopback_compare_args[@]}"
         ;;
     *)
         usage

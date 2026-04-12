@@ -21,9 +21,6 @@ FASTFIX_CMAKE_PRESET=dev-release ./bench/bench.sh quickfix
 FASTFIX_CMAKE_PRESET=dev-release ./bench/bench.sh builder
 FASTFIX_CMAKE_PRESET=dev-release ./bench/bench.sh compare
 
-# Optional xmake fallback
-FASTFIX_BUILD_SYSTEM=xmake ./bench/bench.sh build
-
 # Historical shorthand still works when the default dev-release preset is fine
 ./bench/bench.sh build
 ./bench/bench.sh fastfix
@@ -32,8 +29,6 @@ FASTFIX_BUILD_SYSTEM=xmake ./bench/bench.sh build
 ./bench/bench.sh builder
 ./bench/bench.sh compare
 ```
-
-The xmake fallback also recreates the QuickFIX44 benchmark assets automatically if `build/generated/` or `build/bench/` were removed beforehand.
 
 Every benchmark command above intentionally uses QuickFIX FIX44 inputs: `bench/vendor/quickfix/spec/FIX44.xml`, `build/bench/quickfix_FIX44.ffd`, or `build/bench/quickfix_FIX44.art`. The sample profile artifact is only a shared test/codegen asset and is not a benchmark input.
 
@@ -88,29 +83,29 @@ Encode comparisons measure from a neutral business object to wire bytes. Both Fa
 
 ## Latest Full Compare Snapshot
 
-The full default suite was rerun on 2026-04-08 with `./bench/bench.sh compare`. The raw output from that run is saved at `build/bench/latest-compare.txt`.
+The full default suite was rerun on 2026-04-13 with `./bench/bench.sh compare` after the compiled decoder, T1-fix, and hot-path optimisation rounds. The raw output from that run is saved at `build/bench/latest-compare.txt`.
 
 ### Cross-Engine Summary
 
 | Boundary | FastFix metric | QuickFIX metric | FastFix p50 | FastFix p95 | QuickFIX p50 | QuickFIX p95 |
 |----------|----------------|-----------------|-------------|-------------|--------------|--------------|
-| encode (object → wire) | `encode` | `quickfix-encode-buffer` | 461 ns | 491 ns | 1.25 µs | 1.43 µs |
-| parse (wire → object) | `parse` | `quickfix-parse` | 992 ns | 1.02 µs | 1.25 µs | 1.30 µs |
-| session-inbound | `session-inbound` | `quickfix-session-inbound` | 2.58 µs | 2.71 µs | 2.32 µs | 2.44 µs |
-| replay (128 msgs) | `replay` | `quickfix-replay` | 361 µs | 367 µs | 233 µs | 240 µs |
-| loopback RTT | `loopback-roundtrip` | `quickfix-loopback` | 20.01 µs | 26.60 µs | 20.30 µs | 24.68 µs |
+| encode (object → wire) | `encode` | `quickfix-encode-buffer` | 431 ns | 471 ns | ~1.25 µs | ~1.43 µs |
+| parse (wire → object) | `parse` | `quickfix-parse` | 711 ns | 742 ns | ~1.25 µs | ~1.30 µs |
+| session-inbound | `session-inbound` | `quickfix-session-inbound` | 1.68 µs | 1.98 µs | 2.32 µs | 2.44 µs |
+| replay (128 msgs) | `replay` | `quickfix-replay` | 328 µs | 381 µs | 233 µs | 240 µs |
+| loopback RTT | `loopback-roundtrip` | `quickfix-loopback` | 20.29 µs | 25.24 µs | 20.30 µs | 24.68 µs |
 
-FastFix encode is ~2.7× faster via the generated typed writer. QuickFIX leads the raw parse path by a modest margin. Session-inbound is near parity (~10% difference). QuickFIX replay is faster wall-time but allocates 4,117/op vs 0/op for FastFix — it returns stored string copies per message rather than re-encoding from the store. Loopback is dominated by TCP kernel RTT and is essentially identical.
+FastFix now beats QuickFIX on session-inbound by 1.38x (1.68 µs vs 2.32 µs). The codec layer shows a 2-3x advantage: encode is ~2.9x faster via the generated typed writer and parse is ~1.8x faster with the compiled decoder. QuickFIX replay is faster wall-time but allocates 4,117/op vs 0/op for FastFix — it returns stored string copies per message rather than re-encoding from the store. Wire-to-wire loopback RTT is roughly equal since kernel TCP overhead dominates at ~20 µs.
 ### FastFix Suite Snapshot
 
 | Metric | p50 | p95 | p99 | alloc/op | ops/sec | cache/op | branch/op |
 |--------|-----|-----|-----|----------|---------|----------|-----------|
-| `encode` | 461 ns | 491 ns | 571 ns | 0 | 2,020,000 | 0.0 | 0.0 |
-| `peek` | 180 ns | 190 ns | 191 ns | 0 | 4,950,000 | 0.0 | 0.0 |
-| `parse` | 992 ns | 1.02 µs | 1.23 µs | 0 | 967,900 | 0.0 | 0.0 |
-| `session-inbound` | 2.58 µs | 2.71 µs | 4.00 µs | 0 | 371,700 | 0.9 | 0.1 |
-| `replay` | 361 µs | 367 µs | 378 µs | 0 | 2,900 | 19.7 | 197.1 |
-| `loopback-roundtrip` | 20.01 µs | 26.60 µs | 35.19 µs | 3 | 45,200 | 16.1 | 34.4 |
+| `encode` | 431 ns | 471 ns | 661 ns | 0 | 2,150,000 | 0.0 | 0.0 |
+| `peek` | 140 ns | 141 ns | 141 ns | 0 | 6,330,000 | 0.0 | 0.0 |
+| `parse` | 711 ns | 742 ns | 882 ns | 0 | 1,360,000 | 0.0 | 0.0 |
+| `session-inbound` | 1.68 µs | 1.98 µs | 3.29 µs | 0 | 530,000 | 0.9 | 0.1 |
+| `replay` | 328 µs | 381 µs | 387 µs | 0 | 3,000 | 19.7 | 197.1 |
+| `loopback-roundtrip` | 20.29 µs | 25.24 µs | 29.50 µs | 3 | 47,000 | 16.1 | 34.4 |
 
 ### QuickFIX Suite Snapshot
 

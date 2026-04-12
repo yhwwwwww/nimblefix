@@ -6,6 +6,7 @@
 #include <fstream>
 #include <limits>
 #include <string_view>
+#include <type_traits>
 #include <unordered_set>
 
 namespace fastfix::runtime {
@@ -105,11 +106,20 @@ auto ParseBool(std::string_view token) -> base::Result<bool> {
 template <typename Integer>
 auto ParseInteger(std::string_view token, const char* label) -> base::Result<Integer> {
     try {
-        const auto value = std::stoull(std::string(token), nullptr, 0);
-        if (value > std::numeric_limits<Integer>::max()) {
-            return base::Status::InvalidArgument(std::string(label) + " is out of range");
+        if constexpr (std::is_signed_v<Integer>) {
+            const auto value = std::stoll(std::string(token), nullptr, 0);
+            if (value < std::numeric_limits<Integer>::min() ||
+                value > std::numeric_limits<Integer>::max()) {
+                return base::Status::InvalidArgument(std::string(label) + " is out of range");
+            }
+            return static_cast<Integer>(value);
+        } else {
+            const auto value = std::stoull(std::string(token), nullptr, 0);
+            if (value > std::numeric_limits<Integer>::max()) {
+                return base::Status::InvalidArgument(std::string(label) + " is out of range");
+            }
+            return static_cast<Integer>(value);
         }
-        return static_cast<Integer>(value);
     } catch (...) {
         return base::Status::InvalidArgument(std::string("invalid ") + label + " value");
     }
@@ -617,12 +627,13 @@ auto LoadEngineConfigText(std::string_view text, const std::filesystem::path& ba
             auto durable_local_utc_offset = base::Result<std::int32_t>(0);
             if (parts.size() > counterparty_columns::kDurableLocalUtcOffsetSeconds &&
                 !Trim(parts[counterparty_columns::kDurableLocalUtcOffsetSeconds]).empty()) {
-                durable_local_utc_offset = ParseInteger<std::int32_t>(
+                auto raw = ParseInteger<std::int32_t>(
                     parts[counterparty_columns::kDurableLocalUtcOffsetSeconds],
                     "durable_local_utc_offset_seconds");
-                if (!durable_local_utc_offset.ok()) {
-                    return durable_local_utc_offset.status();
+                if (!raw.ok()) {
+                    return raw.status();
                 }
+                durable_local_utc_offset = raw.value();
             }
             auto durable_use_system_tz = base::Result<bool>(true);
             if (parts.size() > counterparty_columns::kDurableUseSystemTimezone &&

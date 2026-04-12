@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -202,6 +203,9 @@ class NormalizedDictionaryView {
         std::uint32_t original_index;
     };
 
+    static constexpr std::size_t kDirectLookupSize = 10000;
+    static constexpr std::uint16_t kNoEntry = 0xFFFFU;
+
     LoadedProfile profile_;
     StringTableView string_table_;
     FixedSectionView<FieldDefRecord> field_defs_;
@@ -215,6 +219,10 @@ class NormalizedDictionaryView {
     std::vector<MsgTypeIndexEntry> message_index_;
     std::vector<TagRuleEntry> sorted_message_rules_;
     std::vector<TagRuleEntry> sorted_group_rules_;
+
+    /// Direct-address table: tag -> index into field_defs_ for tags < kDirectLookupSize.
+    /// Falls back to binary search on field_index_ for tags >= kDirectLookupSize.
+    std::array<std::uint16_t, kDirectLookupSize> field_direct_lookup_;
 };
 
 }  // namespace fastfix::profile

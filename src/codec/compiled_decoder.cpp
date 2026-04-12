@@ -69,6 +69,8 @@ auto CompiledMessageDecoder::Build(
                 decoder.overflow_tags_[decoder.overflow_count_] = tag;
                 decoder.overflow_slots_[decoder.overflow_count_] = slot_idx;
                 ++decoder.overflow_count_;
+            } else {
+                decoder.overflow_exceeded_ = true;
             }
         }
 

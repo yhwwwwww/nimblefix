@@ -74,6 +74,12 @@ auto SessionCore::BeginLogon() -> base::Status {
 }
 
 auto SessionCore::RestoreSequenceState(std::uint32_t next_in_seq, std::uint32_t next_out_seq) -> base::Status {
+    if (state_ != SessionState::kDisconnected && state_ != SessionState::kConnected &&
+        state_ != SessionState::kPendingLogon && state_ != SessionState::kActive &&
+        state_ != SessionState::kRecovering) {
+        return base::Status::InvalidArgument("sequence state can only be restored before session activation");
+    }
+
     if (next_in_seq == 0 || next_out_seq == 0) {
         return base::Status::InvalidArgument("sequence numbers must be positive");
     }

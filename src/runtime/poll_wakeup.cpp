@@ -1,45 +1,17 @@
 #include "fastfix/runtime/poll_wakeup.h"
 
-#include <array>
 #include <cerrno>
+#include <cstdint>
 #include <cstring>
 
-#include <fcntl.h>
+#include <sys/eventfd.h>
 #include <unistd.h>
 
 namespace fastfix::runtime {
 
-namespace {
-
-constexpr std::size_t kWakeDrainBufferBytes = 64U;
-
-auto ConfigureFd(int fd) -> base::Status {
-    const auto flags = fcntl(fd, F_GETFL, 0);
-    if (flags < 0) {
-        return base::Status::IoError(std::string("fcntl(F_GETFL) failed: ") + std::strerror(errno));
-    }
-    if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
-        return base::Status::IoError(std::string("fcntl(F_SETFL) failed: ") + std::strerror(errno));
-    }
-
-    const auto fd_flags = fcntl(fd, F_GETFD, 0);
-    if (fd_flags < 0) {
-        return base::Status::IoError(std::string("fcntl(F_GETFD) failed: ") + std::strerror(errno));
-    }
-    if (fcntl(fd, F_SETFD, fd_flags | FD_CLOEXEC) < 0) {
-        return base::Status::IoError(std::string("fcntl(F_SETFD) failed: ") + std::strerror(errno));
-    }
-
-    return base::Status::Ok();
-}
-
-}  // namespace
-
 PollWakeup::PollWakeup(PollWakeup&& other) noexcept
-    : read_fd_(other.read_fd_),
-      write_fd_(other.write_fd_) {
-    other.read_fd_ = -1;
-    other.write_fd_ = -1;
+    : efd_(other.efd_) {
+    other.efd_ = -1;
 }
 
 auto PollWakeup::operator=(PollWakeup&& other) noexcept -> PollWakeup& {
@@ -48,10 +20,8 @@ auto PollWakeup::operator=(PollWakeup&& other) noexcept -> PollWakeup& {
     }
 
     Close();
-    read_fd_ = other.read_fd_;
-    write_fd_ = other.write_fd_;
-    other.read_fd_ = -1;
-    other.write_fd_ = -1;
+    efd_ = other.efd_;
+    other.efd_ = -1;
     return *this;
 }
 
@@ -62,37 +32,19 @@ PollWakeup::~PollWakeup() {
 auto PollWakeup::Open() -> base::Status {
     Close();
 
-    int fds[2]{-1, -1};
-    if (pipe(fds) != 0) {
-        return base::Status::IoError(std::string("pipe failed: ") + std::strerror(errno));
+    const int fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+    if (fd < 0) {
+        return base::Status::IoError(std::string("eventfd failed: ") + std::strerror(errno));
     }
 
-    auto status = ConfigureFd(fds[0]);
-    if (!status.ok()) {
-        close(fds[0]);
-        close(fds[1]);
-        return status;
-    }
-    status = ConfigureFd(fds[1]);
-    if (!status.ok()) {
-        close(fds[0]);
-        close(fds[1]);
-        return status;
-    }
-
-    read_fd_ = fds[0];
-    write_fd_ = fds[1];
+    efd_ = fd;
     return base::Status::Ok();
 }
 
 auto PollWakeup::Close() -> void {
-    if (read_fd_ >= 0) {
-        close(read_fd_);
-        read_fd_ = -1;
-    }
-    if (write_fd_ >= 0) {
-        close(write_fd_);
-        write_fd_ = -1;
+    if (efd_ >= 0) {
+        close(efd_);
+        efd_ = -1;
     }
 }
 
@@ -101,10 +53,10 @@ auto PollWakeup::Signal() const -> void {
         return;
     }
 
-    static constexpr unsigned char kWakeByte = 1U;
+    std::uint64_t val = 1;
     while (true) {
-        const auto rc = write(write_fd_, &kWakeByte, sizeof(kWakeByte));
-        if (rc == static_cast<ssize_t>(sizeof(kWakeByte))) {
+        const auto rc = write(efd_, &val, sizeof(val));
+        if (rc == static_cast<ssize_t>(sizeof(val))) {
             return;
         }
         if (rc < 0 && errno == EINTR) {
@@ -119,11 +71,11 @@ auto PollWakeup::Drain() -> void {
         return;
     }
 
-    std::array<unsigned char, kWakeDrainBufferBytes> buffer{};
+    std::uint64_t val{};
     while (true) {
-        const auto rc = read(read_fd_, buffer.data(), buffer.size());
-        if (rc > 0) {
-            continue;
+        const auto rc = read(efd_, &val, sizeof(val));
+        if (rc == static_cast<ssize_t>(sizeof(val))) {
+            return;
         }
         if (rc < 0 && errno == EINTR) {
             continue;

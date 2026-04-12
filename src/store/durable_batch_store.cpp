@@ -656,8 +656,7 @@ auto DurableBatchSessionStore::Open() -> base::Status {
     if (options_.rollover_mode == DurableStoreRolloverMode::kLocalTime) {
         if (options_.use_system_timezone) {
             auto now = std::time(nullptr);
-            std::tm local_tm{};
-            auto* local = localtime_r(&now, &local_tm);
+            auto* local = std::localtime(&now);
             impl_->effective_utc_offset_seconds = static_cast<std::int32_t>(local->tm_gmtoff);
         } else {
             impl_->effective_utc_offset_seconds = options_.local_utc_offset_seconds;
@@ -920,23 +919,8 @@ auto DurableBatchSessionStore::Flush() -> base::Status {
         }
     }
 
-    if (wrote_log && !SyncFileHeader(impl_->active_segment.log_fd, &active_log_header, impl_->active_segment.log_size)) {
-        return base::Status::IoError(
-            IoErrorMessage(impl_->active_segment.log_path, "unable to update durable batch log header"));
-    }
-    if (wrote_index &&
-        !SyncFileHeader(impl_->active_segment.index_fd, &active_index_header, impl_->active_segment.index_size)) {
-        return base::Status::IoError(
-            IoErrorMessage(impl_->active_segment.index_path, "unable to update durable batch index header"));
-    }
-    if (wrote_recovery && !SyncFileHeader(impl_->recovery_fd, &recovery_header, impl_->recovery_size)) {
-        return base::Status::IoError(
-            IoErrorMessage(impl_->recovery_path, "unable to update durable recovery header"));
-    }
-
-    impl_->pending_entries.clear();
-    impl_->pending_payload_arena.clear();
-
+    // Crash-safe WAL semantics: sync data to disk BEFORE updating headers.
+    // This ensures headers never reference unsynced data.
     if (wrote_log) {
         status = SyncDataFile(impl_->active_segment.log_fd);
         if (!status.ok()) {
@@ -955,6 +939,44 @@ auto DurableBatchSessionStore::Flush() -> base::Status {
             return status;
         }
     }
+
+    // Now that data is durable, update headers to commit the new sizes.
+    if (wrote_log && !SyncFileHeader(impl_->active_segment.log_fd, &active_log_header, impl_->active_segment.log_size)) {
+        return base::Status::IoError(
+            IoErrorMessage(impl_->active_segment.log_path, "unable to update durable batch log header"));
+    }
+    if (wrote_index &&
+        !SyncFileHeader(impl_->active_segment.index_fd, &active_index_header, impl_->active_segment.index_size)) {
+        return base::Status::IoError(
+            IoErrorMessage(impl_->active_segment.index_path, "unable to update durable batch index header"));
+    }
+    if (wrote_recovery && !SyncFileHeader(impl_->recovery_fd, &recovery_header, impl_->recovery_size)) {
+        return base::Status::IoError(
+            IoErrorMessage(impl_->recovery_path, "unable to update durable recovery header"));
+    }
+
+    // Sync headers to disk so the committed sizes are durable.
+    if (wrote_log) {
+        status = SyncDataFile(impl_->active_segment.log_fd);
+        if (!status.ok()) {
+            return status;
+        }
+    }
+    if (wrote_index) {
+        status = SyncDataFile(impl_->active_segment.index_fd);
+        if (!status.ok()) {
+            return status;
+        }
+    }
+    if (wrote_recovery) {
+        status = SyncDataFile(impl_->recovery_fd);
+        if (!status.ok()) {
+            return status;
+        }
+    }
+
+    impl_->pending_entries.clear();
+    impl_->pending_payload_arena.clear();
 
     return base::Status::Ok();
 }

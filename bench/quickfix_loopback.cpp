@@ -41,6 +41,7 @@
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <sched.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <sys/wait.h>
@@ -65,6 +66,20 @@
 #include "fix44/OrderCancelRequest.h"
 
 namespace {
+
+// ---------------------------------------------------------------------------
+// CPU affinity (best-effort)
+// ---------------------------------------------------------------------------
+
+static void pin_to_core(int core) {
+    cpu_set_t set;
+    CPU_ZERO(&set);
+    CPU_SET(core, &set);
+    if (::sched_setaffinity(0, sizeof(set), &set) != 0) {
+        std::fprintf(stderr, "warning: sched_setaffinity(core %d) failed: %s\n",
+            core, std::strerror(errno));
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Business-level structs
@@ -599,6 +614,7 @@ int main(int argc, char** argv) {
 
     if (pid == 0) {
         // -------- Child: acceptor --------
+        pin_to_core(1);  // Acceptor on core 1
         ::close(pipe_ready[0]);
 
         QFAcceptorApp acceptor_app;
@@ -620,6 +636,7 @@ int main(int argc, char** argv) {
     }
 
     // -------- Parent: initiator --------
+    pin_to_core(0);  // Initiator on core 0
     ::close(pipe_ready[1]);
     {
         std::uint8_t ready = 0;

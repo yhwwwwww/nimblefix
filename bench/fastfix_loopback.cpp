@@ -47,6 +47,7 @@
 #include <optional>
 #include <unordered_map>
 
+#include <sched.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -62,6 +63,20 @@
 #include "bench_support.h"
 
 namespace {
+
+// ---------------------------------------------------------------------------
+// CPU affinity (best-effort)
+// ---------------------------------------------------------------------------
+
+static void pin_to_core(int core) {
+    cpu_set_t set;
+    CPU_ZERO(&set);
+    CPU_SET(core, &set);
+    if (::sched_setaffinity(0, sizeof(set), &set) != 0) {
+        std::fprintf(stderr, "warning: sched_setaffinity(core %d) failed: %s\n",
+            core, std::strerror(errno));
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Business-level structs (what real application code works with)
@@ -364,6 +379,8 @@ auto PrintStats(std::string_view label, const LatencyStats& s) -> void {
     const fastfix::profile::NormalizedDictionaryView& dictionary,
     std::uint32_t iterations,
     std::uint32_t warmup) {
+
+    pin_to_core(1);  // Acceptor on core 1
 
     auto listener = fastfix::transport::TcpAcceptor::Listen("127.0.0.1", 0U);
     if (!listener.ok()) {
@@ -784,6 +801,7 @@ int main(int argc, char** argv) {
     }
 
     // Parent – initiator
+    pin_to_core(0);  // Initiator on core 0
     ::close(pipe_fds[1]);
 
     std::uint16_t port = 0;

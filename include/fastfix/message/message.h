@@ -34,6 +34,8 @@ enum class FieldValueType : std::uint32_t {
     kBoolean = 5,
 };
 
+// TODO: replace with variant<int64_t, double, char, bool, std::string> to save ~32 bytes
+// for non-string types (SSO buffer is wasted for int/char/bool fields).
 struct FieldValue {
     std::uint32_t tag{0};
     FieldValueType type{FieldValueType::kString};
@@ -76,14 +78,14 @@ struct FieldValue {
   struct ParsedFieldSlot {
     std::uint32_t tag{0};
     std::uint32_t value_offset{0};
-    std::uint32_t value_length{0};
-    std::uint32_t flags{0};  // lower 3 bits: FieldValueType
+    std::uint16_t value_length{0};
+    std::uint16_t flags{0};  // lower 3 bits: FieldValueType
 
     [[nodiscard]] auto type() const -> FieldValueType {
       return static_cast<FieldValueType>(flags & 0x07U);
     }
     auto set_type(FieldValueType t) -> void {
-      flags = (flags & ~0x07U) | (static_cast<std::uint32_t>(t) & 0x07U);
+      flags = static_cast<std::uint16_t>((flags & ~0x07U) | (static_cast<std::uint16_t>(t) & 0x07U));
     }
   };
 
@@ -98,7 +100,6 @@ struct FieldValue {
   struct ParsedGroupFrame {
     std::uint32_t count_tag{0};
     std::uint32_t first_entry{kInvalidParsedIndex};
-    std::uint32_t last_entry{kInvalidParsedIndex};
     std::uint16_t entry_count{0};
     std::uint16_t depth{0};
     std::uint32_t next_group{kInvalidParsedIndex};

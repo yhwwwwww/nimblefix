@@ -267,9 +267,6 @@ class LiveSessionWorker {
 
     auto PollWorkerOnce(WorkerShardState& shard, std::chrono::milliseconds timeout) -> base::Status;
     [[nodiscard]] auto ComputePollTimeout(
-        std::chrono::milliseconds timeout,
-        std::uint64_t timestamp_ns) const -> std::chrono::milliseconds;
-    [[nodiscard]] auto ComputePollTimeout(
         const WorkerShardState& shard,
         std::chrono::milliseconds timeout,
         std::uint64_t timestamp_ns) const -> std::chrono::milliseconds;
@@ -366,7 +363,8 @@ class LiveSessionWorker {
     std::unordered_set<std::uint64_t> active_session_ids_;
     std::optional<base::Status> terminal_status_;
     std::atomic<bool> terminal_status_set_{false};
-    std::uint64_t next_connection_id_{1};
+    std::atomic<uint64_t> next_connection_id_{1};
+    std::vector<std::shared_ptr<session::SessionSubscriptionStream>> publish_scratch_;
     std::atomic<std::size_t> active_connection_count_{0};
     std::atomic<std::uint64_t> last_progress_ns_{0};
     std::atomic<std::size_t> completed_sessions_{0};

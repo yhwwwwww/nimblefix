@@ -2,10 +2,12 @@
 
 #include <algorithm>
 #include <cstring>
+#include <mutex>
 
 namespace fastfix::runtime {
 
 auto TraceRecorder::Configure(TraceMode mode, std::uint32_t capacity) -> void {
+    std::lock_guard lock(mutex_);
     mode_ = mode;
     ring_.clear();
     if (mode == TraceMode::kRing && capacity != 0) {
@@ -17,6 +19,7 @@ auto TraceRecorder::Configure(TraceMode mode, std::uint32_t capacity) -> void {
 }
 
 auto TraceRecorder::Clear() -> void {
+    std::lock_guard lock(mutex_);
     std::fill(ring_.begin(), ring_.end(), TraceEvent{});
     next_sequence_ = 1;
     next_index_ = 0;
@@ -31,6 +34,7 @@ auto TraceRecorder::Record(
     std::uint64_t arg0,
     std::uint64_t arg1,
     std::string_view text) -> void {
+    std::lock_guard lock(mutex_);
     if (!enabled()) {
         return;
     }
@@ -58,6 +62,7 @@ auto TraceRecorder::Record(
 }
 
 auto TraceRecorder::Snapshot() const -> std::vector<TraceEvent> {
+    std::lock_guard lock(mutex_);
     std::vector<TraceEvent> snapshot;
     snapshot.reserve(size_);
     if (!enabled() || size_ == 0) {

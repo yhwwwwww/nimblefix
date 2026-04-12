@@ -19,16 +19,15 @@ class PollWakeup {
     auto Drain() -> void;
 
     [[nodiscard]] auto read_fd() const -> int {
-        return read_fd_;
+        return efd_;
     }
 
     [[nodiscard]] auto valid() const -> bool {
-        return read_fd_ >= 0 && write_fd_ >= 0;
+        return efd_ >= 0;
     }
 
   private:
-    int read_fd_{-1};
-    int write_fd_{-1};
+    int efd_{-1};
 };
 
 }  // namespace fastfix::runtime

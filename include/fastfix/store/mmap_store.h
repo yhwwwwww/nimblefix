@@ -47,7 +47,7 @@ class MmapSessionStore : public SessionStore {
     auto AppendOutboundLikeView(std::uint32_t record_type, const MessageRecordView& record) -> base::Status;
     auto AppendRecoveryState(const SessionRecoveryState& state) -> base::Status;
     auto EnsureMapping() -> base::Status;
-    auto GrowMapping(std::size_t new_physical_size) -> base::Status;
+    auto GrowMapping(std::size_t new_size) -> base::Status;
 
     std::filesystem::path path_;
     SyncPolicy sync_policy_;

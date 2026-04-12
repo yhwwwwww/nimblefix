@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cstdint>
+#include <mutex>
 #include <string_view>
 #include <vector>
 
@@ -54,6 +55,7 @@ class TraceRecorder {
     [[nodiscard]] auto Snapshot() const -> std::vector<TraceEvent>;
 
   private:
+    mutable std::mutex mutex_;
     TraceMode mode_{TraceMode::kDisabled};
     std::vector<TraceEvent> ring_;
     std::uint64_t next_sequence_{1};

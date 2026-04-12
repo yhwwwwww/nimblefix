@@ -574,12 +574,13 @@ auto AdminProtocol::BuildGapFillFrame(
     std::uint64_t timestamp_ns) -> base::Result<EncodedFrame> {
     auto builder = BuildAdminMessage("4");
     builder.set_boolean(123U, true).set_int(36U, static_cast<std::int64_t>(new_seq_num));
+    builder.set_boolean(43U, true);
     return EncodeFrame(
         std::move(builder).build(),
         true,
         timestamp_ns,
         false,
-        false,
+        true,
         false,
         MessageRecordFlagValue(store::MessageRecordFlags::kGapFill),
         begin_seq);
@@ -785,6 +786,7 @@ auto AdminProtocol::OnTransportClosed() -> base::Status {
     }
 
     outstanding_test_request_id_.clear();
+    logout_sent_ = false;
     status = session_.OnTransportClosed();
     if (!status.ok()) {
         return status;
@@ -1151,6 +1153,8 @@ auto AdminProtocol::OnInbound(const codec::DecodedMessageView& decoded, std::uin
     }
 
     if (msg_type == "3") {
+        event.session_reject = true;
+        event.application_messages.push_back(message::MessageRef(decoded.message.view()));
         return event;
     }
 
@@ -1195,7 +1199,7 @@ auto AdminProtocol::OnTimer(std::uint64_t timestamp_ns) -> base::Result<Protocol
 
     const auto interval_ns = std::max<std::uint64_t>(1U, config_.heartbeat_interval_seconds) * kNanosPerSecond;
     if (!outstanding_test_request_id_.empty() &&
-        snapshot.last_outbound_ns != 0U && timestamp_ns > snapshot.last_outbound_ns + interval_ns) {
+        snapshot.last_inbound_ns != 0U && timestamp_ns > snapshot.last_inbound_ns + interval_ns) {
         event.disconnect = true;
         return event;
     }
@@ -1242,8 +1246,8 @@ auto AdminProtocol::NextTimerDeadline(std::uint64_t timestamp_ns) const -> std::
         }
     };
 
-    if (!outstanding_test_request_id_.empty() && snapshot.last_outbound_ns != 0U) {
-        update_deadline(snapshot.last_outbound_ns + interval_ns);
+    if (!outstanding_test_request_id_.empty() && snapshot.last_inbound_ns != 0U) {
+        update_deadline(snapshot.last_inbound_ns + interval_ns);
     } else if (snapshot.last_inbound_ns != 0U) {
         update_deadline(snapshot.last_inbound_ns + (interval_ns * 2U));
     }
@@ -1297,6 +1301,10 @@ auto AdminProtocol::BeginLogout(std::string text, std::uint64_t timestamp_ns) ->
         return status;
     }
 
+    if (logout_sent_) {
+        return base::Status::InvalidArgument("logout already sent");
+    }
+
     if (session_.state() == SessionState::kActive || session_.state() == SessionState::kResendProcessing) {
         status = session_.BeginLogout();
         if (!status.ok()) {
@@ -1308,6 +1316,7 @@ auto AdminProtocol::BeginLogout(std::string text, std::uint64_t timestamp_ns) ->
     if (!text.empty()) {
         builder.set_string(58U, std::move(text));
     }
+    logout_sent_ = true;
     return EncodeFrame(std::move(builder).build(), true, timestamp_ns, true, false, true, 0U);
 }
 

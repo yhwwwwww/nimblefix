@@ -24,43 +24,42 @@ inline constexpr std::size_t kIntegerTextBufferBytes =
     static_cast<std::size_t>(std::numeric_limits<Integer>::digits10) + 3U;
 
 struct SeenTagBuffer {
-    static constexpr std::size_t kInlineCapacity = 64U;
+    // Fixed-size bitset covering FIX tags 0..kBitsetTagLimit-1 (~1.2 KB).
+    // Tags above the threshold fall back to a small overflow vector which
+    // is almost never needed in practice (standard FIX tags < 10000).
+    static constexpr std::size_t kBitsetTagLimit = 10048U;  // 157 * 64
+    static constexpr std::size_t kBitsetWords = kBitsetTagLimit / 64U;
 
     auto contains(std::uint32_t tag) const -> bool {
-        const auto bit = std::uint64_t{1} << (tag & 63U);
-        if ((bloom_bits_ & bit) == 0U) {
-            return false;
+        if (tag < kBitsetTagLimit) {
+            const auto word = tag / 64U;
+            const auto bit = tag % 64U;
+            return (bitset_[word] & (std::uint64_t{1} << bit)) != 0U;
         }
-        const auto inline_end = inline_tags.begin() + static_cast<std::ptrdiff_t>(inline_size);
-        return std::find(inline_tags.begin(), inline_end, tag) != inline_end ||
-               std::find(overflow_tags.begin(), overflow_tags.end(), tag) != overflow_tags.end();
+        return std::find(overflow_tags_.begin(), overflow_tags_.end(), tag) != overflow_tags_.end();
     }
 
     auto push_back(std::uint32_t tag) -> void {
-        bloom_bits_ |= std::uint64_t{1} << (tag & 63U);
-        if (inline_size < inline_tags.size()) {
-            inline_tags[inline_size++] = tag;
-            return;
+        if (tag < kBitsetTagLimit) {
+            const auto word = tag / 64U;
+            const auto bit = tag % 64U;
+            bitset_[word] |= std::uint64_t{1} << bit;
+        } else {
+            overflow_tags_.push_back(tag);
         }
-        overflow_tags.push_back(tag);
     }
 
-    auto reserve(std::size_t count) -> void {
-        if (count > inline_tags.size()) {
-            overflow_tags.reserve(count - inline_tags.size());
-        }
+    auto reserve(std::size_t /*count*/) -> void {
+        // No-op: bitset is pre-allocated, overflow is rare.
     }
 
     auto clear() -> void {
-        inline_size = 0U;
-        bloom_bits_ = 0U;
-        overflow_tags.clear();
+        bitset_.fill(0U);
+        overflow_tags_.clear();
     }
 
-    std::array<std::uint32_t, kInlineCapacity> inline_tags{};
-    std::size_t inline_size{0U};
-    std::uint64_t bloom_bits_{0U};
-    std::vector<std::uint32_t> overflow_tags;
+    std::array<std::uint64_t, kBitsetWords> bitset_{};
+    std::vector<std::uint32_t> overflow_tags_;
 };
 
 struct ParsedContainerRef {
@@ -569,9 +568,13 @@ auto AppendParsedEntry(message::ParsedMessageData* parsed, std::uint32_t group_i
     if (group.first_entry == message::kInvalidParsedIndex) {
         group.first_entry = new_index;
     } else {
-        parsed->entries[group.last_entry].next_entry = new_index;
+        // Walk the linked list to find the last entry.
+        auto tail = group.first_entry;
+        while (parsed->entries[tail].next_entry != message::kInvalidParsedIndex) {
+            tail = parsed->entries[tail].next_entry;
+        }
+        parsed->entries[tail].next_entry = new_index;
     }
-    group.last_entry = new_index;
     ++group.entry_count;
     return new_index;
 }
@@ -642,6 +645,15 @@ auto ParseParsedGroupEntries(
         const auto parsed_entry_index = AppendParsedEntry(parsed, frame_index);
         const auto entry_ref = EntryContainer(parsed_entry_index);
         bool seen_any_field = false;
+
+        // Defer field slot appends so that nested group processing does not
+        // interleave child-entry slots between this entry's slots.  After
+        // the loop, all deferred slots are batch-appended, guaranteeing the
+        // contiguous layout that FindParsedFieldIndex relies on.
+        static constexpr std::size_t kMaxDeferredSlots = 128U;
+        std::array<message::ParsedFieldSlot, kMaxDeferredSlots> deferred_slots{};
+        std::size_t deferred_count = 0U;
+
         while (byte_pos < bytes.size()) {
             auto field = ScanNextField(bytes, byte_pos, delimiter_byte, equals_byte);
             if (!field.ok()) {
@@ -669,7 +681,9 @@ auto ParseParsedGroupEntries(
                     static_cast<std::uint32_t>(field.value().value_offset),
                     field.value().value_length,
                     dictionary);
-                AppendParsedFieldSlot(parsed, entry_ref, slot);
+                if (deferred_count < kMaxDeferredSlots) {
+                    deferred_slots[deferred_count++] = slot;
+                }
 
                 if (const auto* nested_group = dictionary.find_group(tag); nested_group != nullptr) {
                     auto value_sv = std::string_view(
@@ -701,6 +715,11 @@ auto ParseParsedGroupEntries(
             }
 
             break;
+        }
+
+        // Batch-append all deferred field slots so they are contiguous.
+        for (std::size_t i = 0; i < deferred_count; ++i) {
+            AppendParsedFieldSlot(parsed, entry_ref, deferred_slots[i]);
         }
     }
 
@@ -1896,6 +1915,11 @@ auto DecodeFixMessageView(
             parsed_message.msg_type = value_sv;
             header.msg_type = value_sv;
             compiled = compiled_decoders.find(header.msg_type);
+            // Fall back to generic path if the compiled decoder could not
+            // index all fields (overflow chain exceeded during build).
+            if (compiled != nullptr && compiled->has_overflow()) {
+                compiled = nullptr;
+            }
             auto slot = MakeParsedFieldSlotWithType(
                 tag,
                 static_cast<std::uint32_t>(scanned.value().value_offset),

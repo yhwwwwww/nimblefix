@@ -226,39 +226,6 @@ auto LiveSessionWorker::PollWorkerOnce(WorkerShardState& shard,
     return base::Status::Ok();
 }
 
-auto LiveSessionWorker::ComputePollTimeout(std::chrono::milliseconds timeout,
-                                           std::uint64_t timestamp_ns) const
-    -> std::chrono::milliseconds {
-    if (engine_ != nullptr && engine_->config() != nullptr &&
-        engine_->config()->poll_mode == PollMode::kBusy) {
-        return std::chrono::milliseconds(0);
-    }
-    std::optional<std::uint64_t> deadline;
-    for (const auto& shard : worker_shards_) {
-        const auto shard_deadline = shard.poller.NextDeadline();
-        if (shard_deadline.has_value() && (!deadline.has_value() || *shard_deadline < *deadline)) {
-            deadline = shard_deadline;
-        }
-        for (const auto& pending : shard.pending_reconnects) {
-            if (!deadline.has_value() || pending.next_attempt_ns < *deadline) {
-                deadline = pending.next_attempt_ns;
-            }
-        }
-    }
-    if (!deadline.has_value()) {
-        return timeout;
-    }
-    if (*deadline <= timestamp_ns) {
-        return std::chrono::milliseconds(0);
-    }
-    const auto timer_timeout = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::nanoseconds(*deadline - timestamp_ns));
-    if (timeout.count() < 0) {
-        return timer_timeout;
-    }
-    return std::min(timeout, timer_timeout);
-}
-
 auto LiveSessionWorker::ComputePollTimeout(const WorkerShardState& shard,
                                            std::chrono::milliseconds timeout,
                                            std::uint64_t timestamp_ns) const
@@ -567,7 +534,7 @@ auto LiveSessionWorker::UpdateSessionSnapshot(const ActiveSession& session) -> v
 
 auto LiveSessionWorker::PublishNotification(
     const session::SessionNotification& notification) -> void {
-    std::vector<std::shared_ptr<session::SessionSubscriptionStream>> subscribers;
+    publish_scratch_.clear();
     {
         std::lock_guard lock(control_mutex_);
         session_snapshots_[notification.snapshot.session_id] = notification.snapshot;
@@ -582,16 +549,15 @@ auto LiveSessionWorker::PublishNotification(
                 weak_it = weak_subscribers.erase(weak_it);
                 continue;
             }
-            subscribers.push_back(std::move(subscriber));
+            publish_scratch_.push_back(std::move(subscriber));
             ++weak_it;
         }
     }
-    for (const auto& subscriber : subscribers) {
-        auto* queue = dynamic_cast<SubscriberStream*>(subscriber.get());
-        if (queue != nullptr) {
-            static_cast<void>(queue->TryPush(notification));
-        }
+    for (const auto& subscriber : publish_scratch_) {
+        auto* queue = static_cast<SubscriberStream*>(subscriber.get());
+        static_cast<void>(queue->TryPush(notification));
     }
+    publish_scratch_.clear();
 }
 
 auto LiveSessionWorker::PollManagedApplicationWorker(std::uint32_t worker_id) -> base::Status {

@@ -189,10 +189,31 @@ auto NormalizedDictionaryView::FromProfile(LoadedProfile profile) -> base::Resul
         }
     }
 
+    // Build direct-address lookup table for fast O(1) field lookups by tag.
+    {
+        view.field_direct_lookup_.fill(kNoEntry);
+        const auto& entries = view.field_defs_.entries();
+        for (std::size_t i = 0; i < entries.size(); ++i) {
+            const auto tag = entries[i].tag;
+            if (tag < kDirectLookupSize && i <= std::numeric_limits<std::uint16_t>::max()) {
+                view.field_direct_lookup_[tag] = static_cast<std::uint16_t>(i);
+            }
+        }
+    }
+
     return view;
 }
 
 auto NormalizedDictionaryView::find_field(std::uint32_t tag) const -> const FieldDefRecord* {
+    // O(1) direct-address lookup for the common case (tags < 10000).
+    if (tag < kDirectLookupSize) {
+        const auto slot = field_direct_lookup_[tag];
+        if (slot != kNoEntry) {
+            return &field_defs_.entries()[slot];
+        }
+        return nullptr;
+    }
+    // Fallback to O(log N) binary search for rare large tags.
     auto it = std::lower_bound(field_index_.begin(), field_index_.end(), tag,
         [](const TagIndexEntry& e, std::uint32_t t) { return e.key < t; });
     if (it != field_index_.end() && it->key == tag) {

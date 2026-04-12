@@ -1,12 +1,11 @@
 #pragma once
 
+#include <algorithm>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <optional>
-#include <unordered_map>
-#include <unordered_set>
-#include <utility>
 #include <vector>
 
 #include "fastfix/base/status.h"
@@ -60,37 +59,45 @@ class ShardPoller {
         out.wakeup_signaled = false;
         out.ready_indices.clear();
 
-        // Build current fd set and fd→index map.
-        fd_to_index_.clear();
-        fd_to_index_.reserve(connection_count);
+        // Build current fd list and fd->index mapping using a flat vector.
         current_fds_.clear();
-        current_fds_.reserve(connection_count);
         for (std::size_t i = 0; i < connection_count; ++i) {
             const int fd = connection_fd_provider(i);
             if (fd >= 0) {
-                current_fds_.insert(fd);
-                fd_to_index_[fd] = i;
+                current_fds_.push_back(fd);
+                const auto ufd = static_cast<std::size_t>(fd);
+                if (ufd >= fd_to_index_.size()) {
+                    fd_to_index_.resize(ufd + 1U, kNoIndex);
+                }
+                fd_to_index_[ufd] = i;
             }
         }
+
+        // Sort current_fds_ for efficient set-difference with registered_fds_.
+        std::sort(current_fds_.begin(), current_fds_.end());
 
         // Remove stale fds.
-        for (auto it = registered_fds_.begin(); it != registered_fds_.end(); ) {
-            if (!current_fds_.contains(*it)) {
-                io_poller_->RemoveFd(*it);
-                it = registered_fds_.erase(it);
+        auto write_pos = std::size_t{0};
+        for (std::size_t r = 0; r < registered_fds_.size(); ++r) {
+            const int fd = registered_fds_[r];
+            if (std::binary_search(current_fds_.begin(), current_fds_.end(), fd)) {
+                registered_fds_[write_pos++] = fd;
             } else {
-                ++it;
+                io_poller_->RemoveFd(fd);
             }
         }
+        registered_fds_.resize(write_pos);
 
-        // Add new fds (use fd value as tag).
+        // Add new fds. registered_fds_ is kept sorted.
+        std::sort(registered_fds_.begin(), registered_fds_.end());
         for (const int fd : current_fds_) {
-            if (!registered_fds_.contains(fd)) {
+            if (!std::binary_search(registered_fds_.begin(), registered_fds_.end(), fd)) {
                 auto status = io_poller_->AddFd(fd, static_cast<std::size_t>(fd));
                 if (!status.ok()) return status;
-                registered_fds_.insert(fd);
+                registered_fds_.push_back(fd);
             }
         }
+        std::sort(registered_fds_.begin(), registered_fds_.end());
 
         // Wait for events.
         auto result = io_poller_->Wait(timeout);
@@ -104,11 +111,15 @@ class ShardPoller {
                 out.wakeup_signaled = true;
                 continue;
             }
-            const auto fd = static_cast<int>(tag);
-            auto it = fd_to_index_.find(fd);
-            if (it != fd_to_index_.end()) {
-                out.ready_indices.push_back(it->second);
+            const auto fd = static_cast<std::size_t>(tag);
+            if (fd < fd_to_index_.size() && fd_to_index_[fd] != kNoIndex) {
+                out.ready_indices.push_back(fd_to_index_[fd]);
             }
+        }
+
+        // Clear used fd_to_index_ entries (O(N) where N = current fds, not capacity).
+        for (const int fd : current_fds_) {
+            fd_to_index_[static_cast<std::size_t>(fd)] = kNoIndex;
         }
 
         if (out.wakeup_signaled) {
@@ -120,14 +131,14 @@ class ShardPoller {
 
   private:
     static constexpr std::size_t kWakeupTag = ~std::size_t{0};
+    static constexpr std::size_t kNoIndex = ~std::size_t{0};
 
     TimerWheel timer_wheel_{};
     PollWakeup wakeup_{};
     std::unique_ptr<IoPoller> io_poller_;
-    std::unordered_set<int> registered_fds_;
-    // Reused per SyncAndWait call to avoid hot-path heap allocation.
-    std::unordered_map<int, std::size_t> fd_to_index_;
-    std::unordered_set<int> current_fds_;
+    std::vector<int> registered_fds_;       // sorted vector of registered fds
+    std::vector<std::size_t> fd_to_index_;  // flat array: fd -> connection index (sparse)
+    std::vector<int> current_fds_;          // scratch: sorted vector of current fds
 };
 
 }  // namespace fastfix::runtime

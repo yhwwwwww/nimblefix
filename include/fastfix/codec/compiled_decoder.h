@@ -61,6 +61,11 @@ class CompiledMessageDecoder {
 
     [[nodiscard]] auto slot_count() const -> std::uint8_t { return slot_count_; }
 
+    /// Returns true if the overflow chain was exceeded during Build(),
+    /// meaning some fields could not be indexed.  Callers should fall
+    /// back to the generic (non-compiled) decode path when this is set.
+    [[nodiscard]] auto has_overflow() const -> bool { return overflow_exceeded_; }
+
     /// Check if a tag is a known session-header field handled by the header extraction path.
     [[nodiscard]] static auto is_header_tag(std::uint32_t tag) -> bool {
         switch (tag) {
@@ -82,6 +87,7 @@ class CompiledMessageDecoder {
     std::array<std::uint32_t, 16> overflow_tags_{};
     std::array<std::uint8_t, 16> overflow_slots_{};
     std::uint8_t overflow_count_{0};
+    bool overflow_exceeded_{false};
 };
 
 /// Table of pre-compiled decoders, one per known message type in the dictionary.
