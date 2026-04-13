@@ -7,6 +7,7 @@
 #include <string_view>
 
 #include "fastfix/message/typed_message.h"
+#include "fastfix/codec/raw_passthrough.h"
 
 namespace fastfix::session {
 
@@ -676,6 +677,17 @@ auto AdminProtocol::ReplayOutbound(
         return status;
     }
 
+    // Pre-build replay options — only seq_num and orig_sending_time change per message.
+    codec::UtcTimestampBuffer ts_buf;
+    const auto sending_time = codec::CurrentUtcTimestamp(&ts_buf);
+
+    codec::ReplayOptions replay_opts;
+    replay_opts.sender_comp_id = config_.sender_comp_id;
+    replay_opts.target_comp_id = config_.target_comp_id;
+    replay_opts.begin_string = config_.begin_string;
+    replay_opts.default_appl_ver_id = config_.default_appl_ver_id;
+    replay_opts.sending_time = sending_time;
+
     std::uint32_t seq = begin_seq;
     std::size_t record_index = 0U;
     const auto& records = replay_range_buffer_.records;
@@ -704,25 +716,26 @@ auto AdminProtocol::ReplayOutbound(
             continue;
         }
 
-        auto decoded = codec::DecodeFixMessageView(record->payload, dictionary_);
-        if (!decoded.ok()) {
-            return decoded.status();
+        // Lightweight header-only scan — skip checksum verification since we encoded these bytes.
+        auto parsed = codec::DecodeRawPassThrough(record->payload, codec::kFixSoh, false);
+        if (!parsed.ok()) {
+            return parsed.status();
         }
 
-        auto replay = EncodeFrame(
-            decoded.value().message.view(),
-            false,
-            timestamp_ns,
-            false,
-            true,
-            false,
-            0U,
-            record->seq_num,
-            decoded.value().header.sending_time);
-        if (!replay.ok()) {
-            return replay.status();
+        replay_opts.msg_seq_num = record->seq_num;
+        replay_opts.orig_sending_time = parsed.value().sending_time;
+
+        status = codec::EncodeReplay(parsed.value(), replay_opts, &encode_buffer_);
+        if (!status.ok()) {
+            return status;
         }
-        frames->push_back(std::move(replay).value());
+
+        EncodedFrame frame;
+        frame.bytes.assign(encode_buffer_.bytes());
+        frame.msg_type = std::string(parsed.value().msg_type);
+        frame.admin = false;
+        frames->push_back(std::move(frame));
+
         ++record_index;
         ++seq;
     }
