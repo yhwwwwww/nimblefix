@@ -142,14 +142,6 @@ class FixedLayoutWriter {
     /// Reserve group entry storage for a count_tag.
     auto reserve_group_entries(std::uint32_t count_tag, std::size_t count) -> void;
 
-    // Hybrid-path setters -- for fields NOT in the layout (extension/extra fields).
-    // These append "tag=value\x01" to an extra buffer.
-    auto set_extra_string(std::uint32_t tag, std::string_view value) -> void;
-    auto set_extra_int(std::uint32_t tag, std::int64_t value) -> void;
-    auto set_extra_char(std::uint32_t tag, char value) -> void;
-    auto set_extra_float(std::uint32_t tag, double value) -> void;
-    auto set_extra_boolean(std::uint32_t tag, bool value) -> void;
-
     /// Encode directly to buffer.
     auto encode_to_buffer(
         const profile::NormalizedDictionaryView& dictionary,
@@ -185,7 +177,6 @@ class FixedLayoutWriter {
     const FixedLayout* layout_;
     std::string slot_buffer_;
     base::InlineSplitVector<SlotRange, 64> slot_ranges_;
-    std::string extra_fields_buffer_;  // Pre-formatted "tag=value\x01" for hybrid-path fields.
     std::vector<GroupEncodeData> groups_;
     SessionHeaderFragment session_header_;
     bool session_bound_{false};

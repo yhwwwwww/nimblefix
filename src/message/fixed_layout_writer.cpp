@@ -223,7 +223,6 @@ auto FixedLayoutWriter::clear() -> void {
         slot_ranges_[i] = SlotRange{};
     }
     slot_buffer_.clear();
-    extra_fields_buffer_.clear();
     for (auto& g : groups_) {
         // Clear entry strings but preserve their heap capacity for reuse.
         for (std::size_t i = 0; i < g.active_count; ++i) {
@@ -349,54 +348,6 @@ auto FixedLayoutWriter::set_boolean(std::uint32_t tag, bool value) -> FixedLayou
         slot_buffer_.push_back(value ? 'Y' : 'N');
     }
     return *this;
-}
-
-// ---------------------------------------------------------------------------
-// Hybrid-path (extra field) setters
-// ---------------------------------------------------------------------------
-
-auto FixedLayoutWriter::set_extra_string(std::uint32_t tag, std::string_view value) -> void {
-    AppendTagToBuffer(extra_fields_buffer_, tag);
-    extra_fields_buffer_.push_back('=');
-    extra_fields_buffer_.append(value);
-    extra_fields_buffer_.push_back(codec::kFixSoh);
-}
-
-auto FixedLayoutWriter::set_extra_int(std::uint32_t tag, std::int64_t value) -> void {
-    AppendTagToBuffer(extra_fields_buffer_, tag);
-    extra_fields_buffer_.push_back('=');
-    std::array<char, kIntBufSize> buf{};
-    const auto [ptr, ec] = std::to_chars(buf.data(), buf.data() + buf.size(), value);
-    if (ec == std::errc()) {
-        extra_fields_buffer_.append(buf.data(), static_cast<std::size_t>(ptr - buf.data()));
-    }
-    extra_fields_buffer_.push_back(codec::kFixSoh);
-}
-
-auto FixedLayoutWriter::set_extra_char(std::uint32_t tag, char value) -> void {
-    AppendTagToBuffer(extra_fields_buffer_, tag);
-    extra_fields_buffer_.push_back('=');
-    extra_fields_buffer_.push_back(value);
-    extra_fields_buffer_.push_back(codec::kFixSoh);
-}
-
-auto FixedLayoutWriter::set_extra_float(std::uint32_t tag, double value) -> void {
-    AppendTagToBuffer(extra_fields_buffer_, tag);
-    extra_fields_buffer_.push_back('=');
-    std::array<char, 32> buf{};
-    const auto [ptr, ec] = std::to_chars(buf.data(), buf.data() + buf.size(), value,
-                                          std::chars_format::general, 12);
-    if (ec == std::errc()) {
-        extra_fields_buffer_.append(buf.data(), static_cast<std::size_t>(ptr - buf.data()));
-    }
-    extra_fields_buffer_.push_back(codec::kFixSoh);
-}
-
-auto FixedLayoutWriter::set_extra_boolean(std::uint32_t tag, bool value) -> void {
-    AppendTagToBuffer(extra_fields_buffer_, tag);
-    extra_fields_buffer_.push_back('=');
-    extra_fields_buffer_.push_back(value ? 'Y' : 'N');
-    extra_fields_buffer_.push_back(codec::kFixSoh);
 }
 
 auto FixedLayoutWriter::add_group_entry(std::uint32_t count_tag) -> FixedGroupEntryBuilder {
@@ -586,22 +537,6 @@ auto FixedLayoutWriter::encode_to_buffer(
                         }
                     }
                     break;
-                }
-            }
-        }
-    }
-
-    // 11b. Extra fields (hybrid path)
-    if (!extra_fields_buffer_.empty()) {
-        if (delimiter == codec::kFixSoh) {
-            at(std::string_view(extra_fields_buffer_));
-        } else {
-            // Translate \x01 to the actual delimiter.
-            for (const auto ch : extra_fields_buffer_) {
-                if (ch == codec::kFixSoh) {
-                    ac(delimiter);
-                } else {
-                    ac(ch);
                 }
             }
         }

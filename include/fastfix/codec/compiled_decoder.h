@@ -16,7 +16,7 @@ namespace fastfix::codec {
 /// Replaces runtime dictionary lookups with direct array indexing.
 struct CompiledFieldSlot {
     std::uint32_t tag{0};
-    message::FieldValueType field_type{message::FieldValueType::kString};
+    message::FieldTypeIndex field_type{message::kFieldString};
     bool is_group_count{false};
     const profile::GroupDefRecord* group_def{nullptr};
 };

@@ -196,20 +196,29 @@ TEST_CASE("fixed-layout-writer-matches-message-builder", "[message-api][fixed-la
     fastfix::codec::EncodeBuffer fw_buffer;
     REQUIRE(writer.encode_to_buffer(dictionary.value(), options, &fw_buffer).ok());
 
-    // Encoded output should be identical.
-    CHECK(mb_buffer.text() == fw_buffer.text());
+    // MB uses insertion-order-then-groups; FLW uses dictionary rule order.
+    // Both are valid encodings — compare decoded logical content, not raw bytes.
+    auto mb_decoded = fastfix::codec::DecodeFixMessageView(mb_buffer.bytes(), dictionary.value());
+    REQUIRE(mb_decoded.ok());
+    auto fw_decoded = fastfix::codec::DecodeFixMessageView(fw_buffer.bytes(), dictionary.value());
+    REQUIRE(fw_decoded.ok());
 
-    // Also verify decode roundtrip.
-    auto decoded = fastfix::codec::DecodeFixMessageView(fw_buffer.bytes(), dictionary.value());
-    REQUIRE(decoded.ok());
-    auto parsed_view = decoded.value().message.view();
-    CHECK(parsed_view.msg_type() == "D");
-    REQUIRE(parsed_view.get_string(49U).has_value());
-    CHECK(parsed_view.get_string(49U).value() == "BUY");
-    auto parsed_group = parsed_view.group(453U);
-    REQUIRE(parsed_group.has_value());
-    REQUIRE(parsed_group->size() == 1U);
-    CHECK((*parsed_group)[0].get_string(448U).value() == "PTY1");
+    auto mb_view = mb_decoded.value().message.view();
+    auto fw_view = fw_decoded.value().message.view();
+
+    CHECK(mb_view.msg_type() == fw_view.msg_type());
+    CHECK(mb_view.get_string(49U).value() == fw_view.get_string(49U).value());
+    CHECK(mb_view.get_string(56U).value() == fw_view.get_string(56U).value());
+    CHECK(mb_view.get_string(1U).value() == fw_view.get_string(1U).value());
+
+    auto mb_group = mb_view.group(453U);
+    auto fw_group = fw_view.group(453U);
+    REQUIRE(mb_group.has_value());
+    REQUIRE(fw_group.has_value());
+    REQUIRE(mb_group->size() == fw_group->size());
+    CHECK((*mb_group)[0].get_string(448U).value() == (*fw_group)[0].get_string(448U).value());
+    CHECK((*mb_group)[0].get_char(447U).value() == (*fw_group)[0].get_char(447U).value());
+    CHECK((*mb_group)[0].get_int(452U).value() == (*fw_group)[0].get_int(452U).value());
 }
 
 TEST_CASE("fixed-layout-writer-all-value-types", "[message-api][fixed-layout]") {
@@ -290,61 +299,6 @@ TEST_CASE("fixed-layout-writer-encode-roundtrip", "[message-api][fixed-layout]")
     REQUIRE(group.has_value());
     REQUIRE(group->size() == 1U);
     CHECK((*group)[0].get_string(448U).value() == "PTY1");
-}
-
-TEST_CASE("fixed-layout-writer-extra-fields-hybrid-path", "[message-api][fixed-layout]") {
-    auto dictionary_view = fastfix::tests::LoadFix44DictionaryViewOrSkip();
-    auto dictionary = fastfix::base::Result<fastfix::profile::NormalizedDictionaryView>(std::move(dictionary_view));
-
-    auto layout = fastfix::message::FixedLayout::Build(dictionary.value(), "D");
-    REQUIRE(layout.ok());
-
-    fastfix::message::FixedLayoutWriter writer(layout.value());
-
-    // Set known layout fields via normal O(1) setters.
-    writer.set_string(49U, "SENDER");
-    writer.set_string(56U, "TARGET");
-    writer.set_string(1U, "ACC-1");
-
-    // Set extra fields NOT in the layout via hybrid path.
-    writer.set_extra_string(9999U, "CUSTOM_VAL");
-    writer.set_extra_int(9998U, 42);
-    writer.set_extra_char(9997U, 'Z');
-    writer.set_extra_boolean(9996U, true);
-
-    // Encode to buffer and decode — extra fields should survive roundtrip.
-    fastfix::codec::EncodeOptions options;
-    options.begin_string = "FIX.4.4";
-    options.sender_comp_id = "SENDER";
-    options.target_comp_id = "TARGET";
-    options.msg_seq_num = 1U;
-    options.sending_time = "20260406-12:00:00.000";
-
-    fastfix::codec::EncodeBuffer buf;
-    REQUIRE(writer.encode_to_buffer(dictionary.value(), options, &buf).ok());
-
-    // The raw wire should contain our extra tag.
-    const auto wire = buf.text();
-    CHECK(wire.find("9999=CUSTOM_VAL") != std::string_view::npos);
-    CHECK(wire.find("9998=42") != std::string_view::npos);
-    CHECK(wire.find("9997=Z") != std::string_view::npos);
-    CHECK(wire.find("9996=Y") != std::string_view::npos);
-
-    // Decode and verify the extra field is accessible.
-    auto decoded = fastfix::codec::DecodeFixMessageView(buf.bytes(), dictionary.value());
-    REQUIRE(decoded.ok());
-    auto parsed = decoded.value().message.view();
-    REQUIRE(parsed.get_string(9999U).has_value());
-    CHECK(parsed.get_string(9999U).value() == "CUSTOM_VAL");
-
-    // Second writer: extra fields should survive encode roundtrip.
-    fastfix::message::FixedLayoutWriter writer2(layout.value());
-    writer2.set_string(49U, "S");
-    writer2.set_extra_string(8888U, "EXT");
-    fastfix::codec::EncodeBuffer buf2;
-    REQUIRE(writer2.encode_to_buffer(dictionary.value(), options, &buf2).ok());
-    const auto wire2 = buf2.text();
-    CHECK(wire2.find("8888=EXT") != std::string_view::npos);
 }
 
 // ---------------------------------------------------------------------------
@@ -510,32 +464,4 @@ TEST_CASE("generated-writer-clear-and-reuse", "[message-api][generated-writer]")
     const auto wire = buf2.text();
     CHECK(wire.find("1=ACC-2") != std::string_view::npos);
     CHECK(wire.find("1=ACC-1") == std::string_view::npos);
-}
-
-TEST_CASE("generated-writer-escape-hatch", "[message-api][generated-writer]") {
-    auto dictionary_view = fastfix::tests::LoadFix44DictionaryViewOrSkip();
-    auto dictionary = fastfix::base::Result<fastfix::profile::NormalizedDictionaryView>(std::move(dictionary_view));
-
-    auto layout = fastfix::message::FixedLayout::Build(dictionary.value(), "D");
-    REQUIRE(layout.ok());
-
-    NewOrderSingleWriter writer(layout.value());
-    writer.set_account("ACC-1");
-
-    // Use escape hatch for an unknown/extension field.
-    writer.writer().set_extra_string(9999U, "CUSTOM");
-
-    fastfix::codec::EncodeOptions options;
-    options.begin_string = "FIX.4.4";
-    options.sender_comp_id = "BUY";
-    options.target_comp_id = "SELL";
-    options.msg_seq_num = 1U;
-    options.sending_time = "20260406-12:00:00.000";
-
-    fastfix::codec::EncodeBuffer buf;
-    REQUIRE(writer.encode_to_buffer(dictionary.value(), options, &buf).ok());
-
-    const auto wire = buf.text();
-    CHECK(wire.find("9999=CUSTOM") != std::string_view::npos);
-    CHECK(wire.find("1=ACC-1") != std::string_view::npos);
 }

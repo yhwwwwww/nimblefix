@@ -6,18 +6,18 @@ namespace fastfix::codec {
 
 namespace {
 
-auto FieldTypeFromValueType(profile::ValueType vt) -> message::FieldValueType {
+auto FieldTypeFromValueType(profile::ValueType vt) -> message::FieldTypeIndex {
     switch (vt) {
         case profile::ValueType::kInt:
-            return message::FieldValueType::kInt;
+            return message::kFieldInt;
         case profile::ValueType::kChar:
-            return message::FieldValueType::kChar;
+            return message::kFieldChar;
         case profile::ValueType::kFloat:
-            return message::FieldValueType::kFloat;
+            return message::kFieldFloat;
         case profile::ValueType::kBoolean:
-            return message::FieldValueType::kBoolean;
+            return message::kFieldBoolean;
         default:
-            return message::FieldValueType::kString;
+            return message::kFieldString;
     }
 }
 

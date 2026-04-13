@@ -70,7 +70,7 @@ auto ParsedFieldView(const ParsedMessageData& data, const ParsedFieldSlot& slot)
     const auto text = ParsedSlotText(data, slot);
     view.string_value = text;
     switch (slot.type()) {
-        case FieldValueType::kInt: {
+        case kFieldInt: {
             std::int64_t value = 0;
             const auto [ptr, ec] = std::from_chars(text.data(), text.data() + text.size(), value);
             if (ec == std::errc() && ptr == text.data() + text.size()) {
@@ -78,12 +78,12 @@ auto ParsedFieldView(const ParsedMessageData& data, const ParsedFieldSlot& slot)
             }
             break;
         }
-        case FieldValueType::kChar:
+        case kFieldChar:
             if (text.size() == 1U) {
                 view.char_value = text.front();
             }
             break;
-        case FieldValueType::kFloat: {
+        case kFieldFloat: {
             double value = 0.0;
             const auto [ptr, ec] = std::from_chars(text.data(), text.data() + text.size(), value);
             if (ec == std::errc() && ptr == text.data() + text.size()) {
@@ -91,7 +91,7 @@ auto ParsedFieldView(const ParsedMessageData& data, const ParsedFieldSlot& slot)
             }
             break;
         }
-        case FieldValueType::kBoolean:
+        case kFieldBoolean:
             view.bool_value = (text == "Y");
             break;
         default:
@@ -271,23 +271,23 @@ auto GroupEntryBuilder::upsert_field(FieldValue value) -> GroupEntryBuilder& {
 }
 
 auto GroupEntryBuilder::set_string(std::uint32_t tag, std::string_view value) -> GroupEntryBuilder& {
-    return upsert_field(FieldValue{.tag = tag, .type = FieldValueType::kString, .string_value = std::string(value)});
+    return upsert_field(FieldValue{.tag = tag, .value = std::string(value)});
 }
 
 auto GroupEntryBuilder::set_int(std::uint32_t tag, std::int64_t value) -> GroupEntryBuilder& {
-    return upsert_field(FieldValue{.tag = tag, .type = FieldValueType::kInt, .int_value = value});
+    return upsert_field(FieldValue{.tag = tag, .value = value});
 }
 
 auto GroupEntryBuilder::set_char(std::uint32_t tag, char value) -> GroupEntryBuilder& {
-    return upsert_field(FieldValue{.tag = tag, .type = FieldValueType::kChar, .char_value = value});
+    return upsert_field(FieldValue{.tag = tag, .value = value});
 }
 
 auto GroupEntryBuilder::set_float(std::uint32_t tag, double value) -> GroupEntryBuilder& {
-    return upsert_field(FieldValue{.tag = tag, .type = FieldValueType::kFloat, .float_value = value});
+    return upsert_field(FieldValue{.tag = tag, .value = value});
 }
 
 auto GroupEntryBuilder::set_boolean(std::uint32_t tag, bool value) -> GroupEntryBuilder& {
-    return upsert_field(FieldValue{.tag = tag, .type = FieldValueType::kBoolean, .bool_value = value});
+    return upsert_field(FieldValue{.tag = tag, .value = value});
 }
 
 auto GroupEntryBuilder::reserve_fields(std::size_t count) -> GroupEntryBuilder& {
@@ -336,23 +336,23 @@ auto MessageBuilder::upsert_field(FieldValue value) -> MessageBuilder& {
 }
 
 auto MessageBuilder::set_string(std::uint32_t tag, std::string_view value) -> MessageBuilder& {
-    return upsert_field(FieldValue{.tag = tag, .type = FieldValueType::kString, .string_value = std::string(value)});
+    return upsert_field(FieldValue{.tag = tag, .value = std::string(value)});
 }
 
 auto MessageBuilder::set_int(std::uint32_t tag, std::int64_t value) -> MessageBuilder& {
-    return upsert_field(FieldValue{.tag = tag, .type = FieldValueType::kInt, .int_value = value});
+    return upsert_field(FieldValue{.tag = tag, .value = value});
 }
 
 auto MessageBuilder::set_char(std::uint32_t tag, char value) -> MessageBuilder& {
-    return upsert_field(FieldValue{.tag = tag, .type = FieldValueType::kChar, .char_value = value});
+    return upsert_field(FieldValue{.tag = tag, .value = value});
 }
 
 auto MessageBuilder::set_float(std::uint32_t tag, double value) -> MessageBuilder& {
-    return upsert_field(FieldValue{.tag = tag, .type = FieldValueType::kFloat, .float_value = value});
+    return upsert_field(FieldValue{.tag = tag, .value = value});
 }
 
 auto MessageBuilder::set_boolean(std::uint32_t tag, bool value) -> MessageBuilder& {
-    return upsert_field(FieldValue{.tag = tag, .type = FieldValueType::kBoolean, .bool_value = value});
+    return upsert_field(FieldValue{.tag = tag, .value = value});
 }
 
 auto MessageBuilder::reserve_fields(std::size_t count) -> MessageBuilder& {
@@ -590,15 +590,24 @@ auto MessageView::field_at(std::size_t index) const -> std::optional<FieldView> 
             return std::nullopt;
         }
         const auto& field = data_->fields[index];
-        return FieldView{
-            .tag = field.tag,
-            .type = field.type,
-            .string_value = field.string_value,
-            .int_value = field.int_value,
-            .float_value = field.float_value,
-            .char_value = field.char_value,
-            .bool_value = field.bool_value,
-        };
+        FieldView v;
+        v.tag = field.tag;
+        v.type = field.type_index();
+        std::visit([&](const auto& val) {
+            using T = std::decay_t<decltype(val)>;
+            if constexpr (std::is_same_v<T, std::string>) {
+                v.string_value = val;
+            } else if constexpr (std::is_same_v<T, std::int64_t>) {
+                v.int_value = val;
+            } else if constexpr (std::is_same_v<T, double>) {
+                v.float_value = val;
+            } else if constexpr (std::is_same_v<T, char>) {
+                v.char_value = val;
+            } else if constexpr (std::is_same_v<T, bool>) {
+                v.bool_value = val;
+            }
+        }, field.value);
+        return v;
     }
     if (parsed_ == nullptr || parsed_entry_ == nullptr) {
         return std::nullopt;
@@ -638,19 +647,28 @@ auto MessageView::find_field_view(std::uint32_t tag) const -> std::optional<Fiel
     if (data_ != nullptr) {
         const auto* field = FindField(data_->fields, tag);
         if (field != nullptr) {
-            return FieldView{
-                .tag = field->tag,
-                .type = field->type,
-                .string_value = field->string_value,
-                .int_value = field->int_value,
-                .float_value = field->float_value,
-                .char_value = field->char_value,
-                .bool_value = field->bool_value,
-            };
+            FieldView v;
+            v.tag = field->tag;
+            v.type = field->type_index();
+            std::visit([&](const auto& val) {
+                using T = std::decay_t<decltype(val)>;
+                if constexpr (std::is_same_v<T, std::string>) {
+                    v.string_value = val;
+                } else if constexpr (std::is_same_v<T, std::int64_t>) {
+                    v.int_value = val;
+                } else if constexpr (std::is_same_v<T, double>) {
+                    v.float_value = val;
+                } else if constexpr (std::is_same_v<T, char>) {
+                    v.char_value = val;
+                } else if constexpr (std::is_same_v<T, bool>) {
+                    v.bool_value = val;
+                }
+            }, field->value);
+            return v;
         }
 
         if (tag == 35U && !data_->msg_type.empty()) {
-            return FieldView{.tag = 35U, .type = FieldValueType::kString, .string_value = data_->msg_type};
+            return FieldView{.tag = 35U, .type = kFieldString, .string_value = data_->msg_type};
         }
 
         return std::nullopt;
@@ -666,7 +684,7 @@ auto MessageView::find_field_view(std::uint32_t tag) const -> std::optional<Fiel
     if (tag == 35U && !parsed_msg_type_.empty()) {
         return FieldView{
             .tag = 35U,
-            .type = FieldValueType::kString,
+            .type = kFieldString,
             .string_value = parsed_msg_type_,
         };
     }
@@ -686,7 +704,7 @@ auto MessageView::has_field(std::uint32_t tag) const -> bool {
 
 auto MessageView::get_string(std::uint32_t tag) const -> std::optional<std::string_view> {
     const auto field = find_field_view(tag);
-    if (!field.has_value() || field->type != FieldValueType::kString) {
+    if (!field.has_value() || field->type != kFieldString) {
         return std::nullopt;
     }
     return field->string_value;
@@ -694,7 +712,7 @@ auto MessageView::get_string(std::uint32_t tag) const -> std::optional<std::stri
 
 auto MessageView::get_int(std::uint32_t tag) const -> std::optional<std::int64_t> {
     const auto field = find_field_view(tag);
-    if (!field.has_value() || field->type != FieldValueType::kInt) {
+    if (!field.has_value() || field->type != kFieldInt) {
         return std::nullopt;
     }
     return field->int_value;
@@ -702,7 +720,7 @@ auto MessageView::get_int(std::uint32_t tag) const -> std::optional<std::int64_t
 
 auto MessageView::get_char(std::uint32_t tag) const -> std::optional<char> {
     const auto field = find_field_view(tag);
-    if (!field.has_value() || field->type != FieldValueType::kChar) {
+    if (!field.has_value() || field->type != kFieldChar) {
         return std::nullopt;
     }
     return field->char_value;
@@ -710,7 +728,7 @@ auto MessageView::get_char(std::uint32_t tag) const -> std::optional<char> {
 
 auto MessageView::get_float(std::uint32_t tag) const -> std::optional<double> {
     const auto field = find_field_view(tag);
-    if (!field.has_value() || field->type != FieldValueType::kFloat) {
+    if (!field.has_value() || field->type != kFieldFloat) {
         return std::nullopt;
     }
     return field->float_value;
@@ -718,7 +736,7 @@ auto MessageView::get_float(std::uint32_t tag) const -> std::optional<double> {
 
 auto MessageView::get_boolean(std::uint32_t tag) const -> std::optional<bool> {
     const auto field = find_field_view(tag);
-    if (!field.has_value() || field->type != FieldValueType::kBoolean) {
+    if (!field.has_value() || field->type != kFieldBoolean) {
         return std::nullopt;
     }
     return field->bool_value;

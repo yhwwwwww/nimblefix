@@ -9,6 +9,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <variant>
 #include <vector>
 
 #include "fastfix/base/inline_split_vector.h"
@@ -26,29 +27,32 @@ class PrecompiledTemplateTable;
 
 namespace fastfix::message {
 
-enum class FieldValueType : std::uint32_t {
-    kString = 1,
-    kInt = 2,
-    kChar = 3,
-    kFloat = 4,
-    kBoolean = 5,
-};
+/// Type index for field values — matches std::variant<string,int64,double,char,bool> index.
+using FieldTypeIndex = std::uint8_t;
+inline constexpr FieldTypeIndex kFieldString  = 0;
+inline constexpr FieldTypeIndex kFieldInt     = 1;
+inline constexpr FieldTypeIndex kFieldFloat   = 2;
+inline constexpr FieldTypeIndex kFieldChar    = 3;
+inline constexpr FieldTypeIndex kFieldBoolean = 4;
 
-// TODO: replace with variant<int64_t, double, char, bool, std::string> to save ~32 bytes
-// for non-string types (SSO buffer is wasted for int/char/bool fields).
 struct FieldValue {
     std::uint32_t tag{0};
-    FieldValueType type{FieldValueType::kString};
-    std::string string_value;
-    std::int64_t int_value{0};
-    double float_value{0.0};
-    char char_value{'\0'};
-    bool bool_value{false};
+    std::variant<std::string, std::int64_t, double, char, bool> value;
+
+    [[nodiscard]] auto type_index() const -> FieldTypeIndex {
+        return static_cast<FieldTypeIndex>(value.index());
+    }
+
+    [[nodiscard]] auto& as_string() const { return std::get<std::string>(value); }
+    [[nodiscard]] auto  as_int()    const { return std::get<std::int64_t>(value); }
+    [[nodiscard]] auto  as_float()  const { return std::get<double>(value); }
+    [[nodiscard]] auto  as_char()   const { return std::get<char>(value); }
+    [[nodiscard]] auto  as_bool()   const { return std::get<bool>(value); }
 };
 
   struct FieldView {
     std::uint32_t tag{0};
-    FieldValueType type{FieldValueType::kString};
+    FieldTypeIndex type{kFieldString};
     std::string_view string_value;
     std::int64_t int_value{0};
     double float_value{0.0};
@@ -56,15 +60,16 @@ struct FieldValue {
     bool bool_value{false};
 
     [[nodiscard]] auto to_owned() const -> FieldValue {
-      FieldValue value;
-      value.tag = tag;
-      value.type = type;
-      value.string_value = std::string(string_value);
-      value.int_value = int_value;
-      value.float_value = float_value;
-      value.char_value = char_value;
-      value.bool_value = bool_value;
-      return value;
+      FieldValue v;
+      v.tag = tag;
+      switch (type) {
+        case kFieldInt:     v.value = int_value; break;
+        case kFieldFloat:   v.value = float_value; break;
+        case kFieldChar:    v.value = char_value; break;
+        case kFieldBoolean: v.value = bool_value; break;
+        default:            v.value = std::string(string_value); break;
+      }
+      return v;
     }
   };
 
@@ -79,12 +84,12 @@ struct FieldValue {
     std::uint32_t tag{0};
     std::uint32_t value_offset{0};
     std::uint16_t value_length{0};
-    std::uint16_t flags{0};  // lower 3 bits: FieldValueType
+    std::uint16_t flags{0};  // lower 3 bits: FieldTypeIndex
 
-    [[nodiscard]] auto type() const -> FieldValueType {
-      return static_cast<FieldValueType>(flags & 0x07U);
+    [[nodiscard]] auto type() const -> FieldTypeIndex {
+      return static_cast<FieldTypeIndex>(flags & 0x07U);
     }
-    auto set_type(FieldValueType t) -> void {
+    auto set_type(FieldTypeIndex t) -> void {
       flags = static_cast<std::uint16_t>((flags & ~0x07U) | (static_cast<std::uint16_t>(t) & 0x07U));
     }
   };

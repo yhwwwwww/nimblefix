@@ -298,22 +298,22 @@ auto ParseBoolean(std::string_view text, const char* label) -> base::Result<bool
     return base::Status::InvalidArgument(std::string("invalid ") + label);
 }
 
-auto FieldTypeFromDef(const profile::FieldDefRecord& field) -> message::FieldValueType {
+auto FieldTypeFromDef(const profile::FieldDefRecord& field) -> message::FieldTypeIndex {
     switch (static_cast<profile::ValueType>(field.value_type)) {
         case profile::ValueType::kInt:
-            return message::FieldValueType::kInt;
+            return message::kFieldInt;
         case profile::ValueType::kChar:
-            return message::FieldValueType::kChar;
+            return message::kFieldChar;
         case profile::ValueType::kFloat:
-            return message::FieldValueType::kFloat;
+            return message::kFieldFloat;
         case profile::ValueType::kBoolean:
-            return message::FieldValueType::kBoolean;
+            return message::kFieldBoolean;
         default:
-            return message::FieldValueType::kString;
+            return message::kFieldString;
     }
 }
 
-auto FieldTypeFallback(std::uint32_t tag) -> message::FieldValueType {
+auto FieldTypeFallback(std::uint32_t tag) -> message::FieldTypeIndex {
     switch (tag) {
         case 9:
         case 34:
@@ -325,20 +325,20 @@ auto FieldTypeFallback(std::uint32_t tag) -> message::FieldValueType {
         case 7:
         case 16:
         case 36:
-            return message::FieldValueType::kInt;
+            return message::kFieldInt;
         case 141:
         case 43:
         case 97:
         case 123:
-            return message::FieldValueType::kBoolean;
+            return message::kFieldBoolean;
         default:
-            return message::FieldValueType::kString;
+            return message::kFieldString;
     }
 }
 
 auto ResolveFieldType(
     std::uint32_t tag,
-    const profile::NormalizedDictionaryView& dictionary) -> message::FieldValueType {
+    const profile::NormalizedDictionaryView& dictionary) -> message::FieldTypeIndex {
     if (const auto* field = dictionary.find_field(tag); field != nullptr) {
         return FieldTypeFromDef(*field);
     }
@@ -347,7 +347,7 @@ auto ResolveFieldType(
 
 auto ResolveFieldTypeWithDef(
     std::uint32_t tag,
-    const profile::FieldDefRecord* field_def) -> message::FieldValueType {
+    const profile::FieldDefRecord* field_def) -> message::FieldTypeIndex {
     if (field_def != nullptr) {
         return FieldTypeFromDef(*field_def);
     }
@@ -361,7 +361,7 @@ auto ApplyScalarField(
     std::string_view value,
     const profile::NormalizedDictionaryView& dictionary) -> base::Status {
     switch (ResolveFieldType(tag, dictionary)) {
-        case message::FieldValueType::kInt: {
+        case message::kFieldInt: {
             auto parsed = ParseSigned(value, "integer field");
             if (!parsed.ok()) {
                 return parsed.status();
@@ -369,13 +369,13 @@ auto ApplyScalarField(
             builder.set_int(tag, parsed.value());
             return base::Status::Ok();
         }
-        case message::FieldValueType::kChar:
+        case message::kFieldChar:
             if (value.size() != 1U) {
                 return base::Status::InvalidArgument("char field must have exactly one byte");
             }
             builder.set_char(tag, value.front());
             return base::Status::Ok();
-        case message::FieldValueType::kFloat: {
+        case message::kFieldFloat: {
             auto parsed = ParseDouble(value, "floating-point field");
             if (!parsed.ok()) {
                 return parsed.status();
@@ -383,7 +383,7 @@ auto ApplyScalarField(
             builder.set_float(tag, parsed.value());
             return base::Status::Ok();
         }
-        case message::FieldValueType::kBoolean: {
+        case message::kFieldBoolean: {
             auto parsed = ParseBoolean(value, "boolean field");
             if (!parsed.ok()) {
                 return parsed.status();
@@ -504,7 +504,7 @@ auto MakeParsedFieldSlotWithType(
     std::uint32_t tag,
     std::uint32_t value_offset,
     std::uint32_t value_length,
-    message::FieldValueType field_type) -> message::ParsedFieldSlot {
+    message::FieldTypeIndex field_type) -> message::ParsedFieldSlot {
     message::ParsedFieldSlot slot;
     slot.tag = tag;
     slot.set_type(field_type);
@@ -863,13 +863,13 @@ auto AppendPrefixedFieldValue(
     char delimiter) -> void {
     AppendTracked(out, checksum, prefix);
     switch (field.type) {
-        case message::FieldValueType::kInt:
+        case message::kFieldInt:
             AppendIntegerDigits(out, checksum, field.int_value);
             break;
-        case message::FieldValueType::kChar:
+        case message::kFieldChar:
             AppendTracked(out, checksum, field.char_value);
             break;
-        case message::FieldValueType::kFloat: {
+        case message::kFieldFloat: {
             std::array<char, 32> float_buf{};
             const auto [fptr, fec] = std::to_chars(float_buf.data(), float_buf.data() + float_buf.size(), field.float_value, std::chars_format::general, 12);
             if (fec == std::errc()) {
@@ -877,7 +877,7 @@ auto AppendPrefixedFieldValue(
             }
             break;
         }
-        case message::FieldValueType::kBoolean:
+        case message::kFieldBoolean:
             AppendTracked(out, checksum, std::string_view(field.bool_value ? "Y" : "N"));
             break;
         default:
@@ -888,29 +888,31 @@ auto AppendPrefixedFieldValue(
 }
 
 auto EncodeFieldValue(std::string& out, const message::FieldValue& field, char delimiter) -> void {
-    switch (field.type) {
-        case message::FieldValueType::kInt:
-            return AppendField(out, field.tag, field.int_value, delimiter);
-        case message::FieldValueType::kChar:
-            return AppendField(out, field.tag, std::string_view(&field.char_value, 1U), delimiter);
-        case message::FieldValueType::kFloat:
-            return AppendField(out, field.tag, field.float_value, delimiter);
-        case message::FieldValueType::kBoolean:
-            return AppendField(out, field.tag, field.bool_value, delimiter);
-        default:
-            return AppendField(out, field.tag, field.string_value, delimiter);
-    }
+    std::visit([&](const auto& val) {
+        using T = std::decay_t<decltype(val)>;
+        if constexpr (std::is_same_v<T, std::string>) {
+            AppendField(out, field.tag, std::string_view(val), delimiter);
+        } else if constexpr (std::is_same_v<T, std::int64_t>) {
+            AppendField(out, field.tag, val, delimiter);
+        } else if constexpr (std::is_same_v<T, double>) {
+            AppendField(out, field.tag, val, delimiter);
+        } else if constexpr (std::is_same_v<T, char>) {
+            AppendField(out, field.tag, std::string_view(&val, 1U), delimiter);
+        } else if constexpr (std::is_same_v<T, bool>) {
+            AppendField(out, field.tag, val, delimiter);
+        }
+    }, field.value);
 }
 
 auto EncodeFieldValue(std::string& out, const message::FieldView& field, char delimiter) -> void {
     switch (field.type) {
-        case message::FieldValueType::kInt:
+        case message::kFieldInt:
             return AppendField(out, field.tag, field.int_value, delimiter);
-        case message::FieldValueType::kChar:
+        case message::kFieldChar:
             return AppendField(out, field.tag, std::string_view(&field.char_value, 1U), delimiter);
-        case message::FieldValueType::kFloat:
+        case message::kFieldFloat:
             return AppendField(out, field.tag, field.float_value, delimiter);
-        case message::FieldValueType::kBoolean:
+        case message::kFieldBoolean:
             return AppendField(out, field.tag, field.bool_value, delimiter);
         default:
             return AppendField(out, field.tag, field.string_value, delimiter);
@@ -1924,7 +1926,7 @@ auto DecodeFixMessageView(
                 tag,
                 static_cast<std::uint32_t>(scanned.value().value_offset),
                 scanned.value().value_length,
-                message::FieldValueType::kString);
+                message::kFieldString);
             AppendParsedFieldSlot(&parsed_message, RootContainer(), slot);
             byte_pos = scanned.value().next_pos;
             continue;
@@ -1991,7 +1993,7 @@ auto DecodeFixMessageView(
                     tag,
                     static_cast<std::uint32_t>(scanned.value().value_offset),
                     scanned.value().value_length,
-                    message::FieldValueType::kString);
+                    message::kFieldString);
                 AppendParsedFieldSlot(&parsed_message, RootContainer(), slot);
                 byte_pos = scanned.value().next_pos;
                 continue;
@@ -2054,7 +2056,7 @@ auto DecodeFixMessageView(
             tag,
             static_cast<std::uint32_t>(scanned.value().value_offset),
             scanned.value().value_length,
-            message::FieldValueType::kString);
+            message::kFieldString);
         AppendParsedFieldSlot(&parsed_message, RootContainer(), slot);
         byte_pos = scanned.value().next_pos;
     }
