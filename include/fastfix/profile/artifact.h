@@ -28,6 +28,8 @@ enum class SectionKind : std::uint32_t {
     kTemplateDescriptors = 8,
     kMessageFieldRules = 9,
     kGroupFieldRules = 10,
+    kHeaderFieldRules = 11,
+    kTrailerFieldRules = 12,
 };
 
 enum class ArtifactFlags : std::uint32_t {

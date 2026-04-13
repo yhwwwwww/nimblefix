@@ -169,6 +169,55 @@ auto BuildProfileArtifact(const NormalizedDictionary& dictionary)
         });
     }
 
+    // --- kAdminRules: one entry per admin message ---
+    std::vector<AdminRuleEntry> admin_rules;
+    for (const auto& message : dictionary.messages) {
+        if ((message.flags & static_cast<std::uint32_t>(MessageFlags::kAdmin)) != 0U) {
+            admin_rules.push_back(AdminRuleEntry{
+                .msg_type_offset = strings.Intern(message.msg_type),
+                .flags = message.flags,
+            });
+        }
+    }
+
+    // --- kValidationRules: one entry per field ---
+    std::vector<ValidationRuleEntry> validation_rules;
+    validation_rules.reserve(dictionary.fields.size());
+    for (const auto& field : dictionary.fields) {
+        validation_rules.push_back(ValidationRuleEntry{
+            .tag = field.tag,
+            .value_type = static_cast<std::uint32_t>(field.value_type),
+            .flags = field.flags,
+        });
+    }
+
+    // --- kLookupTables: direct-address array for O(1) tag->field_index ---
+    static constexpr std::size_t kLookupTableSize = 10000;
+    static constexpr std::uint32_t kLookupAbsent = 0xFFFFFFFFU;
+    std::vector<LookupTableEntry> lookup_table(kLookupTableSize, LookupTableEntry{.field_index = kLookupAbsent});
+    for (std::size_t i = 0; i < dictionary.fields.size(); ++i) {
+        const auto tag = dictionary.fields[i].tag;
+        if (tag < kLookupTableSize) {
+            lookup_table[tag].field_index = static_cast<std::uint32_t>(i);
+        }
+    }
+
+    // --- kTemplateDescriptors: one entry per message ---
+    std::vector<TemplateDescriptorEntry> template_descriptors;
+    template_descriptors.reserve(dictionary.messages.size());
+    {
+        std::uint32_t rule_offset = 0;
+        for (const auto& message : dictionary.messages) {
+            template_descriptors.push_back(TemplateDescriptorEntry{
+                .msg_type_offset = strings.Intern(message.msg_type),
+                .field_count = static_cast<std::uint32_t>(message.field_rules.size()),
+                .first_field_rule_index = rule_offset,
+                .flags = message.flags,
+            });
+            rule_offset += static_cast<std::uint32_t>(message.field_rules.size());
+        }
+    }
+
     std::vector<PendingSection> pending_sections;
     pending_sections.push_back(PendingSection{
         .kind = SectionKind::kStringTable,
@@ -204,6 +253,54 @@ auto BuildProfileArtifact(const NormalizedDictionary& dictionary)
         .kind = SectionKind::kGroupFieldRules,
         .bytes = SerializeEntries<FieldRuleRecord>(group_rules),
         .entry_count = group_rules.size(),
+        .entry_size = sizeof(FieldRuleRecord),
+    });
+    pending_sections.push_back(PendingSection{
+        .kind = SectionKind::kAdminRules,
+        .bytes = SerializeEntries<AdminRuleEntry>(admin_rules),
+        .entry_count = admin_rules.size(),
+        .entry_size = sizeof(AdminRuleEntry),
+    });
+    pending_sections.push_back(PendingSection{
+        .kind = SectionKind::kValidationRules,
+        .bytes = SerializeEntries<ValidationRuleEntry>(validation_rules),
+        .entry_count = validation_rules.size(),
+        .entry_size = sizeof(ValidationRuleEntry),
+    });
+    pending_sections.push_back(PendingSection{
+        .kind = SectionKind::kLookupTables,
+        .bytes = SerializeEntries<LookupTableEntry>(lookup_table),
+        .entry_count = lookup_table.size(),
+        .entry_size = sizeof(LookupTableEntry),
+    });
+    pending_sections.push_back(PendingSection{
+        .kind = SectionKind::kTemplateDescriptors,
+        .bytes = SerializeEntries<TemplateDescriptorEntry>(template_descriptors),
+        .entry_count = template_descriptors.size(),
+        .entry_size = sizeof(TemplateDescriptorEntry),
+    });
+
+    std::vector<FieldRuleRecord> header_rules;
+    header_rules.reserve(dictionary.header_fields.size());
+    for (const auto& rule : dictionary.header_fields) {
+        header_rules.push_back(FieldRuleRecord{.tag = rule.tag, .flags = rule.flags});
+    }
+    pending_sections.push_back(PendingSection{
+        .kind = SectionKind::kHeaderFieldRules,
+        .bytes = SerializeEntries<FieldRuleRecord>(header_rules),
+        .entry_count = header_rules.size(),
+        .entry_size = sizeof(FieldRuleRecord),
+    });
+
+    std::vector<FieldRuleRecord> trailer_rules;
+    trailer_rules.reserve(dictionary.trailer_fields.size());
+    for (const auto& rule : dictionary.trailer_fields) {
+        trailer_rules.push_back(FieldRuleRecord{.tag = rule.tag, .flags = rule.flags});
+    }
+    pending_sections.push_back(PendingSection{
+        .kind = SectionKind::kTrailerFieldRules,
+        .bytes = SerializeEntries<FieldRuleRecord>(trailer_rules),
+        .entry_count = trailer_rules.size(),
         .entry_size = sizeof(FieldRuleRecord),
     });
 

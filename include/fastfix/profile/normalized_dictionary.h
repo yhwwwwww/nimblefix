@@ -75,12 +75,38 @@ struct GroupDefRecord {
     std::uint32_t flags;
     std::uint64_t required_field_bitmap;
 };
+
+struct AdminRuleEntry {
+    std::uint32_t msg_type_offset;
+    std::uint32_t flags;
+};
+
+struct ValidationRuleEntry {
+    std::uint32_t tag;
+    std::uint32_t value_type;
+    std::uint32_t flags;
+};
+
+struct LookupTableEntry {
+    std::uint32_t field_index;
+};
+
+struct TemplateDescriptorEntry {
+    std::uint32_t msg_type_offset;
+    std::uint32_t field_count;
+    std::uint32_t first_field_rule_index;
+    std::uint32_t flags;
+};
 #pragma pack(pop)
 
 static_assert(sizeof(FieldDefRecord) == 16);
 static_assert(sizeof(FieldRuleRecord) == 8);
 static_assert(sizeof(MessageDefRecord) == 24);
 static_assert(sizeof(GroupDefRecord) == 32);
+static_assert(sizeof(AdminRuleEntry) == 8);
+static_assert(sizeof(ValidationRuleEntry) == 12);
+static_assert(sizeof(LookupTableEntry) == 4);
+static_assert(sizeof(TemplateDescriptorEntry) == 16);
 
 struct FieldDef {
     std::uint32_t tag{0};
@@ -123,6 +149,8 @@ struct NormalizedDictionary {
     std::vector<FieldDef> fields;
     std::vector<MessageDef> messages;
     std::vector<GroupDef> groups;
+    std::vector<FieldRule> header_fields;
+    std::vector<FieldRule> trailer_fields;
 };
 
 class NormalizedDictionaryView {

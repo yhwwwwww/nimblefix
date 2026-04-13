@@ -1,10 +1,22 @@
 #include "fastfix/profile/overlay.h"
 
 #include <algorithm>
+#include <array>
 
 namespace fastfix::profile {
 
 namespace {
+
+constexpr std::array<std::uint32_t, 7> kCoreSessionTags = {8, 9, 10, 34, 35, 49, 56};
+
+auto IsCoreSessionTag(std::uint32_t tag) -> bool {
+    for (const auto core : kCoreSessionTags) {
+        if (tag == core) {
+            return true;
+        }
+    }
+    return false;
+}
 
 auto FindFieldRule(std::vector<FieldRule>& rules, std::uint32_t tag) {
     return std::find_if(rules.begin(), rules.end(), [&](const auto& existing) {
@@ -128,6 +140,24 @@ auto ApplyOverlay(const NormalizedDictionary& baseline, const NormalizedDictiona
         it->flags |= overlay_group.flags;
         MergeFieldRules(&it->field_rules, overlay_group.field_rules);
     }
+
+    // Merge header fields — reject core session tags in overlay.
+    for (const auto& rule : overlay.header_fields) {
+        if (IsCoreSessionTag(rule.tag)) {
+            return base::Status::InvalidArgument(
+                "overlay may not add core session tag " + std::to_string(rule.tag) + " to header");
+        }
+    }
+    MergeFieldRules(&merged.header_fields, overlay.header_fields);
+
+    // Merge trailer fields — reject core session tags in overlay.
+    for (const auto& rule : overlay.trailer_fields) {
+        if (IsCoreSessionTag(rule.tag)) {
+            return base::Status::InvalidArgument(
+                "overlay may not add core session tag " + std::to_string(rule.tag) + " to trailer");
+        }
+    }
+    MergeFieldRules(&merged.trailer_fields, overlay.trailer_fields);
 
     std::sort(merged.fields.begin(), merged.fields.end(), [](const auto& lhs, const auto& rhs) {
         return lhs.tag < rhs.tag;

@@ -22,6 +22,8 @@ constexpr std::string_view kSchemaHashKey = "schema_hash";
 constexpr std::string_view kFieldEntryKind = "field";
 constexpr std::string_view kMessageEntryKind = "message";
 constexpr std::string_view kGroupEntryKind = "group";
+constexpr std::string_view kHeaderEntryKind = "header";
+constexpr std::string_view kTrailerEntryKind = "trailer";
 
 namespace field_columns {
 constexpr std::size_t kKind = 0U;
@@ -346,6 +348,34 @@ auto ParseDictionaryLines(const std::vector<std::string>& lines)
                 return group.status();
             }
             dictionary.groups.push_back(std::move(group).value());
+            continue;
+        }
+
+        if (parts[0] == kHeaderEntryKind) {
+            if (parts.size() != 2U) {
+                return base::Status::InvalidArgument("header entries must have 2 parts");
+            }
+            auto rules = ParseFieldRules(parts[1]);
+            if (!rules.ok()) {
+                return rules.status();
+            }
+            for (auto& rule : rules.value()) {
+                dictionary.header_fields.push_back(rule);
+            }
+            continue;
+        }
+
+        if (parts[0] == kTrailerEntryKind) {
+            if (parts.size() != 2U) {
+                return base::Status::InvalidArgument("trailer entries must have 2 parts");
+            }
+            auto rules = ParseFieldRules(parts[1]);
+            if (!rules.ok()) {
+                return rules.status();
+            }
+            for (auto& rule : rules.value()) {
+                dictionary.trailer_fields.push_back(rule);
+            }
             continue;
         }
 
