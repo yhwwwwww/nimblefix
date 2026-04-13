@@ -89,6 +89,7 @@ class LiveAcceptor {
         std::unique_ptr<ActiveSession> session;
         std::uint64_t last_progress_ns{0};
         std::optional<RuntimeEvent> pending_app_event;
+        std::vector<std::byte> stashed_app_frame;
         bool close_requested{false};
         bool count_completion{false};
         std::string close_reason;
@@ -163,6 +164,7 @@ class LiveAcceptor {
     auto MigrateConnectionToRoutedWorker(WorkerShardState& shard, std::size_t connection_index) -> base::Status;
     auto ProcessDueTimers(WorkerShardState& shard, std::uint64_t timestamp_ns) -> base::Status;
     auto RetryPendingAppEvent(ConnectionState& connection, std::uint64_t timestamp_ns) -> base::Status;
+    auto RetryPendingAppEvents(WorkerShardState& shard, std::uint64_t timestamp_ns) -> base::Status;
     auto BindConnectionFromLogon(
         WorkerShardState& shard,
         std::size_t connection_index,

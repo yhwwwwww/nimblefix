@@ -771,6 +771,10 @@ auto LiveAcceptor::PollOnce(std::chrono::milliseconds timeout) -> base::Status {
         if (!app_status.ok()) return app_status;
     }
     {
+        auto retry_status = RetryPendingAppEvents(shard, now);
+        if (!retry_status.ok()) return retry_status;
+    }
+    {
         auto drain_status = DrainWorkerCommands(shard.worker_id, now);
         if (!drain_status.ok()) return drain_status;
     }
@@ -783,6 +787,10 @@ auto LiveAcceptor::PollOnce(std::chrono::milliseconds timeout) -> base::Status {
     {
         auto app_status = PollManagedApplicationWorker(shard.worker_id);
         if (!app_status.ok()) return app_status;
+    }
+    {
+        auto retry_status = RetryPendingAppEvents(shard, timers_now);
+        if (!retry_status.ok()) return retry_status;
     }
 
     const auto final_now = NowNs();
@@ -835,6 +843,10 @@ auto LiveAcceptor::PollWorkerOnce(WorkerShardState& shard, std::chrono::millisec
     if (!status.ok()) {
         return status;
     }
+    status = RetryPendingAppEvents(shard, now);
+    if (!status.ok()) {
+        return status;
+    }
     const auto t_app_done = NowNs();
 
     status = DrainWorkerCommands(shard.worker_id, now);
@@ -851,6 +863,10 @@ auto LiveAcceptor::PollWorkerOnce(WorkerShardState& shard, std::chrono::millisec
     const auto t_timer_done = NowNs();
 
     status = PollManagedApplicationWorker(shard.worker_id);
+    if (!status.ok()) {
+        return status;
+    }
+    status = RetryPendingAppEvents(shard, timers_now);
     if (!status.ok()) {
         return status;
     }
@@ -991,12 +1007,112 @@ auto LiveAcceptor::ProcessConnection(
             MarkConnectionForClose(*connection, status.message(), false);
         }
         if (connection->pending_app_event.has_value()) {
+            // Backpressure is still active.  We must NOT read application-level
+            // frames because the previous app message hasn't been dispatched
+            // yet and reading would either drop or double-dispatch it.
+            // However, we still need to drain admin frames (heartbeats, test
+            // requests) so that the session's last_inbound_ns stays current
+            // and the heartbeat watchdog doesn't disconnect us.
+            if (readable) {
+                while (!connection->close_requested) {
+                    auto frame = connection->connection.TryReceiveFrameView();
+                    if (!frame.ok()) {
+                        MarkConnectionForClose(*connection, frame.status().message(), false);
+                        break;
+                    }
+                    if (!frame.value().has_value()) {
+                        break;
+                    }
+                    const auto frame_bytes = frame.value().value();
+                    auto header = codec::PeekSessionHeaderView(frame_bytes);
+                    if (!header.ok()) {
+                        MarkConnectionForClose(*connection, header.status().message(), false);
+                        break;
+                    }
+                    if (!IsAdminMessage(header.value().msg_type)) {
+                        // Application frame — cannot process while backpressured.
+                        // Stash the frame bytes so the next ProcessConnection
+                        // iteration can reprocess them once backpressure clears.
+                        connection->stashed_app_frame.assign(
+                            frame_bytes.begin(), frame_bytes.end());
+                        break;
+                    }
+                    // Admin frame — safe to process; keeps the session alive.
+                    connection->last_progress_ns = timestamp_ns;
+                    last_progress_ns_.store(timestamp_ns);
+                    const auto conn_id = connection->connection_id;
+                    status = HandleInboundFrame(
+                        *connection_shard,
+                        connection_shard->connection_indices[conn_id],
+                        frame_bytes,
+                        header.value(),
+                        timestamp_ns);
+                    if (!status.ok()) {
+                        MarkConnectionForClose(*connection, status.message(), false);
+                        break;
+                    }
+                }
+            }
             readable = false;
         }
     }
 
     if (readable) {
-        while (!connection->close_requested) {
+        // If a previous admin-drain loop stashed an application frame,
+        // reprocess it now that backpressure has cleared.
+        if (!connection->stashed_app_frame.empty()) {
+            // Copy the stashed frame so the original vector can be safely moved
+            // if HandleInboundFrame triggers connection migration.
+            auto stashed_copy = std::move(connection->stashed_app_frame);
+            connection->stashed_app_frame.clear();
+            const auto frame_bytes = std::span<const std::byte>(
+                stashed_copy.data(), stashed_copy.size());
+            auto header = codec::PeekSessionHeaderView(frame_bytes);
+            if (!header.ok()) {
+                if (connection->session != nullptr) {
+                    RecordProtocolFailure(*connection->session, header.status());
+                }
+                MarkConnectionForClose(*connection, header.status().message(), false);
+            } else {
+                connection->last_progress_ns = timestamp_ns;
+                last_progress_ns_.store(timestamp_ns);
+
+                const auto connection_id = connection->connection_id;
+                auto status = HandleInboundFrame(
+                    *connection_shard,
+                    connection_shard->connection_indices[connection_id],
+                    frame_bytes,
+                    header.value(),
+                    timestamp_ns);
+                if (!status.ok()) {
+                    if (connection->session != nullptr) {
+                        RecordProtocolFailure(*connection->session, status);
+                    }
+                    MarkConnectionForClose(*connection, status.message(), false);
+                } else {
+                    // Re-find connection after HandleInboundFrame (may have migrated).
+                    connection = nullptr;
+                    connection_shard = nullptr;
+                    for (auto& candidate_shard : worker_shards_) {
+                        auto* candidate = FindConnectionById(candidate_shard, connection_id);
+                        if (candidate != nullptr) {
+                            connection = candidate;
+                            connection_shard = &candidate_shard;
+                            break;
+                        }
+                    }
+                    if (connection == nullptr || connection_shard == nullptr) {
+                        if (!worker_threads_.empty()) {
+                            return base::Status::Ok();
+                        }
+                        return base::Status::NotFound(
+                            "live acceptor connection was not found after stashed frame processing");
+                    }
+                }
+            }
+        }
+
+        while (!connection->close_requested && !connection->pending_app_event.has_value()) {
             auto frame = connection->connection.TryReceiveFrameView();
             if (!frame.ok()) {
                 if (connection->session != nullptr) {
@@ -1164,6 +1280,19 @@ auto LiveAcceptor::RetryPendingAppEvent(ConnectionState& connection, std::uint64
     connection.pending_app_event.reset();
     connection.last_progress_ns = timestamp_ns;
     last_progress_ns_.store(timestamp_ns);
+    return base::Status::Ok();
+}
+
+auto LiveAcceptor::RetryPendingAppEvents(WorkerShardState& shard, std::uint64_t timestamp_ns) -> base::Status {
+    for (auto& connection : shard.connections) {
+        if (connection.close_requested || !connection.pending_app_event.has_value()) {
+            continue;
+        }
+        auto status = RetryPendingAppEvent(connection, timestamp_ns);
+        if (!status.ok()) {
+            MarkConnectionForClose(connection, status.message(), false);
+        }
+    }
     return base::Status::Ok();
 }
 

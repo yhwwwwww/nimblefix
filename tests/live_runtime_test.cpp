@@ -1134,8 +1134,12 @@ TEST_CASE("live-backpressure", "[live-backpressure]") {
         application_result.set_value(poller.RunWorker(0U, stop_application));
     });
 
-    REQUIRE(initiator_future.get().ok());
-    REQUIRE(runtime_future.get().ok());
+    auto initiator_status = initiator_future.get();
+    if (!initiator_status.ok()) {
+        UNSCOPED_INFO("initiator failed: " << initiator_status.message());
+    }
+    REQUIRE(initiator_status.ok());
+    auto runtime_status = runtime_future.get();
     stop_application.store(true);
     REQUIRE(application_future.get().ok());
     REQUIRE(runtime.completed_session_count() == 1U);
