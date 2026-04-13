@@ -557,6 +557,7 @@ auto RunSoak(const SoakConfig& config) -> base::Result<SoakReport> {
         counterparty.session.session_id = 10'000U + index;
         counterparty.session.profile_id = dictionary.value().profile().header().profile_id;
         counterparty.session.key.begin_string = "FIX.4.4";
+        counterparty.transport_profile = session::TransportSessionProfile::Fix44();
         counterparty.session.key.sender_comp_id = "SELL" + std::to_string(index + 1U);
         counterparty.session.key.target_comp_id = "BUY" + std::to_string(index + 1U);
         counterparty.session.heartbeat_interval_seconds = 30U;
@@ -586,6 +587,7 @@ auto RunSoak(const SoakConfig& config) -> base::Result<SoakReport> {
         harness.protocol = std::make_unique<session::AdminProtocol>(
             session::AdminProtocolConfig{
                 .session = harness.counterparty.session,
+                .transport_profile = harness.counterparty.transport_profile,
                 .begin_string = harness.counterparty.session.key.begin_string,
                 .sender_comp_id = harness.counterparty.session.key.sender_comp_id,
                 .target_comp_id = harness.counterparty.session.key.target_comp_id,

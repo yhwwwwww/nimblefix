@@ -55,8 +55,12 @@ constexpr std::size_t kReconnectMaxMs = 20U;
 constexpr std::size_t kReconnectMaxRetries = 21U;
 constexpr std::size_t kDurableLocalUtcOffsetSeconds = 22U;
 constexpr std::size_t kDurableUseSystemTimezone = 23U;
+constexpr std::size_t kDayCutMode = 24U;
+constexpr std::size_t kDayCutHour = 25U;
+constexpr std::size_t kDayCutMinute = 26U;
+constexpr std::size_t kDayCutUtcOffset = 27U;
 constexpr std::size_t kMinFieldCount = kIsInitiator + 1U;
-constexpr std::size_t kMaxFieldCount = kDurableUseSystemTimezone + 1U;
+constexpr std::size_t kMaxFieldCount = kDayCutUtcOffset + 1U;
 }  // namespace counterparty_columns
 
 auto Trim(std::string_view input) -> std::string_view {
@@ -225,13 +229,33 @@ auto ParseRecoveryMode(std::string_view token) -> base::Result<session::Recovery
     if (value == "memory") {
         return session::RecoveryMode::kMemoryOnly;
     }
-    if (value == "warm") {
+    if (value == "warm" || value == "warm-restart") {
         return session::RecoveryMode::kWarmRestart;
     }
-    if (value == "cold") {
+    if (value == "cold" || value == "cold-start") {
         return session::RecoveryMode::kColdStart;
     }
+    if (value == "no-recovery") {
+        return session::RecoveryMode::kNoRecovery;
+    }
     return base::Status::InvalidArgument("unknown recovery mode in runtime config");
+}
+
+auto ParseDayCutMode(std::string_view token) -> base::Result<session::DayCutMode> {
+    const auto value = Trim(token);
+    if (value.empty() || value == "no-auto-reset") {
+        return session::DayCutMode::kNoAutoReset;
+    }
+    if (value == "fixed-local-time") {
+        return session::DayCutMode::kFixedLocalTime;
+    }
+    if (value == "fixed-utc-time") {
+        return session::DayCutMode::kFixedUtcTime;
+    }
+    if (value == "external-control") {
+        return session::DayCutMode::kExternalControl;
+    }
+    return base::Status::InvalidArgument("unknown day_cut_mode in runtime config");
 }
 
 auto ParseDispatchMode(std::string_view token) -> base::Result<AppDispatchMode> {
@@ -531,7 +555,7 @@ auto LoadEngineConfigText(std::string_view text, const std::filesystem::path& ba
             if (parts.size() < counterparty_columns::kMinFieldCount ||
                 parts.size() > counterparty_columns::kMaxFieldCount) {
                 return base::Status::InvalidArgument(
-                    "counterparty config must have between 13 and 24 pipe-separated parts");
+                    "counterparty config must have between 13 and 28 pipe-separated parts");
             }
 
             auto session_id = ParseInteger<std::uint64_t>(parts[counterparty_columns::kSessionId], "session_id");
@@ -643,6 +667,41 @@ auto LoadEngineConfigText(std::string_view text, const std::filesystem::path& ba
                     return durable_use_system_tz.status();
                 }
             }
+            auto day_cut_mode = base::Result<session::DayCutMode>(session::DayCutMode::kNoAutoReset);
+            if (parts.size() > counterparty_columns::kDayCutMode &&
+                !Trim(parts[counterparty_columns::kDayCutMode]).empty()) {
+                day_cut_mode = ParseDayCutMode(parts[counterparty_columns::kDayCutMode]);
+                if (!day_cut_mode.ok()) {
+                    return day_cut_mode.status();
+                }
+            }
+            auto day_cut_hour = base::Result<std::int32_t>(0);
+            if (parts.size() > counterparty_columns::kDayCutHour &&
+                !Trim(parts[counterparty_columns::kDayCutHour]).empty()) {
+                day_cut_hour = ParseInteger<std::int32_t>(
+                    parts[counterparty_columns::kDayCutHour], "day_cut_hour");
+                if (!day_cut_hour.ok()) {
+                    return day_cut_hour.status();
+                }
+            }
+            auto day_cut_minute = base::Result<std::int32_t>(0);
+            if (parts.size() > counterparty_columns::kDayCutMinute &&
+                !Trim(parts[counterparty_columns::kDayCutMinute]).empty()) {
+                day_cut_minute = ParseInteger<std::int32_t>(
+                    parts[counterparty_columns::kDayCutMinute], "day_cut_minute");
+                if (!day_cut_minute.ok()) {
+                    return day_cut_minute.status();
+                }
+            }
+            auto day_cut_utc_offset = base::Result<std::int32_t>(0);
+            if (parts.size() > counterparty_columns::kDayCutUtcOffset &&
+                !Trim(parts[counterparty_columns::kDayCutUtcOffset]).empty()) {
+                day_cut_utc_offset = ParseInteger<std::int32_t>(
+                    parts[counterparty_columns::kDayCutUtcOffset], "day_cut_utc_offset");
+                if (!day_cut_utc_offset.ok()) {
+                    return day_cut_utc_offset.status();
+                }
+            }
             auto heartbeat = ParseInteger<std::uint32_t>(
                 parts[counterparty_columns::kHeartbeatIntervalSeconds],
                 "heartbeat_interval_seconds");
@@ -669,6 +728,8 @@ auto LoadEngineConfigText(std::string_view text, const std::filesystem::path& ba
             config.counterparties.push_back(CounterpartyConfig{
                 .name = parts[counterparty_columns::kName],
                 .session = std::move(session),
+                .transport_profile = session::TransportSessionProfile::FromBeginString(
+                    parts[counterparty_columns::kBeginString]),
                 .store_path = ResolvePath(base_dir, parts[counterparty_columns::kStorePath]),
                 .default_appl_ver_id = parts.size() > counterparty_columns::kDefaultApplVerId
                                            ? parts[counterparty_columns::kDefaultApplVerId]
@@ -686,6 +747,12 @@ auto LoadEngineConfigText(std::string_view text, const std::filesystem::path& ba
                 .reconnect_initial_ms = reconnect_initial_ms.value(),
                 .reconnect_max_ms = reconnect_max_ms.value(),
                 .reconnect_max_retries = reconnect_max_retries.value(),
+                .day_cut = session::DayCutConfig{
+                    .mode = day_cut_mode.value(),
+                    .reset_hour = day_cut_hour.value(),
+                    .reset_minute = day_cut_minute.value(),
+                    .utc_offset_seconds = day_cut_utc_offset.value(),
+                },
             });
             continue;
         }

@@ -1907,7 +1907,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]") {
         REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
 
         const auto inbound = ::fastfix::tests::EncodeFixFrame(
-            "35=D|34=2|49=BUY|56=SELL|52=20260402-12:00:00.000|11=ORD1|54=1|60=20260402-12:00:00.000|40=2|55=AAPL|453=1|");
+            "35=D|34=2|49=BUY|56=SELL|52=20260402-12:00:00.000|11=ORD1|54=1|60=20260402-12:00:00.000|40=2|55=AAPL|453=1|448=PARTY1|447=D|452=1|");
         auto event = protocol.OnInbound(inbound, 10U);
         REQUIRE(event.ok());
         REQUIRE(event.value().outbound_frames.empty());
@@ -2961,7 +2961,8 @@ TEST_CASE("Reject received processed silently", "[admin-protocol]") {
     REQUIRE(event.ok());
     REQUIRE(event.value().outbound_frames.empty());
     REQUIRE(!event.value().disconnect);
-    REQUIRE(event.value().application_messages.empty());
+    // Reject is delivered to the application layer via OnReject callback (17.3)
+    REQUIRE(event.value().application_messages.size() == 1U);
 
     const auto after = protocol.session().Snapshot();
     REQUIRE(after.next_in_seq == 3U);

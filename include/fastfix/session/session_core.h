@@ -9,8 +9,23 @@
 #include "fastfix/session/session_handle.h"
 #include "fastfix/session/session_key.h"
 #include "fastfix/session/session_snapshot.h"
+#include "fastfix/session/transport_profile.h"
 
 namespace fastfix::session {
+
+enum class DayCutMode : std::uint32_t {
+    kNoAutoReset = 0,      // No automatic reset; application triggers manually
+    kFixedLocalTime,       // Reset at a fixed local time (e.g., 17:00 EST)
+    kFixedUtcTime,         // Reset at a fixed UTC time
+    kExternalControl,      // Reset only when explicitly triggered via API
+};
+
+struct DayCutConfig {
+    DayCutMode mode{DayCutMode::kNoAutoReset};
+    std::int32_t reset_hour{0};        // Hour (0-23) for fixed-time modes
+    std::int32_t reset_minute{0};      // Minute (0-59) for fixed-time modes
+    std::int32_t utc_offset_seconds{0}; // For kFixedLocalTime: local timezone offset
+};
 
 struct SessionConfig {
     std::uint64_t session_id{0};
@@ -57,6 +72,31 @@ class SessionCore {
     auto RecordInboundActivity(std::uint64_t timestamp_ns) -> base::Status;
     auto RecordOutboundActivity(std::uint64_t timestamp_ns) -> base::Status;
 
+    /// Check whether the day-cut boundary has been crossed since the last check.
+    /// Only effective for kFixedLocalTime and kFixedUtcTime modes.
+    /// \param now_ns wall-clock nanoseconds since Unix epoch (system_clock).
+    auto CheckDayCut(std::uint64_t now_ns) -> void;
+
+    /// Externally triggered session reset: resets sequence numbers to 1.
+    /// Callable for kExternalControl mode or internally by timer-based modes.
+    auto TriggerDayCut() -> base::Status;
+
+    auto SetDayCutConfig(const DayCutConfig& config) -> void {
+        day_cut_config_ = config;
+    }
+
+    [[nodiscard]] auto day_cut_config() const -> const DayCutConfig& {
+        return day_cut_config_;
+    }
+
+    void set_transport_profile(const TransportSessionProfile* profile) {
+        transport_profile_ = profile;
+    }
+
+    [[nodiscard]] auto transport_profile() const -> const TransportSessionProfile* {
+        return transport_profile_;
+    }
+
     [[nodiscard]] auto pending_resend() const -> const std::optional<ResendRange>& {
         return pending_resend_;
     }
@@ -73,6 +113,9 @@ class SessionCore {
     std::uint64_t last_inbound_ns_{0};
     std::uint64_t last_outbound_ns_{0};
     std::optional<ResendRange> pending_resend_{};
+    DayCutConfig day_cut_config_{};
+    std::int32_t last_day_cut_date_{-1};  // Julian-style day number to avoid re-triggering
+    const TransportSessionProfile* transport_profile_{nullptr};
 };
 
 }  // namespace fastfix::session

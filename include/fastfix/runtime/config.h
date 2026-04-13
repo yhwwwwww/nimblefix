@@ -12,6 +12,7 @@
 #include "fastfix/runtime/io_poller.h"
 #include "fastfix/session/resend_recovery.h"
 #include "fastfix/session/session_core.h"
+#include "fastfix/session/transport_profile.h"
 #include "fastfix/session/validation_policy.h"
 #include "fastfix/store/durable_batch_store.h"
 
@@ -62,6 +63,7 @@ struct ListenerConfig {
 struct CounterpartyConfig {
     std::string name;
     session::SessionConfig session;
+    session::TransportSessionProfile transport_profile;
     std::filesystem::path store_path;
     std::string default_appl_ver_id;
     StoreMode store_mode{StoreMode::kMemory};
@@ -78,6 +80,7 @@ struct CounterpartyConfig {
     std::uint32_t reconnect_initial_ms = kDefaultReconnectInitialMs;
     std::uint32_t reconnect_max_ms = kDefaultReconnectMaxMs;
     std::uint32_t reconnect_max_retries = kUnlimitedReconnectRetries;  // 0 = unlimited
+    session::DayCutConfig day_cut;
 };
 
 struct EngineConfig {

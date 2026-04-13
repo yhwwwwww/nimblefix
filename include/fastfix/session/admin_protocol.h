@@ -20,6 +20,7 @@
 #include "fastfix/message/message.h"
 #include "fastfix/profile/normalized_dictionary.h"
 #include "fastfix/session/session_core.h"
+#include "fastfix/session/transport_profile.h"
 #include "fastfix/session/validation_policy.h"
 #include "fastfix/store/session_store.h"
 
@@ -501,6 +502,7 @@ struct ProtocolEvent {
 
 struct AdminProtocolConfig {
     SessionConfig session;
+    TransportSessionProfile transport_profile;
     std::string begin_string{"FIX.4.4"};
     std::string sender_comp_id;
     std::string target_comp_id;
@@ -531,6 +533,10 @@ class AdminProtocol {
     auto ReserveReplayStorage(std::size_t frame_count) -> void;
 
     [[nodiscard]] const SessionCore& session() const {
+        return session_;
+    }
+
+    [[nodiscard]] SessionCore& mutable_session() {
         return session_;
     }
 

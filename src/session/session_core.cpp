@@ -226,4 +226,59 @@ auto SessionCore::handle(std::uint32_t worker_id) const -> SessionHandle {
     return SessionHandle(config_.session_id, worker_id);
 }
 
+auto SessionCore::CheckDayCut(std::uint64_t now_ns) -> void {
+    const auto mode = day_cut_config_.mode;
+    if (mode != DayCutMode::kFixedLocalTime && mode != DayCutMode::kFixedUtcTime) {
+        return;
+    }
+
+    // Convert nanoseconds since epoch to seconds.
+    const auto epoch_seconds = static_cast<std::int64_t>(now_ns / 1'000'000'000ULL);
+
+    // Apply timezone offset for local-time mode.
+    const auto adjusted_seconds = (mode == DayCutMode::kFixedLocalTime)
+                                      ? epoch_seconds + day_cut_config_.utc_offset_seconds
+                                      : epoch_seconds;
+
+    // Compute day number and time-of-day.
+    constexpr std::int64_t kSecondsPerDay = 86400;
+    const auto day_number = static_cast<std::int32_t>(adjusted_seconds / kSecondsPerDay);
+    const auto time_of_day = adjusted_seconds % kSecondsPerDay;
+    const auto current_hour = static_cast<std::int32_t>(time_of_day / 3600);
+    const auto current_minute = static_cast<std::int32_t>((time_of_day % 3600) / 60);
+
+    // Has the reset time been reached today?
+    const bool past_reset = (current_hour > day_cut_config_.reset_hour) ||
+                            (current_hour == day_cut_config_.reset_hour &&
+                             current_minute >= day_cut_config_.reset_minute);
+
+    // The effective day-cut date: if past reset time, we are in the "new" session day.
+    const auto effective_date = past_reset ? day_number : day_number - 1;
+
+    if (last_day_cut_date_ < 0) {
+        // First check: initialise without triggering.
+        last_day_cut_date_ = effective_date;
+        return;
+    }
+
+    if (effective_date <= last_day_cut_date_) {
+        return;  // Already triggered for this session day.
+    }
+
+    last_day_cut_date_ = effective_date;
+    static_cast<void>(TriggerDayCut());
+}
+
+auto SessionCore::TriggerDayCut() -> base::Status {
+    if (state_ != SessionState::kDisconnected && state_ != SessionState::kActive) {
+        return base::Status::InvalidArgument(
+            "day-cut can only be triggered when session is disconnected or active");
+    }
+
+    next_in_seq_ = 1;
+    next_out_seq_ = 1;
+    pending_resend_.reset();
+    return base::Status::Ok();
+}
+
 }  // namespace fastfix::session

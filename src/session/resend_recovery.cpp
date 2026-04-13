@@ -86,7 +86,7 @@ auto RecoverSession(SessionCore& session, const store::SessionStore& store, Reco
         return session.FinishRecovery();
     }
 
-    if (mode == RecoveryMode::kColdStart) {
+    if (mode == RecoveryMode::kNoRecovery || mode == RecoveryMode::kColdStart) {
         status = session.RestoreSequenceState(1U, 1U);
         if (!status.ok()) {
             return status;

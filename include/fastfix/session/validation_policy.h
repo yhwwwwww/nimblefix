@@ -39,7 +39,7 @@ struct ValidationPolicy {
             .require_required_fields_on_app_messages = true,
             .reject_unknown_fields = false,
             .reject_duplicate_fields = false,
-            .reject_invalid_group_structure = false,
+            .reject_invalid_group_structure = true,
         };
     }
 

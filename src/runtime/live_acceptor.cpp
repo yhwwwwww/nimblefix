@@ -47,6 +47,7 @@ auto IsChecksumFailure(const base::Status& status) -> bool {
 auto MakeProtocolConfig(const CounterpartyConfig& counterparty) -> session::AdminProtocolConfig {
     return session::AdminProtocolConfig{
         .session = counterparty.session,
+        .transport_profile = counterparty.transport_profile,
         .begin_string = counterparty.session.key.begin_string,
         .sender_comp_id = counterparty.session.key.sender_comp_id,
         .target_comp_id = counterparty.session.key.target_comp_id,

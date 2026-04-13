@@ -28,6 +28,12 @@ auto NowNs() -> std::uint64_t {
                                           .count());
 }
 
+auto WallClockNowNs() -> std::uint64_t {
+    return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                          std::chrono::system_clock::now().time_since_epoch())
+                                          .count());
+}
+
 auto IsAdminMessage(std::string_view msg_type) -> bool {
     return msg_type == "0" || msg_type == "1" || msg_type == "2" || msg_type == "3" ||
            msg_type == "4" || msg_type == "5" || msg_type == "A";
@@ -41,6 +47,7 @@ auto IsChecksumFailure(const base::Status& status) -> bool {
 auto MakeProtocolConfig(const CounterpartyConfig& counterparty) -> session::AdminProtocolConfig {
     return session::AdminProtocolConfig{
         .session = counterparty.session,
+        .transport_profile = counterparty.transport_profile,
         .begin_string = counterparty.session.key.begin_string,
         .sender_comp_id = counterparty.session.key.sender_comp_id,
         .target_comp_id = counterparty.session.key.target_comp_id,
@@ -190,6 +197,16 @@ auto LiveSessionWorker::PollWorkerOnce(WorkerShardState& shard,
     status = ProcessDueTimers(shard, timers_now);
     if (!status.ok()) {
         return status;
+    }
+
+    // Check day-cut boundaries for all active sessions (wall-clock based).
+    {
+        const auto wall_now_ns = WallClockNowNs();
+        for (auto& conn : shard.connections) {
+            if (conn.session != nullptr && conn.session->protocol.has_value()) {
+                conn.session->protocol->mutable_session().CheckDayCut(wall_now_ns);
+            }
+        }
     }
 
     status = ProcessPendingReconnects(shard, timers_now);
@@ -878,6 +895,10 @@ auto LiveSessionWorker::UnregisterActiveSession(std::uint64_t session_id) -> voi
 
 auto LiveSessionWorker::MakeStore(const CounterpartyConfig& counterparty) const
     -> base::Result<std::unique_ptr<store::SessionStore>> {
+    // kNoRecovery: skip all store I/O, use a lightweight in-memory store.
+    if (counterparty.recovery_mode == session::RecoveryMode::kNoRecovery) {
+        return std::unique_ptr<store::SessionStore>(std::make_unique<store::MemorySessionStore>());
+    }
     if (counterparty.store_mode == StoreMode::kMmap) {
         auto store = std::make_unique<store::MmapSessionStore>(counterparty.store_path);
         auto status = store->Open();
@@ -981,6 +1002,7 @@ auto LiveSessionWorker::MakeActiveSessionBase(
     };
     session_state.protocol.emplace(
         MakeProtocolConfig(counterparty), *session_state.dictionary, session_state.store.get());
+    session_state.protocol->mutable_session().SetDayCutConfig(counterparty.day_cut);
     return session_state;
 }
 

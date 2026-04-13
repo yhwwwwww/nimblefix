@@ -13,6 +13,7 @@ enum class RecoveryMode : std::uint32_t {
     kMemoryOnly = 0,
     kWarmRestart,
     kColdStart,
+    kNoRecovery,  // No store, no recovery; sequences start at 1 (lowest-latency mode)
 };
 
 enum class ReplayActionKind : std::uint32_t {

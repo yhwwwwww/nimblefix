@@ -773,19 +773,9 @@ TEST_CASE("session-core: outbound seq near UINT32_MAX", "[session-core][edge][wr
     REQUIRE(seq2.ok());
     REQUIRE(seq2.value() == UINT32_MAX - 1U);
 
-    // Allocate: UINT32_MAX
+    // Allocate: UINT32_MAX — should fail (8.3: overflow returns error)
     auto seq3 = s.AllocateOutboundSeq();
-    REQUIRE(seq3.ok());
-    REQUIRE(seq3.value() == UINT32_MAX);
-
-    // Allocate: wraps to 0 (uint32_t overflow)
-    auto seq4 = s.AllocateOutboundSeq();
-    REQUIRE(seq4.ok());
-    REQUIRE(seq4.value() == 0U);
-
-    // Verify snapshot reflects post-wrap state
-    auto post_snap = s.Snapshot();
-    REQUIRE(post_snap.next_out_seq == 1U);
+    REQUIRE(!seq3.ok());
 }
 
 TEST_CASE("session-core: inbound seq near UINT32_MAX", "[session-core][edge][wraparound]") {

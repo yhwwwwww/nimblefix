@@ -135,6 +135,14 @@ AdminProtocol::AdminProtocol(
       dictionary_(dictionary),
       store_(store),
       session_(config_.session) {
+    // If transport_profile was left at default but begin_string was set, derive
+    // the profile from begin_string so callers that only set begin_string still
+    // get correct transport semantics.
+    if (config_.transport_profile.begin_string != config_.begin_string &&
+        !config_.begin_string.empty()) {
+        config_.transport_profile = TransportSessionProfile::FromBeginString(config_.begin_string);
+    }
+    session_.set_transport_profile(&config_.transport_profile);
     encode_buffer_.storage.reserve(kInitialEncodeBufferBytes);
     for (auto& replay_frames : replay_frame_buffers_) {
         replay_frames = std::make_shared<ProtocolFrameList>();
@@ -226,7 +234,7 @@ auto AdminProtocol::ValidateCompIds(
         return false;
     }
     if (is_logon && config_.validation_policy.require_default_appl_ver_id_on_logon &&
-        config_.begin_string == "FIXT.1.1" && decoded.header.default_appl_ver_id.empty()) {
+        config_.transport_profile.requires_default_appl_ver_id && decoded.header.default_appl_ver_id.empty()) {
         *ref_tag_id = 1137U;
         *reject_reason = kSessionRejectRequiredTagMissing;
         *text = "FIXT.1.1 logon requires DefaultApplVerID";
