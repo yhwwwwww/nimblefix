@@ -3,6 +3,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstddef>
+#include <condition_variable>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -266,6 +267,8 @@ class LiveAcceptor {
     std::vector<ListenerState> listeners_;
     std::vector<WorkerShardState> worker_shards_;
     std::vector<std::jthread> worker_threads_;
+    mutable std::mutex run_state_mutex_;
+    std::condition_variable run_state_cv_;
     mutable std::mutex control_mutex_;
     std::unordered_map<std::uint64_t, session::SessionSnapshot> session_snapshots_;
     std::unordered_map<std::uint64_t, std::vector<std::weak_ptr<session::SessionSubscriptionStream>>> session_subscribers_;
@@ -276,6 +279,8 @@ class LiveAcceptor {
     std::atomic<std::uint64_t> last_progress_ns_{0};
     std::atomic<std::size_t> completed_sessions_{0};
     bool opened_{false};
+    bool run_active_{false};
+    std::thread::id run_thread_id_{};
     std::atomic<bool> stop_requested_{false};
 };
 

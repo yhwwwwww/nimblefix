@@ -48,6 +48,56 @@ command_exists() {
     command -v "$1" >/dev/null 2>&1
 }
 
+ensure_submodules_ready() {
+    local required_files=(
+        "deps/src/Catch2/extras/catch_amalgamated.cpp"
+        "deps/src/pugixml/src/pugixml.cpp"
+        "bench/vendor/quickfix/spec/FIX44.xml"
+    )
+    local missing_files=()
+    local relative_path
+
+    for relative_path in "${required_files[@]}"; do
+        if [ ! -f "$ROOT_DIR/$relative_path" ]; then
+            missing_files+=("$relative_path")
+        fi
+    done
+
+    if [ "${#missing_files[@]}" -eq 0 ]; then
+        return
+    fi
+
+    if [ ! -f "$ROOT_DIR/.gitmodules" ]; then
+        echo "error: missing vendored dependency files:" >&2
+        printf '  %s\n' "${missing_files[@]}" >&2
+        exit 1
+    fi
+
+    if ! command_exists git; then
+        echo "error: git is required to initialize repository submodules" >&2
+        printf 'missing: %s\n' "${missing_files[*]}" >&2
+        exit 1
+    fi
+
+    if ! git -C "$ROOT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        echo "error: missing vendored dependency files:" >&2
+        printf '  %s\n' "${missing_files[@]}" >&2
+        echo "hint: source archive is incomplete; populate submodules before building" >&2
+        exit 1
+    fi
+
+    echo "info: initializing git submodules" >&2
+    git -C "$ROOT_DIR" submodule sync --recursive
+    git -C "$ROOT_DIR" submodule update --init --recursive
+
+    for relative_path in "${missing_files[@]}"; do
+        if [ ! -f "$ROOT_DIR/$relative_path" ]; then
+            echo "error: submodule initialization did not provide $relative_path" >&2
+            exit 1
+        fi
+    done
+}
+
 cmake_preset_for_generator() {
     local preset_name="$1"
     local generator_kind="$2"
@@ -250,6 +300,8 @@ case "$BENCH_MODE" in
 esac
 
 cd "$ROOT_DIR"
+
+ensure_submodules_ready
 
 resolve_build_system
 

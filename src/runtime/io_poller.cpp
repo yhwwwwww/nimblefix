@@ -39,8 +39,16 @@ class EpollPoller final : public IoPoller {
         ev.events = EPOLLIN;
         ev.data.u64 = static_cast<std::uint64_t>(tag);
         if (epoll_ctl(epfd_, EPOLL_CTL_ADD, fd, &ev) != 0) {
+            const int add_error = errno;
+            if (add_error == EEXIST) {
+                if (epoll_ctl(epfd_, EPOLL_CTL_MOD, fd, &ev) == 0) {
+                    return base::Status::Ok();
+                }
+                return base::Status::IoError(
+                    std::string("epoll_ctl MOD after EEXIST failed: ") + std::strerror(errno));
+            }
             return base::Status::IoError(
-                std::string("epoll_ctl ADD failed: ") + std::strerror(errno));
+                std::string("epoll_ctl ADD failed: ") + std::strerror(add_error));
         }
         ++fd_count_;
         if (fd_count_ > events_.size()) {

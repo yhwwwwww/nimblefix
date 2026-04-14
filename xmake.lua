@@ -10,10 +10,22 @@ local local_deps = FASTFIX_LOCAL_DEPS or {}
 local vendor_hint = "run `git submodule update --init --recursive`"
 local catch2_override_root = path.join("deps", "include")
 local quickfix_root = path.join("bench", "vendor", "quickfix")
+local table_unpack = table.unpack or unpack
+local xmake_raise = raise or os.raise or function (format, ...)
+    error(string.format(format, ...), 0)
+end
+
+local function batchcmds_show(batchcmds, format, ...)
+    if batchcmds.show ~= nil then
+        batchcmds:show(format, ...)
+    elseif batchcmds.show_progress ~= nil then
+        batchcmds:show_progress(0, format, ...)
+    end
+end
 
 local function ensure_vendor_file(required_path, label)
     if not os.isfile(required_path) then
-        os.raise("missing %s at %s; %s", label, required_path, vendor_hint)
+        xmake_raise("missing %s at %s; %s", label, required_path, vendor_hint)
     end
 end
 
@@ -25,22 +37,22 @@ local function apply_local_dep(target_name, dep_name)
 
     if dep.include_dirs ~= nil and #dep.include_dirs > 0 then
         target(target_name)
-            add_includedirs(table.unpack(dep.include_dirs), {public = true})
+            add_includedirs(table_unpack(dep.include_dirs), {public = true})
     end
 
     if dep.defines ~= nil and #dep.defines > 0 then
         target(target_name)
-            add_defines(table.unpack(dep.defines), {public = true})
+            add_defines(table_unpack(dep.defines), {public = true})
     end
 
     if dep.link_dirs ~= nil and #dep.link_dirs > 0 then
         target(target_name)
-            add_linkdirs(table.unpack(dep.link_dirs))
+            add_linkdirs(table_unpack(dep.link_dirs))
     end
 
     if dep.links ~= nil and #dep.links > 0 then
         target(target_name)
-            add_links(table.unpack(dep.links))
+            add_links(table_unpack(dep.links))
     end
 end
 
@@ -90,13 +102,13 @@ local function enqueue_fix44_assets(batchcmds)
     local fix44_builders = path.join("build", "generated", "fix44_builders.h")
 
     if not os.isfile(xml2ffd_bin) then
-        os.raise("missing build tool: %s", xml2ffd_bin)
+        xmake_raise("missing build tool: %s", xml2ffd_bin)
     end
     if not os.isfile(dictgen_bin) then
-        os.raise("missing build tool: %s", dictgen_bin)
+        xmake_raise("missing build tool: %s", dictgen_bin)
     end
     if not os.isfile(fix44_xml) then
-        os.raise("missing QuickFIX FIX44 dictionary at %s; %s", fix44_xml, vendor_hint)
+        xmake_raise("missing QuickFIX FIX44 dictionary at %s; %s", fix44_xml, vendor_hint)
     end
 
     batchcmds:mkdir(path.join("build", "bench"))
@@ -104,7 +116,7 @@ local function enqueue_fix44_assets(batchcmds)
 
     local needs_fix44_ffd = output_is_stale(fix44_ffd, {fix44_xml, xml2ffd_bin})
     if needs_fix44_ffd then
-        batchcmds:show("[fastfix] regenerating %s", fix44_ffd)
+        batchcmds_show(batchcmds, "[fastfix] regenerating %s", fix44_ffd)
         batchcmds:vrunv(xml2ffd_bin, {
             "--xml", fix44_xml,
             "--output", fix44_ffd,
@@ -113,7 +125,7 @@ local function enqueue_fix44_assets(batchcmds)
     end
 
     if needs_fix44_ffd or any_output_is_stale({fix44_art, fix44_builders}, {fix44_ffd, dictgen_bin}) then
-        batchcmds:show("[fastfix] regenerating %s and %s", fix44_art, fix44_builders)
+        batchcmds_show(batchcmds, "[fastfix] regenerating %s and %s", fix44_art, fix44_builders)
         batchcmds:vrunv(dictgen_bin, {
             "--input", fix44_ffd,
             "--output", fix44_art,
@@ -179,20 +191,20 @@ local function enqueue_sample_assets(batchcmds)
     local sample_builders = path.join("build", "generated", "sample_basic_builders.h")
 
     if not os.isfile(dictgen_bin) then
-        os.raise("missing build tool: %s", dictgen_bin)
+        xmake_raise("missing build tool: %s", dictgen_bin)
     end
     if not os.isfile(sample_profile) then
-        os.raise("missing sample profile: %s", sample_profile)
+        xmake_raise("missing sample profile: %s", sample_profile)
     end
     if not os.isfile(sample_overlay) then
-        os.raise("missing sample overlay: %s", sample_overlay)
+        xmake_raise("missing sample overlay: %s", sample_overlay)
     end
 
     batchcmds:mkdir("build")
     batchcmds:mkdir(path.join("build", "generated"))
 
     if any_output_is_stale({sample_art, sample_builders}, {sample_profile, sample_overlay, dictgen_bin}) then
-        batchcmds:show("[fastfix] regenerating %s and %s", sample_art, sample_builders)
+        batchcmds_show(batchcmds, "[fastfix] regenerating %s and %s", sample_art, sample_builders)
         batchcmds:vrunv(dictgen_bin, {
             "--input", sample_profile,
             "--merge", sample_overlay,
@@ -328,7 +340,7 @@ target("fastfix-vendor-quickfix")
     add_defines("NOMINMAX", "_FILE_OFFSET_BITS=64")
     add_includedirs(path.join("deps", "include", "quickfix"), path.join(quickfix_root, "src", "C++"), {public = true})
     add_includedirs(quickfix_root, path.join(quickfix_root, "src"))
-    add_files(table.unpack(quickfix_vendor_sources))
+    add_files(table_unpack(quickfix_vendor_sources))
     if is_plat("linux") then
         add_syslinks("pthread")
     end

@@ -7,6 +7,7 @@ BUILD_DIR="$ROOT_DIR/build"
 BENCH_DIR="$BUILD_DIR/bench"
 BUILD_SYSTEM="${FASTFIX_BUILD_SYSTEM:-auto}"
 XMAKE_MODE="${FASTFIX_XMAKE_MODE:-release}"
+XMAKE_CCACHE="${FASTFIX_XMAKE_CCACHE:-n}"
 XMAKE_BIN_DIR="${FASTFIX_XMAKE_BIN_DIR:-$ROOT_DIR/build/linux/x86_64/$XMAKE_MODE}"
 CMAKE_PRESET="${FASTFIX_CMAKE_PRESET:-dev-release}"
 CMAKE_GENERATOR_KIND="${FASTFIX_CMAKE_GENERATOR:-auto}"
@@ -44,6 +45,7 @@ commands:
 environment overrides:
     FASTFIX_BUILD_SYSTEM=auto|xmake|cmake  Build system selector (default: auto)
     FASTFIX_XMAKE_MODE=<mode>              xmake build mode (default: release)
+    FASTFIX_XMAKE_CCACHE=y|n               xmake compiler cache toggle (default: n)
     FASTFIX_XMAKE_BIN_DIR=<path>           Explicit xmake binary directory override
     FASTFIX_CMAKE_GENERATOR=auto|ninja|make
                                           CMake generator selector (default: auto)
@@ -53,6 +55,67 @@ EOF
 
 command_exists() {
     command -v "$1" >/dev/null 2>&1
+}
+
+validate_xmake_ccache() {
+    case "$XMAKE_CCACHE" in
+        y|n)
+            ;;
+        *)
+            echo "error: FASTFIX_XMAKE_CCACHE must be 'y' or 'n' (got '$XMAKE_CCACHE')" >&2
+            exit 1
+            ;;
+    esac
+}
+
+ensure_submodules_ready() {
+    local required_files=(
+        "deps/src/Catch2/extras/catch_amalgamated.cpp"
+        "deps/src/pugixml/src/pugixml.cpp"
+        "bench/vendor/quickfix/spec/FIX44.xml"
+    )
+    local missing_files=()
+    local relative_path
+
+    for relative_path in "${required_files[@]}"; do
+        if [ ! -f "$ROOT_DIR/$relative_path" ]; then
+            missing_files+=("$relative_path")
+        fi
+    done
+
+    if [ "${#missing_files[@]}" -eq 0 ]; then
+        return
+    fi
+
+    if [ ! -f "$ROOT_DIR/.gitmodules" ]; then
+        echo "error: missing vendored dependency files:" >&2
+        printf '  %s\n' "${missing_files[@]}" >&2
+        exit 1
+    fi
+
+    if ! command_exists git; then
+        echo "error: git is required to initialize repository submodules" >&2
+        printf 'missing: %s\n' "${missing_files[*]}" >&2
+        exit 1
+    fi
+
+    if ! git -C "$ROOT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        echo "error: missing vendored dependency files:" >&2
+        printf '  %s\n' "${missing_files[@]}" >&2
+        echo "hint: source archive is incomplete; populate submodules before building" >&2
+        exit 1
+    fi
+
+    echo "info: initializing git submodules" >&2
+    git -C "$ROOT_DIR" submodule sync --recursive
+    git -C "$ROOT_DIR" submodule update --init --recursive
+
+    for relative_path in "${missing_files[@]}"; do
+        if [ ! -f "$ROOT_DIR/$relative_path" ]; then
+            echo "error: submodule initialization did not provide $relative_path" >&2
+            exit 1
+        fi
+    done
 }
 
 cmake_preset_for_generator() {
@@ -237,7 +300,8 @@ configure_cmake() {
 
 configure_xmake() {
     resolve_paths
-    xmake f -m "$XMAKE_MODE" -y
+    validate_xmake_ccache
+    xmake f -m "$XMAKE_MODE" --ccache="$XMAKE_CCACHE" -y
 }
 
 cmake_build() {
@@ -319,6 +383,8 @@ if [ "$#" -lt 1 ]; then
     usage
     exit 1
 fi
+
+ensure_submodules_ready
 
 command_name="$1"
 shift

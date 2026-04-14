@@ -30,8 +30,25 @@ constexpr std::size_t kChecksumFieldWireSize = 7U;
 constexpr char kFixBeginStringTag = '8';
 constexpr char kFixBodyLengthTag = '9';
 constexpr char kFixTagValueSeparator = '=';
-constexpr char kFixFieldDelimiter = '\x01';
 constexpr int kSocketOptionEnabled = 1;
+
+auto IsRetryableAcceptError(int error) -> bool {
+    switch (error) {
+        case EINTR:
+        case ECONNABORTED:
+        case ENETDOWN:
+        case EPROTO:
+        case ENOPROTOOPT:
+        case EHOSTDOWN:
+        case ENONET:
+        case EHOSTUNREACH:
+        case EOPNOTSUPP:
+        case ENETUNREACH:
+            return true;
+        default:
+            return false;
+    }
+}
 
 auto SetNonBlocking(int fd) -> base::Status {
     const int flags = fcntl(fd, F_GETFL, 0);
@@ -805,28 +822,36 @@ auto TcpAcceptor::Accept(std::chrono::milliseconds timeout) -> base::Result<TcpC
 }
 
 auto TcpAcceptor::TryAccept() -> base::Result<std::optional<TcpConnection>> {
-    const int connection_fd = accept(fd_, nullptr, nullptr);
-    if (connection_fd < 0) {
-        if (errno == EAGAIN || errno == EWOULDBLOCK) {
-            return std::optional<TcpConnection>{};
+    while (true) {
+        const int connection_fd = accept(fd_, nullptr, nullptr);
+        if (connection_fd < 0) {
+            const int accept_error = errno;
+            if (accept_error == EAGAIN || accept_error == EWOULDBLOCK) {
+                return std::optional<TcpConnection>{};
+            }
+            // Linux may surface pending TCP/IP errors from accept(); keep
+            // draining the listen queue instead of terminating the front door.
+            if (IsRetryableAcceptError(accept_error)) {
+                continue;
+            }
+            return base::Status::IoError(std::string("accept failed: ") + std::strerror(accept_error));
         }
-        return base::Status::IoError(std::string("accept failed: ") + std::strerror(errno));
-    }
 
-    auto status = SetNonBlocking(connection_fd);
-    if (!status.ok()) {
-        close(connection_fd);
-        return status;
-    }
-    status = SetNoDelay(connection_fd);
-    if (!status.ok()) {
-        close(connection_fd);
-        return status;
-    }
-    TrySetBusyPoll(connection_fd);
-    TrySetQuickAck(connection_fd);
+        auto status = SetNonBlocking(connection_fd);
+        if (!status.ok()) {
+            close(connection_fd);
+            return status;
+        }
+        status = SetNoDelay(connection_fd);
+        if (!status.ok()) {
+            close(connection_fd);
+            return status;
+        }
+        TrySetBusyPoll(connection_fd);
+        TrySetQuickAck(connection_fd);
 
-    return std::optional<TcpConnection>(TcpConnection(connection_fd));
+        return std::optional<TcpConnection>(TcpConnection(connection_fd));
+    }
 }
 
 auto TcpAcceptor::Close() -> void {

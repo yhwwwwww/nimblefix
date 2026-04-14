@@ -537,6 +537,26 @@ auto LiveAcceptor::Run(std::size_t max_completed_sessions, std::chrono::millisec
         }
     }
 
+    {
+        std::lock_guard lock(run_state_mutex_);
+        run_active_ = true;
+        run_thread_id_ = std::this_thread::get_id();
+    }
+    struct RunStateGuard {
+        LiveAcceptor* owner;
+
+        ~RunStateGuard() {
+            {
+                std::lock_guard lock(owner->run_state_mutex_);
+                owner->run_active_ = false;
+                owner->run_thread_id_ = std::thread::id{};
+            }
+            owner->run_state_cv_.notify_all();
+        }
+    } run_state_guard{this};
+
+    stop_requested_.store(false);
+
     auto status = EnsureManagedQueueRunnerStarted();
     if (!status.ok()) {
         return status;
@@ -640,6 +660,13 @@ auto LiveAcceptor::Run(std::size_t max_completed_sessions, std::chrono::millisec
                         break;
                     }
                 }
+
+                if (run_status.ok()) {
+                    const auto terminal_status = LoadTerminalStatus();
+                    if (terminal_status.has_value()) {
+                        run_status = *terminal_status;
+                    }
+                }
             }
             ::close(epfd);
         }
@@ -656,6 +683,25 @@ auto LiveAcceptor::Run(std::size_t max_completed_sessions, std::chrono::millisec
 
 auto LiveAcceptor::Stop() -> void {
     stop_requested_.store(true);
+
+    {
+        std::unique_lock lock(run_state_mutex_);
+        if (run_active_ && run_thread_id_ == std::this_thread::get_id()) {
+            return;
+        }
+    }
+
+    for (const auto& shard : worker_shards_) {
+        SignalWorkerWakeup(shard.worker_id);
+    }
+
+    {
+        std::unique_lock lock(run_state_mutex_);
+        if (run_active_) {
+            run_state_cv_.wait(lock, [this]() { return !run_active_; });
+        }
+    }
+
     StopWorkerThreads();
     static_cast<void>(StopManagedQueueRunner());
     for (auto& shard : worker_shards_) {

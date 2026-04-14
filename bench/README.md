@@ -33,6 +33,8 @@ FASTFIX_BUILD_SYSTEM=cmake FASTFIX_CMAKE_PRESET=dev-release ./bench/bench.sh com
 FASTFIX_BUILD_SYSTEM=cmake FASTFIX_CMAKE_GENERATOR=make FASTFIX_CMAKE_PRESET=dev-release ./bench/bench.sh build
 ```
 
+On the default xmake path, `bench.sh` now configures `FASTFIX_XMAKE_CCACHE=n` unless you override it. This is intentional: the QuickFIX benchmark target can hit reproducible Linux `.build_cache/... -> .objs/... file busy` failures with xmake ccache enabled. If you want to try it anyway, run with `FASTFIX_XMAKE_CCACHE=y`.
+
 Every benchmark command above intentionally uses QuickFIX FIX44 inputs: `bench/vendor/quickfix/spec/FIX44.xml`, `build/bench/quickfix_FIX44.ffd`, or `build/bench/quickfix_FIX44.art`. The sample profile artifact is only a shared test/codegen asset and is not a benchmark input.
 
 What each command does:

@@ -881,10 +881,33 @@ TEST_CASE("live-runtime", "[live-runtime]") {
             }));
     };
 
+    std::optional<fastfix::base::Status> balance_run_status;
     const auto accept_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
     while (accept_count() < balance_connections.size() && std::chrono::steady_clock::now() < accept_deadline) {
+        if (balance_runtime_future.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready) {
+            balance_run_status = balance_runtime_future.get();
+            break;
+        }
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
+    if (!balance_run_status.has_value() && accept_count() < balance_connections.size() &&
+        balance_runtime_future.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready) {
+        balance_run_status = balance_runtime_future.get();
+    }
+    if (balance_run_status.has_value()) {
+        INFO(balance_run_status->message());
+    } else {
+        INFO("balance runtime still running");
+    }
+    const auto balance_active_connections = balance_runtime.active_connection_count();
+    CAPTURE(balance_active_connections);
+    CAPTURE(balance_run_status.has_value());
+    if (balance_run_status.has_value()) {
+        CAPTURE(static_cast<int>(balance_run_status->code()));
+        CAPTURE(balance_run_status->message());
+    }
+    const bool balance_runtime_ok = !balance_run_status.has_value() || balance_run_status->ok();
+    REQUIRE(balance_runtime_ok);
     REQUIRE(accept_count() == balance_connections.size());
 
     const auto balance_traces = balance_engine.trace().Snapshot();
@@ -911,7 +934,14 @@ TEST_CASE("live-runtime", "[live-runtime]") {
     for (auto& connection : balance_connections) {
         connection.Close();
     }
-    REQUIRE(balance_runtime_future.get().ok());
+    std::optional<fastfix::base::Status> final_balance_status;
+    if (balance_run_status.has_value()) {
+        final_balance_status = *balance_run_status;
+    } else {
+        final_balance_status = balance_runtime_future.get();
+    }
+    CAPTURE(final_balance_status->message());
+    REQUIRE(final_balance_status->ok());
 
     fastfix::runtime::EngineConfig queue_mismatch_config;
     queue_mismatch_config.worker_count = 2U;
