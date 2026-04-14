@@ -125,7 +125,51 @@ end
 ensure_vendor_file(path.join("deps", "src", "pugixml", "src", "pugixml.cpp"), "pugixml submodule checkout")
 ensure_vendor_file(path.join("deps", "src", "Catch2", "extras", "catch_amalgamated.cpp"), "Catch2 submodule checkout")
 ensure_vendor_file(path.join(catch2_override_root, "catch2", "catch_user_config.hpp"), "Catch2 override header")
+ensure_vendor_file(path.join("deps", "include", "quickfix", "Allocator.h"), "QuickFIX override header")
 ensure_vendor_file(path.join(quickfix_root, "spec", "FIX44.xml"), "QuickFIX submodule checkout")
+
+local quickfix_vendor_sources = {
+    path.join(quickfix_root, "src", "C++", "Acceptor.cpp"),
+    path.join(quickfix_root, "src", "C++", "DataDictionary.cpp"),
+    path.join(quickfix_root, "src", "C++", "DataDictionaryProvider.cpp"),
+    path.join(quickfix_root, "src", "C++", "Dictionary.cpp"),
+    path.join(quickfix_root, "src", "C++", "FieldConvertors.cpp"),
+    path.join(quickfix_root, "src", "C++", "FieldMap.cpp"),
+    path.join(quickfix_root, "src", "C++", "FieldTypes.cpp"),
+    path.join(quickfix_root, "src", "C++", "FileLog.cpp"),
+    path.join(quickfix_root, "src", "C++", "FileStore.cpp"),
+    path.join(quickfix_root, "src", "C++", "Group.cpp"),
+    path.join(quickfix_root, "src", "C++", "HostDetailsProvider.cpp"),
+    path.join(quickfix_root, "src", "C++", "HttpConnection.cpp"),
+    path.join(quickfix_root, "src", "C++", "HttpMessage.cpp"),
+    path.join(quickfix_root, "src", "C++", "HttpParser.cpp"),
+    path.join(quickfix_root, "src", "C++", "HttpServer.cpp"),
+    path.join(quickfix_root, "src", "C++", "Initiator.cpp"),
+    path.join(quickfix_root, "src", "C++", "Log.cpp"),
+    path.join(quickfix_root, "src", "C++", "Message.cpp"),
+    path.join(quickfix_root, "src", "C++", "MessageSorters.cpp"),
+    path.join(quickfix_root, "src", "C++", "MessageStore.cpp"),
+    path.join(quickfix_root, "src", "C++", "NullStore.cpp"),
+    path.join(quickfix_root, "src", "C++", "Parser.cpp"),
+    path.join(quickfix_root, "src", "C++", "PUGIXML_DOMDocument.cpp"),
+    path.join(quickfix_root, "src", "C++", "Session.cpp"),
+    path.join(quickfix_root, "src", "C++", "SessionFactory.cpp"),
+    path.join(quickfix_root, "src", "C++", "SessionSettings.cpp"),
+    path.join(quickfix_root, "src", "C++", "Settings.cpp"),
+    path.join(quickfix_root, "src", "C++", "SocketAcceptor.cpp"),
+    path.join(quickfix_root, "src", "C++", "SocketConnection.cpp"),
+    path.join(quickfix_root, "src", "C++", "SocketConnector.cpp"),
+    path.join(quickfix_root, "src", "C++", "SocketInitiator.cpp"),
+    path.join(quickfix_root, "src", "C++", "SocketMonitor_UNIX.cpp"),
+    path.join(quickfix_root, "src", "C++", "SocketServer.cpp"),
+    path.join(quickfix_root, "src", "C++", "stdafx.cpp"),
+    path.join(quickfix_root, "src", "C++", "ThreadedSocketAcceptor.cpp"),
+    path.join(quickfix_root, "src", "C++", "ThreadedSocketConnection.cpp"),
+    path.join(quickfix_root, "src", "C++", "ThreadedSocketInitiator.cpp"),
+    path.join(quickfix_root, "src", "C++", "TimeRange.cpp"),
+    path.join(quickfix_root, "src", "C++", "Utility.cpp"),
+    path.join(quickfix_root, "src", "C++", "pugixml.cpp")
+}
 
 local function enqueue_sample_assets(batchcmds)
     local dictgen_bin = generated_tool_path("fastfix-dictgen")
@@ -276,6 +320,31 @@ target("fastfix-bench")
     add_includedirs("build/generated")
     add_files("bench/main.cpp")
 
+target("fastfix-vendor-quickfix")
+    set_kind("static")
+    set_default(false)
+    set_warnings("none")
+    set_languages("cxx17")
+    add_defines("NOMINMAX", "_FILE_OFFSET_BITS=64")
+    add_includedirs(path.join("deps", "include", "quickfix"), path.join(quickfix_root, "src", "C++"), {public = true})
+    add_includedirs(quickfix_root, path.join(quickfix_root, "src"))
+    add_files(table.unpack(quickfix_vendor_sources))
+    if is_plat("linux") then
+        add_syslinks("pthread")
+    end
+
+target("fastfix-quickfix-cpp-bench")
+    set_kind("binary")
+    set_default(false)
+    set_basename("quickfix-cpp-bench")
+    set_languages("cxx17")
+    add_deps("fastfix-vendor-quickfix")
+    add_includedirs("bench")
+    add_files("bench/quickfix_main.cpp")
+    if is_plat("linux") then
+        add_syslinks("pthread")
+    end
+
 target("fastfix-tests")
     set_kind("binary")
     add_deps("fastfix", "fastfix-thirdparty-catch2-main", "fastfix-thirdparty-pugixml", "fastfix-generated-assets")
@@ -294,4 +363,6 @@ apply_local_dep("fastfix-fuzz-codec-libfuzzer", "fastfix-fuzz-codec-libfuzzer")
 apply_local_dep("fastfix-initiator", "fastfix-initiator")
 apply_local_dep("fastfix-acceptor", "fastfix-acceptor")
 apply_local_dep("fastfix-bench", "fastfix-bench")
+apply_local_dep("fastfix-vendor-quickfix", "fastfix-vendor-quickfix")
+apply_local_dep("fastfix-quickfix-cpp-bench", "fastfix-quickfix-cpp-bench")
 apply_local_dep("fastfix-tests", "fastfix-tests")

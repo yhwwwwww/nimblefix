@@ -24,18 +24,18 @@ jobs:
         run: |
           if [[ "${{ matrix.compiler }}" == "gcc-13" ]]; then
             sudo apt-get update -qq
-            sudo apt-get install -y -qq g++-13
+            sudo apt-get install -y -qq g++-13 xmake
             echo "CC=gcc-13" >> $GITHUB_ENV
             echo "CXX=g++-13" >> $GITHUB_ENV
           elif [[ "${{ matrix.compiler }}" == "gcc-14" ]]; then
             sudo apt-get update -qq
-            sudo apt-get install -y -qq g++-14
+            sudo apt-get install -y -qq g++-14 xmake
             echo "CC=gcc-14" >> $GITHUB_ENV
             echo "CXX=g++-14" >> $GITHUB_ENV
           fi
 
-      - name: Configure, build, test, and benchmark smoke
-        run: bash ./scripts/offline_build.sh --preset dev-release --bench smoke
+      - name: Configure, build, test, and benchmark smoke (xmake default)
+        run: bash ./scripts/offline_build.sh --bench smoke
 
   rhel-build-and-test:
     name: ${{ matrix.name }}
@@ -47,13 +47,13 @@ jobs:
           - name: RHEL 8.10 + GCC 12
             image: registry.access.redhat.com/ubi8/ubi:8.10
             preset: rhel8-gcc12
-            other: cmake make
+            other: cmake ninja-build
             toolchain_packages: gcc-toolset-12-gcc gcc-toolset-12-gcc-c++
             toolchain_enable: source /opt/rh/gcc-toolset-12/enable
           - name: RHEL 9.7 + GCC 14
             image: registry.access.redhat.com/ubi9/ubi:9.7
             preset: rhel9-gcc14
-            other: cmake make liburing-devel
+            other: cmake ninja-build liburing-devel
             toolchain_packages: gcc-toolset-14-gcc gcc-toolset-14-gcc-c++
             toolchain_enable: source /opt/rh/gcc-toolset-14/enable
     steps:
@@ -64,7 +64,7 @@ jobs:
       - name: Pull container image
         run: docker pull ${{ matrix.image }}
 
-      - name: Configure, build, test, and benchmark smoke in container
+      - name: Configure, build, test, and benchmark smoke in container (CMake alternative)
         shell: bash
         run: |
           docker run --rm \
@@ -82,5 +82,6 @@ jobs:
               gcc --version
               g++ --version
               cmake --version
-              bash ./scripts/offline_build.sh --preset "${{ matrix.preset }}" --bench smoke
+              ninja --version
+              bash ./scripts/offline_build.sh --build-system cmake --preset "${{ matrix.preset }}" --bench smoke
             '

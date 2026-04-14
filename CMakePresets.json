@@ -7,7 +7,20 @@
   },
   "configurePresets": [
     {
-      "name": "base-release",
+      "name": "base-release-ninja",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/cmake/${presetName}",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "FASTFIX_BUILD_TESTS": "ON",
+        "FASTFIX_BUILD_BENCHMARKS": "ON",
+        "FASTFIX_BUILD_TOOLS": "ON",
+        "FASTFIX_BUILD_FUZZERS": "ON"
+      }
+    },
+    {
+      "name": "base-release-make",
       "hidden": true,
       "generator": "Unix Makefiles",
       "binaryDir": "${sourceDir}/build/cmake/${presetName}",
@@ -21,19 +34,36 @@
     },
     {
       "name": "dev-release",
-      "inherits": "base-release",
-      "displayName": "Developer Release"
+      "inherits": "base-release-ninja",
+      "displayName": "Developer Release (Ninja)"
+    },
+    {
+      "name": "dev-release-make",
+      "inherits": "base-release-make",
+      "displayName": "Developer Release (Make fallback)"
     },
     {
       "name": "rhel8-gcc12",
-      "inherits": "base-release",
-      "displayName": "RHEL 8.10 + GCC 12",
+      "inherits": "base-release-ninja",
+      "displayName": "RHEL 8.10 + GCC 12 (Ninja)",
+      "description": "Use after enabling the GCC 12 toolset in the shell of the target RHEL 8.10 host."
+    },
+    {
+      "name": "rhel8-gcc12-make",
+      "inherits": "base-release-make",
+      "displayName": "RHEL 8.10 + GCC 12 (Make fallback)",
       "description": "Use after enabling the GCC 12 toolset in the shell of the target RHEL 8.10 host."
     },
     {
       "name": "rhel9-gcc14",
-      "inherits": "base-release",
-      "displayName": "RHEL 9.7 + GCC 14",
+      "inherits": "base-release-ninja",
+      "displayName": "RHEL 9.7 + GCC 14 (Ninja)",
+      "description": "Use after enabling the GCC 14 toolset in the shell of the target RHEL 9.7 host."
+    },
+    {
+      "name": "rhel9-gcc14-make",
+      "inherits": "base-release-make",
+      "displayName": "RHEL 9.7 + GCC 14 (Make fallback)",
       "description": "Use after enabling the GCC 14 toolset in the shell of the target RHEL 9.7 host."
     }
   ],
@@ -49,6 +79,18 @@
     {
       "name": "rhel9-gcc14",
       "configurePreset": "rhel9-gcc14"
+    },
+    {
+      "name": "dev-release-make",
+      "configurePreset": "dev-release-make"
+    },
+    {
+      "name": "rhel8-gcc12-make",
+      "configurePreset": "rhel8-gcc12-make"
+    },
+    {
+      "name": "rhel9-gcc14-make",
+      "configurePreset": "rhel9-gcc14-make"
     }
   ],
   "testPresets": [
@@ -69,6 +111,27 @@
     {
       "name": "rhel9-gcc14",
       "configurePreset": "rhel9-gcc14",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "dev-release-make",
+      "configurePreset": "dev-release-make",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "rhel8-gcc12-make",
+      "configurePreset": "rhel8-gcc12-make",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "rhel9-gcc14-make",
+      "configurePreset": "rhel9-gcc14-make",
       "output": {
         "outputOnFailure": true
       }

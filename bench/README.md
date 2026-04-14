@@ -11,30 +11,33 @@ This directory contains the benchmark sources, shared benchmark support code, an
 
 ## Build And Run
 
-The script is the intended entry point:
+The script is the intended entry point and auto-selects `xmake`, then `cmake + Ninja`, then `cmake + make`:
 
 ```bash
-FASTFIX_CMAKE_PRESET=dev-release ./bench/bench.sh build
-FASTFIX_CMAKE_PRESET=dev-release ./bench/bench.sh fastfix
-FASTFIX_CMAKE_PRESET=dev-release ./bench/bench.sh fastfix-ffd
-FASTFIX_CMAKE_PRESET=dev-release ./bench/bench.sh quickfix
-FASTFIX_CMAKE_PRESET=dev-release ./bench/bench.sh builder
-FASTFIX_CMAKE_PRESET=dev-release ./bench/bench.sh compare
-
-# Historical shorthand still works when the default dev-release preset is fine
 ./bench/bench.sh build
 ./bench/bench.sh fastfix
 ./bench/bench.sh fastfix-ffd
 ./bench/bench.sh quickfix
 ./bench/bench.sh builder
 ./bench/bench.sh compare
+
+# Alternative CMake path
+FASTFIX_BUILD_SYSTEM=cmake FASTFIX_CMAKE_PRESET=dev-release ./bench/bench.sh build
+FASTFIX_BUILD_SYSTEM=cmake FASTFIX_CMAKE_PRESET=dev-release ./bench/bench.sh fastfix
+FASTFIX_BUILD_SYSTEM=cmake FASTFIX_CMAKE_PRESET=dev-release ./bench/bench.sh fastfix-ffd
+FASTFIX_BUILD_SYSTEM=cmake FASTFIX_CMAKE_PRESET=dev-release ./bench/bench.sh quickfix
+FASTFIX_BUILD_SYSTEM=cmake FASTFIX_CMAKE_PRESET=dev-release ./bench/bench.sh builder
+FASTFIX_BUILD_SYSTEM=cmake FASTFIX_CMAKE_PRESET=dev-release ./bench/bench.sh compare
+
+# Force the make fallback
+FASTFIX_BUILD_SYSTEM=cmake FASTFIX_CMAKE_GENERATOR=make FASTFIX_CMAKE_PRESET=dev-release ./bench/bench.sh build
 ```
 
 Every benchmark command above intentionally uses QuickFIX FIX44 inputs: `bench/vendor/quickfix/spec/FIX44.xml`, `build/bench/quickfix_FIX44.ffd`, or `build/bench/quickfix_FIX44.art`. The sample profile artifact is only a shared test/codegen asset and is not a benchmark input.
 
 What each command does:
 
-- `build`: builds `fastfix-bench`, `fastfix-xml2ffd`, `fastfix-dictgen`, regenerates the FIX44 `.ffd/.art` files under `build/bench/`, and compiles the QuickFIX comparison benchmark from the pinned submodule checkout.
+- `build`: builds `fastfix-bench`, `fastfix-xml2ffd`, `fastfix-dictgen`, regenerates the FIX44 `.ffd/.art` files under `build/bench/`, and compiles the QuickFIX comparison benchmark from the pinned submodule checkout using the selected build system. By default it auto-selects `xmake`, then `cmake + Ninja`, then `cmake + make`.
 - `fastfix`: runs the main FastFix suite against `build/bench/quickfix_FIX44.art`. If no extra args are supplied, it uses `--iterations 100000 --loopback 1000 --replay 1000`.
 - `fastfix-ffd`: runs the same FastFix suite but loads `build/bench/quickfix_FIX44.ffd` directly at startup. Default args are `--iterations 30000 --loopback 200 --replay 200`.
 - `quickfix`: runs the QuickFIX comparison benchmark against the pinned `bench/vendor/quickfix/spec/FIX44.xml`. Default args are `--iterations 100000`.
@@ -43,9 +46,9 @@ What each command does:
 
 Prerequisites:
 
-- `cmake`
+- `xmake` for the preferred path
 - `g++`
-- `make` or Ninja for the selected CMake generator
+- CMake 3.20+ plus Ninja or make if you select `FASTFIX_BUILD_SYSTEM=cmake`
 
 The default path is now fully offline after `git submodule update --init --recursive`: Catch2, pugixml, QuickFIX, and `FIX44.xml` are all pinned inside this repository checkout.
 
@@ -157,6 +160,8 @@ Each benchmark also emits a single raw line with the full counter set:
 - `build/bench/quickfix_FIX44.ffd`: FastFix text dictionary generated from QuickFIX `FIX44.xml`.
 - `build/bench/quickfix_FIX44.art`: compiled FastFix artifact for the main FIX44 comparison suite.
 - `build/sample-basic.art`: auxiliary merged sample profile artifact used by shared test/codegen flows; benchmark commands do not consume it.
-- `build/bench/quickfix-cpp-bench`: compiled QuickFIX comparison binary.
+- `build/linux/x86_64/release/quickfix-cpp-bench`: xmake output for the QuickFIX comparison binary.
+- `build/cmake/<preset>/bin/quickfix-cpp-bench`: Ninja-based CMake output for the QuickFIX comparison binary.
+- `build/cmake/<preset>-make/bin/quickfix-cpp-bench`: make-based CMake fallback output for the QuickFIX comparison binary.
 
 If you need the wider development workflow or tool inventory, see `docs/development.md`. This file is only about the benchmark subsystem.

@@ -63,8 +63,8 @@ FastFix was designed to answer: *what if every design decision optimized for the
 ### Prerequisites
 
 - C++20 compiler (GCC 12+, Clang 15+)
-- CMake 3.20+ and a native build tool (`make` or Ninja)
-- `xmake` is optional and remains supported for local development
+- `xmake` (preferred, used automatically when available)
+- or CMake 3.20+ plus Ninja (preferred CMake generator) or make (fallback when Ninja is unavailable)
 
 ### Offline Dependency Layout
 
@@ -85,13 +85,24 @@ After the submodules are initialized, no build step downloads Catch2, pugixml, Q
 ### Build
 
 ```bash
-# One command: configure, build, test, and run benchmark smoke
-bash ./scripts/offline_build.sh --preset dev-release --bench smoke
+# Auto-detect build path: xmake -> cmake + Ninja -> cmake + make
+bash ./scripts/offline_build.sh --bench smoke
 
-# Full benchmark run
-bash ./scripts/offline_build.sh --preset dev-release --bench full
+# Full benchmark run with the same auto-detect order
+bash ./scripts/offline_build.sh --bench full
 
-# Named CMake presets for the supported offline targets
+# Direct xmake path
+xmake f -m release -y
+xmake build fastfix-tests
+xmake build fastfix-bench
+
+# Alternative CMake path
+bash ./scripts/offline_build.sh --build-system cmake --preset dev-release --bench smoke
+
+# Force the make fallback if Ninja is unavailable or undesirable
+bash ./scripts/offline_build.sh --build-system cmake --cmake-generator make --preset dev-release --bench smoke
+
+# Named CMake presets for the supported offline targets (Ninja-first)
 cmake --preset rhel8-gcc12
 cmake --build --preset rhel8-gcc12
 ctest --preset rhel8-gcc12
@@ -101,34 +112,40 @@ cmake --build --preset rhel9-gcc14
 ctest --preset rhel9-gcc14
 
 # Manual CMake flow without presets
-cmake -S . -B build/cmake/dev-release -DCMAKE_BUILD_TYPE=Release
-cmake --build build/cmake/dev-release
-ctest --test-dir build/cmake/dev-release --output-on-failure
+cmake -S . -B build/cmake/dev-release-manual -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build/cmake/dev-release-manual
+ctest --test-dir build/cmake/dev-release-manual --output-on-failure
 
-# Optional xmake flow, now using the pinned Catch2/pugixml submodules instead of package downloads
+# Manual make fallback when Ninja is unavailable
+cmake -S . -B build/cmake/dev-release-manual-make -G "Unix Makefiles" -DCMAKE_BUILD_TYPE=Release
+cmake --build build/cmake/dev-release-manual-make
+ctest --test-dir build/cmake/dev-release-manual-make --output-on-failure
+
+# Direct xmake target build, using the pinned Catch2/pugixml submodules instead of package downloads
 xmake f -m release -y
 xmake build fastfix-tests
 ```
 
-GitHub Actions CI also exercises these two named RHEL presets via `ubi8/ubi:8.10` + `gcc-toolset-12` and `ubi9/ubi:9.7` + `gcc-toolset-14` container jobs on every push and pull request.
+GitHub Actions CI uses the default xmake path on Ubuntu and still exercises these two named RHEL CMake presets via `ubi8/ubi:8.10` + `gcc-toolset-12` and `ubi9/ubi:9.7` + `gcc-toolset-14` container jobs on every push and pull request.
 
 When `build/generated/`, `build/bench/`, or `build/sample-basic.art` have been removed, `xmake build fastfix-tests` and `xmake build fastfix-bench` now regenerate the required shared assets automatically.
 
-Preset-based CMake builds write executables under `build/cmake/<preset>/bin/`. The helper script keeps using the shared repository-local assets under `build/generated/` and `build/bench/` so tests and benchmarks resolve the same files regardless of build system.
+The helper scripts auto-select `xmake`, then `cmake + Ninja`, then `cmake + make`. Default xmake builds write executables under `build/linux/x86_64/release/`. Ninja-based CMake presets write to `build/cmake/<preset>/bin/`, and make-based fallback presets write to `build/cmake/<preset>-make/bin/`. The helper scripts keep using the shared repository-local assets under `build/generated/` and `build/bench/` so tests and benchmarks resolve the same files regardless of build system.
 
 ### Run Tests
 
 ```bash
-./build/cmake/dev-release/bin/fastfix-tests
-# Alternative: bash ./scripts/offline_build.sh --preset dev-release --bench skip
-# Alternative: ./build/linux/x86_64/release/fastfix-tests
+./build/linux/x86_64/release/fastfix-tests
+# Alternative one-shot flow: bash ./scripts/offline_build.sh --bench skip
+# Alternative CMake binary: ./build/cmake/dev-release/bin/fastfix-tests
+# Make fallback binary: ./build/cmake/dev-release-make/bin/fastfix-tests
 ```
 
 ### Integration
 
 FastFix compiles into a single static library `libfastfix.a`. To use it in your own program:
 
-1. **Build the library**: `cmake --build build/cmake/dev-release --target fastfix` or `xmake build fastfix`
+1. **Build the library**: `xmake f -m release -y && xmake build fastfix` or, if you need the alternative path, `cmake --build build/cmake/dev-release --target fastfix` (or `build/cmake/dev-release-make` when forcing the make fallback)
 2. **Compile a protocol profile**: Run `fastfix-dictgen` to produce a `.art` binary artifact from your dictionary (optional — `.ffd` files can also be loaded directly at runtime)
 3. **Link and include**: Point your compiler at `include/` for headers and link against `libfastfix.a`
 
@@ -144,7 +161,7 @@ target("my-trading-app")
     add_files("src/*.cpp")
 ```
 
-**CMake / Makefile / other:**
+**CMake / Makefile / other (alternative):**
 
 ```bash
 # 1. Build fastfix first

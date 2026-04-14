@@ -6,13 +6,13 @@ This guide covers everything you need to contribute to or extend FastFix: buildi
 
 ## Build System
 
-FastFix supports both offline CMake and offline xmake flows. CMake is the primary path for shared environments and the RHEL targets; xmake remains available for local development.
+FastFix supports both offline xmake and offline CMake flows. xmake is the primary path for normal local builds, tests, and benchmarks; CMake remains available as the alternative path for shared environments and the RHEL targets.
 
 ### Prerequisites
 
 - C++20 compiler (GCC 12+ or Clang 15+)
-- CMake 3.20+ and a native build backend (`make` or Ninja)
-- xmake (latest) if you prefer the optional xmake path
+- xmake (preferred and auto-detected when available)
+- or CMake 3.20+ plus Ninja (preferred CMake generator) or make (fallback when Ninja is unavailable)
 - Linux x86_64 (primary platform)
 
 ### Build Targets
@@ -35,20 +35,24 @@ FastFix supports both offline CMake and offline xmake flows. CMake is the primar
 ### Common Commands
 
 ```bash
-cmake --preset dev-release   # Configure the default offline build
+xmake f -m release -y        # Direct xmake path
+xmake build fastfix-tests
+xmake build fastfix-bench
+xmake clean
+
+bash ./scripts/offline_build.sh --bench smoke   # Auto: xmake -> cmake + Ninja -> cmake + make
+
+# Alternative CMake path
+bash ./scripts/offline_build.sh --build-system cmake --preset dev-release --bench smoke
+bash ./scripts/offline_build.sh --build-system cmake --cmake-generator make --preset dev-release --bench smoke
+cmake --preset dev-release
 cmake --build --preset dev-release
 ctest --preset dev-release
-
-bash ./scripts/offline_build.sh --preset dev-release --bench smoke
-
-xmake f -m release -y        # Optional xmake path
-xmake build fastfix-tests
-xmake clean
 ```
 
-Preset-based CMake builds write executables to `./build/cmake/<preset>/bin/`. The examples below assume `BIN_DIR=./build/cmake/dev-release/bin` for the CMake path and invoke binaries directly for reproducibility and predictable argument handling. The xmake path still writes to `./build/linux/x86_64/release/`.
+The helper scripts auto-select `xmake`, then `cmake + Ninja`, then `cmake + make`. Default xmake builds write executables to `./build/linux/x86_64/release/`. Ninja-based CMake presets remain available at `./build/cmake/<preset>/bin/`, and make-based fallback presets live at `./build/cmake/<preset>-make/bin/`. The examples below assume `BIN_DIR=./build/linux/x86_64/release` for the default path and invoke binaries directly for reproducibility and predictable argument handling.
 
-GitHub Actions CI covers the named RHEL presets through `ubi8/ubi:8.10` + `gcc-toolset-12` and `ubi9/ubi:9.7` + `gcc-toolset-14` container jobs, so those environments are regression-tested even when they are not reproduced locally.
+GitHub Actions CI uses xmake for the default Ubuntu path and keeps the named RHEL presets through `ubi8/ubi:8.10` + `gcc-toolset-12` and `ubi9/ubi:9.7` + `gcc-toolset-14` container jobs as alternative CMake coverage.
 
 ### Dependencies
 
