@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <ctime>
 #include <fstream>
 #include <limits>
 #include <string_view>
@@ -59,9 +60,40 @@ constexpr std::size_t kDayCutMode = 24U;
 constexpr std::size_t kDayCutHour = 25U;
 constexpr std::size_t kDayCutMinute = 26U;
 constexpr std::size_t kDayCutUtcOffset = 27U;
+constexpr std::size_t kResetSeqNumOnLogon = 28U;
+constexpr std::size_t kResetSeqNumOnLogout = 29U;
+constexpr std::size_t kResetSeqNumOnDisconnect = 30U;
+constexpr std::size_t kRefreshOnLogon = 31U;
+constexpr std::size_t kSendNextExpectedMsgSeqNum = 32U;
+constexpr std::size_t kUseLocalTime = 33U;
+constexpr std::size_t kNonStopSession = 34U;
+constexpr std::size_t kStartTime = 35U;
+constexpr std::size_t kEndTime = 36U;
+constexpr std::size_t kStartDay = 37U;
+constexpr std::size_t kEndDay = 38U;
+constexpr std::size_t kLogonTime = 39U;
+constexpr std::size_t kLogoutTime = 40U;
+constexpr std::size_t kLogonDay = 41U;
+constexpr std::size_t kLogoutDay = 42U;
 constexpr std::size_t kMinFieldCount = kIsInitiator + 1U;
-constexpr std::size_t kMaxFieldCount = kDayCutUtcOffset + 1U;
+constexpr std::size_t kMaxFieldCount = kLogoutDay + 1U;
 }  // namespace counterparty_columns
+
+constexpr int kSecondsPerDay = 24 * 60 * 60;
+
+struct SessionWindowSpec {
+    bool use_local_time{false};
+    int start_second{0};
+    int end_second{0};
+    std::optional<int> start_day;
+    std::optional<int> end_day;
+};
+
+struct CalendarPoint {
+    std::tm civil_time{};
+    int weekday{0};
+    int second_of_day{0};
+};
 
 auto Trim(std::string_view input) -> std::string_view {
     std::size_t begin = 0;
@@ -105,6 +137,14 @@ auto ParseBool(std::string_view token) -> base::Result<bool> {
         return false;
     }
     return base::Status::InvalidArgument("invalid boolean value in runtime config");
+}
+
+auto Lowercase(std::string_view token) -> std::string {
+    std::string value(token);
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    return value;
 }
 
 template <typename Integer>
@@ -258,6 +298,77 @@ auto ParseDayCutMode(std::string_view token) -> base::Result<session::DayCutMode
     return base::Status::InvalidArgument("unknown day_cut_mode in runtime config");
 }
 
+auto ParseSessionTimeOfDay(std::string_view token) -> base::Result<SessionTimeOfDay> {
+    const auto value = Trim(token);
+    const auto first_colon = value.find(':');
+    if (first_colon == std::string_view::npos) {
+        return base::Status::InvalidArgument("invalid session time value");
+    }
+
+    const auto second_colon = value.find(':', first_colon + 1U);
+    if (second_colon == std::string_view::npos) {
+        return base::Status::InvalidArgument("invalid session time value");
+    }
+
+    const auto parse_component = [](std::string_view field, const char* label) -> base::Result<std::uint32_t> {
+        try {
+            return static_cast<std::uint32_t>(std::stoul(std::string(field), nullptr, 10));
+        } catch (...) {
+            return base::Status::InvalidArgument(std::string("invalid ") + label + " value");
+        }
+    };
+
+    auto hour = parse_component(value.substr(0, first_colon), "session_time_hour");
+    if (!hour.ok()) {
+        return hour.status();
+    }
+    auto minute = parse_component(
+        value.substr(first_colon + 1U, second_colon - first_colon - 1U),
+        "session_time_minute");
+    if (!minute.ok()) {
+        return minute.status();
+    }
+    auto second = parse_component(value.substr(second_colon + 1U), "session_time_second");
+    if (!second.ok()) {
+        return second.status();
+    }
+    if (hour.value() > 23U || minute.value() > 59U || second.value() > 59U) {
+        return base::Status::InvalidArgument("session time value is out of range");
+    }
+
+    return SessionTimeOfDay{
+        .hour = static_cast<std::uint8_t>(hour.value()),
+        .minute = static_cast<std::uint8_t>(minute.value()),
+        .second = static_cast<std::uint8_t>(second.value()),
+    };
+}
+
+auto ParseSessionDayOfWeek(std::string_view token) -> base::Result<SessionDayOfWeek> {
+    const auto value = Lowercase(Trim(token));
+    if (value == "sun" || value == "sunday") {
+        return SessionDayOfWeek::kSunday;
+    }
+    if (value == "mon" || value == "monday") {
+        return SessionDayOfWeek::kMonday;
+    }
+    if (value == "tue" || value == "tuesday") {
+        return SessionDayOfWeek::kTuesday;
+    }
+    if (value == "wed" || value == "wednesday") {
+        return SessionDayOfWeek::kWednesday;
+    }
+    if (value == "thu" || value == "thursday") {
+        return SessionDayOfWeek::kThursday;
+    }
+    if (value == "fri" || value == "friday") {
+        return SessionDayOfWeek::kFriday;
+    }
+    if (value == "sat" || value == "saturday") {
+        return SessionDayOfWeek::kSaturday;
+    }
+    return base::Status::InvalidArgument("invalid session day value");
+}
+
 auto ParseDispatchMode(std::string_view token) -> base::Result<AppDispatchMode> {
     const auto value = Trim(token);
     if (value == "inline") {
@@ -323,7 +434,252 @@ auto IsTransportSession(std::string_view begin_string) -> bool {
     return begin_string == "FIXT.1.1";
 }
 
+auto IsValidTimeOfDay(const SessionTimeOfDay& time) -> bool {
+    return time.hour < 24U && time.minute < 60U && time.second < 60U;
+}
+
+auto HasSessionWindowFields(const SessionScheduleConfig& schedule) -> bool {
+    return schedule.start_time.has_value() || schedule.end_time.has_value() || schedule.start_day.has_value() ||
+           schedule.end_day.has_value();
+}
+
+auto HasLogonWindowFields(const SessionScheduleConfig& schedule) -> bool {
+    return schedule.logon_time.has_value() || schedule.logout_time.has_value() || schedule.logon_day.has_value() ||
+           schedule.logout_day.has_value();
+}
+
+auto SecondsOfDay(const SessionTimeOfDay& time) -> int {
+    return static_cast<int>(time.hour) * 3600 + static_cast<int>(time.minute) * 60 +
+           static_cast<int>(time.second);
+}
+
+auto BuildWindowSpec(
+    const SessionScheduleConfig& schedule,
+    bool logon_window) -> std::optional<SessionWindowSpec> {
+    if (schedule.non_stop_session) {
+        return std::nullopt;
+    }
+
+    if (logon_window && HasLogonWindowFields(schedule)) {
+        return SessionWindowSpec{
+            .use_local_time = schedule.use_local_time,
+            .start_second = SecondsOfDay(*schedule.logon_time),
+            .end_second = SecondsOfDay(*schedule.logout_time),
+            .start_day = schedule.logon_day.has_value()
+                             ? std::optional<int>(static_cast<int>(*schedule.logon_day))
+                             : std::nullopt,
+            .end_day = schedule.logout_day.has_value()
+                           ? std::optional<int>(static_cast<int>(*schedule.logout_day))
+                           : std::nullopt,
+        };
+    }
+
+    if (!HasSessionWindowFields(schedule)) {
+        return std::nullopt;
+    }
+
+    return SessionWindowSpec{
+        .use_local_time = schedule.use_local_time,
+        .start_second = SecondsOfDay(*schedule.start_time),
+        .end_second = SecondsOfDay(*schedule.end_time),
+        .start_day = schedule.start_day.has_value()
+                         ? std::optional<int>(static_cast<int>(*schedule.start_day))
+                         : std::nullopt,
+        .end_day = schedule.end_day.has_value() ? std::optional<int>(static_cast<int>(*schedule.end_day))
+                                                : std::nullopt,
+    };
+}
+
+auto BuildCalendarPoint(std::uint64_t unix_time_ns, bool use_local_time) -> CalendarPoint {
+    const auto unix_seconds = static_cast<std::time_t>(unix_time_ns / 1'000'000'000ULL);
+    std::tm civil_time{};
+    if (use_local_time) {
+        localtime_r(&unix_seconds, &civil_time);
+    } else {
+        gmtime_r(&unix_seconds, &civil_time);
+    }
+    return CalendarPoint{
+        .civil_time = civil_time,
+        .weekday = civil_time.tm_wday,
+        .second_of_day = civil_time.tm_hour * 3600 + civil_time.tm_min * 60 + civil_time.tm_sec,
+    };
+}
+
+auto MakeUnixTimeNs(std::tm civil_time, bool use_local_time) -> std::optional<std::uint64_t> {
+    const auto unix_seconds = use_local_time ? mktime(&civil_time) : timegm(&civil_time);
+    if (unix_seconds < 0) {
+        return std::nullopt;
+    }
+    return static_cast<std::uint64_t>(unix_seconds) * 1'000'000'000ULL;
+}
+
+auto IsWithinWindow(const SessionWindowSpec& window, std::uint64_t unix_time_ns) -> bool {
+    const auto point = BuildCalendarPoint(unix_time_ns, window.use_local_time);
+    const auto current = window.start_day.has_value()
+                             ? point.weekday * kSecondsPerDay + point.second_of_day
+                             : point.second_of_day;
+    const auto start = window.start_day.has_value()
+                           ? *window.start_day * kSecondsPerDay + window.start_second
+                           : window.start_second;
+    const auto end = window.end_day.has_value() ? *window.end_day * kSecondsPerDay + window.end_second
+                                                : window.end_second;
+    if (start == end) {
+        return true;
+    }
+    if (start < end) {
+        return current >= start && current < end;
+    }
+    return current >= start || current < end;
+}
+
+auto NextWindowStart(const SessionWindowSpec& window, std::uint64_t unix_time_ns) -> std::optional<std::uint64_t> {
+    if (IsWithinWindow(window, unix_time_ns)) {
+        return unix_time_ns;
+    }
+
+    const auto point = BuildCalendarPoint(unix_time_ns, window.use_local_time);
+    auto candidate = point.civil_time;
+    candidate.tm_hour = window.start_second / 3600;
+    candidate.tm_min = (window.start_second / 60) % 60;
+    candidate.tm_sec = window.start_second % 60;
+
+    if (window.start_day.has_value()) {
+        int delta_days = *window.start_day - point.weekday;
+        if (delta_days < 0) {
+            delta_days += 7;
+        }
+        candidate.tm_mday += delta_days;
+        auto candidate_ns = MakeUnixTimeNs(candidate, window.use_local_time);
+        if (!candidate_ns.has_value()) {
+            return std::nullopt;
+        }
+        if (*candidate_ns <= unix_time_ns) {
+            candidate.tm_mday += 7;
+            return MakeUnixTimeNs(candidate, window.use_local_time);
+        }
+        return candidate_ns;
+    }
+
+    auto candidate_ns = MakeUnixTimeNs(candidate, window.use_local_time);
+    if (!candidate_ns.has_value()) {
+        return std::nullopt;
+    }
+    if (*candidate_ns <= unix_time_ns) {
+        candidate.tm_mday += 1;
+        return MakeUnixTimeNs(candidate, window.use_local_time);
+    }
+    return candidate_ns;
+}
+
+auto ParseOptionalBoolColumn(
+    const std::vector<std::string>& parts,
+    std::size_t index,
+    bool default_value) -> base::Result<bool> {
+    if (parts.size() <= index || Trim(parts[index]).empty()) {
+        return default_value;
+    }
+    return ParseBool(parts[index]);
+}
+
+auto ParseOptionalTimeColumn(
+    const std::vector<std::string>& parts,
+    std::size_t index) -> base::Result<std::optional<SessionTimeOfDay>> {
+    if (parts.size() <= index || Trim(parts[index]).empty()) {
+        return std::optional<SessionTimeOfDay>{};
+    }
+    auto parsed = ParseSessionTimeOfDay(parts[index]);
+    if (!parsed.ok()) {
+        return parsed.status();
+    }
+    return std::optional<SessionTimeOfDay>(parsed.value());
+}
+
+auto ParseOptionalDayColumn(
+    const std::vector<std::string>& parts,
+    std::size_t index) -> base::Result<std::optional<SessionDayOfWeek>> {
+    if (parts.size() <= index || Trim(parts[index]).empty()) {
+        return std::optional<SessionDayOfWeek>{};
+    }
+    auto parsed = ParseSessionDayOfWeek(parts[index]);
+    if (!parsed.ok()) {
+        return parsed.status();
+    }
+    return std::optional<SessionDayOfWeek>(parsed.value());
+}
+
 }  // namespace
+
+auto ValidateSessionSchedule(const SessionScheduleConfig& schedule) -> base::Status {
+    const auto validate_time_pair = [](std::string_view label,
+                                       const std::optional<SessionTimeOfDay>& start_time,
+                                       const std::optional<SessionTimeOfDay>& end_time,
+                                       const std::optional<SessionDayOfWeek>& start_day,
+                                       const std::optional<SessionDayOfWeek>& end_day) -> base::Status {
+        if (start_time.has_value() != end_time.has_value()) {
+            return base::Status::InvalidArgument(std::string(label) + " requires both start and end times");
+        }
+        if (start_day.has_value() != end_day.has_value()) {
+            return base::Status::InvalidArgument(std::string(label) + " requires both start and end days");
+        }
+        if ((start_day.has_value() || end_day.has_value()) && !start_time.has_value()) {
+            return base::Status::InvalidArgument(std::string(label) + " days require matching times");
+        }
+        if (start_time.has_value() && !IsValidTimeOfDay(*start_time)) {
+            return base::Status::InvalidArgument(std::string(label) + " start time is out of range");
+        }
+        if (end_time.has_value() && !IsValidTimeOfDay(*end_time)) {
+            return base::Status::InvalidArgument(std::string(label) + " end time is out of range");
+        }
+        return base::Status::Ok();
+    };
+
+    if (schedule.non_stop_session &&
+        (HasSessionWindowFields(schedule) || HasLogonWindowFields(schedule))) {
+        return base::Status::InvalidArgument(
+            "non_stop_session cannot be combined with session or logon window settings");
+    }
+
+    auto session_window_status = validate_time_pair(
+        "session window",
+        schedule.start_time,
+        schedule.end_time,
+        schedule.start_day,
+        schedule.end_day);
+    if (!session_window_status.ok()) {
+        return session_window_status;
+    }
+
+    auto logon_window_status = validate_time_pair(
+        "logon window",
+        schedule.logon_time,
+        schedule.logout_time,
+        schedule.logon_day,
+        schedule.logout_day);
+    if (!logon_window_status.ok()) {
+        return logon_window_status;
+    }
+
+    return base::Status::Ok();
+}
+
+auto IsWithinSessionWindow(const SessionScheduleConfig& schedule, std::uint64_t unix_time_ns) -> bool {
+    const auto window = BuildWindowSpec(schedule, false);
+    return !window.has_value() || IsWithinWindow(*window, unix_time_ns);
+}
+
+auto IsWithinLogonWindow(const SessionScheduleConfig& schedule, std::uint64_t unix_time_ns) -> bool {
+    const auto window = BuildWindowSpec(schedule, true);
+    return !window.has_value() || IsWithinWindow(*window, unix_time_ns);
+}
+
+auto NextLogonWindowStart(const SessionScheduleConfig& schedule, std::uint64_t unix_time_ns)
+    -> std::optional<std::uint64_t> {
+    const auto window = BuildWindowSpec(schedule, true);
+    if (!window.has_value()) {
+        return unix_time_ns;
+    }
+    return NextWindowStart(*window, unix_time_ns);
+}
 
 auto ValidateEngineConfig(const EngineConfig& config) -> base::Status {
     if (config.worker_count == 0) {
@@ -391,6 +747,19 @@ auto ValidateEngineConfig(const EngineConfig& config) -> base::Status {
         if (counterparty.recovery_mode == session::RecoveryMode::kWarmRestart &&
             counterparty.store_mode == StoreMode::kMemory) {
             return base::Status::InvalidArgument("warm restart recovery requires a persistent store mode");
+        }
+        if (counterparty.reset_seq_num_on_logon && !counterparty.transport_profile.supports_reset_on_logon) {
+            return base::Status::InvalidArgument(
+                "reset_seq_num_on_logon is not supported by the configured transport version");
+        }
+        if (counterparty.send_next_expected_msg_seq_num &&
+            !counterparty.transport_profile.supports_next_expected_msg_seq_num) {
+            return base::Status::InvalidArgument(
+                "send_next_expected_msg_seq_num is not supported by the configured transport version");
+        }
+        auto schedule_status = ValidateSessionSchedule(counterparty.session_schedule);
+        if (!schedule_status.ok()) {
+            return schedule_status;
         }
     }
 
@@ -555,7 +924,7 @@ auto LoadEngineConfigText(std::string_view text, const std::filesystem::path& ba
             if (parts.size() < counterparty_columns::kMinFieldCount ||
                 parts.size() > counterparty_columns::kMaxFieldCount) {
                 return base::Status::InvalidArgument(
-                    "counterparty config must have between 13 and 28 pipe-separated parts");
+                    "counterparty config must have between 13 and 43 pipe-separated parts");
             }
 
             auto session_id = ParseInteger<std::uint64_t>(parts[counterparty_columns::kSessionId], "session_id");
@@ -702,6 +1071,78 @@ auto LoadEngineConfigText(std::string_view text, const std::filesystem::path& ba
                     return day_cut_utc_offset.status();
                 }
             }
+            auto reset_seq_num_on_logon = ParseOptionalBoolColumn(
+                parts,
+                counterparty_columns::kResetSeqNumOnLogon,
+                false);
+            if (!reset_seq_num_on_logon.ok()) {
+                return reset_seq_num_on_logon.status();
+            }
+            auto reset_seq_num_on_logout = ParseOptionalBoolColumn(
+                parts,
+                counterparty_columns::kResetSeqNumOnLogout,
+                false);
+            if (!reset_seq_num_on_logout.ok()) {
+                return reset_seq_num_on_logout.status();
+            }
+            auto reset_seq_num_on_disconnect = ParseOptionalBoolColumn(
+                parts,
+                counterparty_columns::kResetSeqNumOnDisconnect,
+                false);
+            if (!reset_seq_num_on_disconnect.ok()) {
+                return reset_seq_num_on_disconnect.status();
+            }
+            auto refresh_on_logon = ParseOptionalBoolColumn(parts, counterparty_columns::kRefreshOnLogon, false);
+            if (!refresh_on_logon.ok()) {
+                return refresh_on_logon.status();
+            }
+            auto send_next_expected_msg_seq_num = ParseOptionalBoolColumn(
+                parts,
+                counterparty_columns::kSendNextExpectedMsgSeqNum,
+                false);
+            if (!send_next_expected_msg_seq_num.ok()) {
+                return send_next_expected_msg_seq_num.status();
+            }
+            auto use_local_time = ParseOptionalBoolColumn(parts, counterparty_columns::kUseLocalTime, false);
+            if (!use_local_time.ok()) {
+                return use_local_time.status();
+            }
+            auto non_stop_session = ParseOptionalBoolColumn(parts, counterparty_columns::kNonStopSession, false);
+            if (!non_stop_session.ok()) {
+                return non_stop_session.status();
+            }
+            auto start_time = ParseOptionalTimeColumn(parts, counterparty_columns::kStartTime);
+            if (!start_time.ok()) {
+                return start_time.status();
+            }
+            auto end_time = ParseOptionalTimeColumn(parts, counterparty_columns::kEndTime);
+            if (!end_time.ok()) {
+                return end_time.status();
+            }
+            auto start_day = ParseOptionalDayColumn(parts, counterparty_columns::kStartDay);
+            if (!start_day.ok()) {
+                return start_day.status();
+            }
+            auto end_day = ParseOptionalDayColumn(parts, counterparty_columns::kEndDay);
+            if (!end_day.ok()) {
+                return end_day.status();
+            }
+            auto logon_time = ParseOptionalTimeColumn(parts, counterparty_columns::kLogonTime);
+            if (!logon_time.ok()) {
+                return logon_time.status();
+            }
+            auto logout_time = ParseOptionalTimeColumn(parts, counterparty_columns::kLogoutTime);
+            if (!logout_time.ok()) {
+                return logout_time.status();
+            }
+            auto logon_day = ParseOptionalDayColumn(parts, counterparty_columns::kLogonDay);
+            if (!logon_day.ok()) {
+                return logon_day.status();
+            }
+            auto logout_day = ParseOptionalDayColumn(parts, counterparty_columns::kLogoutDay);
+            if (!logout_day.ok()) {
+                return logout_day.status();
+            }
             auto heartbeat = ParseInteger<std::uint32_t>(
                 parts[counterparty_columns::kHeartbeatIntervalSeconds],
                 "heartbeat_interval_seconds");
@@ -743,6 +1184,23 @@ auto LoadEngineConfigText(std::string_view text, const std::filesystem::path& ba
                 .recovery_mode = recovery_mode.value(),
                 .dispatch_mode = dispatch_mode.value(),
                 .validation_policy = session::MakeValidationPolicy(validation_mode.value()),
+                .reset_seq_num_on_logon = reset_seq_num_on_logon.value(),
+                .reset_seq_num_on_logout = reset_seq_num_on_logout.value(),
+                .reset_seq_num_on_disconnect = reset_seq_num_on_disconnect.value(),
+                .refresh_on_logon = refresh_on_logon.value(),
+                .send_next_expected_msg_seq_num = send_next_expected_msg_seq_num.value(),
+                .session_schedule = SessionScheduleConfig{
+                    .use_local_time = use_local_time.value(),
+                    .non_stop_session = non_stop_session.value(),
+                    .start_time = start_time.value(),
+                    .end_time = end_time.value(),
+                    .start_day = start_day.value(),
+                    .end_day = end_day.value(),
+                    .logon_time = logon_time.value(),
+                    .logout_time = logout_time.value(),
+                    .logon_day = logon_day.value(),
+                    .logout_day = logout_day.value(),
+                },
                 .reconnect_enabled = reconnect_enabled.value(),
                 .reconnect_initial_ms = reconnect_initial_ms.value(),
                 .reconnect_max_ms = reconnect_max_ms.value(),

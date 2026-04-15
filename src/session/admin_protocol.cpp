@@ -271,6 +271,66 @@ auto AdminProtocol::PersistRecoveryState() -> base::Status {
     });
 }
 
+auto AdminProtocol::RefreshSessionStateFromStore() -> base::Status {
+    if (store_ == nullptr) {
+        return base::Status::Ok();
+    }
+
+    auto status = store_->Refresh();
+    if (!status.ok()) {
+        return status;
+    }
+
+    auto recovery = store_->LoadRecoveryState(session_.session_id());
+    if (!recovery.ok()) {
+        if (recovery.status().code() == base::ErrorCode::kNotFound) {
+            return session_.RestoreSequenceState(1U, 1U);
+        }
+        return recovery.status();
+    }
+
+    return session_.RestoreSequenceState(recovery.value().next_in_seq, recovery.value().next_out_seq);
+}
+
+auto AdminProtocol::ResetSessionState(
+    std::uint32_t next_in_seq,
+    std::uint32_t next_out_seq,
+    bool reset_store) -> base::Status {
+    if (reset_store && store_ != nullptr) {
+        auto status = store_->ResetSession(session_.session_id());
+        if (!status.ok()) {
+            return status;
+        }
+    }
+
+    auto status = session_.RestoreSequenceState(next_in_seq, next_out_seq);
+    if (!status.ok()) {
+        return status;
+    }
+
+    return PersistRecoveryState();
+}
+
+auto AdminProtocol::ReplayCounterpartyExpectedRange(
+    std::uint32_t counterparty_next_expected,
+    std::uint32_t pre_logon_next_out,
+    std::uint64_t timestamp_ns,
+    ProtocolEvent* event) -> base::Status {
+    if (event == nullptr || counterparty_next_expected >= pre_logon_next_out) {
+        return base::Status::Ok();
+    }
+
+    ProtocolFrameList replay_frames;
+    auto status = ReplayOutbound(counterparty_next_expected, pre_logon_next_out - 1U, timestamp_ns, &replay_frames);
+    if (!status.ok()) {
+        return status;
+    }
+    for (auto& frame : replay_frames) {
+        event->outbound_frames.push_back(std::move(frame));
+    }
+    return base::Status::Ok();
+}
+
 auto AdminProtocol::ValidateCompIds(
     const codec::DecodedMessageView& decoded,
     std::uint32_t* ref_tag_id,
@@ -611,6 +671,10 @@ auto AdminProtocol::BuildLogonFrame(std::uint64_t timestamp_ns, bool reset_seq_n
     if (reset_seq_num) {
         builder.set_boolean(kResetSeqNumFlag, true);
     }
+    if (config_.send_next_expected_msg_seq_num && config_.transport_profile.supports_next_expected_msg_seq_num) {
+        const auto snapshot = session_.Snapshot();
+        builder.set_int(kNextExpectedMsgSeqNum, static_cast<std::int64_t>(snapshot.next_in_seq));
+    }
     return EncodeFrame(std::move(builder).build(), true, timestamp_ns, true, false, true, 0U);
 }
 
@@ -829,6 +893,13 @@ auto AdminProtocol::OnTransportConnected(std::uint64_t timestamp_ns) -> base::Re
         return status;
     }
 
+    if (config_.refresh_on_logon) {
+        status = RefreshSessionStateFromStore();
+        if (!status.ok()) {
+            return status;
+        }
+    }
+
     status = session_.OnTransportConnected();
     if (!status.ok()) {
         return status;
@@ -843,7 +914,7 @@ auto AdminProtocol::OnTransportConnected(std::uint64_t timestamp_ns) -> base::Re
     }
 
     if (config_.reset_seq_num_on_logon) {
-        status = session_.RestoreSequenceState(1U, 1U);
+        status = ResetSessionState(1U, 1U, true);
         if (!status.ok()) {
             return status;
         }
@@ -868,6 +939,12 @@ auto AdminProtocol::OnTransportClosed() -> base::Status {
         return status;
     }
 
+    const auto state_before_close = session_.state();
+    const bool reset_for_logout =
+        config_.reset_seq_num_on_logout && state_before_close == SessionState::kAwaitingLogout;
+    const bool reset_for_disconnect =
+        config_.reset_seq_num_on_disconnect && state_before_close != SessionState::kAwaitingLogout;
+
     outstanding_test_request_id_.clear();
     logout_sent_ = false;
     test_request_sent_ns_ = 0U;
@@ -876,6 +953,10 @@ auto AdminProtocol::OnTransportClosed() -> base::Status {
     status = session_.OnTransportClosed();
     if (!status.ok()) {
         return status;
+    }
+
+    if (reset_for_logout || reset_for_disconnect) {
+        return ResetSessionState(1U, 1U, true);
     }
     return PersistRecoveryState();
 }
@@ -946,8 +1027,9 @@ auto AdminProtocol::OnInbound(const codec::DecodedMessageView& decoded, std::uin
 
     const auto view = decoded.message.view();
     const auto msg_type = view.msg_type();
+    const bool is_logon = msg_type == "A";
     const bool inbound_gap_fill = msg_type == "4" && HasBoolean(view, kGapFillFlag);
-    const bool inbound_logon_reset = msg_type == "A" && HasBoolean(view, kResetSeqNumFlag);
+    const bool inbound_logon_reset = is_logon && HasBoolean(view, kResetSeqNumFlag);
 
     std::uint32_t ref_tag_id = 0U;
     std::uint32_t reject_reason = 0U;
@@ -974,10 +1056,17 @@ auto AdminProtocol::OnInbound(const codec::DecodedMessageView& decoded, std::uin
             decoded.header.msg_type == "A");
     }
 
+    if (is_logon && config_.refresh_on_logon) {
+        status = RefreshSessionStateFromStore();
+        if (!status.ok()) {
+            return status;
+        }
+    }
+
     auto snapshot_before = session_.Snapshot();
     if (inbound_logon_reset) {
         const auto next_out_seq = config_.session.is_initiator ? snapshot_before.next_out_seq : 1U;
-        status = session_.RestoreSequenceState(1U, next_out_seq);
+        status = ResetSessionState(1U, next_out_seq, !config_.session.is_initiator);
         if (!status.ok()) {
             return status;
         }
@@ -1145,14 +1234,36 @@ auto AdminProtocol::OnInbound(const codec::DecodedMessageView& decoded, std::uin
     }
 
     if (msg_type == "A") {
+        const auto inbound_next_expected = view.get_int(kNextExpectedMsgSeqNum);
         const bool inbound_reset = HasBoolean(view, kResetSeqNumFlag);
         if (inbound_reset) {
             const auto snapshot = session_.Snapshot();
             const auto next_out = config_.session.is_initiator ? snapshot.next_out_seq : 1U;
-            status = session_.RestoreSequenceState(decoded.header.msg_seq_num + 1U, next_out);
+            status = ResetSessionState(decoded.header.msg_seq_num + 1U, next_out, false);
             if (!status.ok()) {
                 return status;
             }
+        }
+
+        const auto pre_logon_next_out = session_.Snapshot().next_out_seq;
+        if (inbound_next_expected.has_value() && inbound_next_expected.value() <= 0) {
+            auto logout = BeginLogout("received invalid NextExpectedMsgSeqNum on Logon", timestamp_ns);
+            if (!logout.ok()) {
+                return logout.status();
+            }
+            event.outbound_frames.push_back(std::move(logout).value());
+            event.disconnect = true;
+            return event;
+        }
+        if (inbound_next_expected.has_value() &&
+            static_cast<std::uint64_t>(inbound_next_expected.value()) > static_cast<std::uint64_t>(pre_logon_next_out)) {
+            auto logout = BeginLogout("counterparty requested unsent outbound sequence range", timestamp_ns);
+            if (!logout.ok()) {
+                return logout.status();
+            }
+            event.outbound_frames.push_back(std::move(logout).value());
+            event.disconnect = true;
+            return event;
         }
 
         if (!config_.session.is_initiator) {
@@ -1172,6 +1283,16 @@ auto AdminProtocol::OnInbound(const codec::DecodedMessageView& decoded, std::uin
             return status;
         }
         event.session_active = true;
+        if (inbound_next_expected.has_value()) {
+            status = ReplayCounterpartyExpectedRange(
+                static_cast<std::uint32_t>(inbound_next_expected.value()),
+                pre_logon_next_out,
+                timestamp_ns,
+                &event);
+            if (!status.ok()) {
+                return status;
+            }
+        }
         return event;
     }
 

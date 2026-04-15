@@ -256,6 +256,11 @@ auto MemorySessionStore::LoadRecoveryState(std::uint64_t session_id) const
     return it->second.recovery;
 }
 
+auto MemorySessionStore::ResetSession(std::uint64_t session_id) -> base::Status {
+    sessions_.erase(session_id);
+    return base::Status::Ok();
+}
+
 auto MemorySessionStore::Rollover() -> base::Status {
     for (auto& [session_id, session] : sessions_) {
         // Rebuild payload arena with only live payloads from outbound + inbound records.

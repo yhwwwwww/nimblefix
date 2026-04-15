@@ -32,6 +32,12 @@ auto NowNs() -> std::uint64_t {
                                               .count());
 }
 
+auto WallClockNowNs() -> std::uint64_t {
+    return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::system_clock::now().time_since_epoch())
+                                              .count());
+}
+
 auto IsAdminMessage(std::string_view msg_type) -> bool {
     return msg_type == "0" || msg_type == "1" || msg_type == "2" || msg_type == "3" ||
            msg_type == "4" || msg_type == "5" || msg_type == "A";
@@ -54,6 +60,11 @@ auto MakeProtocolConfig(const CounterpartyConfig& counterparty) -> session::Admi
         .target_comp_id = counterparty.session.key.target_comp_id,
         .default_appl_ver_id = counterparty.default_appl_ver_id,
         .heartbeat_interval_seconds = counterparty.session.heartbeat_interval_seconds,
+        .reset_seq_num_on_logon = counterparty.reset_seq_num_on_logon,
+        .reset_seq_num_on_logout = counterparty.reset_seq_num_on_logout,
+        .reset_seq_num_on_disconnect = counterparty.reset_seq_num_on_disconnect,
+        .refresh_on_logon = counterparty.refresh_on_logon,
+        .send_next_expected_msg_seq_num = counterparty.send_next_expected_msg_seq_num,
         .validation_policy = counterparty.validation_policy,
     };
 }
@@ -1392,6 +1403,10 @@ auto LiveAcceptor::BindConnectionFromLogon(
         return resolved.status();
     }
 
+    if (!IsWithinLogonWindow(resolved.value().counterparty.session_schedule, WallClockNowNs())) {
+        return base::Status::InvalidArgument("inbound Logon arrived outside the configured logon window");
+    }
+
     if (HasActiveSession(resolved.value().counterparty.session.session_id)) {
         return base::Status::AlreadyExists("session already has an active transport connection");
     }
@@ -1752,6 +1767,27 @@ auto LiveAcceptor::DispatchAppMessage(
 }
 
 auto LiveAcceptor::ServiceTimer(WorkerShardState& shard, ConnectionState& connection, std::uint64_t timestamp_ns) -> base::Status {
+    const auto wall_now_ns = WallClockNowNs();
+    if (!IsWithinSessionWindow(connection.session->counterparty.session_schedule, wall_now_ns)) {
+        const auto state = connection.session->protocol->session().state();
+        if (state == session::SessionState::kActive || state == session::SessionState::kResendProcessing) {
+            auto logout = connection.session->protocol->BeginLogout("session window closed", timestamp_ns);
+            if (!logout.ok()) {
+                return logout.status();
+            }
+            auto status = SendFrame(connection, logout.value(), timestamp_ns);
+            if (!status.ok()) {
+                return status;
+            }
+            UpdateSessionSnapshot(*connection.session);
+            RefreshConnectionTimer(shard, connection, timestamp_ns);
+            return base::Status::Ok();
+        }
+
+        MarkConnectionForClose(connection, "session window closed", false);
+        return base::Status::Ok();
+    }
+
     auto event = connection.session->protocol->OnTimer(timestamp_ns);
     if (!event.ok()) {
         return event.status();

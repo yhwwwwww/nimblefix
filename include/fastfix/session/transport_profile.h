@@ -27,7 +27,7 @@ struct TransportSessionProfile {
     std::uint32_t default_heartbeat_interval_seconds{30};
 
     // Admin message behavior
-    bool supports_next_expected_msg_seq_num{false};  // tag 789 in Logon
+    bool supports_next_expected_msg_seq_num{true};   // tag 789 in Logon
     bool supports_msg_seq_num_reset{true};           // SequenceReset-Reset
 
     // FIXT-specific

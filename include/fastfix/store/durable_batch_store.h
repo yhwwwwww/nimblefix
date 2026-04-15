@@ -54,6 +54,8 @@ class DurableBatchSessionStore : public SessionStore {
     auto SaveRecoveryState(const SessionRecoveryState& state) -> base::Status override;
     auto LoadRecoveryState(std::uint64_t session_id) const
         -> base::Result<SessionRecoveryState> override;
+    auto Refresh() -> base::Status override;
+    auto ResetSession(std::uint64_t session_id) -> base::Status override;
 
   private:
     auto AppendMessage(bool outbound, const MessageRecord& record) -> base::Status;

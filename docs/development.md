@@ -536,7 +536,22 @@ engine.trace_capacity=8
 profile=path/to/profile.art
 dictionary=path/to/profile.ffd
 counterparty|name|session_id|profile_id|begin_string|sender|target|store_mode|durable_dir|validation|dispatch|heartbeat_sec|is_initiator
+
+# Full counterparty record order used by current tools/tests:
+counterparty|name|session_id|profile_id|begin_string|sender|target|store_mode|store_path|recovery_mode|dispatch_mode|heartbeat_sec|is_initiator|default_appl_ver_id|validation_mode|durable_flush_threshold|durable_rollover_mode|durable_archive_limit|reconnect_enabled|reconnect_initial_ms|reconnect_max_ms|reconnect_max_retries|durable_local_utc_offset_seconds|durable_use_system_timezone|day_cut_mode|day_cut_hour|day_cut_minute|day_cut_utc_offset|reset_seq_num_on_logon|reset_seq_num_on_logout|reset_seq_num_on_disconnect|refresh_on_logon|send_next_expected_msg_seq_num|use_local_time|non_stop_session|start_time|end_time|start_day|end_day|logon_time|logout_time|logon_day|logout_day
 ```
+
+The newer FIX-behavior columns expose the QuickFIX-style session controls now wired through runtime config and `CounterpartyConfig`:
+
+- `reset_seq_num_on_logon`, `reset_seq_num_on_logout`, `reset_seq_num_on_disconnect`: reset the persisted session state and next inbound/outbound sequences back to `1` on the corresponding lifecycle edge.
+- `refresh_on_logon`: reload persisted recovery state from the bound store right before logon processing/generation.
+- `send_next_expected_msg_seq_num`: include tag `789` on Logon and honor the peer's advertised next-expected outbound range.
+- `start_time`, `end_time`, `start_day`, `end_day`: session window.
+- `logon_time`, `logout_time`, `logon_day`, `logout_day`: optional narrower logon window.
+- `use_local_time`: interpret the schedule in local wall clock time; otherwise UTC is used.
+- `non_stop_session`: disable schedule gating entirely. It must not be combined with explicit session/logon window fields.
+
+Time fields use `HH:MM:SS`. Day fields accept `sun`..`sat` (or full names). Empty trailing columns keep the default behavior.
 
 Load in code:
 
@@ -581,6 +596,8 @@ class MyStore : public fastfix::store::SessionStore {
     auto SaveRecoveryState(const SessionRecoveryState& state) -> Status override;
     auto LoadRecoveryState(uint64_t session_id)
         -> Result<SessionRecoveryState> override;
+    auto Refresh() -> Status override;
+    auto ResetSession(uint64_t session_id) -> Status override;
     auto Flush() -> Status override;
     auto Rollover() -> Status override;
 };

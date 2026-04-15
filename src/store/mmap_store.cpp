@@ -525,4 +525,53 @@ auto MmapSessionStore::Flush() -> base::Status {
     return base::Status::Ok();
 }
 
+auto MmapSessionStore::Refresh() -> base::Status {
+    if (impl_->mapping != nullptr && impl_->mapping_size != 0U) {
+        ::munmap(impl_->mapping, impl_->mapping_size);
+        impl_->mapping = nullptr;
+        impl_->mapping_size = 0U;
+    }
+    if (impl_->fd >= 0) {
+        ::close(impl_->fd);
+        impl_->fd = -1;
+    }
+    impl_->outbound_offsets.clear();
+    impl_->recovery_states.clear();
+    return Open();
+}
+
+auto MmapSessionStore::ResetSession(std::uint64_t session_id) -> base::Status {
+    (void)session_id;
+
+    if (impl_->mapping != nullptr && impl_->mapping_size != 0U) {
+        ::munmap(impl_->mapping, impl_->mapping_size);
+        impl_->mapping = nullptr;
+        impl_->mapping_size = 0U;
+    }
+    if (impl_->fd >= 0) {
+        ::close(impl_->fd);
+        impl_->fd = -1;
+    }
+
+    if (path_.has_parent_path()) {
+        std::error_code error;
+        std::filesystem::create_directories(path_.parent_path(), error);
+        if (error) {
+            return base::Status::IoError(
+                "unable to prepare mmap store directory '" + path_.parent_path().string() + "': " +
+                error.message());
+        }
+    }
+
+    const int fd = ::open(path_.c_str(), O_RDWR | O_CREAT | O_TRUNC, kDefaultStoreFilePermissions);
+    if (fd < 0) {
+        return base::Status::IoError(IoErrorMessage(path_, "unable to reset mmap store"));
+    }
+    ::close(fd);
+
+    impl_->outbound_offsets.clear();
+    impl_->recovery_states.clear();
+    return Open();
+}
+
 }  // namespace fastfix::store

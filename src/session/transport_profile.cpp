@@ -61,7 +61,7 @@ auto TransportSessionProfile::Fix44() -> TransportSessionProfile {
         .requires_default_appl_ver_id = false,
         .supports_reset_on_logon = true,
         .default_heartbeat_interval_seconds = 30,
-        .supports_next_expected_msg_seq_num = false,
+        .supports_next_expected_msg_seq_num = true,
         .supports_msg_seq_num_reset = true,
         .transport_and_app_version_decoupled = false,
     };

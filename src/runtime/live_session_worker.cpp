@@ -1,6 +1,5 @@
 #include "fastfix/runtime/live_session_worker.h"
 
-#include <cerrno>
 #include <chrono>
 #include <cstddef>
 #include <cstring>
@@ -14,7 +13,6 @@
 
 #include "fastfix/codec/fix_tags.h"
 #include "fastfix/base/spsc_queue.h"
-#include "fastfix/runtime/thread_affinity.h"
 #include "fastfix/store/durable_batch_store.h"
 #include "fastfix/store/memory_store.h"
 #include "fastfix/store/mmap_store.h"
@@ -54,19 +52,13 @@ auto MakeProtocolConfig(const CounterpartyConfig& counterparty) -> session::Admi
         .target_comp_id = counterparty.session.key.target_comp_id,
         .default_appl_ver_id = counterparty.default_appl_ver_id,
         .heartbeat_interval_seconds = counterparty.session.heartbeat_interval_seconds,
+        .reset_seq_num_on_logon = counterparty.reset_seq_num_on_logon,
+        .reset_seq_num_on_logout = counterparty.reset_seq_num_on_logout,
+        .reset_seq_num_on_disconnect = counterparty.reset_seq_num_on_disconnect,
+        .refresh_on_logon = counterparty.refresh_on_logon,
+        .send_next_expected_msg_seq_num = counterparty.send_next_expected_msg_seq_num,
         .validation_policy = counterparty.validation_policy,
     };
-}
-
-auto WorkerCpuAffinity(const Engine* engine, std::uint32_t worker_id) -> std::optional<std::uint32_t> {
-    if (engine == nullptr || engine->config() == nullptr) {
-        return std::nullopt;
-    }
-    const auto& worker_cpu_affinity = engine->config()->worker_cpu_affinity;
-    if (worker_id >= worker_cpu_affinity.size()) {
-        return std::nullopt;
-    }
-    return worker_cpu_affinity[worker_id];
 }
 
 thread_local const void* g_inline_borrow_send_sink = nullptr;

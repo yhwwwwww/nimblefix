@@ -96,6 +96,7 @@ class LiveInitiator {
         std::uint32_t retry_count{0};
         std::uint32_t current_backoff_ms{0};
         std::uint64_t next_attempt_ns{0};
+        bool session_registered{false};
         std::unique_ptr<ActiveSession> session;
     };
 

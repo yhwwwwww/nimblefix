@@ -39,8 +39,10 @@ class MmapSessionStore : public SessionStore {
     auto SaveRecoveryState(const SessionRecoveryState& state) -> base::Status override;
     auto LoadRecoveryState(std::uint64_t session_id) const
         -> base::Result<SessionRecoveryState> override;
+    auto Refresh() -> base::Status override;
+    auto ResetSession(std::uint64_t session_id) -> base::Status override;
 
-    auto Flush() -> base::Status;
+    auto Flush() -> base::Status override;
 
   private:
     auto AppendOutboundLike(std::uint32_t record_type, const MessageRecord& record) -> base::Status;

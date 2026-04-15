@@ -188,6 +188,135 @@ TEST_CASE("admin-protocol", "[admin-protocol]") {
 
     {
         fastfix::store::MemorySessionStore store;
+        REQUIRE(store.SaveRecoveryState(
+            fastfix::store::SessionRecoveryState{
+                .session_id = 5010U,
+                .next_in_seq = 7U,
+                .next_out_seq = 11U,
+                .last_inbound_ns = 70U,
+                .last_outbound_ns = 80U,
+                .active = false,
+            }).ok());
+        fastfix::session::AdminProtocol protocol(
+            fastfix::session::AdminProtocolConfig{
+                .session = fastfix::session::SessionConfig{
+                    .session_id = 5010U,
+                    .key = fastfix::session::SessionKey{"FIX.4.4", "SELL", "BUY"},
+                    .profile_id = dictionary.value().profile().header().profile_id,
+                    .heartbeat_interval_seconds = 30U,
+                    .is_initiator = true,
+                },
+                .begin_string = "FIX.4.4",
+                .sender_comp_id = "SELL",
+                .target_comp_id = "BUY",
+                .heartbeat_interval_seconds = 30U,
+                .refresh_on_logon = true,
+                .send_next_expected_msg_seq_num = true,
+            },
+            dictionary.value(),
+            &store);
+
+        REQUIRE(store.SaveRecoveryState(
+            fastfix::store::SessionRecoveryState{
+                .session_id = 5010U,
+                .next_in_seq = 13U,
+                .next_out_seq = 17U,
+                .last_inbound_ns = 170U,
+                .last_outbound_ns = 180U,
+                .active = false,
+            }).ok());
+
+        auto event = protocol.OnTransportConnected(5U);
+        REQUIRE(event.ok());
+        REQUIRE(event.value().outbound_frames.size() == 1U);
+
+        auto decoded = fastfix::codec::DecodeFixMessage(event.value().outbound_frames.front().bytes, dictionary.value());
+        REQUIRE(decoded.ok());
+        REQUIRE(decoded.value().header.msg_type == "A");
+        REQUIRE(decoded.value().header.msg_seq_num == 17U);
+        REQUIRE(decoded.value().message.view().get_int(kNextExpectedMsgSeqNum).value() == 13);
+    }
+
+    {
+        fastfix::store::MemorySessionStore store;
+        REQUIRE(store.SaveRecoveryState(
+            fastfix::store::SessionRecoveryState{
+                .session_id = 5011U,
+                .next_in_seq = 5U,
+                .next_out_seq = 9U,
+                .last_inbound_ns = 50U,
+                .last_outbound_ns = 90U,
+                .active = true,
+            }).ok());
+        fastfix::session::AdminProtocol protocol(
+            fastfix::session::AdminProtocolConfig{
+                .session = fastfix::session::SessionConfig{
+                    .session_id = 5011U,
+                    .key = fastfix::session::SessionKey{"FIX.4.4", "SELL", "BUY"},
+                    .profile_id = dictionary.value().profile().header().profile_id,
+                    .heartbeat_interval_seconds = 30U,
+                    .is_initiator = true,
+                },
+                .begin_string = "FIX.4.4",
+                .sender_comp_id = "SELL",
+                .target_comp_id = "BUY",
+                .heartbeat_interval_seconds = 30U,
+                .reset_seq_num_on_disconnect = true,
+            },
+            dictionary.value(),
+            &store);
+
+        REQUIRE(protocol.OnTransportConnected(5U).ok());
+        REQUIRE(protocol.OnTransportClosed().ok());
+
+        const auto snapshot = protocol.session().Snapshot();
+        REQUIRE(snapshot.next_in_seq == 1U);
+        REQUIRE(snapshot.next_out_seq == 1U);
+
+        auto recovery = store.LoadRecoveryState(5011U);
+        REQUIRE(recovery.ok());
+        REQUIRE(recovery.value().next_in_seq == 1U);
+        REQUIRE(recovery.value().next_out_seq == 1U);
+    }
+
+    {
+        fastfix::store::MemorySessionStore store;
+        fastfix::session::AdminProtocol protocol(
+            fastfix::session::AdminProtocolConfig{
+                .session = fastfix::session::SessionConfig{
+                    .session_id = 5012U,
+                    .key = fastfix::session::SessionKey{"FIX.4.4", "SELL", "BUY"},
+                    .profile_id = dictionary.value().profile().header().profile_id,
+                    .heartbeat_interval_seconds = 30U,
+                    .is_initiator = false,
+                },
+                .begin_string = "FIX.4.4",
+                .sender_comp_id = "SELL",
+                .target_comp_id = "BUY",
+                .heartbeat_interval_seconds = 30U,
+                .reset_seq_num_on_logout = true,
+            },
+            dictionary.value(),
+            &store);
+
+        REQUIRE(protocol.OnTransportConnected(1U).ok());
+        REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
+        auto logout = protocol.BeginLogout({}, 10U);
+        REQUIRE(logout.ok());
+        REQUIRE(protocol.OnTransportClosed().ok());
+
+        const auto snapshot = protocol.session().Snapshot();
+        REQUIRE(snapshot.next_in_seq == 1U);
+        REQUIRE(snapshot.next_out_seq == 1U);
+
+        auto recovery = store.LoadRecoveryState(5012U);
+        REQUIRE(recovery.ok());
+        REQUIRE(recovery.value().next_in_seq == 1U);
+        REQUIRE(recovery.value().next_out_seq == 1U);
+    }
+
+    {
+        fastfix::store::MemorySessionStore store;
         fastfix::session::AdminProtocol protocol(
             fastfix::session::AdminProtocolConfig{
                 .session = fastfix::session::SessionConfig{

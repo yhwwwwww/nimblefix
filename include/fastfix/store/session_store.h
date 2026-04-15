@@ -125,6 +125,12 @@ class SessionStore {
         return base::Status::Ok();
     }
 
+    virtual auto Refresh() -> base::Status {
+        return base::Status::Ok();
+    }
+
+    virtual auto ResetSession(std::uint64_t session_id) -> base::Status = 0;
+
     virtual auto SaveOutbound(const MessageRecord& record) -> base::Status = 0;
     virtual auto SaveInbound(const MessageRecord& record) -> base::Status = 0;
     virtual auto SaveOutboundView(const MessageRecordView& record) -> base::Status {

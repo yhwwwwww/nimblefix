@@ -2,6 +2,7 @@
 
 #include <filesystem>
 #include <fstream>
+#include <ctime>
 
 #include "fastfix/codec/fix_codec.h"
 #include "fastfix/message/message.h"
@@ -10,8 +11,6 @@
 #include "fastfix/runtime/config.h"
 #include "fastfix/runtime/config_io.h"
 #include "fastfix/runtime/engine.h"
-
-#include "test_support.h"
 
 namespace {
 
@@ -27,6 +26,17 @@ auto BuildSampleArtifact(const std::filesystem::path& artifact_path, std::uint64
         return artifact.status();
     }
     return fastfix::profile::WriteProfileArtifact(artifact_path, artifact.value());
+}
+
+auto MakeUtcNs(int year, int month, int day, int hour, int minute, int second) -> std::uint64_t {
+    std::tm value{};
+    value.tm_year = year - 1900;
+    value.tm_mon = month - 1;
+    value.tm_mday = day;
+    value.tm_hour = hour;
+    value.tm_min = minute;
+    value.tm_sec = second;
+    return static_cast<std::uint64_t>(timegm(&value)) * 1'000'000'000ULL;
 }
 
 }  // namespace
@@ -184,6 +194,42 @@ TEST_CASE("runtime-config", "[runtime-config]") {    const auto temp_root = std:
         "profile=sample-profile.art\n");
     auto invalid_app_cpu = fastfix::runtime::LoadEngineConfigText(invalid_app_cpu_text, temp_root);
     REQUIRE(!invalid_app_cpu.ok());
+
+    const auto advanced_config_text = std::string(
+        "engine.worker_count=1\n"
+        "profile=sample-profile.art\n"
+        "counterparty|scheduled|3001|4400|FIX.4.4|BUY|SELL|memory||memory|inline|30|true||strict|0|utc-day|0|false|1000|5000|3|0|true|no-auto-reset|0|0|0|true|true|true|true|true|false|false|09:30:00|16:00:00|mon|fri|08:45:00|16:15:00|mon|fri\n");
+    auto advanced = fastfix::runtime::LoadEngineConfigText(advanced_config_text, temp_root);
+    REQUIRE(advanced.ok());
+    REQUIRE(advanced.value().counterparties.size() == 1U);
+    const auto& scheduled = advanced.value().counterparties.front();
+    REQUIRE(scheduled.reset_seq_num_on_logon);
+    REQUIRE(scheduled.reset_seq_num_on_logout);
+    REQUIRE(scheduled.reset_seq_num_on_disconnect);
+    REQUIRE(scheduled.refresh_on_logon);
+    REQUIRE(scheduled.send_next_expected_msg_seq_num);
+    REQUIRE(!scheduled.session_schedule.use_local_time);
+    REQUIRE(!scheduled.session_schedule.non_stop_session);
+    REQUIRE(scheduled.session_schedule.start_time.has_value());
+    REQUIRE(scheduled.session_schedule.start_time->hour == 9U);
+    REQUIRE(scheduled.session_schedule.end_time->hour == 16U);
+    REQUIRE(scheduled.session_schedule.start_day == fastfix::runtime::SessionDayOfWeek::kMonday);
+    REQUIRE(scheduled.session_schedule.end_day == fastfix::runtime::SessionDayOfWeek::kFriday);
+    REQUIRE(scheduled.session_schedule.logon_time.has_value());
+    REQUIRE(scheduled.session_schedule.logon_time->hour == 8U);
+    REQUIRE(scheduled.session_schedule.logout_time->minute == 15U);
+
+    fastfix::runtime::SessionScheduleConfig session_schedule;
+    session_schedule.start_time = fastfix::runtime::SessionTimeOfDay{9U, 0U, 0U};
+    session_schedule.end_time = fastfix::runtime::SessionTimeOfDay{17U, 0U, 0U};
+    REQUIRE(fastfix::runtime::ValidateSessionSchedule(session_schedule).ok());
+    REQUIRE(fastfix::runtime::IsWithinSessionWindow(session_schedule, MakeUtcNs(2026, 4, 6, 10, 0, 0)));
+    REQUIRE(!fastfix::runtime::IsWithinSessionWindow(session_schedule, MakeUtcNs(2026, 4, 6, 8, 0, 0)));
+    const auto next_logon = fastfix::runtime::NextLogonWindowStart(
+        session_schedule,
+        MakeUtcNs(2026, 4, 6, 8, 0, 0));
+    REQUIRE(next_logon.has_value());
+    REQUIRE(next_logon.value() == MakeUtcNs(2026, 4, 6, 9, 0, 0));
 
     std::filesystem::remove(config_path);
     std::filesystem::remove(artifact_path);

@@ -1290,4 +1290,60 @@ auto DurableBatchSessionStore::LoadRecoveryState(std::uint64_t session_id) const
     return it->second;
 }
 
+auto DurableBatchSessionStore::Refresh() -> base::Status {
+    CloseSegment(impl_->active_segment);
+    impl_->active_segment = {};
+    for (auto& [segment_id, segment] : impl_->archived_segments) {
+        (void)segment_id;
+        CloseSegment(segment);
+    }
+    impl_->archived_segments.clear();
+    CloseFd(impl_->recovery_fd);
+    impl_->recovery_size = 0U;
+    impl_->outbound_index.clear();
+    impl_->recovery_states.clear();
+    impl_->pending_entries.clear();
+    impl_->pending_payload_arena.clear();
+    impl_->active_utc_day.reset();
+    return Open();
+}
+
+auto DurableBatchSessionStore::ResetSession(std::uint64_t session_id) -> base::Status {
+    (void)session_id;
+
+    auto status = Flush();
+    if (!status.ok()) {
+        return status;
+    }
+
+    status = Refresh();
+    if (!status.ok()) {
+        return status;
+    }
+
+    CloseSegment(impl_->active_segment);
+    impl_->active_segment = {};
+    for (auto& [segment_id, segment] : impl_->archived_segments) {
+        (void)segment_id;
+        CloseSegment(segment);
+    }
+    impl_->archived_segments.clear();
+    CloseFd(impl_->recovery_fd);
+    impl_->recovery_size = 0U;
+
+    std::error_code error;
+    std::filesystem::remove_all(root_, error);
+    if (error) {
+        return base::Status::IoError(
+            "unable to reset durable batch store root '" + root_.string() + "': " + error.message());
+    }
+
+    impl_->outbound_index.clear();
+    impl_->recovery_states.clear();
+    impl_->pending_entries.clear();
+    impl_->pending_payload_arena.clear();
+    impl_->active_utc_day.reset();
+    return Open();
+}
+
 }  // namespace fastfix::store

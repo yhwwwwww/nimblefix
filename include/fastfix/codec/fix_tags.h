@@ -40,6 +40,7 @@ inline constexpr std::uint32_t kResetSeqNumFlag = 141U;
 inline constexpr std::uint32_t kRefTagID = 371U;
 inline constexpr std::uint32_t kRefMsgType = 372U;
 inline constexpr std::uint32_t kRejectReason = 373U;
+inline constexpr std::uint32_t kNextExpectedMsgSeqNum = 789U;
 
 // Application-version negotiation.
 inline constexpr std::uint32_t kApplVerID = 1128U;
@@ -122,6 +123,7 @@ inline constexpr std::string_view kDefaultApplVerIDPrefix = "1137=";
         case kTestReqID:
         case kGapFillFlag:
         case kResetSeqNumFlag:
+        case kNextExpectedMsgSeqNum:
         case kRefTagID:
         case kRefMsgType:
         case kRejectReason:

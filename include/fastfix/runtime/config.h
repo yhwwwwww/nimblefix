@@ -4,10 +4,8 @@
 #include <filesystem>
 #include <optional>
 #include <string>
-#include <string_view>
 #include <vector>
 
-#include "fastfix/base/result.h"
 #include "fastfix/base/status.h"
 #include "fastfix/runtime/io_poller.h"
 #include "fastfix/session/resend_recovery.h"
@@ -52,6 +50,35 @@ enum class PollMode : std::uint32_t {
     kBusy = 1,
 };
 
+enum class SessionDayOfWeek : std::uint32_t {
+    kSunday = 0,
+    kMonday,
+    kTuesday,
+    kWednesday,
+    kThursday,
+    kFriday,
+    kSaturday,
+};
+
+struct SessionTimeOfDay {
+    std::uint8_t hour{0};
+    std::uint8_t minute{0};
+    std::uint8_t second{0};
+};
+
+struct SessionScheduleConfig {
+    bool use_local_time{false};
+    bool non_stop_session{false};
+    std::optional<SessionTimeOfDay> start_time;
+    std::optional<SessionTimeOfDay> end_time;
+    std::optional<SessionDayOfWeek> start_day;
+    std::optional<SessionDayOfWeek> end_day;
+    std::optional<SessionTimeOfDay> logon_time;
+    std::optional<SessionTimeOfDay> logout_time;
+    std::optional<SessionDayOfWeek> logon_day;
+    std::optional<SessionDayOfWeek> logout_day;
+};
+
 struct ListenerConfig {
     std::string name;
     std::string host{"0.0.0.0"};
@@ -75,6 +102,12 @@ struct CounterpartyConfig {
     session::RecoveryMode recovery_mode{session::RecoveryMode::kMemoryOnly};
     AppDispatchMode dispatch_mode{AppDispatchMode::kInline};
     session::ValidationPolicy validation_policy{session::ValidationPolicy::Strict()};
+    bool reset_seq_num_on_logon{false};
+    bool reset_seq_num_on_logout{false};
+    bool reset_seq_num_on_disconnect{false};
+    bool refresh_on_logon{false};
+    bool send_next_expected_msg_seq_num{false};
+    SessionScheduleConfig session_schedule;
     // Reconnect backoff (initiator only)
     bool reconnect_enabled = false;
     std::uint32_t reconnect_initial_ms = kDefaultReconnectInitialMs;
@@ -102,6 +135,17 @@ struct EngineConfig {
     std::vector<CounterpartyConfig> counterparties;
     bool accept_unknown_sessions{false};
 };
+
+[[nodiscard]] auto ValidateSessionSchedule(const SessionScheduleConfig& schedule) -> base::Status;
+[[nodiscard]] auto IsWithinSessionWindow(
+    const SessionScheduleConfig& schedule,
+    std::uint64_t unix_time_ns) -> bool;
+[[nodiscard]] auto IsWithinLogonWindow(
+    const SessionScheduleConfig& schedule,
+    std::uint64_t unix_time_ns) -> bool;
+[[nodiscard]] auto NextLogonWindowStart(
+    const SessionScheduleConfig& schedule,
+    std::uint64_t unix_time_ns) -> std::optional<std::uint64_t>;
 
 auto ValidateEngineConfig(const EngineConfig& config) -> base::Status;
 

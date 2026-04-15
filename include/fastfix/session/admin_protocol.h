@@ -463,6 +463,10 @@ struct AdminProtocolConfig {
     std::string default_appl_ver_id;
     std::uint32_t heartbeat_interval_seconds{30};
     bool reset_seq_num_on_logon{false};
+    bool reset_seq_num_on_logout{false};
+    bool reset_seq_num_on_disconnect{false};
+    bool refresh_on_logon{false};
+    bool send_next_expected_msg_seq_num{false};
     ValidationPolicy validation_policy{ValidationPolicy::Strict()};
 };
 
@@ -541,6 +545,16 @@ class AdminProtocol {
         ProtocolFrameList* frames) -> base::Status;
     auto AcquireReplayFrameBuffer() -> std::shared_ptr<ProtocolFrameList>;
     auto PersistRecoveryState() -> base::Status;
+    auto RefreshSessionStateFromStore() -> base::Status;
+    auto ResetSessionState(
+        std::uint32_t next_in_seq,
+        std::uint32_t next_out_seq,
+        bool reset_store) -> base::Status;
+    auto ReplayCounterpartyExpectedRange(
+        std::uint32_t counterparty_next_expected,
+        std::uint32_t pre_logon_next_out,
+        std::uint64_t timestamp_ns,
+        ProtocolEvent* event) -> base::Status;
     auto RejectInbound(
         const codec::DecodedMessageView& decoded,
         std::uint32_t ref_tag_id,

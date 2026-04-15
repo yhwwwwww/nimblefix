@@ -47,6 +47,7 @@ class MemorySessionStore : public SessionStore {
         const SessionRecoveryState& state) -> base::Status override;
     auto LoadRecoveryState(std::uint64_t session_id) const
         -> base::Result<SessionRecoveryState> override;
+    auto ResetSession(std::uint64_t session_id) -> base::Status override;
 
     /// Compact payload arenas by rebuilding with only live payloads.
     auto Rollover() -> base::Status override;

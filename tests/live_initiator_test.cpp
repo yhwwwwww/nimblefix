@@ -3,12 +3,12 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <ctime>
 #include <filesystem>
 #include <future>
 #include <mutex>
 #include <optional>
 #include <thread>
-#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -1946,4 +1946,72 @@ TEST_CASE("live-initiator-reconnect-backoff-timing", "[live-initiator]") {
 
     const auto elapsed_ms = (bound_ns - close_ns) / 1000000ULL;
     REQUIRE(elapsed_ms >= initial_ms);
+}
+
+TEST_CASE("live-initiator-defers-outside-logon-window", "[live-initiator]") {
+    auto dictionary = fastfix::tests::LoadFix44DictionaryView();
+    if (!dictionary.ok()) {
+        SKIP("FIX44 artifact not available: " << dictionary.status().message());
+    }
+
+    const auto artifact_path =
+        std::filesystem::path(FASTFIX_PROJECT_DIR) / "build" / "bench" / "quickfix_FIX44.art";
+    const auto profile_id = dictionary.value().profile().header().profile_id;
+
+    auto acceptor = fastfix::transport::TcpAcceptor::Listen("127.0.0.1", 0U);
+    REQUIRE(acceptor.ok());
+    const auto listen_port = acceptor.value().port();
+
+    const auto now = std::time(nullptr);
+    std::tm utc_now{};
+    gmtime_r(&now, &utc_now);
+
+    fastfix::runtime::EngineConfig config;
+    config.worker_count = 1U;
+    config.profile_artifacts.push_back(artifact_path);
+    config.counterparties.push_back(fastfix::runtime::CounterpartyConfig{
+        .name = "buy-sell-windowed-initiator",
+        .session = fastfix::session::SessionConfig{
+            .session_id = 1450U,
+            .key = fastfix::session::SessionKey{"FIX.4.4", "BUY", "SELL"},
+            .profile_id = profile_id,
+            .default_appl_ver_id = {},
+            .heartbeat_interval_seconds = 1U,
+            .is_initiator = true,
+        },
+        .store_path = {},
+        .default_appl_ver_id = {},
+        .store_mode = fastfix::runtime::StoreMode::kMemory,
+        .recovery_mode = fastfix::session::RecoveryMode::kMemoryOnly,
+        .dispatch_mode = fastfix::runtime::AppDispatchMode::kInline,
+        .validation_policy = fastfix::session::ValidationPolicy::Permissive(),
+        .session_schedule = fastfix::runtime::SessionScheduleConfig{
+            .use_local_time = false,
+            .non_stop_session = false,
+            .start_time = fastfix::runtime::SessionTimeOfDay{
+                static_cast<std::uint8_t>((utc_now.tm_hour + 1) % 24),
+                0U,
+                0U,
+            },
+            .end_time = fastfix::runtime::SessionTimeOfDay{
+                static_cast<std::uint8_t>((utc_now.tm_hour + 2) % 24),
+                0U,
+                0U,
+            },
+        },
+    });
+
+    fastfix::runtime::Engine engine;
+    REQUIRE(engine.Boot(config).ok());
+
+    fastfix::runtime::LiveInitiator runtime(
+        &engine,
+        fastfix::runtime::LiveInitiator::Options{
+            .poll_timeout = std::chrono::milliseconds(10),
+            .io_timeout = std::chrono::milliseconds(50),
+        });
+
+    REQUIRE(runtime.OpenSession(1450U, "127.0.0.1", listen_port).ok());
+    REQUIRE(runtime.active_connection_count() == 0U);
+    REQUIRE(runtime.pending_reconnect_count() == 1U);
 }
