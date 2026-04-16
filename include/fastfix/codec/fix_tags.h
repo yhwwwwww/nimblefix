@@ -15,8 +15,10 @@ inline constexpr std::uint32_t kMsgSeqNum = 34U;
 inline constexpr std::uint32_t kMsgType = 35U;
 inline constexpr std::uint32_t kPossDupFlag = 43U;
 inline constexpr std::uint32_t kSenderCompID = 49U;
+inline constexpr std::uint32_t kSenderSubID = 50U;
 inline constexpr std::uint32_t kSendingTime = 52U;
 inline constexpr std::uint32_t kTargetCompID = 56U;
+inline constexpr std::uint32_t kTargetSubID = 57U;
 
 // Optional session header and replay semantics.
 inline constexpr std::uint32_t kPossResend = 97U;
@@ -70,9 +72,13 @@ inline constexpr std::string_view kCheckSumPrefix = "10=";
 inline constexpr std::string_view kMsgSeqNumPrefix = "34=";
 inline constexpr std::string_view kMsgTypePrefix = "35=";
 inline constexpr std::string_view kPossDupFlagYesField = "43=Y";
+inline constexpr std::string_view kPossResendPrefix = "97=";
+inline constexpr std::string_view kPossResendYesField = "97=Y";
 inline constexpr std::string_view kSenderCompIDPrefix = "49=";
+inline constexpr std::string_view kSenderSubIDPrefix = "50=";
 inline constexpr std::string_view kSendingTimePrefix = "52=";
 inline constexpr std::string_view kTargetCompIDPrefix = "56=";
+inline constexpr std::string_view kTargetSubIDPrefix = "57=";
 inline constexpr std::string_view kTextPrefix = "58=";
 inline constexpr std::string_view kEncryptMethodPrefix = "98=";
 inline constexpr std::string_view kHeartBtIntPrefix = "108=";
@@ -82,6 +88,12 @@ inline constexpr std::string_view kOrigSendingTimePrefix = "122=";
 inline constexpr std::string_view kDeliverToCompIDPrefix = "128=";
 inline constexpr std::string_view kApplVerIDPrefix = "1128=";
 inline constexpr std::string_view kDefaultApplVerIDPrefix = "1137=";
+
+enum class SessionHeaderTagClass : std::uint8_t {
+    kNone = 0,
+    kStandard,
+    kRouting,
+};
 
 [[nodiscard]] inline constexpr auto IsFrameStructureTag(std::uint32_t tag) -> bool {
     switch (tag) {
@@ -100,8 +112,10 @@ inline constexpr std::string_view kDefaultApplVerIDPrefix = "1137=";
         case kMsgType:
         case kPossDupFlag:
         case kSenderCompID:
+        case kSenderSubID:
         case kSendingTime:
         case kTargetCompID:
+        case kTargetSubID:
         case kPossResend:
         case kOrigSendingTime:
         case kDefaultApplVerID:
@@ -109,6 +123,30 @@ inline constexpr std::string_view kDefaultApplVerIDPrefix = "1137=";
         default:
             return false;
     }
+}
+
+[[nodiscard]] inline constexpr auto IsRoutingSessionHeaderTag(std::uint32_t tag) -> bool {
+    switch (tag) {
+        case kOnBehalfOfCompID:
+        case kDeliverToCompID:
+            return true;
+        default:
+            return false;
+    }
+}
+
+[[nodiscard]] inline constexpr auto ClassifySessionHeaderTag(std::uint32_t tag) -> SessionHeaderTagClass {
+    if (IsStandardSessionHeaderTag(tag)) {
+        return SessionHeaderTagClass::kStandard;
+    }
+    if (IsRoutingSessionHeaderTag(tag)) {
+        return SessionHeaderTagClass::kRouting;
+    }
+    return SessionHeaderTagClass::kNone;
+}
+
+[[nodiscard]] inline constexpr auto IsAggregateSessionHeaderTag(std::uint32_t tag) -> bool {
+    return ClassifySessionHeaderTag(tag) != SessionHeaderTagClass::kNone;
 }
 
 [[nodiscard]] inline constexpr auto IsCommonAdminTag(std::uint32_t tag) -> bool {
@@ -137,14 +175,20 @@ inline constexpr std::string_view kDefaultApplVerIDPrefix = "1137=";
     return IsFrameStructureTag(tag) || IsStandardSessionHeaderTag(tag);
 }
 
+[[nodiscard]] inline constexpr auto IsAggregateSessionEnvelopeTag(std::uint32_t tag) -> bool {
+    return IsFrameStructureTag(tag) || IsAggregateSessionHeaderTag(tag);
+}
+
 [[nodiscard]] inline constexpr auto IsTemplateManagedHeaderTag(std::uint32_t tag) -> bool {
     switch (tag) {
         case kMsgSeqNum:
         case kMsgType:
         case kPossDupFlag:
         case kSenderCompID:
+        case kSenderSubID:
         case kSendingTime:
         case kTargetCompID:
+        case kTargetSubID:
             return true;
         default:
             return false;
@@ -152,7 +196,7 @@ inline constexpr std::string_view kDefaultApplVerIDPrefix = "1137=";
 }
 
 [[nodiscard]] inline constexpr auto IsEncodeManagedTag(std::uint32_t tag) -> bool {
-    return IsFrameStructureTag(tag) || IsTemplateManagedHeaderTag(tag);
+    return IsFrameStructureTag(tag) || IsAggregateSessionHeaderTag(tag);
 }
 
 }  // namespace fastfix::codec::tags

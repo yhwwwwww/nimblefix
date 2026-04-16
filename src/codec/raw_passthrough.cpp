@@ -29,6 +29,10 @@ auto ParseUint32(std::string_view text) -> std::uint32_t {
     return value;
 }
 
+auto ParseBoolean(std::string_view text) -> bool {
+    return text == "Y";
+}
+
 // Returns the string_view for a field value within the raw bytes,
 // given the value_offset and value_length.
 auto ValueView(std::span<const std::byte> data, std::size_t offset, std::size_t len) -> std::string_view {
@@ -74,10 +78,49 @@ auto ScanField(std::span<const std::byte> data, std::size_t pos, std::byte delim
     };
 }
 
-// Session-layer header tags — used to determine where raw_body begins.
-// Matches CompiledMessageDecoder::is_header_tag() plus framing tags.
+// Aggregate session/routing header tags plus framing tags — used to determine
+// where raw_body begins.
 auto IsSessionHeaderTag(std::uint32_t tag) -> bool {
-    return IsSessionEnvelopeTag(tag);
+    return IsAggregateSessionEnvelopeTag(tag);
+}
+
+void AppendStringField(std::string& out, std::string_view prefix, std::string_view value, char delimiter) {
+    out.append(prefix);
+    out.append(value);
+    out.push_back(delimiter);
+}
+
+void AppendCountField(std::string& out, std::string_view prefix, std::uint32_t value, char delimiter) {
+    char buf[10];
+    const auto len = FormatUint32(buf, value);
+    out.append(prefix);
+    out.append(buf, len);
+    out.push_back(delimiter);
+}
+
+void AppendOptionalFlagField(std::string& out, std::string_view prefix, bool enabled, char delimiter) {
+    if (!enabled) {
+        return;
+    }
+    out.append(prefix);
+    out.push_back('Y');
+    out.push_back(delimiter);
+}
+
+auto ResolveReplayString(std::string_view preferred, std::string_view fallback) -> std::string_view {
+    return preferred.empty() ? fallback : preferred;
+}
+
+auto ResolveReplayDefaultApplVerID(
+    const RawPassThroughView& stored,
+    const ReplayOptions& options) -> std::string_view {
+    if (!options.default_appl_ver_id.empty()) {
+        return options.default_appl_ver_id;
+    }
+    if (stored.msg_type == "A") {
+        return stored.default_appl_ver_id;
+    }
+    return {};
 }
 
 }  // namespace
@@ -159,8 +202,16 @@ auto DecodeRawPassThrough(
             case kMsgType: view.msg_type = val; break;
             case kMsgSeqNum: view.msg_seq_num = ParseUint32(val); break;
             case kSenderCompID: view.sender_comp_id = val; break;
+            case kSenderSubID: view.sender_sub_id = val; break;
             case kTargetCompID: view.target_comp_id = val; break;
+            case kTargetSubID: view.target_sub_id = val; break;
+            case kOnBehalfOfCompID: view.on_behalf_of_comp_id = val; break;
+            case kDeliverToCompID: view.deliver_to_comp_id = val; break;
+            case kDefaultApplVerID: view.default_appl_ver_id = val; break;
             case kSendingTime: view.sending_time = val; break;
+            case kOrigSendingTime: view.orig_sending_time = val; break;
+            case kPossDupFlag: view.poss_dup = ParseBoolean(val); break;
+            case kPossResend: view.poss_resend = ParseBoolean(val); break;
             default: break;
         }
         last_header_end = f.next_pos;
@@ -207,60 +258,28 @@ auto EncodeForwarded(
     out.push_back(soh);
     const auto body_start = out.size();
 
-    // 3. Write 35=<msg_type>SOH
-    out.append(kMsgTypePrefix);
-    out.append(inbound.msg_type);
-    out.push_back(soh);
-
-    // 4. Write 49=<sender>SOH
-    out.append(kSenderCompIDPrefix);
-    out.append(options.sender_comp_id);
-    out.push_back(soh);
-
-    // 5. Write 56=<target>SOH
-    out.append(kTargetCompIDPrefix);
-    out.append(options.target_comp_id);
-    out.push_back(soh);
-
-    // 6. Write 34=<seq_num>SOH
-    {
-        char buf[10];
-        const auto len = FormatUint32(buf, options.msg_seq_num);
-        out.append(kMsgSeqNumPrefix);
-        out.append(buf, len);
-        out.push_back(soh);
+    // 3-12. Shared session/routing header fields.
+    AppendStringField(out, kMsgTypePrefix, inbound.msg_type, soh);
+    AppendCountField(out, kMsgSeqNumPrefix, options.msg_seq_num, soh);
+    AppendStringField(out, kSenderCompIDPrefix, options.sender_comp_id, soh);
+    if (!options.sender_sub_id.empty()) {
+        AppendStringField(out, kSenderSubIDPrefix, options.sender_sub_id, soh);
     }
-
-    // 7. Write 52=<sending_time>SOH
-    out.append(kSendingTimePrefix);
-    out.append(options.sending_time);
-    out.push_back(soh);
-
-    // 8. Optional: 43=Y SOH (PossDupFlag)
-    if (options.poss_dup) {
-        out.append(kPossDupFlagYesField);
-        out.push_back(soh);
+    AppendStringField(out, kTargetCompIDPrefix, options.target_comp_id, soh);
+    if (!options.target_sub_id.empty()) {
+        AppendStringField(out, kTargetSubIDPrefix, options.target_sub_id, soh);
     }
-
-    // 9. Optional: 122=<orig_sending_time>SOH
+    AppendStringField(out, kSendingTimePrefix, options.sending_time, soh);
+    AppendOptionalFlagField(out, std::string_view("43="), options.poss_dup, soh);
+    AppendOptionalFlagField(out, kPossResendPrefix, options.poss_resend, soh);
     if (!options.orig_sending_time.empty()) {
-        out.append(kOrigSendingTimePrefix);
-        out.append(options.orig_sending_time);
-        out.push_back(soh);
+        AppendStringField(out, kOrigSendingTimePrefix, options.orig_sending_time, soh);
     }
-
-    // 10. Optional: 115=<on_behalf_of_comp_id>SOH
     if (!options.on_behalf_of_comp_id.empty()) {
-        out.append(kOnBehalfOfCompIDPrefix);
-        out.append(options.on_behalf_of_comp_id);
-        out.push_back(soh);
+        AppendStringField(out, kOnBehalfOfCompIDPrefix, options.on_behalf_of_comp_id, soh);
     }
-
-    // 9. Optional: 128=<deliver_to_comp_id>SOH
     if (!options.deliver_to_comp_id.empty()) {
-        out.append(kDeliverToCompIDPrefix);
-        out.append(options.deliver_to_comp_id);
-        out.push_back(soh);
+        AppendStringField(out, kDeliverToCompIDPrefix, options.deliver_to_comp_id, soh);
     }
 
     // 10. Splice raw body bytes
@@ -330,51 +349,34 @@ auto EncodeReplay(
     out.push_back(soh);
     const auto body_start = out.size();
 
-    // 3. 35=<msg_type>SOH
-    out.append(kMsgTypePrefix);
-    out.append(stored.msg_type);
-    out.push_back(soh);
+    const auto replay_default_appl_ver_id = ResolveReplayDefaultApplVerID(stored, options);
+    const auto replay_on_behalf_of = ResolveReplayString(options.on_behalf_of_comp_id, stored.on_behalf_of_comp_id);
+    const auto replay_deliver_to = ResolveReplayString(options.deliver_to_comp_id, stored.deliver_to_comp_id);
 
-    // 4. 49=<sender>SOH
-    out.append(kSenderCompIDPrefix);
-    out.append(options.sender_comp_id);
-    out.push_back(soh);
-
-    // 5. 56=<target>SOH
-    out.append(kTargetCompIDPrefix);
-    out.append(options.target_comp_id);
-    out.push_back(soh);
-
-    // 6. 34=<seq_num>SOH
-    {
-        char buf[10];
-        const auto len = FormatUint32(buf, options.msg_seq_num);
-        out.append(kMsgSeqNumPrefix);
-        out.append(buf, len);
-        out.push_back(soh);
+    AppendStringField(out, kMsgTypePrefix, stored.msg_type, soh);
+    AppendCountField(out, kMsgSeqNumPrefix, options.msg_seq_num, soh);
+    AppendStringField(out, kSenderCompIDPrefix, options.sender_comp_id, soh);
+    if (!options.sender_sub_id.empty()) {
+        AppendStringField(out, kSenderSubIDPrefix, options.sender_sub_id, soh);
     }
-
-    // 7. 52=<sending_time>SOH
-    out.append(kSendingTimePrefix);
-    out.append(options.sending_time);
-    out.push_back(soh);
-
-    // 8. 43=Y SOH (always set for replay)
-    out.append(kPossDupFlagYesField);
-    out.push_back(soh);
-
-    // 9. 122=<orig_sending_time>SOH
+    AppendStringField(out, kTargetCompIDPrefix, options.target_comp_id, soh);
+    if (!options.target_sub_id.empty()) {
+        AppendStringField(out, kTargetSubIDPrefix, options.target_sub_id, soh);
+    }
+    AppendStringField(out, kSendingTimePrefix, options.sending_time, soh);
+    if (!replay_default_appl_ver_id.empty()) {
+        AppendStringField(out, kDefaultApplVerIDPrefix, replay_default_appl_ver_id, soh);
+    }
+    AppendOptionalFlagField(out, std::string_view("43="), true, soh);
+    AppendOptionalFlagField(out, kPossResendPrefix, options.poss_resend, soh);
     if (!options.orig_sending_time.empty()) {
-        out.append(kOrigSendingTimePrefix);
-        out.append(options.orig_sending_time);
-        out.push_back(soh);
+        AppendStringField(out, kOrigSendingTimePrefix, options.orig_sending_time, soh);
     }
-
-    // 10. Optional 1137=<default_appl_ver_id>SOH
-    if (!options.default_appl_ver_id.empty()) {
-        out.append(kDefaultApplVerIDPrefix);
-        out.append(options.default_appl_ver_id);
-        out.push_back(soh);
+    if (!replay_on_behalf_of.empty()) {
+        AppendStringField(out, kOnBehalfOfCompIDPrefix, replay_on_behalf_of, soh);
+    }
+    if (!replay_deliver_to.empty()) {
+        AppendStringField(out, kDeliverToCompIDPrefix, replay_deliver_to, soh);
     }
 
     // 11. Splice raw body bytes unchanged
@@ -426,11 +428,16 @@ auto EncodeReplayInto(
     }
 
     const char soh = options.delimiter == '\0' ? kFixSoh : options.delimiter;
+    const auto replay_default_appl_ver_id = ResolveReplayDefaultApplVerID(stored, options);
+    const auto replay_on_behalf_of = ResolveReplayString(options.on_behalf_of_comp_id, stored.on_behalf_of_comp_id);
+    const auto replay_deliver_to = ResolveReplayString(options.deliver_to_comp_id, stored.deliver_to_comp_id);
 
     // Estimate buffer size: header + trailer, plus body if not zero-copy
     const auto estimated_size = 128U + options.sender_comp_id.size() +
-        options.target_comp_id.size() + options.begin_string.size() +
-        options.default_appl_ver_id.size() + options.sending_time.size() +
+        options.sender_sub_id.size() + options.target_comp_id.size() +
+        options.target_sub_id.size() + options.begin_string.size() +
+        replay_default_appl_ver_id.size() + replay_on_behalf_of.size() +
+        replay_deliver_to.size() + options.sending_time.size() +
         options.orig_sending_time.size() + stored.msg_type.size() +
         (options.zero_copy_body ? 0U : stored.raw_body.size());
 
@@ -478,22 +485,10 @@ auto EncodeReplayInto(
     append_char(soh);
     const auto body_start = pos;
 
-    // 3. 35=<msg_type>SOH
     append_sv(kMsgTypePrefix);
     append_sv(stored.msg_type);
     append_char(soh);
 
-    // 4. 49=<sender>SOH
-    append_sv(kSenderCompIDPrefix);
-    append_sv(options.sender_comp_id);
-    append_char(soh);
-
-    // 5. 56=<target>SOH
-    append_sv(kTargetCompIDPrefix);
-    append_sv(options.target_comp_id);
-    append_char(soh);
-
-    // 6. 34=<seq_num>SOH
     {
         char num_buf[10];
         const auto num_len = FormatUint32(num_buf, options.msg_seq_num);
@@ -502,26 +497,49 @@ auto EncodeReplayInto(
         append_char(soh);
     }
 
-    // 7. 52=<sending_time>SOH
+    append_sv(kSenderCompIDPrefix);
+    append_sv(options.sender_comp_id);
+    append_char(soh);
+    if (!options.sender_sub_id.empty()) {
+        append_sv(kSenderSubIDPrefix);
+        append_sv(options.sender_sub_id);
+        append_char(soh);
+    }
+    append_sv(kTargetCompIDPrefix);
+    append_sv(options.target_comp_id);
+    append_char(soh);
+    if (!options.target_sub_id.empty()) {
+        append_sv(kTargetSubIDPrefix);
+        append_sv(options.target_sub_id);
+        append_char(soh);
+    }
     append_sv(kSendingTimePrefix);
     append_sv(options.sending_time);
     append_char(soh);
-
-    // 8. 43=Y SOH
-    append_sv(kPossDupFlagYesField);
+    if (!replay_default_appl_ver_id.empty()) {
+        append_sv(kDefaultApplVerIDPrefix);
+        append_sv(replay_default_appl_ver_id);
+        append_char(soh);
+    }
+    append_sv(std::string_view("43=Y"));
     append_char(soh);
-
-    // 9. 122=<orig_sending_time>SOH
+    if (options.poss_resend) {
+        append_sv(std::string_view("97=Y"));
+        append_char(soh);
+    }
     if (!options.orig_sending_time.empty()) {
         append_sv(kOrigSendingTimePrefix);
         append_sv(options.orig_sending_time);
         append_char(soh);
     }
-
-    // 10. Optional 1137=<default_appl_ver_id>SOH
-    if (!options.default_appl_ver_id.empty()) {
-        append_sv(kDefaultApplVerIDPrefix);
-        append_sv(options.default_appl_ver_id);
+    if (!replay_on_behalf_of.empty()) {
+        append_sv(kOnBehalfOfCompIDPrefix);
+        append_sv(replay_on_behalf_of);
+        append_char(soh);
+    }
+    if (!replay_deliver_to.empty()) {
+        append_sv(kDeliverToCompIDPrefix);
+        append_sv(replay_deliver_to);
         append_char(soh);
     }
 
@@ -547,23 +565,30 @@ auto EncodeReplayInto(
         }
     }
 
-    // 12. Backfill BodyLength with zero-padded 7-digit format and add its digit sum.
+    // 12. Backfill BodyLength using the canonical variable-width decimal form.
     const auto body_length = options.zero_copy_body
         ? static_cast<std::uint32_t>(pos - body_start + body_data_size)
         : static_cast<std::uint32_t>(pos - body_start);
     {
-        char bl_buf[7];
-        bl_buf[0] = '0' + static_cast<char>((body_length / 1000000U) % 10U);
-        bl_buf[1] = '0' + static_cast<char>((body_length / 100000U) % 10U);
-        bl_buf[2] = '0' + static_cast<char>((body_length / 10000U) % 10U);
-        bl_buf[3] = '0' + static_cast<char>((body_length / 1000U) % 10U);
-        bl_buf[4] = '0' + static_cast<char>((body_length / 100U) % 10U);
-        bl_buf[5] = '0' + static_cast<char>((body_length / 10U) % 10U);
-        bl_buf[6] = '0' + static_cast<char>(body_length % 10U);
-        std::memcpy(buf + body_length_offset, bl_buf, 7);
-        // Add the actual digit bytes to the checksum (placeholder was not tracked)
-        for (int i = 0; i < 7; ++i) {
-            header_checksum += static_cast<unsigned char>(bl_buf[i]);
+        char bl_buf[10];
+        const auto body_length_digits = FormatUint32(bl_buf, body_length);
+        if (body_length_digits > kBodyLengthPlaceholderWidth) {
+            return base::Status::FormatError("BodyLength exceeds placeholder width");
+        }
+        const auto shrink = kBodyLengthPlaceholderWidth - body_length_digits;
+        if (shrink > 0U) {
+            std::memmove(
+                buf + body_length_offset + body_length_digits,
+                buf + body_length_offset + kBodyLengthPlaceholderWidth,
+                pos - (body_length_offset + kBodyLengthPlaceholderWidth));
+            pos -= shrink;
+            if (options.zero_copy_body) {
+                splice_offset -= shrink;
+            }
+        }
+        std::memcpy(buf + body_length_offset, bl_buf, body_length_digits);
+        for (std::size_t index = 0; index < body_length_digits; ++index) {
+            header_checksum += static_cast<unsigned char>(bl_buf[index]);
         }
     }
 

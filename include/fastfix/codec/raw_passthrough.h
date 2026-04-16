@@ -16,8 +16,16 @@ struct RawPassThroughView {
     std::string_view msg_type;
     std::uint32_t msg_seq_num{0};
     std::string_view sender_comp_id;
+    std::string_view sender_sub_id;
     std::string_view target_comp_id;
+    std::string_view target_sub_id;
+    std::string_view on_behalf_of_comp_id;
+    std::string_view deliver_to_comp_id;
+    std::string_view default_appl_ver_id;
     std::string_view sending_time;
+    std::string_view orig_sending_time;
+    bool poss_dup{false};
+    bool poss_resend{false};
 
     // Raw message body (unparsed application fields)
     // Points into the original receive buffer
@@ -31,7 +39,9 @@ struct RawPassThroughView {
 
 struct ForwardingOptions {
     std::string_view sender_comp_id;      // downstream sender
+    std::string_view sender_sub_id;       // downstream sender sub id
     std::string_view target_comp_id;      // downstream target
+    std::string_view target_sub_id;       // downstream target sub id
     std::uint32_t msg_seq_num{0};         // downstream seq num
     std::string_view sending_time;        // current timestamp
     std::string_view begin_string;        // downstream BeginString (empty = use original)
@@ -42,6 +52,7 @@ struct ForwardingOptions {
 
     // PossDupFlag / OrigSendingTime for forwarded retransmissions
     bool poss_dup{false};                    // PossDupFlag
+    bool poss_resend{false};                 // PossResend
     std::string_view orig_sending_time;      // OrigSendingTime, empty = omit
 
     // Delimiter (default SOH)
@@ -50,12 +61,17 @@ struct ForwardingOptions {
 
 struct ReplayOptions {
     std::string_view sender_comp_id;
+    std::string_view sender_sub_id;
     std::string_view target_comp_id;
+    std::string_view target_sub_id;
     std::string_view begin_string;
     std::string_view default_appl_ver_id;   // DefaultApplVerID, empty = omit
+    std::string_view on_behalf_of_comp_id;  // OnBehalfOfCompID, empty = preserve stored
+    std::string_view deliver_to_comp_id;    // DeliverToCompID, empty = preserve stored
     std::uint32_t msg_seq_num{0};
     std::string_view sending_time;          // new sending time
     std::string_view orig_sending_time;     // original sending time from stored frame
+    bool poss_resend{false};                // PossResend
 
     // Delimiter (default SOH)
     char delimiter{kFixSoh};

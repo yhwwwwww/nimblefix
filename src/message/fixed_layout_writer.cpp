@@ -6,7 +6,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
-#include <limits>
 #include <string>
 #include <utility>
 #include <vector>
@@ -19,11 +18,6 @@
 namespace fastfix::message {
 
 namespace {
-
-inline constexpr std::size_t kIntBufSize =
-    static_cast<std::size_t>(std::numeric_limits<std::int64_t>::digits10) + 3U;
-inline constexpr std::size_t kUintBufSize =
-    static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::digits10) + 3U;
 
 auto IsEncodeManagedTag(std::uint32_t tag) -> bool {
     return fastfix::codec::tags::IsEncodeManagedTag(tag);
@@ -66,8 +60,8 @@ auto FixedLayout::Build(
 
     // First pass: assign slot indices.
     for (const auto& rule : rules) {
-        if (rule.tag == codec::tags::kMsgType) {
-            continue;  // MsgType is implicit
+        if (IsEncodeManagedTag(rule.tag)) {
+            continue;
         }
         if (dictionary.find_group(rule.tag) != nullptr) {
             layout.group_slots_.push_back({rule.tag, group_slot++});
@@ -80,12 +74,14 @@ auto FixedLayout::Build(
     layout.total_group_slots_ = group_slot;
 
     // Build encode_order_ BEFORE sorting field_slots_ / group_slots_.
-    for (const auto& rule : rules) {
+    for (std::size_t rule_index = 0; rule_index < rules.size(); ++rule_index) {
+        const auto& rule = rules[rule_index];
         if (IsEncodeManagedTag(rule.tag)) {
             continue;
         }
         EncodeStep step{};
         step.tag = rule.tag;
+        step.rule_index = static_cast<std::uint32_t>(rule_index);
         SetEncodeStepPrefix(step, rule.tag);
         if (dictionary.find_group(rule.tag) != nullptr) {
             step.kind = EncodeStep::Kind::kGroup;
@@ -251,24 +247,27 @@ auto FixedLayoutWriter::bind_session(
     frag.body_start_offset = frag.header_prefix.size();
     frag.header_prefix.append(layout_->msg_type_fragment_);
 
-    // Build sender_target: "49={sender}\x01 56={target}\x01"
-    frag.sender_target.clear();
-    frag.sender_target.reserve(
-        3U + sender_comp_id.size() + 1U +
-        3U + target_comp_id.size() + 1U);
-    frag.sender_target.append(codec::tags::kSenderCompIDPrefix);
-    frag.sender_target.append(sender_comp_id);
-    frag.sender_target.push_back(codec::kFixSoh);
-    frag.sender_target.append(codec::tags::kTargetCompIDPrefix);
-    frag.sender_target.append(target_comp_id);
-    frag.sender_target.push_back(codec::kFixSoh);
+    frag.sender_fragment.clear();
+    frag.sender_fragment.reserve(3U + sender_comp_id.size() + 1U);
+    frag.sender_fragment.append(codec::tags::kSenderCompIDPrefix);
+    frag.sender_fragment.append(sender_comp_id);
+    frag.sender_fragment.push_back(codec::kFixSoh);
+
+    frag.target_fragment.clear();
+    frag.target_fragment.reserve(3U + target_comp_id.size() + 1U);
+    frag.target_fragment.append(codec::tags::kTargetCompIDPrefix);
+    frag.target_fragment.append(target_comp_id);
+    frag.target_fragment.push_back(codec::kFixSoh);
 
     // Pre-compute checksum for all static bytes.
     frag.static_checksum = 0;
     for (const auto ch : frag.header_prefix) {
         frag.static_checksum += static_cast<unsigned char>(ch);
     }
-    for (const auto ch : frag.sender_target) {
+    for (const auto ch : frag.sender_fragment) {
+        frag.static_checksum += static_cast<unsigned char>(ch);
+    }
+    for (const auto ch : frag.target_fragment) {
         frag.static_checksum += static_cast<unsigned char>(ch);
     }
 }
@@ -404,8 +403,19 @@ auto FixedLayoutWriter::encode_to_buffer(
             out.push_back(delimiter);
         }
 
-        // 5-6. SenderCompID + TargetCompID — memcpy from pre-built fragment
-        out.append(frag.sender_target);
+        // 5-8. Pre-built SenderCompID / TargetCompID plus optional sub IDs.
+        out.append(frag.sender_fragment);
+        if (!options.sender_sub_id.empty()) {
+            out.append(codec::tags::kSenderSubIDPrefix);
+            out.append(options.sender_sub_id);
+            out.push_back(delimiter);
+        }
+        out.append(frag.target_fragment);
+        if (!options.target_sub_id.empty()) {
+            out.append(codec::tags::kTargetSubIDPrefix);
+            out.append(options.target_sub_id);
+            out.push_back(delimiter);
+        }
     } else {
         // --- Slow path: format each header field individually ---
 
@@ -439,10 +449,24 @@ auto FixedLayoutWriter::encode_to_buffer(
         out.append(options.sender_comp_id);
         out.push_back(delimiter);
 
-        // 6. TargetCompID
+        // 6. SenderSubID (optional)
+        if (!options.sender_sub_id.empty()) {
+            out.append(codec::tags::kSenderSubIDPrefix);
+            out.append(options.sender_sub_id);
+            out.push_back(delimiter);
+        }
+
+        // 7. TargetCompID
         out.append(codec::tags::kTargetCompIDPrefix);
         out.append(options.target_comp_id);
         out.push_back(delimiter);
+
+        // 8. TargetSubID (optional)
+        if (!options.target_sub_id.empty()) {
+            out.append(codec::tags::kTargetSubIDPrefix);
+            out.append(options.target_sub_id);
+            out.push_back(delimiter);
+        }
     }
 
     // 7. SendingTime
@@ -454,9 +478,9 @@ auto FixedLayoutWriter::encode_to_buffer(
     out.append(sending_time);
     out.push_back(delimiter);
 
-    // 8. ApplVerID (optional)
-    if (!options.default_appl_ver_id.empty()) {
-        out.append(codec::tags::kApplVerIDPrefix);
+    // 8. DefaultApplVerID (Logon only)
+    if (layout_->msg_type() == "A" && !options.default_appl_ver_id.empty()) {
+        out.append(codec::tags::kDefaultApplVerIDPrefix);
         out.append(options.default_appl_ver_id);
         out.push_back(delimiter);
     }
@@ -467,14 +491,32 @@ auto FixedLayoutWriter::encode_to_buffer(
         out.push_back(delimiter);
     }
 
-    // 10. OrigSendingTime (optional)
+    // 10. PossResend (optional)
+    if (options.poss_resend) {
+        out.append(codec::tags::kPossResendYesField);
+        out.push_back(delimiter);
+    }
+
+    // 11. OrigSendingTime (optional)
     if (!options.orig_sending_time.empty()) {
         out.append(codec::tags::kOrigSendingTimePrefix);
         out.append(options.orig_sending_time);
         out.push_back(delimiter);
     }
 
-    // 11. Body fields + groups from encode_order_
+    // 12. Routing headers (optional)
+    if (!options.on_behalf_of_comp_id.empty()) {
+        out.append(codec::tags::kOnBehalfOfCompIDPrefix);
+        out.append(options.on_behalf_of_comp_id);
+        out.push_back(delimiter);
+    }
+    if (!options.deliver_to_comp_id.empty()) {
+        out.append(codec::tags::kDeliverToCompIDPrefix);
+        out.append(options.deliver_to_comp_id);
+        out.push_back(delimiter);
+    }
+
+    // 13. Body fields + groups from encode_order_
     for (const auto& step : layout_->encode_order_) {
         if (step.kind == FixedLayout::EncodeStep::Kind::kField) {
             const auto& range = slot_ranges_[step.slot_index];
@@ -543,11 +585,214 @@ auto FixedLayoutWriter::encode_to_buffer(
 }
 
 auto FixedLayoutWriter::encode_to_buffer(
+    const profile::NormalizedDictionaryView& /*dictionary*/,
+    const codec::EncodeOptions& options,
+    codec::EncodedOutboundExtrasView extras,
+    codec::EncodeBuffer* buffer) const -> base::Status {
+    if (buffer == nullptr) {
+        return base::Status::InvalidArgument("encode buffer is null");
+    }
+
+    const char delimiter = (options.delimiter == '\0') ? codec::kFixSoh : options.delimiter;
+    auto& out = buffer->storage;
+    out.clear();
+
+    constexpr std::size_t kBLPlaceholderWidth = 7U;
+    std::size_t bl_offset = 0;
+    std::size_t body_start = 0;
+
+    if (session_bound_ && delimiter == codec::kFixSoh) {
+        const auto& frag = session_header_;
+
+        out.append(frag.header_prefix);
+        bl_offset = frag.body_length_offset;
+        body_start = frag.body_start_offset;
+
+        {
+            const auto seq = options.msg_seq_num == 0U ? 1U : options.msg_seq_num;
+            char buf[10];
+            const auto len = codec::FormatUint32(buf, seq);
+            out.append(codec::tags::kMsgSeqNumPrefix);
+            out.append(buf, len);
+            out.push_back(delimiter);
+        }
+
+        out.append(frag.sender_fragment);
+        if (!options.sender_sub_id.empty()) {
+            out.append(codec::tags::kSenderSubIDPrefix);
+            out.append(options.sender_sub_id);
+            out.push_back(delimiter);
+        }
+        out.append(frag.target_fragment);
+        if (!options.target_sub_id.empty()) {
+            out.append(codec::tags::kTargetSubIDPrefix);
+            out.append(options.target_sub_id);
+            out.push_back(delimiter);
+        }
+    } else {
+        const auto begin_string = options.begin_string.empty()
+            ? std::string_view("FIX.4.4")
+            : std::string_view(options.begin_string);
+
+        out.append(codec::tags::kBeginStringPrefix);
+        out.append(begin_string);
+        out.push_back(delimiter);
+        out.append(codec::tags::kBodyLengthPrefix);
+
+        bl_offset = out.size();
+        out.append("0000000", kBLPlaceholderWidth);
+        out.push_back(delimiter);
+        body_start = out.size();
+
+        out.append(layout_->msg_type_fragment_);
+
+        {
+            const auto seq = options.msg_seq_num == 0U ? 1U : options.msg_seq_num;
+            char buf[10];
+            const auto len = codec::FormatUint32(buf, seq);
+            out.append(codec::tags::kMsgSeqNumPrefix);
+            out.append(buf, len);
+            out.push_back(delimiter);
+        }
+
+        out.append(codec::tags::kSenderCompIDPrefix);
+        out.append(options.sender_comp_id);
+        out.push_back(delimiter);
+        if (!options.sender_sub_id.empty()) {
+            out.append(codec::tags::kSenderSubIDPrefix);
+            out.append(options.sender_sub_id);
+            out.push_back(delimiter);
+        }
+        out.append(codec::tags::kTargetCompIDPrefix);
+        out.append(options.target_comp_id);
+        out.push_back(delimiter);
+        if (!options.target_sub_id.empty()) {
+            out.append(codec::tags::kTargetSubIDPrefix);
+            out.append(options.target_sub_id);
+            out.push_back(delimiter);
+        }
+    }
+
+    codec::UtcTimestampBuffer ts_buf;
+    const auto sending_time = options.sending_time.empty()
+        ? codec::CurrentUtcTimestamp(&ts_buf)
+        : options.sending_time;
+    out.append(codec::tags::kSendingTimePrefix);
+    out.append(sending_time);
+    out.push_back(delimiter);
+
+    if (layout_->msg_type() == "A" && !options.default_appl_ver_id.empty()) {
+        out.append(codec::tags::kDefaultApplVerIDPrefix);
+        out.append(options.default_appl_ver_id);
+        out.push_back(delimiter);
+    }
+    if (options.poss_dup) {
+        out.append(codec::tags::kPossDupFlagYesField);
+        out.push_back(delimiter);
+    }
+    if (options.poss_resend) {
+        out.append(codec::tags::kPossResendYesField);
+        out.push_back(delimiter);
+    }
+    if (!options.orig_sending_time.empty()) {
+        out.append(codec::tags::kOrigSendingTimePrefix);
+        out.append(options.orig_sending_time);
+        out.push_back(delimiter);
+    }
+    if (!options.on_behalf_of_comp_id.empty()) {
+        out.append(codec::tags::kOnBehalfOfCompIDPrefix);
+        out.append(options.on_behalf_of_comp_id);
+        out.push_back(delimiter);
+    }
+    if (!options.deliver_to_comp_id.empty()) {
+        out.append(codec::tags::kDeliverToCompIDPrefix);
+        out.append(options.deliver_to_comp_id);
+        out.push_back(delimiter);
+    }
+    if (!extras.header_fragment.empty()) {
+        out.append(extras.header_fragment);
+    }
+
+    for (const auto& step : layout_->encode_order_) {
+        if (step.kind == FixedLayout::EncodeStep::Kind::kField) {
+            const auto& range = slot_ranges_[step.slot_index];
+            if (range.length > 0) {
+                out.append(step.prefix());
+                out.append(slot_buffer_.data() + range.offset, range.length);
+                out.push_back(delimiter);
+            }
+        } else {
+            for (const auto& g : groups_) {
+                if (g.count_tag == step.tag) {
+                    out.append(step.prefix());
+                    char count_buf[10];
+                    const auto count_len = codec::FormatUint32(
+                        count_buf,
+                        static_cast<std::uint32_t>(g.active_count));
+                    out.append(count_buf, count_len);
+                    out.push_back(delimiter);
+                    for (std::size_t ei = 0; ei < g.active_count; ++ei) {
+                        const auto& entry = g.entries[ei];
+                        if (delimiter == codec::kFixSoh) {
+                            out.append(entry.field_bytes);
+                        } else {
+                            for (const auto ch : entry.field_bytes) {
+                                if (ch == codec::kFixSoh) {
+                                    out.push_back(delimiter);
+                                } else {
+                                    out.push_back(ch);
+                                }
+                            }
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+    }
+    if (!extras.body_fragment.empty()) {
+        out.append(extras.body_fragment);
+    }
+
+    {
+        const auto body_length = static_cast<std::uint32_t>(out.size() - body_start);
+        char buf[10];
+        const auto len = codec::FormatUint32(buf, body_length);
+        if (len > kBLPlaceholderWidth) {
+            return base::Status::FormatError(
+                "encoded body length exceeds BodyLength placeholder width");
+        }
+        out.replace(bl_offset, kBLPlaceholderWidth, buf, len);
+    }
+
+    const auto checksum = codec::ComputeChecksumSIMD(out.data(), out.size()) % 256U;
+
+    out.append(codec::tags::kCheckSumPrefix);
+    std::array<char, 3> ck{};
+    ck[0] = static_cast<char>('0' + ((checksum / 100U) % 10U));
+    ck[1] = static_cast<char>('0' + ((checksum / 10U) % 10U));
+    ck[2] = static_cast<char>('0' + (checksum % 10U));
+    out.append(ck.data(), 3U);
+    out.push_back(delimiter);
+
+    return base::Status::Ok();
+}
+
+auto FixedLayoutWriter::encode_to_buffer(
     const profile::NormalizedDictionaryView& dictionary,
     const codec::EncodeOptions& options,
     codec::EncodeBuffer* buffer,
     const codec::PrecompiledTemplateTable* /*precompiled*/) const -> base::Status {
     return encode_to_buffer(dictionary, options, buffer);
+}
+
+auto FixedLayoutWriter::encode_to_buffer(
+    const profile::NormalizedDictionaryView& dictionary,
+    const codec::EncodeOptions& options,
+    codec::EncodedOutboundExtrasView extras,
+    codec::EncodeBuffer* buffer,
+    const codec::PrecompiledTemplateTable* /*precompiled*/) const -> base::Status {
+    return encode_to_buffer(dictionary, options, extras, buffer);
 }
 
 auto FixedLayoutWriter::encode(
@@ -556,6 +801,22 @@ auto FixedLayoutWriter::encode(
     codec::EncodeBuffer buf;
     auto status = encode_to_buffer(dictionary, options, &buf);
     if (!status.ok()) return status;
+    std::vector<std::byte> bytes(buf.size());
+    if (!bytes.empty()) {
+        std::memcpy(bytes.data(), buf.storage.data(), buf.size());
+    }
+    return bytes;
+}
+
+auto FixedLayoutWriter::encode(
+    const profile::NormalizedDictionaryView& dictionary,
+    const codec::EncodeOptions& options,
+    codec::EncodedOutboundExtrasView extras) const -> base::Result<std::vector<std::byte>> {
+    codec::EncodeBuffer buf;
+    auto status = encode_to_buffer(dictionary, options, extras, &buf);
+    if (!status.ok()) {
+        return status;
+    }
     std::vector<std::byte> bytes(buf.size());
     if (!bytes.empty()) {
         std::memcpy(bytes.data(), buf.storage.data(), buf.size());

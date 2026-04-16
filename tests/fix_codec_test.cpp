@@ -41,7 +41,9 @@ TEST_CASE("fix-codec", "[fix-codec]") {
     fastfix::codec::EncodeOptions options;
     options.begin_string = "FIX.4.4";
     options.sender_comp_id = "BUY";
+    options.sender_sub_id = "DESK-1";
     options.target_comp_id = "SELL";
+    options.target_sub_id = "ROUTE-2";
     options.msg_seq_num = 1U;
     options.sending_time = "20260402-12:00:00.000";
 
@@ -91,6 +93,8 @@ TEST_CASE("fix-codec", "[fix-codec]") {
     REQUIRE(decoded.ok());
     REQUIRE(decoded.value().header.msg_type == "D");
     REQUIRE(decoded.value().header.msg_seq_num == 1U);
+    REQUIRE(decoded.value().header.sender_sub_id == "DESK-1");
+    REQUIRE(decoded.value().header.target_sub_id == "ROUTE-2");
     REQUIRE(!decoded.value().validation_issue.present());
     REQUIRE(decoded.value().message.view().group(kNoPartyIDs).has_value());
     REQUIRE(decoded.value().message.view().group(kNoPartyIDs)->size() == 1U);
@@ -100,6 +104,8 @@ TEST_CASE("fix-codec", "[fix-codec]") {
     REQUIRE(decoded_view.ok());
     REQUIRE(decoded_view.value().header.msg_type == "D");
     REQUIRE(decoded_view.value().header.msg_seq_num == 1U);
+    REQUIRE(decoded_view.value().header.sender_sub_id == "DESK-1");
+    REQUIRE(decoded_view.value().header.target_sub_id == "ROUTE-2");
     REQUIRE(decoded_view.value().header.sending_time == "20260402-12:00:00.000");
     REQUIRE(decoded_view.value().raw.size() == encoded.value().size());
     REQUIRE(std::equal(
@@ -171,7 +177,9 @@ TEST_CASE("fix-codec", "[fix-codec]") {
     REQUIRE(peeked_view.value().begin_string == "FIX.4.4");
     REQUIRE(peeked_view.value().msg_type == "D");
     REQUIRE(peeked_view.value().sender_comp_id == "BUY");
+    REQUIRE(peeked_view.value().sender_sub_id == "DESK-1");
     REQUIRE(peeked_view.value().target_comp_id == "SELL");
+    REQUIRE(peeked_view.value().target_sub_id == "ROUTE-2");
 
     auto unknown = fastfix::codec::DecodeFixMessage(
         ::fastfix::tests::EncodeFixFrame(

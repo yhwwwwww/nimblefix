@@ -10,12 +10,10 @@
 #include <chrono>
 #include <cstring>
 #include <ctime>
-#include <functional>
 #include <limits>
 #include <memory>
 #include <optional>
 #include <string_view>
-#include <tuple>
 
 namespace fastfix::codec {
 
@@ -85,6 +83,7 @@ struct CompiledScopeStep {
 
     Kind kind{Kind::kScalar};
     std::uint32_t tag{0};
+    std::uint32_t rule_index{0};
     std::string prefix;
     std::shared_ptr<const CompiledScopeTemplate> group_scope;
 };
@@ -96,11 +95,11 @@ struct CompiledScopeTemplate {
 };
 
 auto IsStandardSessionField(std::uint32_t tag) -> bool {
-    return IsStandardSessionHeaderTag(tag);
+    return IsAggregateSessionEnvelopeTag(tag);
 }
 
 auto IsImplicitStandardField(std::uint32_t tag) -> bool {
-    return IsStandardSessionHeaderTag(tag) || IsCommonAdminTag(tag);
+    return IsAggregateSessionEnvelopeTag(tag) || IsCommonAdminTag(tag);
 }
 
 auto SetValidationIssue(
@@ -208,10 +207,10 @@ inline auto ParseTagInline(const char* data, std::size_t len) -> std::uint32_t {
     };
     switch (len) {
         case 1: return ok(data[0]) ? d(data[0]) : 0U;
-        case 2: if (ok(data[0]) & ok(data[1])) return d(data[0]) * 10U + d(data[1]); return 0U;
-        case 3: if (ok(data[0]) & ok(data[1]) & ok(data[2])) return d(data[0]) * 100U + d(data[1]) * 10U + d(data[2]); return 0U;
-        case 4: if (ok(data[0]) & ok(data[1]) & ok(data[2]) & ok(data[3])) return d(data[0]) * 1000U + d(data[1]) * 100U + d(data[2]) * 10U + d(data[3]); return 0U;
-        case 5: if (ok(data[0]) & ok(data[1]) & ok(data[2]) & ok(data[3]) & ok(data[4])) return d(data[0]) * 10000U + d(data[1]) * 1000U + d(data[2]) * 100U + d(data[3]) * 10U + d(data[4]); return 0U;
+        case 2: if (ok(data[0]) && ok(data[1])) return d(data[0]) * 10U + d(data[1]); return 0U;
+        case 3: if (ok(data[0]) && ok(data[1]) && ok(data[2])) return d(data[0]) * 100U + d(data[1]) * 10U + d(data[2]); return 0U;
+        case 4: if (ok(data[0]) && ok(data[1]) && ok(data[2]) && ok(data[3])) return d(data[0]) * 1000U + d(data[1]) * 100U + d(data[2]) * 10U + d(data[3]); return 0U;
+        case 5: if (ok(data[0]) && ok(data[1]) && ok(data[2]) && ok(data[3]) && ok(data[4])) return d(data[0]) * 10000U + d(data[1]) * 1000U + d(data[2]) * 100U + d(data[3]) * 10U + d(data[4]); return 0U;
         default: return 0U;
     }
 }
@@ -295,7 +294,7 @@ auto ScanNextField(
     };
 }
 
-auto ParseSigned(std::string_view text, const char* label) -> base::Result<std::int64_t> {
+[[maybe_unused]] auto ParseSigned(std::string_view text, const char* label) -> base::Result<std::int64_t> {
     std::int64_t value = 0;
     const auto* begin = text.data();
     const auto* end = text.data() + text.size();
@@ -306,7 +305,7 @@ auto ParseSigned(std::string_view text, const char* label) -> base::Result<std::
     return value;
 }
 
-auto ParseDouble(std::string_view text, const char* label) -> base::Result<double> {
+[[maybe_unused]] auto ParseDouble(std::string_view text, const char* label) -> base::Result<double> {
     double value = 0.0;
     const auto* begin = text.data();
     const auto* end = text.data() + text.size();
@@ -808,7 +807,7 @@ auto ShouldSkipField(std::uint32_t tag) -> bool {
 }
 
 auto IsTemplateManagedHeaderField(std::uint32_t tag) -> bool {
-    return IsTemplateManagedHeaderTag(tag);
+    return IsAggregateSessionHeaderTag(tag);
 }
 
 auto ContainsTag(const std::vector<std::uint32_t>& tags, std::uint32_t tag) -> bool {
@@ -950,6 +949,58 @@ auto AppendPrefixedFieldValue(
     AppendTracked(out, checksum, delimiter);
 }
 
+auto AppendResolvedHeaderFields(
+    std::string& out,
+    std::uint32_t* checksum,
+    std::string_view msg_type,
+    const EncodeOptions& options,
+    char delimiter,
+    UtcTimestampBuffer* timestamp_buffer) -> void {
+    const auto seq_num = options.msg_seq_num == 0U ? 1U : options.msg_seq_num;
+    const auto sending_time = options.sending_time.empty() ? CurrentUtcTimestamp(timestamp_buffer) : options.sending_time;
+
+    AppendPrefixedStringField(
+        out,
+        checksum,
+        kMsgTypePrefix,
+        msg_type.empty() ? std::string_view("UNKNOWN") : msg_type,
+        delimiter);
+    AppendPrefixedCountField(out, checksum, kMsgSeqNumPrefix, seq_num, delimiter);
+    if (!options.sender_comp_id.empty()) {
+        AppendPrefixedStringField(out, checksum, kSenderCompIDPrefix, options.sender_comp_id, delimiter);
+    }
+    if (!options.sender_sub_id.empty()) {
+        AppendPrefixedStringField(out, checksum, kSenderSubIDPrefix, options.sender_sub_id, delimiter);
+    }
+    if (!options.target_comp_id.empty()) {
+        AppendPrefixedStringField(out, checksum, kTargetCompIDPrefix, options.target_comp_id, delimiter);
+    }
+    if (!options.target_sub_id.empty()) {
+        AppendPrefixedStringField(out, checksum, kTargetSubIDPrefix, options.target_sub_id, delimiter);
+    }
+    AppendPrefixedStringField(out, checksum, kSendingTimePrefix, sending_time, delimiter);
+
+    if (msg_type == "A" && !options.default_appl_ver_id.empty()) {
+        AppendPrefixedStringField(out, checksum, kDefaultApplVerIDPrefix, options.default_appl_ver_id, delimiter);
+    }
+
+    if (options.poss_dup) {
+        AppendPrefixedStringField(out, checksum, std::string_view("43="), std::string_view("Y"), delimiter);
+    }
+    if (options.poss_resend) {
+        AppendPrefixedStringField(out, checksum, kPossResendPrefix, std::string_view("Y"), delimiter);
+    }
+    if (!options.orig_sending_time.empty()) {
+        AppendPrefixedStringField(out, checksum, kOrigSendingTimePrefix, options.orig_sending_time, delimiter);
+    }
+    if (!options.on_behalf_of_comp_id.empty()) {
+        AppendPrefixedStringField(out, checksum, kOnBehalfOfCompIDPrefix, options.on_behalf_of_comp_id, delimiter);
+    }
+    if (!options.deliver_to_comp_id.empty()) {
+        AppendPrefixedStringField(out, checksum, kDeliverToCompIDPrefix, options.deliver_to_comp_id, delimiter);
+    }
+}
+
 auto EncodeFieldValue(std::string& out, const message::FieldValue& field, char delimiter) -> void {
     std::visit([&](const auto& val) {
         using T = std::decay_t<decltype(val)>;
@@ -1033,6 +1084,11 @@ auto AppendTrackedGenericField(
 }
 
 auto EncodeGroupData(std::string& out, message::GroupView group, char delimiter) -> void;
+auto EncodeGroupData(
+    std::string& out,
+    message::GroupView group,
+    const profile::NormalizedDictionaryView& dictionary,
+    char delimiter) -> void;
 auto EncodeMessageBody(
     std::string& out,
     message::MessageView view,
@@ -1296,13 +1352,15 @@ auto CompileScopeTemplate(
     std::span<const profile::FieldRuleRecord> rules,
     bool skip_managed_header_fields) -> std::shared_ptr<const CompiledScopeTemplate> {
     auto scope = std::make_shared<CompiledScopeTemplate>();
-    for (const auto& rule : rules) {
+    for (std::size_t index = 0; index < rules.size(); ++index) {
+        const auto& rule = rules[index];
         if (skip_managed_header_fields && IsTemplateManagedHeaderField(rule.tag)) {
             continue;
         }
 
         CompiledScopeStep step;
         step.tag = rule.tag;
+        step.rule_index = static_cast<std::uint32_t>(index);
         step.prefix = MakeTagPrefix(rule.tag);
         if (const auto* group_def = dictionary.find_group(rule.tag); group_def != nullptr) {
             step.kind = CompiledScopeStep::Kind::kGroup;
@@ -1459,30 +1517,9 @@ auto EncodeFixMessageGenericToBuffer(
     full.push_back(delimiter);
     const auto body_start = full.size();
 
-    // Body content directly into buffer (untracked — checksum computed at end)
     const auto msg_type = message.msg_type();
-    AppendField(full, kMsgType, msg_type.empty() ? std::string_view("UNKNOWN") : msg_type, delimiter);
-
-    const auto seq_num = options.msg_seq_num == 0U ? 1U : options.msg_seq_num;
-    AppendField(full, kMsgSeqNum, static_cast<std::int64_t>(seq_num), delimiter);
-    if (!options.sender_comp_id.empty()) {
-        AppendField(full, kSenderCompID, options.sender_comp_id, delimiter);
-    }
-    if (!options.target_comp_id.empty()) {
-        AppendField(full, kTargetCompID, options.target_comp_id, delimiter);
-    }
     UtcTimestampBuffer timestamp_buffer;
-    const auto sending_time = options.sending_time.empty() ? CurrentUtcTimestamp(&timestamp_buffer) : options.sending_time;
-    AppendField(full, kSendingTime, sending_time, delimiter);
-    if (msg_type == "A" && !options.default_appl_ver_id.empty()) {
-        AppendField(full, kDefaultApplVerID, options.default_appl_ver_id, delimiter);
-    }
-    if (options.poss_dup) {
-        AppendField(full, kPossDupFlag, std::string_view("Y"), delimiter);
-    }
-    if (!options.orig_sending_time.empty()) {
-        AppendField(full, kOrigSendingTime, options.orig_sending_time, delimiter);
-    }
+    AppendResolvedHeaderFields(full, nullptr, msg_type, options, delimiter, &timestamp_buffer);
 
     // Look up dictionary rules for this message type.
     const auto* msg_def = msg_type.empty() ? nullptr : dictionary.find_message(msg_type);
@@ -1518,6 +1555,72 @@ auto EncodeFixMessageGenericToBuffer(
     return base::Status::Ok();
 }
 
+auto EncodeFixMessageGenericWithFragmentsToBuffer(
+    message::MessageView message,
+    const profile::NormalizedDictionaryView& dictionary,
+    const EncodeOptions& options,
+    const EncodedOutboundExtrasView* extras,
+    EncodeBuffer* buffer) -> base::Status {
+    if (buffer == nullptr) {
+        return base::Status::InvalidArgument("encode buffer is null");
+    }
+
+    const char delimiter = NormalizeDelimiter(options.delimiter);
+    buffer->storage.clear();
+    auto& full = buffer->storage;
+
+    const auto begin_string = options.begin_string.empty() ? std::string_view("FIX.4.4") : std::string_view(options.begin_string);
+    full.append(kBeginStringPrefix);
+    full.append(begin_string);
+    full.push_back(delimiter);
+    full.append(kBodyLengthPrefix);
+
+    constexpr std::size_t kBodyLengthPlaceholderWidth = 7U;
+    const auto body_length_offset = full.size();
+    full.append(kBodyLengthPlaceholderWidth, '0');
+    full.push_back(delimiter);
+    const auto body_start = full.size();
+
+    const auto msg_type = message.msg_type();
+    UtcTimestampBuffer timestamp_buffer;
+    AppendResolvedHeaderFields(full, nullptr, msg_type, options, delimiter, &timestamp_buffer);
+    if (extras != nullptr && !extras->header_fragment.empty()) {
+        full.append(extras->header_fragment);
+    }
+
+    const auto* msg_def = msg_type.empty() ? nullptr : dictionary.find_message(msg_type);
+    if (msg_def != nullptr) {
+        auto rules = dictionary.message_field_rules(*msg_def);
+        EncodeMessageBody(full, message, dictionary, rules, delimiter, true);
+    } else {
+        EncodeMessageBody(full, message, delimiter, true);
+    }
+    if (extras != nullptr && !extras->body_fragment.empty()) {
+        full.append(extras->body_fragment);
+    }
+
+    const auto body_length = static_cast<std::uint32_t>(full.size() - body_start);
+    {
+        char bl_buf[10];
+        const auto digits = FormatUint32(bl_buf, body_length);
+        if (digits > kBodyLengthPlaceholderWidth) {
+            return base::Status::FormatError(
+                "encoded body length exceeds BodyLength placeholder width");
+        }
+        full.replace(body_length_offset, kBodyLengthPlaceholderWidth,
+                     bl_buf, digits);
+    }
+
+    std::uint32_t checksum = ComputeChecksumSIMD(full.data(), full.size()) % 256U;
+
+    std::array<char, 3> cksum_digits{};
+    cksum_digits[0] = static_cast<char>('0' + ((checksum / 100U) % 10U));
+    cksum_digits[1] = static_cast<char>('0' + ((checksum / 10U) % 10U));
+    cksum_digits[2] = static_cast<char>('0' + (checksum % 10U));
+    AppendField(full, kCheckSum, std::string_view(cksum_digits.data(), 3U), delimiter);
+    return base::Status::Ok();
+}
+
 }  // namespace
 
 struct FrameEncodeTemplate::State {
@@ -1535,6 +1638,9 @@ struct FrameEncodeTemplate::State {
     std::string sending_time_prefix;
     std::string default_appl_ver_fragment;
     std::string poss_dup_fragment;
+    std::string poss_resend_prefix;
+    std::string on_behalf_of_prefix;
+    std::string deliver_to_prefix;
     std::string orig_sending_time_prefix;
     std::shared_ptr<const CompiledScopeTemplate> body_scope;
 };
@@ -1604,6 +1710,9 @@ auto CompileFrameEncodeTemplate(
     state->sending_time_prefix = MakeTagPrefix(kSendingTime);
     state->orig_sending_time_prefix = MakeTagPrefix(kOrigSendingTime);
     state->poss_dup_fragment = MakeFixedFieldFragment(kPossDupFlag, "Y", delimiter);
+    state->poss_resend_prefix = MakeTagPrefix(kPossResend);
+    state->on_behalf_of_prefix = MakeTagPrefix(kOnBehalfOfCompID);
+    state->deliver_to_prefix = MakeTagPrefix(kDeliverToCompID);
     if (!state->sender_comp_id.empty()) {
         state->sender_fragment = MakeFixedFieldFragment(kSenderCompID, state->sender_comp_id, delimiter);
     }
@@ -1624,10 +1733,29 @@ auto FrameEncodeTemplate::Encode(
 }
 
 auto FrameEncodeTemplate::Encode(
+    const message::Message& message,
+    const EncodeOptions& options,
+    EncodedOutboundExtrasView extras) const -> base::Result<std::vector<std::byte>> {
+    return Encode(message.view(), options, extras);
+}
+
+auto FrameEncodeTemplate::Encode(
     message::MessageView message,
     const EncodeOptions& options) const -> base::Result<std::vector<std::byte>> {
     EncodeBuffer buffer;
     auto status = EncodeToBuffer(message, options, &buffer);
+    if (!status.ok()) {
+        return status;
+    }
+    return CopyTextToBytes(buffer.text());
+}
+
+auto FrameEncodeTemplate::Encode(
+    message::MessageView message,
+    const EncodeOptions& options,
+    EncodedOutboundExtrasView extras) const -> base::Result<std::vector<std::byte>> {
+    EncodeBuffer buffer;
+    auto status = EncodeToBuffer(message, options, extras, &buffer);
     if (!status.ok()) {
         return status;
     }
@@ -1639,6 +1767,14 @@ auto FrameEncodeTemplate::EncodeToBuffer(
     const EncodeOptions& options,
     EncodeBuffer* buffer) const -> base::Status {
     return EncodeToBuffer(message.view(), options, buffer);
+}
+
+auto FrameEncodeTemplate::EncodeToBuffer(
+    const message::Message& message,
+    const EncodeOptions& options,
+    EncodedOutboundExtrasView extras,
+    EncodeBuffer* buffer) const -> base::Status {
+    return EncodeToBuffer(message.view(), options, extras, buffer);
 }
 
 auto FrameEncodeTemplate::EncodeToBuffer(
@@ -1690,8 +1826,14 @@ auto FrameEncodeTemplate::EncodeToBuffer(
     if (!state_->sender_fragment.empty()) {
         AppendTracked(full, &checksum, state_->sender_fragment);
     }
+    if (!options.sender_sub_id.empty()) {
+        AppendPrefixedStringField(full, &checksum, kSenderSubIDPrefix, options.sender_sub_id, delimiter);
+    }
     if (!state_->target_fragment.empty()) {
         AppendTracked(full, &checksum, state_->target_fragment);
+    }
+    if (!options.target_sub_id.empty()) {
+        AppendPrefixedStringField(full, &checksum, kTargetSubIDPrefix, options.target_sub_id, delimiter);
     }
 
     UtcTimestampBuffer timestamp_buffer;
@@ -1703,6 +1845,9 @@ auto FrameEncodeTemplate::EncodeToBuffer(
     if (options.poss_dup) {
         AppendTracked(full, &checksum, state_->poss_dup_fragment);
     }
+    if (options.poss_resend) {
+        AppendPrefixedStringField(full, &checksum, state_->poss_resend_prefix, std::string_view("Y"), delimiter);
+    }
     if (!options.orig_sending_time.empty()) {
         AppendPrefixedStringField(
             full,
@@ -1711,8 +1856,156 @@ auto FrameEncodeTemplate::EncodeToBuffer(
             options.orig_sending_time,
             delimiter);
     }
+    if (!options.on_behalf_of_comp_id.empty()) {
+        AppendPrefixedStringField(
+            full,
+            &checksum,
+            state_->on_behalf_of_prefix,
+            options.on_behalf_of_comp_id,
+            delimiter);
+    }
+    if (!options.deliver_to_comp_id.empty()) {
+        AppendPrefixedStringField(
+            full,
+            &checksum,
+            state_->deliver_to_prefix,
+            options.deliver_to_comp_id,
+            delimiter);
+    }
 
     EncodeScopeTemplate(full, &checksum, message, *state_->body_scope, delimiter, true);
+
+    {
+        const auto body_length = static_cast<std::uint32_t>(full.size() - body_start);
+        char bl_check[10];
+        const auto bl_len = FormatUint32(bl_check, body_length);
+        if (bl_len > kBodyLengthPlaceholderWidth) {
+            return base::Status::FormatError(
+                "encoded body length exceeds BodyLength placeholder width");
+        }
+        ReplaceUnsignedPlaceholder(
+            full,
+            body_length_offset,
+            kBodyLengthPlaceholderWidth,
+            body_length,
+            &checksum);
+    }
+
+    checksum %= 256U;
+    AppendTracked(full, nullptr, kCheckSumPrefix);
+    std::array<char, 4> checksum_digits{};
+    checksum_digits[0] = static_cast<char>('0' + ((checksum / 100U) % 10U));
+    checksum_digits[1] = static_cast<char>('0' + ((checksum / 10U) % 10U));
+    checksum_digits[2] = static_cast<char>('0' + (checksum % 10U));
+    AppendTracked(full, nullptr, std::string_view(checksum_digits.data(), 3U));
+    AppendTracked(full, nullptr, delimiter);
+    return base::Status::Ok();
+}
+
+auto FrameEncodeTemplate::EncodeToBuffer(
+    message::MessageView message,
+    const EncodeOptions& options,
+    EncodedOutboundExtrasView extras,
+    EncodeBuffer* buffer) const -> base::Status {
+    if (state_ == nullptr) {
+        return base::Status::InvalidArgument("frame template is not initialized");
+    }
+    if (buffer == nullptr) {
+        return base::Status::InvalidArgument("encode buffer is null");
+    }
+    if (message.valid() && !message.msg_type().empty() && message.msg_type() != state_->msg_type) {
+        return base::Status::InvalidArgument("message type does not match compiled frame template");
+    }
+
+    const char delimiter = NormalizeDelimiter(options.delimiter);
+    if (delimiter != state_->delimiter) {
+        return base::Status::InvalidArgument("delimiter does not match compiled frame template");
+    }
+    if (!options.begin_string.empty() && options.begin_string != state_->begin_string) {
+        return base::Status::InvalidArgument("BeginString does not match compiled frame template");
+    }
+    if (!options.sender_comp_id.empty() && options.sender_comp_id != state_->sender_comp_id) {
+        return base::Status::InvalidArgument("SenderCompID does not match compiled frame template");
+    }
+    if (!options.target_comp_id.empty() && options.target_comp_id != state_->target_comp_id) {
+        return base::Status::InvalidArgument("TargetCompID does not match compiled frame template");
+    }
+    if (!options.default_appl_ver_id.empty() && options.default_appl_ver_id != state_->default_appl_ver_id) {
+        return base::Status::InvalidArgument("DefaultApplVerID does not match compiled frame template");
+    }
+
+    buffer->storage.clear();
+    auto& full = buffer->storage;
+    std::uint32_t checksum = 0;
+    AppendTracked(full, &checksum, state_->begin_prefix);
+
+    constexpr std::size_t kBodyLengthPlaceholderWidth = 7U;
+    const auto body_length_offset = full.size();
+    AppendTracked(full, &checksum, std::string_view("0000000000", kBodyLengthPlaceholderWidth));
+    AppendTracked(full, &checksum, delimiter);
+    const auto body_start = full.size();
+
+    AppendTracked(full, &checksum, state_->msg_type_fragment);
+
+    const auto seq_num = options.msg_seq_num == 0U ? 1U : options.msg_seq_num;
+    AppendPrefixedCountField(full, &checksum, state_->msg_seq_prefix, seq_num, delimiter);
+    if (!state_->sender_fragment.empty()) {
+        AppendTracked(full, &checksum, state_->sender_fragment);
+    }
+    if (!options.sender_sub_id.empty()) {
+        AppendPrefixedStringField(full, &checksum, kSenderSubIDPrefix, options.sender_sub_id, delimiter);
+    }
+    if (!state_->target_fragment.empty()) {
+        AppendTracked(full, &checksum, state_->target_fragment);
+    }
+    if (!options.target_sub_id.empty()) {
+        AppendPrefixedStringField(full, &checksum, kTargetSubIDPrefix, options.target_sub_id, delimiter);
+    }
+
+    UtcTimestampBuffer timestamp_buffer;
+    const auto sending_time = options.sending_time.empty() ? CurrentUtcTimestamp(&timestamp_buffer) : options.sending_time;
+    AppendPrefixedStringField(full, &checksum, state_->sending_time_prefix, sending_time, delimiter);
+    if (!state_->default_appl_ver_fragment.empty()) {
+        AppendTracked(full, &checksum, state_->default_appl_ver_fragment);
+    }
+    if (options.poss_dup) {
+        AppendTracked(full, &checksum, state_->poss_dup_fragment);
+    }
+    if (options.poss_resend) {
+        AppendPrefixedStringField(full, &checksum, state_->poss_resend_prefix, std::string_view("Y"), delimiter);
+    }
+    if (!options.orig_sending_time.empty()) {
+        AppendPrefixedStringField(
+            full,
+            &checksum,
+            state_->orig_sending_time_prefix,
+            options.orig_sending_time,
+            delimiter);
+    }
+    if (!options.on_behalf_of_comp_id.empty()) {
+        AppendPrefixedStringField(
+            full,
+            &checksum,
+            state_->on_behalf_of_prefix,
+            options.on_behalf_of_comp_id,
+            delimiter);
+    }
+    if (!options.deliver_to_comp_id.empty()) {
+        AppendPrefixedStringField(
+            full,
+            &checksum,
+            state_->deliver_to_prefix,
+            options.deliver_to_comp_id,
+            delimiter);
+    }
+    if (!extras.header_fragment.empty()) {
+        AppendTracked(full, &checksum, extras.header_fragment);
+    }
+
+    EncodeScopeTemplate(full, &checksum, message, *state_->body_scope, delimiter, true);
+    if (!extras.body_fragment.empty()) {
+        AppendTracked(full, &checksum, extras.body_fragment);
+    }
 
     {
         const auto body_length = static_cast<std::uint32_t>(full.size() - body_start);
@@ -1750,11 +2043,29 @@ auto EncodeFixMessageToBuffer(
 }
 
 auto EncodeFixMessageToBuffer(
+    const message::Message& message,
+    const profile::NormalizedDictionaryView& dictionary,
+    const EncodeOptions& options,
+    EncodedOutboundExtrasView extras,
+    EncodeBuffer* buffer) -> base::Status {
+    return EncodeFixMessageToBuffer(message.view(), dictionary, options, extras, buffer);
+}
+
+auto EncodeFixMessageToBuffer(
     message::MessageView message,
     const profile::NormalizedDictionaryView& dictionary,
     const EncodeOptions& options,
     EncodeBuffer* buffer) -> base::Status {
     return EncodeFixMessageGenericToBuffer(message, dictionary, options, buffer);
+}
+
+auto EncodeFixMessageToBuffer(
+    message::MessageView message,
+    const profile::NormalizedDictionaryView& dictionary,
+    const EncodeOptions& options,
+    EncodedOutboundExtrasView extras,
+    EncodeBuffer* buffer) -> base::Status {
+    return EncodeFixMessageGenericWithFragmentsToBuffer(message, dictionary, options, &extras, buffer);
 }
 
 auto EncodeFixMessageToBuffer(
@@ -1764,6 +2075,16 @@ auto EncodeFixMessageToBuffer(
     EncodeBuffer* buffer,
     const PrecompiledTemplateTable* precompiled) -> base::Status {
     return EncodeFixMessageToBuffer(message.view(), dictionary, options, buffer, precompiled);
+}
+
+auto EncodeFixMessageToBuffer(
+    const message::Message& message,
+    const profile::NormalizedDictionaryView& dictionary,
+    const EncodeOptions& options,
+    EncodedOutboundExtrasView extras,
+    EncodeBuffer* buffer,
+    const PrecompiledTemplateTable* precompiled) -> base::Status {
+    return EncodeFixMessageToBuffer(message.view(), dictionary, options, extras, buffer, precompiled);
 }
 
 auto EncodeFixMessageToBuffer(
@@ -1782,6 +2103,25 @@ auto EncodeFixMessageToBuffer(
         }
     }
     return EncodeFixMessageGenericToBuffer(message, dictionary, options, buffer);
+}
+
+auto EncodeFixMessageToBuffer(
+    message::MessageView message,
+    const profile::NormalizedDictionaryView& dictionary,
+    const EncodeOptions& options,
+    EncodedOutboundExtrasView extras,
+    EncodeBuffer* buffer,
+    const PrecompiledTemplateTable* precompiled) -> base::Status {
+    const auto msg_type = message.msg_type();
+    if (!msg_type.empty() && precompiled != nullptr) {
+        if (const auto* tmpl = precompiled->find(msg_type); tmpl != nullptr) {
+            auto status = tmpl->EncodeToBuffer(message, options, extras, buffer);
+            if (status.ok()) {
+                return status;
+            }
+        }
+    }
+    return EncodeFixMessageGenericWithFragmentsToBuffer(message, dictionary, options, &extras, buffer);
 }
 
 auto PrecompiledTemplateTable::Build(
@@ -1827,11 +2167,32 @@ auto EncodeFixMessage(
 }
 
 auto EncodeFixMessage(
+    const message::Message& message,
+    const profile::NormalizedDictionaryView& dictionary,
+    const EncodeOptions& options,
+    EncodedOutboundExtrasView extras) -> base::Result<std::vector<std::byte>> {
+    return EncodeFixMessage(message.view(), dictionary, options, extras);
+}
+
+auto EncodeFixMessage(
     message::MessageView message,
     const profile::NormalizedDictionaryView& dictionary,
     const EncodeOptions& options) -> base::Result<std::vector<std::byte>> {
     EncodeBuffer buffer;
     auto status = EncodeFixMessageToBuffer(message, dictionary, options, &buffer);
+    if (!status.ok()) {
+        return status;
+    }
+    return CopyTextToBytes(buffer.text());
+}
+
+auto EncodeFixMessage(
+    message::MessageView message,
+    const profile::NormalizedDictionaryView& dictionary,
+    const EncodeOptions& options,
+    EncodedOutboundExtrasView extras) -> base::Result<std::vector<std::byte>> {
+    EncodeBuffer buffer;
+    auto status = EncodeFixMessageToBuffer(message, dictionary, options, extras, &buffer);
     if (!status.ok()) {
         return status;
     }
@@ -1964,7 +2325,11 @@ auto DecodeFixMessageView(
                 break;
             }
             case kSenderCompID: header.sender_comp_id = value_sv; break;
+            case kSenderSubID: header.sender_sub_id = value_sv; break;
             case kTargetCompID: header.target_comp_id = value_sv; break;
+            case kTargetSubID: header.target_sub_id = value_sv; break;
+            case kOnBehalfOfCompID: header.on_behalf_of_comp_id = value_sv; break;
+            case kDeliverToCompID: header.deliver_to_comp_id = value_sv; break;
             case kSendingTime: header.sending_time = value_sv; break;
             case kOrigSendingTime: header.orig_sending_time = value_sv; break;
             case kDefaultApplVerID: header.default_appl_ver_id = value_sv; break;
@@ -1974,6 +2339,14 @@ auto DecodeFixMessageView(
                     return parsed.status();
                 }
                 header.poss_dup = parsed.value();
+                break;
+            }
+            case kPossResend: {
+                auto parsed = ParseBoolean(value_sv, "PossResend");
+                if (!parsed.ok()) {
+                    return parsed.status();
+                }
+                header.poss_resend = parsed.value();
                 break;
             }
             default: break;
@@ -2209,7 +2582,11 @@ auto DecodeFixMessageView(
                 break;
             }
             case kSenderCompID: header.sender_comp_id = value_sv; break;
+            case kSenderSubID: header.sender_sub_id = value_sv; break;
             case kTargetCompID: header.target_comp_id = value_sv; break;
+            case kTargetSubID: header.target_sub_id = value_sv; break;
+            case kOnBehalfOfCompID: header.on_behalf_of_comp_id = value_sv; break;
+            case kDeliverToCompID: header.deliver_to_comp_id = value_sv; break;
             case kSendingTime: header.sending_time = value_sv; break;
             case kOrigSendingTime: header.orig_sending_time = value_sv; break;
             case kDefaultApplVerID: header.default_appl_ver_id = value_sv; break;
@@ -2219,6 +2596,14 @@ auto DecodeFixMessageView(
                     return parsed.status();
                 }
                 header.poss_dup = parsed.value();
+                break;
+            }
+            case kPossResend: {
+                auto parsed = ParseBoolean(value_sv, "PossResend");
+                if (!parsed.ok()) {
+                    return parsed.status();
+                }
+                header.poss_resend = parsed.value();
                 break;
             }
             default: break;
@@ -2504,6 +2889,12 @@ auto PeekSessionHeaderView(
             case kSenderCompID:
                 header.sender_comp_id = value;
                 break;
+            case kSenderSubID:
+                header.sender_sub_id = value;
+                break;
+            case kOnBehalfOfCompID:
+                header.on_behalf_of_comp_id = value;
+                break;
             case kSendingTime:
                 header.sending_time = value;
                 break;
@@ -2513,9 +2904,23 @@ auto PeekSessionHeaderView(
             case kTargetCompID:
                 header.target_comp_id = value;
                 break;
+            case kTargetSubID:
+                header.target_sub_id = value;
+                break;
+            case kDeliverToCompID:
+                header.deliver_to_comp_id = value;
+                break;
             case kDefaultApplVerID:
                 header.default_appl_ver_id = value;
                 break;
+            case kPossResend: {
+                auto parsed = ParseBoolean(value, "PossResend");
+                if (!parsed.ok()) {
+                    return parsed.status();
+                }
+                header.poss_resend = parsed.value();
+                break;
+            }
             default:
                 break;
         }

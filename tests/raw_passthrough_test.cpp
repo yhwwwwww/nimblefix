@@ -1,8 +1,6 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <cstddef>
-#include <cstring>
-#include <string>
 #include <string_view>
 #include <vector>
 
@@ -15,13 +13,27 @@ auto ToStringView(std::span<const std::byte> bytes) -> std::string_view {
     return std::string_view(reinterpret_cast<const char*>(bytes.data()), bytes.size());
 }
 
+auto FlattenFrameBytes(const fastfix::session::EncodedFrameBytes& frame) -> std::vector<std::byte> {
+    const auto owned = frame.view();
+    if (frame.external_body.empty()) {
+        return std::vector<std::byte>(owned.begin(), owned.end());
+    }
+
+    std::vector<std::byte> bytes;
+    bytes.reserve(frame.size());
+    bytes.insert(bytes.end(), owned.begin(), owned.begin() + static_cast<std::ptrdiff_t>(frame.body_splice_offset));
+    bytes.insert(bytes.end(), frame.external_body.begin(), frame.external_body.end());
+    bytes.insert(bytes.end(), owned.begin() + static_cast<std::ptrdiff_t>(frame.body_splice_offset), owned.end());
+    return bytes;
+}
+
 }  // namespace
 
 TEST_CASE("raw-passthrough decode extracts session fields and raw body", "[raw-passthrough]") {
     // Build a FIX message with known session fields and application body.
     // Body fields: 11=ORD-1, 55=AAPL, 54=1, 38=100
     const auto frame = fastfix::tests::EncodeFixFrame(
-        "35=D|49=SENDER|56=TARGET|34=42|52=20260413-10:00:00.000|"
+        "35=D|49=SENDER|50=DESK|56=TARGET|57=ROUTE|34=42|52=20260413-10:00:00.000|"
         "11=ORD-1|55=AAPL|54=1|38=100|");
 
     auto result = fastfix::codec::DecodeRawPassThrough(
@@ -34,7 +46,9 @@ TEST_CASE("raw-passthrough decode extracts session fields and raw body", "[raw-p
     CHECK(view.msg_type == "D");
     CHECK(view.msg_seq_num == 42U);
     CHECK(view.sender_comp_id == "SENDER");
+    CHECK(view.sender_sub_id == "DESK");
     CHECK(view.target_comp_id == "TARGET");
+    CHECK(view.target_sub_id == "ROUTE");
     CHECK(view.sending_time == "20260413-10:00:00.000");
 
     // The raw_body should contain the application fields: 11=ORD-1|55=AAPL|54=1|38=100|
@@ -47,8 +61,47 @@ TEST_CASE("raw-passthrough decode extracts session fields and raw body", "[raw-p
     // Session fields should NOT be in raw_body
     CHECK(body_sv.find("35=D") == std::string_view::npos);
     CHECK(body_sv.find("49=SENDER") == std::string_view::npos);
+    CHECK(body_sv.find("50=DESK") == std::string_view::npos);
     CHECK(body_sv.find("56=TARGET") == std::string_view::npos);
+    CHECK(body_sv.find("57=ROUTE") == std::string_view::npos);
     CHECK(body_sv.find("34=42") == std::string_view::npos);
+}
+
+TEST_CASE("raw-passthrough forwarding rewrites sender and target sub ids as header fields", "[raw-passthrough]") {
+    const auto frame = fastfix::tests::EncodeFixFrame(
+        "35=D|49=ORIG_SENDER|50=ORIG_DESK|56=ORIG_TARGET|57=ORIG_ROUTE|34=10|52=20260413-10:00:00.000|"
+        "11=ORD-1|55=MSFT|");
+
+    auto decoded = fastfix::codec::DecodeRawPassThrough(
+        std::span<const std::byte>(frame.data(), frame.size()));
+    REQUIRE(decoded.ok());
+    REQUIRE(decoded.value().sender_sub_id == "ORIG_DESK");
+    REQUIRE(decoded.value().target_sub_id == "ORIG_ROUTE");
+
+    fastfix::codec::ForwardingOptions opts;
+    opts.sender_comp_id = "DOWNSTREAM_S";
+    opts.sender_sub_id = "DESK-9";
+    opts.target_comp_id = "DOWNSTREAM_T";
+    opts.target_sub_id = "ROUTE-7";
+    opts.msg_seq_num = 77;
+    opts.sending_time = "20260413-11:00:00.000";
+
+    fastfix::codec::EncodeBuffer buffer;
+    auto status = fastfix::codec::EncodeForwarded(decoded.value(), opts, &buffer);
+    REQUIRE(status.ok());
+
+    auto forwarded = fastfix::codec::DecodeRawPassThrough(buffer.bytes());
+    REQUIRE(forwarded.ok());
+    CHECK(forwarded.value().sender_comp_id == "DOWNSTREAM_S");
+    CHECK(forwarded.value().sender_sub_id == "DESK-9");
+    CHECK(forwarded.value().target_comp_id == "DOWNSTREAM_T");
+    CHECK(forwarded.value().target_sub_id == "ROUTE-7");
+
+    const auto body_sv = ToStringView(forwarded.value().raw_body);
+    CHECK(body_sv.find("11=ORD-1") != std::string_view::npos);
+    CHECK(body_sv.find("55=MSFT") != std::string_view::npos);
+    CHECK(body_sv.find("50=DESK-9") == std::string_view::npos);
+    CHECK(body_sv.find("57=ROUTE-7") == std::string_view::npos);
 }
 
 TEST_CASE("raw-passthrough forwarding rewrites header and preserves body", "[raw-passthrough]") {
@@ -126,6 +179,22 @@ TEST_CASE("raw-passthrough forwarding with routing fields", "[raw-passthrough]")
     CHECK(fwd_decoded.value().target_comp_id == "EXCH");
 }
 
+TEST_CASE("raw-passthrough decode excludes routing header fields from raw body", "[raw-passthrough]") {
+    const auto frame = fastfix::tests::EncodeFixFrame(
+        "35=D|49=SENDER|56=TARGET|34=1|52=20260413-10:00:00.000|"
+        "115=CLIENT-A|128=VENUE-B|11=ORD-1|55=IBM|");
+
+    auto decoded = fastfix::codec::DecodeRawPassThrough(
+        std::span<const std::byte>(frame.data(), frame.size()));
+    REQUIRE(decoded.ok());
+
+    const auto body_sv = ToStringView(decoded.value().raw_body);
+    CHECK(body_sv.find("115=CLIENT-A") == std::string_view::npos);
+    CHECK(body_sv.find("128=VENUE-B") == std::string_view::npos);
+    CHECK(body_sv.find("11=ORD-1") != std::string_view::npos);
+    CHECK(body_sv.find("55=IBM") != std::string_view::npos);
+}
+
 TEST_CASE("raw-passthrough preserves unknown application fields exactly", "[raw-passthrough]") {
     // Use non-standard tags in the body to simulate unknown/proprietary fields
     const auto frame = fastfix::tests::EncodeFixFrame(
@@ -200,4 +269,71 @@ TEST_CASE("raw-passthrough decode rejects missing tag 8", "[raw-passthrough]") {
     auto result = fastfix::codec::DecodeRawPassThrough(
         std::span<const std::byte>(bytes.data(), bytes.size()));
     CHECK(!result.ok());
+}
+
+TEST_CASE("raw-passthrough replay preserves extended header semantics across encode paths", "[raw-passthrough]") {
+    const auto frame = fastfix::tests::EncodeFixFrame(
+        "35=A|34=4|49=SELLER|50=DESK|56=BUYER|57=ROUTE|52=20260413-10:00:00.000|"
+        "1137=9|43=Y|97=Y|122=20260413-09:59:59.999|115=CLIENT-A|128=VENUE-B|98=0|108=30|");
+
+    auto stored = fastfix::codec::DecodeRawPassThrough(
+        std::span<const std::byte>(frame.data(), frame.size()));
+    REQUIRE(stored.ok());
+    CHECK(stored.value().sender_sub_id == "DESK");
+    CHECK(stored.value().target_sub_id == "ROUTE");
+    CHECK(stored.value().on_behalf_of_comp_id == "CLIENT-A");
+    CHECK(stored.value().deliver_to_comp_id == "VENUE-B");
+    CHECK(stored.value().default_appl_ver_id == "9");
+    CHECK(stored.value().poss_dup);
+    CHECK(stored.value().poss_resend);
+    CHECK(stored.value().orig_sending_time == "20260413-09:59:59.999");
+
+    const auto stored_body = ToStringView(stored.value().raw_body);
+    CHECK(stored_body.find("98=0") != std::string_view::npos);
+    CHECK(stored_body.find("108=30") != std::string_view::npos);
+    CHECK(stored_body.find("50=DESK") == std::string_view::npos);
+    CHECK(stored_body.find("57=ROUTE") == std::string_view::npos);
+    CHECK(stored_body.find("97=Y") == std::string_view::npos);
+    CHECK(stored_body.find("115=CLIENT-A") == std::string_view::npos);
+    CHECK(stored_body.find("128=VENUE-B") == std::string_view::npos);
+
+    fastfix::codec::ReplayOptions opts;
+    opts.sender_comp_id = "REPLAY_S";
+    opts.sender_sub_id = "REPLAY_DESK";
+    opts.target_comp_id = "REPLAY_T";
+    opts.target_sub_id = "REPLAY_ROUTE";
+    opts.msg_seq_num = 99U;
+    opts.sending_time = "20260413-11:00:00.000";
+    opts.orig_sending_time = "20260413-10:00:00.000";
+    opts.poss_resend = true;
+
+    fastfix::codec::EncodeBuffer replay_buffer;
+    auto replay_status = fastfix::codec::EncodeReplay(stored.value(), opts, &replay_buffer);
+    REQUIRE(replay_status.ok());
+
+    auto replayed = fastfix::codec::DecodeRawPassThrough(replay_buffer.bytes());
+    REQUIRE(replayed.ok());
+    CHECK(replayed.value().sender_comp_id == "REPLAY_S");
+    CHECK(replayed.value().sender_sub_id == "REPLAY_DESK");
+    CHECK(replayed.value().target_comp_id == "REPLAY_T");
+    CHECK(replayed.value().target_sub_id == "REPLAY_ROUTE");
+    CHECK(replayed.value().on_behalf_of_comp_id == "CLIENT-A");
+    CHECK(replayed.value().deliver_to_comp_id == "VENUE-B");
+    CHECK(replayed.value().default_appl_ver_id == "9");
+    CHECK(replayed.value().poss_dup);
+    CHECK(replayed.value().poss_resend);
+    CHECK(replayed.value().orig_sending_time == "20260413-10:00:00.000");
+    CHECK(ToStringView(replayed.value().raw_body) == stored_body);
+
+    fastfix::session::EncodedFrameBytes zero_copy_frame;
+    auto zero_copy_opts = opts;
+    zero_copy_opts.zero_copy_body = true;
+    auto replay_into_status = fastfix::codec::EncodeReplayInto(stored.value(), zero_copy_opts, &zero_copy_frame);
+    REQUIRE(replay_into_status.ok());
+    REQUIRE(zero_copy_frame.external_body.size() == stored.value().raw_body.size());
+    REQUIRE(zero_copy_frame.body_splice_offset > 0U);
+
+    const auto flattened = FlattenFrameBytes(zero_copy_frame);
+    REQUIRE(flattened.size() == replay_buffer.bytes().size());
+    CHECK(std::equal(flattened.begin(), flattened.end(), replay_buffer.bytes().begin(), replay_buffer.bytes().end()));
 }

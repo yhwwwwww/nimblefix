@@ -69,7 +69,7 @@ class CompiledMessageDecoder {
 
     /// Check if a tag is a known session-header field handled by the header extraction path.
     [[nodiscard]] static auto is_header_tag(std::uint32_t tag) -> bool {
-        return tags::IsSessionEnvelopeTag(tag);
+        return tags::IsAggregateSessionEnvelopeTag(tag);
     }
 
   private:

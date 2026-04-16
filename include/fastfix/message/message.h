@@ -21,7 +21,7 @@
 namespace fastfix::codec {
 
 struct EncodeOptions;
-class EncodeBuffer;
+struct EncodeBuffer;
 class PrecompiledTemplateTable;
 
 }  // namespace fastfix::codec

@@ -152,7 +152,7 @@ auto ComputeBodyStartOffset(std::span<const std::byte> frame) -> std::uint32_t {
 
         const auto field_end = soh + 1;
 
-        if (fastfix::codec::tags::IsSessionEnvelopeTag(tag)) {
+        if (fastfix::codec::tags::IsAggregateSessionEnvelopeTag(tag)) {
             last_header_end = field_end;
         } else {
             // First non-header tag — body starts at the current position

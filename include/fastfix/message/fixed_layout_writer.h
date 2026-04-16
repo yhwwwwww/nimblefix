@@ -1,6 +1,5 @@
 #pragma once
 
-#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -26,6 +25,7 @@ class FixedLayout {
         enum class Kind : std::uint8_t { kField, kGroup };
         Kind kind;
         std::uint32_t tag;
+        std::uint32_t rule_index;
         std::uint32_t slot_index;
         std::array<char, 16> prefix_data{};   // "TAG=" chars (e.g. "49=", "5001=")
         std::uint8_t prefix_length{0};
@@ -148,6 +148,13 @@ class FixedLayoutWriter {
         const codec::EncodeOptions& options,
         codec::EncodeBuffer* buffer) const -> base::Status;
 
+    /// Encode directly to buffer while consuming pre-classified outbound extras.
+    auto encode_to_buffer(
+        const profile::NormalizedDictionaryView& dictionary,
+        const codec::EncodeOptions& options,
+        codec::EncodedOutboundExtrasView extras,
+        codec::EncodeBuffer* buffer) const -> base::Status;
+
     /// Encode directly to buffer with precompiled template table.
     auto encode_to_buffer(
         const profile::NormalizedDictionaryView& dictionary,
@@ -155,10 +162,22 @@ class FixedLayoutWriter {
         codec::EncodeBuffer* buffer,
         const codec::PrecompiledTemplateTable* precompiled) const -> base::Status;
 
+    auto encode_to_buffer(
+        const profile::NormalizedDictionaryView& dictionary,
+        const codec::EncodeOptions& options,
+        codec::EncodedOutboundExtrasView extras,
+        codec::EncodeBuffer* buffer,
+        const codec::PrecompiledTemplateTable* precompiled) const -> base::Status;
+
     /// Encode to owned bytes.
     auto encode(
         const profile::NormalizedDictionaryView& dictionary,
         const codec::EncodeOptions& options) const -> base::Result<std::vector<std::byte>>;
+
+    auto encode(
+        const profile::NormalizedDictionaryView& dictionary,
+        const codec::EncodeOptions& options,
+        codec::EncodedOutboundExtrasView extras) const -> base::Result<std::vector<std::byte>>;
 
   private:
     struct SlotRange {
@@ -168,8 +187,9 @@ class FixedLayoutWriter {
 
     struct SessionHeaderFragment {
         std::string header_prefix;       // "8={bs}\x01 9=0000000000\x01 35={mt}\x01"
-        std::string sender_target;       // "49={sender}\x01 56={target}\x01"
-        std::uint32_t static_checksum{0}; // Checksum of header_prefix + sender_target bytes
+        std::string sender_fragment;     // "49={sender}\x01"
+        std::string target_fragment;     // "56={target}\x01"
+        std::uint32_t static_checksum{0}; // Checksum of static header bytes
         std::size_t body_length_offset{0}; // Offset of placeholder within header_prefix
         std::size_t body_start_offset{0};  // Offset right after "9=...\x01"
     };
