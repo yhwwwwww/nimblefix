@@ -8,10 +8,10 @@
 
 namespace fastfix::profile {
 
-auto LoadNormalizedDictionaryText(std::string_view text)
-    -> base::Result<NormalizedDictionary>;
+auto
+LoadNormalizedDictionaryText(std::string_view text) -> base::Result<NormalizedDictionary>;
 
-auto LoadNormalizedDictionaryFile(const std::filesystem::path& path)
-    -> base::Result<NormalizedDictionary>;
+auto
+LoadNormalizedDictionaryFile(const std::filesystem::path& path) -> base::Result<NormalizedDictionary>;
 
-}  // namespace fastfix::profile
+} // namespace fastfix::profile

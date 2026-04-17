@@ -7,7 +7,9 @@
 
 namespace fastfix::runtime {
 
-auto ApplyCurrentThreadAffinity(std::uint32_t cpu_id, std::string_view role) -> base::Status;
-auto SetCurrentThreadName(std::string_view name) -> void;
+auto
+ApplyCurrentThreadAffinity(std::uint32_t cpu_id, std::string_view role) -> base::Status;
+auto
+SetCurrentThreadName(std::string_view name) -> void;
 
-}  // namespace fastfix::runtime
+} // namespace fastfix::runtime

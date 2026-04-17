@@ -89,114 +89,135 @@ inline constexpr std::string_view kDeliverToCompIDPrefix = "128=";
 inline constexpr std::string_view kApplVerIDPrefix = "1128=";
 inline constexpr std::string_view kDefaultApplVerIDPrefix = "1137=";
 
-enum class SessionHeaderTagClass : std::uint8_t {
-    kNone = 0,
-    kStandard,
-    kRouting,
+enum class SessionHeaderTagClass : std::uint8_t
+{
+  kNone = 0,
+  kStandard,
+  kRouting,
 };
 
-[[nodiscard]] inline constexpr auto IsFrameStructureTag(std::uint32_t tag) -> bool {
-    switch (tag) {
-        case kBeginString:
-        case kBodyLength:
-        case kCheckSum:
-            return true;
-        default:
-            return false;
-    }
+[[nodiscard]] inline constexpr auto
+IsFrameStructureTag(std::uint32_t tag) -> bool
+{
+  switch (tag) {
+    case kBeginString:
+    case kBodyLength:
+    case kCheckSum:
+      return true;
+    default:
+      return false;
+  }
 }
 
-[[nodiscard]] inline constexpr auto IsStandardSessionHeaderTag(std::uint32_t tag) -> bool {
-    switch (tag) {
-        case kMsgSeqNum:
-        case kMsgType:
-        case kPossDupFlag:
-        case kSenderCompID:
-        case kSenderSubID:
-        case kSendingTime:
-        case kTargetCompID:
-        case kTargetSubID:
-        case kPossResend:
-        case kOrigSendingTime:
-        case kDefaultApplVerID:
-            return true;
-        default:
-            return false;
-    }
+[[nodiscard]] inline constexpr auto
+IsStandardSessionHeaderTag(std::uint32_t tag) -> bool
+{
+  switch (tag) {
+    case kMsgSeqNum:
+    case kMsgType:
+    case kPossDupFlag:
+    case kSenderCompID:
+    case kSenderSubID:
+    case kSendingTime:
+    case kTargetCompID:
+    case kTargetSubID:
+    case kPossResend:
+    case kOrigSendingTime:
+    case kDefaultApplVerID:
+      return true;
+    default:
+      return false;
+  }
 }
 
-[[nodiscard]] inline constexpr auto IsRoutingSessionHeaderTag(std::uint32_t tag) -> bool {
-    switch (tag) {
-        case kOnBehalfOfCompID:
-        case kDeliverToCompID:
-            return true;
-        default:
-            return false;
-    }
+[[nodiscard]] inline constexpr auto
+IsRoutingSessionHeaderTag(std::uint32_t tag) -> bool
+{
+  switch (tag) {
+    case kOnBehalfOfCompID:
+    case kDeliverToCompID:
+      return true;
+    default:
+      return false;
+  }
 }
 
-[[nodiscard]] inline constexpr auto ClassifySessionHeaderTag(std::uint32_t tag) -> SessionHeaderTagClass {
-    if (IsStandardSessionHeaderTag(tag)) {
-        return SessionHeaderTagClass::kStandard;
-    }
-    if (IsRoutingSessionHeaderTag(tag)) {
-        return SessionHeaderTagClass::kRouting;
-    }
-    return SessionHeaderTagClass::kNone;
+[[nodiscard]] inline constexpr auto
+ClassifySessionHeaderTag(std::uint32_t tag) -> SessionHeaderTagClass
+{
+  if (IsStandardSessionHeaderTag(tag)) {
+    return SessionHeaderTagClass::kStandard;
+  }
+  if (IsRoutingSessionHeaderTag(tag)) {
+    return SessionHeaderTagClass::kRouting;
+  }
+  return SessionHeaderTagClass::kNone;
 }
 
-[[nodiscard]] inline constexpr auto IsAggregateSessionHeaderTag(std::uint32_t tag) -> bool {
-    return ClassifySessionHeaderTag(tag) != SessionHeaderTagClass::kNone;
+[[nodiscard]] inline constexpr auto
+IsAggregateSessionHeaderTag(std::uint32_t tag) -> bool
+{
+  return ClassifySessionHeaderTag(tag) != SessionHeaderTagClass::kNone;
 }
 
-[[nodiscard]] inline constexpr auto IsCommonAdminTag(std::uint32_t tag) -> bool {
-    switch (tag) {
-        case kBeginSeqNo:
-        case kEndSeqNo:
-        case kNewSeqNo:
-        case kRefSeqNum:
-        case kText:
-        case kEncryptMethod:
-        case kHeartBtInt:
-        case kTestReqID:
-        case kGapFillFlag:
-        case kResetSeqNumFlag:
-        case kNextExpectedMsgSeqNum:
-        case kRefTagID:
-        case kRefMsgType:
-        case kRejectReason:
-            return true;
-        default:
-            return false;
-    }
+[[nodiscard]] inline constexpr auto
+IsCommonAdminTag(std::uint32_t tag) -> bool
+{
+  switch (tag) {
+    case kBeginSeqNo:
+    case kEndSeqNo:
+    case kNewSeqNo:
+    case kRefSeqNum:
+    case kText:
+    case kEncryptMethod:
+    case kHeartBtInt:
+    case kTestReqID:
+    case kGapFillFlag:
+    case kResetSeqNumFlag:
+    case kNextExpectedMsgSeqNum:
+    case kRefTagID:
+    case kRefMsgType:
+    case kRejectReason:
+      return true;
+    default:
+      return false;
+  }
 }
 
-[[nodiscard]] inline constexpr auto IsSessionEnvelopeTag(std::uint32_t tag) -> bool {
-    return IsFrameStructureTag(tag) || IsStandardSessionHeaderTag(tag);
+[[nodiscard]] inline constexpr auto
+IsSessionEnvelopeTag(std::uint32_t tag) -> bool
+{
+  return IsFrameStructureTag(tag) || IsStandardSessionHeaderTag(tag);
 }
 
-[[nodiscard]] inline constexpr auto IsAggregateSessionEnvelopeTag(std::uint32_t tag) -> bool {
-    return IsFrameStructureTag(tag) || IsAggregateSessionHeaderTag(tag);
+[[nodiscard]] inline constexpr auto
+IsAggregateSessionEnvelopeTag(std::uint32_t tag) -> bool
+{
+  return IsFrameStructureTag(tag) || IsAggregateSessionHeaderTag(tag);
 }
 
-[[nodiscard]] inline constexpr auto IsTemplateManagedHeaderTag(std::uint32_t tag) -> bool {
-    switch (tag) {
-        case kMsgSeqNum:
-        case kMsgType:
-        case kPossDupFlag:
-        case kSenderCompID:
-        case kSenderSubID:
-        case kSendingTime:
-        case kTargetCompID:
-        case kTargetSubID:
-            return true;
-        default:
-            return false;
-    }
+[[nodiscard]] inline constexpr auto
+IsTemplateManagedHeaderTag(std::uint32_t tag) -> bool
+{
+  switch (tag) {
+    case kMsgSeqNum:
+    case kMsgType:
+    case kPossDupFlag:
+    case kSenderCompID:
+    case kSenderSubID:
+    case kSendingTime:
+    case kTargetCompID:
+    case kTargetSubID:
+      return true;
+    default:
+      return false;
+  }
 }
 
-[[nodiscard]] inline constexpr auto IsEncodeManagedTag(std::uint32_t tag) -> bool {
-    return IsFrameStructureTag(tag) || IsAggregateSessionHeaderTag(tag);
+[[nodiscard]] inline constexpr auto
+IsEncodeManagedTag(std::uint32_t tag) -> bool
+{
+  return IsFrameStructureTag(tag) || IsAggregateSessionHeaderTag(tag);
 }
 
-}  // namespace fastfix::codec::tags
+} // namespace fastfix::codec::tags

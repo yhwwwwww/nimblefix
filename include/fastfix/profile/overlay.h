@@ -5,7 +5,8 @@
 
 namespace fastfix::profile {
 
-auto ApplyOverlay(const NormalizedDictionary& baseline, const NormalizedDictionary& overlay)
-    -> base::Result<NormalizedDictionary>;
+auto
+ApplyOverlay(const NormalizedDictionary& baseline, const NormalizedDictionary& overlay)
+  -> base::Result<NormalizedDictionary>;
 
-}  // namespace fastfix::profile
+} // namespace fastfix::profile

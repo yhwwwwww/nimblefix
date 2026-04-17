@@ -4,30 +4,27 @@
 
 namespace fastfix::runtime {
 
-class PollWakeup {
-  public:
-    PollWakeup() = default;
-    PollWakeup(const PollWakeup&) = delete;
-    auto operator=(const PollWakeup&) -> PollWakeup& = delete;
-    PollWakeup(PollWakeup&& other) noexcept;
-    auto operator=(PollWakeup&& other) noexcept -> PollWakeup&;
-    ~PollWakeup();
+class PollWakeup
+{
+public:
+  PollWakeup() = default;
+  PollWakeup(const PollWakeup&) = delete;
+  auto operator=(const PollWakeup&) -> PollWakeup& = delete;
+  PollWakeup(PollWakeup&& other) noexcept;
+  auto operator=(PollWakeup&& other) noexcept -> PollWakeup&;
+  ~PollWakeup();
 
-    auto Open() -> base::Status;
-    auto Close() -> void;
-    auto Signal() const -> void;
-    auto Drain() -> void;
+  auto Open() -> base::Status;
+  auto Close() -> void;
+  auto Signal() const -> void;
+  auto Drain() -> void;
 
-    [[nodiscard]] auto read_fd() const -> int {
-        return efd_;
-    }
+  [[nodiscard]] auto read_fd() const -> int { return efd_; }
 
-    [[nodiscard]] auto valid() const -> bool {
-        return efd_ >= 0;
-    }
+  [[nodiscard]] auto valid() const -> bool { return efd_ >= 0; }
 
-  private:
-    int efd_{-1};
+private:
+  int efd_{ -1 };
 };
 
-}  // namespace fastfix::runtime
+} // namespace fastfix::runtime

@@ -11,10 +11,10 @@
 
 namespace fastfix::profile {
 
-auto BuildProfileArtifact(const NormalizedDictionary& dictionary)
-    -> base::Result<std::vector<std::byte>>;
+auto
+BuildProfileArtifact(const NormalizedDictionary& dictionary) -> base::Result<std::vector<std::byte>>;
 
-auto WriteProfileArtifact(const std::filesystem::path& path, std::span<const std::byte> bytes)
-    -> base::Status;
+auto
+WriteProfileArtifact(const std::filesystem::path& path, std::span<const std::byte> bytes) -> base::Status;
 
-}  // namespace fastfix::profile
+} // namespace fastfix::profile
