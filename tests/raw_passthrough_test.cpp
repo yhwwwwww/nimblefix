@@ -297,6 +297,22 @@ TEST_CASE("raw-passthrough replay preserves extended header semantics across enc
     CHECK(stored_body.find("115=CLIENT-A") == std::string_view::npos);
     CHECK(stored_body.find("128=VENUE-B") == std::string_view::npos);
 
+    fastfix::codec::ReplayOptions preserve_opts;
+    preserve_opts.sender_comp_id = "REPLAY_S";
+    preserve_opts.target_comp_id = "REPLAY_T";
+    preserve_opts.msg_seq_num = 98U;
+    preserve_opts.sending_time = "20260413-10:30:00.000";
+    preserve_opts.orig_sending_time = "20260413-10:00:00.000";
+
+    fastfix::codec::EncodeBuffer preserve_buffer;
+    auto preserve_status = fastfix::codec::EncodeReplay(stored.value(), preserve_opts, &preserve_buffer);
+    REQUIRE(preserve_status.ok());
+
+    auto preserved = fastfix::codec::DecodeRawPassThrough(preserve_buffer.bytes());
+    REQUIRE(preserved.ok());
+    CHECK(preserved.value().sender_sub_id == "DESK");
+    CHECK(preserved.value().target_sub_id == "ROUTE");
+
     fastfix::codec::ReplayOptions opts;
     opts.sender_comp_id = "REPLAY_S";
     opts.sender_sub_id = "REPLAY_DESK";

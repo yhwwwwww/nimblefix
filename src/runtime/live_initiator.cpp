@@ -151,6 +151,7 @@ auto ApplyInitiatorWorkerThreadSetup(const Engine* engine, std::uint32_t worker_
 
 enum class OutboundCommandKind : std::uint32_t {
     kSendApplication = 0,
+    kSendEncodedApplication,
     kBeginLogout,
 };
 
@@ -158,6 +159,8 @@ struct OutboundCommand {
     OutboundCommandKind kind{OutboundCommandKind::kSendApplication};
     std::uint64_t session_id{0};
     message::MessageRef message;
+    session::EncodedApplicationMessageRef encoded_message;
+    session::SessionSendEnvelopeRef envelope;
     std::string text;
 };
 
@@ -190,10 +193,19 @@ class LiveInitiator::CommandSink final : public session::SessionCommandSink {
     }
 
     auto EnqueueSend(std::uint64_t session_id, message::MessageRef message) -> base::Status override {
+        return EnqueueSendWithEnvelope(session_id, std::move(message), {});
+    }
+
+    auto EnqueueSendWithEnvelope(
+        std::uint64_t session_id,
+        message::MessageRef message,
+        session::SessionSendEnvelopeRef envelope) -> base::Status override {
         if (!queue_.TryPush(OutboundCommand{
                 .kind = OutboundCommandKind::kSendApplication,
                 .session_id = session_id,
                 .message = std::move(message),
+                .encoded_message = {},
+                .envelope = std::move(envelope),
                 .text = {},
             })) {
             return base::Status::IoError("runtime outbound command queue is full");
@@ -204,6 +216,13 @@ class LiveInitiator::CommandSink final : public session::SessionCommandSink {
 
     auto EnqueueSendBorrowed(std::uint64_t session_id, const message::MessageRef& message)
         -> base::Result<bool> override {
+        return EnqueueSendBorrowedWithEnvelope(session_id, message, {});
+    }
+
+    auto EnqueueSendBorrowedWithEnvelope(
+        std::uint64_t session_id,
+        const message::MessageRef& message,
+        session::SessionSendEnvelopeView envelope) -> base::Result<bool> override {
         if (g_inline_borrow_send_sink != this) {
             return false;
         }
@@ -211,6 +230,59 @@ class LiveInitiator::CommandSink final : public session::SessionCommandSink {
                 .kind = OutboundCommandKind::kSendApplication,
                 .session_id = session_id,
                 .message = message,
+                .encoded_message = {},
+                .envelope = session::SessionSendEnvelopeRef(envelope),
+                .text = {},
+            })) {
+            return base::Status::IoError("runtime outbound command queue is full");
+        }
+        owner_->SignalWorkerWakeup(worker_id_);
+        return true;
+    }
+
+    auto EnqueueSendEncoded(
+        std::uint64_t session_id,
+        session::EncodedApplicationMessageRef message) -> base::Status override {
+        return EnqueueSendEncodedWithEnvelope(session_id, std::move(message), {});
+    }
+
+    auto EnqueueSendEncodedWithEnvelope(
+        std::uint64_t session_id,
+        session::EncodedApplicationMessageRef message,
+        session::SessionSendEnvelopeRef envelope) -> base::Status override {
+        if (!queue_.TryPush(OutboundCommand{
+                .kind = OutboundCommandKind::kSendEncodedApplication,
+                .session_id = session_id,
+                .message = {},
+                .encoded_message = std::move(message),
+                .envelope = std::move(envelope),
+                .text = {},
+            })) {
+            return base::Status::IoError("runtime outbound command queue is full");
+        }
+        owner_->SignalWorkerWakeup(worker_id_);
+        return base::Status::Ok();
+    }
+
+    auto EnqueueSendEncodedBorrowed(
+        std::uint64_t session_id,
+        const session::EncodedApplicationMessageRef& message) -> base::Result<bool> override {
+        return EnqueueSendEncodedBorrowedWithEnvelope(session_id, message, {});
+    }
+
+    auto EnqueueSendEncodedBorrowedWithEnvelope(
+        std::uint64_t session_id,
+        const session::EncodedApplicationMessageRef& message,
+        session::SessionSendEnvelopeView envelope) -> base::Result<bool> override {
+        if (g_inline_borrow_send_sink != this) {
+            return false;
+        }
+        if (!queue_.TryPush(OutboundCommand{
+                .kind = OutboundCommandKind::kSendEncodedApplication,
+                .session_id = session_id,
+                .message = {},
+                .encoded_message = message,
+                .envelope = session::SessionSendEnvelopeRef(envelope),
                 .text = {},
             })) {
             return base::Status::IoError("runtime outbound command queue is full");
@@ -232,6 +304,7 @@ class LiveInitiator::CommandSink final : public session::SessionCommandSink {
                 .kind = OutboundCommandKind::kBeginLogout,
                 .session_id = session_id,
                 .message = {},
+                .envelope = {},
                 .text = std::move(text),
             })) {
             return base::Status::IoError("runtime outbound command queue is full");
@@ -1749,7 +1822,15 @@ auto LiveInitiator::DrainWorkerCommands(std::uint32_t worker_id, std::uint64_t t
             continue;
         }
 
-        auto outbound = connection->session->protocol->SendApplication(command->message, timestamp_ns);
+        auto outbound = command->kind == OutboundCommandKind::kSendEncodedApplication
+            ? connection->session->protocol->SendEncodedApplication(
+                  command->encoded_message,
+                  timestamp_ns,
+                  command->envelope.view())
+            : connection->session->protocol->SendApplication(
+                  command->message,
+                  timestamp_ns,
+                  command->envelope.view());
         if (!outbound.ok()) {
             return outbound.status();
         }

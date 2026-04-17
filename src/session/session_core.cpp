@@ -26,8 +26,6 @@ auto SessionKeyHash::operator()(const SessionKey& key) const -> std::size_t {
     std::size_t seed = std::hash<std::string>{}(key.begin_string);
     seed = CombineHash(seed, std::hash<std::string>{}(key.sender_comp_id));
     seed = CombineHash(seed, std::hash<std::string>{}(key.target_comp_id));
-    seed = CombineHash(seed, HashOptional(key.sender_sub_id));
-    seed = CombineHash(seed, HashOptional(key.target_sub_id));
     seed = CombineHash(seed, HashOptional(key.sender_location_id));
     seed = CombineHash(seed, HashOptional(key.target_location_id));
     seed = CombineHash(seed, HashOptional(key.session_qualifier));

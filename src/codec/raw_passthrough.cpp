@@ -350,18 +350,20 @@ auto EncodeReplay(
     const auto body_start = out.size();
 
     const auto replay_default_appl_ver_id = ResolveReplayDefaultApplVerID(stored, options);
+    const auto replay_sender_sub_id = ResolveReplayString(options.sender_sub_id, stored.sender_sub_id);
+    const auto replay_target_sub_id = ResolveReplayString(options.target_sub_id, stored.target_sub_id);
     const auto replay_on_behalf_of = ResolveReplayString(options.on_behalf_of_comp_id, stored.on_behalf_of_comp_id);
     const auto replay_deliver_to = ResolveReplayString(options.deliver_to_comp_id, stored.deliver_to_comp_id);
 
     AppendStringField(out, kMsgTypePrefix, stored.msg_type, soh);
     AppendCountField(out, kMsgSeqNumPrefix, options.msg_seq_num, soh);
     AppendStringField(out, kSenderCompIDPrefix, options.sender_comp_id, soh);
-    if (!options.sender_sub_id.empty()) {
-        AppendStringField(out, kSenderSubIDPrefix, options.sender_sub_id, soh);
+    if (!replay_sender_sub_id.empty()) {
+        AppendStringField(out, kSenderSubIDPrefix, replay_sender_sub_id, soh);
     }
     AppendStringField(out, kTargetCompIDPrefix, options.target_comp_id, soh);
-    if (!options.target_sub_id.empty()) {
-        AppendStringField(out, kTargetSubIDPrefix, options.target_sub_id, soh);
+    if (!replay_target_sub_id.empty()) {
+        AppendStringField(out, kTargetSubIDPrefix, replay_target_sub_id, soh);
     }
     AppendStringField(out, kSendingTimePrefix, options.sending_time, soh);
     if (!replay_default_appl_ver_id.empty()) {
@@ -429,13 +431,15 @@ auto EncodeReplayInto(
 
     const char soh = options.delimiter == '\0' ? kFixSoh : options.delimiter;
     const auto replay_default_appl_ver_id = ResolveReplayDefaultApplVerID(stored, options);
+    const auto replay_sender_sub_id = ResolveReplayString(options.sender_sub_id, stored.sender_sub_id);
+    const auto replay_target_sub_id = ResolveReplayString(options.target_sub_id, stored.target_sub_id);
     const auto replay_on_behalf_of = ResolveReplayString(options.on_behalf_of_comp_id, stored.on_behalf_of_comp_id);
     const auto replay_deliver_to = ResolveReplayString(options.deliver_to_comp_id, stored.deliver_to_comp_id);
 
     // Estimate buffer size: header + trailer, plus body if not zero-copy
     const auto estimated_size = 128U + options.sender_comp_id.size() +
-        options.sender_sub_id.size() + options.target_comp_id.size() +
-        options.target_sub_id.size() + options.begin_string.size() +
+        replay_sender_sub_id.size() + options.target_comp_id.size() +
+        replay_target_sub_id.size() + options.begin_string.size() +
         replay_default_appl_ver_id.size() + replay_on_behalf_of.size() +
         replay_deliver_to.size() + options.sending_time.size() +
         options.orig_sending_time.size() + stored.msg_type.size() +
@@ -500,17 +504,17 @@ auto EncodeReplayInto(
     append_sv(kSenderCompIDPrefix);
     append_sv(options.sender_comp_id);
     append_char(soh);
-    if (!options.sender_sub_id.empty()) {
+    if (!replay_sender_sub_id.empty()) {
         append_sv(kSenderSubIDPrefix);
-        append_sv(options.sender_sub_id);
+        append_sv(replay_sender_sub_id);
         append_char(soh);
     }
     append_sv(kTargetCompIDPrefix);
     append_sv(options.target_comp_id);
     append_char(soh);
-    if (!options.target_sub_id.empty()) {
+    if (!replay_target_sub_id.empty()) {
         append_sv(kTargetSubIDPrefix);
-        append_sv(options.target_sub_id);
+        append_sv(replay_target_sub_id);
         append_char(soh);
     }
     append_sv(kSendingTimePrefix);

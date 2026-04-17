@@ -129,6 +129,7 @@ struct SessionHeaderView {
 struct EncodeOptions {
     std::string begin_string{"FIX.4.4"};
     std::string sender_comp_id;
+    // Optional per-message session envelope fields. Leave empty to omit tags 50/57.
     std::string sender_sub_id;
     std::string target_comp_id;
     std::string target_sub_id;

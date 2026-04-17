@@ -38,7 +38,159 @@ auto ActivateAcceptorSession(
     fastfix::session::AdminProtocol* protocol,
     const fastfix::profile::NormalizedDictionaryView& dictionary,
     std::string begin_string,
-    std::string default_appl_ver_id = {}) -> fastfix::base::Status {
+    std::string default_appl_ver_id = {}) -> fastfix::base::Status;
+
+TEST_CASE("admin protocol sends pre-encoded application payload", "[admin-protocol]") {
+    auto dictionary = fastfix::tests::LoadFix44DictionaryView();
+    if (!dictionary.ok()) {
+        SKIP("FIX44 artifact not available: " << dictionary.status().message());
+    }
+
+    fastfix::store::MemorySessionStore store;
+    fastfix::session::AdminProtocol protocol(
+        fastfix::session::AdminProtocolConfig{
+            .session = fastfix::session::SessionConfig{
+                .session_id = 5004U,
+                .key = fastfix::session::SessionKey{"FIX.4.4", "SELL", "BUY"},
+                .profile_id = dictionary.value().profile().header().profile_id,
+                .heartbeat_interval_seconds = 30U,
+                .is_initiator = false,
+            },
+            .begin_string = "FIX.4.4",
+            .sender_comp_id = "SELL",
+            .target_comp_id = "BUY",
+            .heartbeat_interval_seconds = 30U,
+        },
+        dictionary.value(),
+        &store);
+
+    REQUIRE(protocol.OnTransportConnected(1U).ok());
+    REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
+
+    const auto encoded_body = fastfix::tests::Bytes("11=ORD-ENC\x01" "55=AAPL\x01");
+    fastfix::session::EncodedApplicationMessage encoded(
+        "D",
+        std::span<const std::byte>(encoded_body.data(), encoded_body.size()));
+
+    auto outbound = protocol.SendEncodedApplication(
+        encoded,
+        100U,
+        {.sender_sub_id = "DESK-ENC", .target_sub_id = "ROUTE-ENC"});
+    REQUIRE(outbound.ok());
+
+    auto decoded = fastfix::codec::DecodeFixMessage(outbound.value().bytes, dictionary.value());
+    REQUIRE(decoded.ok());
+    REQUIRE(decoded.value().header.msg_type == "D");
+    REQUIRE(decoded.value().header.msg_seq_num == 2U);
+    REQUIRE(decoded.value().header.sender_sub_id == "DESK-ENC");
+    REQUIRE(decoded.value().header.target_sub_id == "ROUTE-ENC");
+    REQUIRE(decoded.value().message.view().get_string(kClOrdID).value() == "ORD-ENC");
+    REQUIRE(decoded.value().message.view().get_string(kSymbol).value() == "AAPL");
+
+    auto stored = store.LoadOutboundRange(5004U, 2U, 2U);
+    REQUIRE(stored.ok());
+    REQUIRE(stored.value().size() == 1U);
+    REQUIRE(stored.value().front().payload == std::vector<std::byte>(
+        outbound.value().bytes.view().begin(),
+        outbound.value().bytes.view().end()));
+
+    fastfix::message::MessageBuilder resend_builder("2");
+    resend_builder.set_string(kMsgType, "2").set_int(kBeginSeqNo, 2).set_int(kEndSeqNo, 2);
+    auto inbound = EncodeInboundFrame(
+        std::move(resend_builder).build(),
+        dictionary.value(),
+        "FIX.4.4",
+        "BUY",
+        "SELL",
+        2U,
+        false);
+    REQUIRE(inbound.ok());
+
+    auto event = protocol.OnInbound(inbound.value(), 200U);
+    REQUIRE(event.ok());
+    REQUIRE(event.value().outbound_frames.size() == 1U);
+
+    auto replay = fastfix::codec::DecodeFixMessage(event.value().outbound_frames.front().bytes, dictionary.value());
+    REQUIRE(replay.ok());
+    REQUIRE(replay.value().header.msg_type == "D");
+    REQUIRE(replay.value().header.sender_sub_id == "DESK-ENC");
+    REQUIRE(replay.value().header.target_sub_id == "ROUTE-ENC");
+    REQUIRE(replay.value().message.view().get_string(kClOrdID).value() == "ORD-ENC");
+    REQUIRE(replay.value().message.view().get_string(kSymbol).value() == "AAPL");
+}
+
+TEST_CASE("admin protocol treats SenderSubID and TargetSubID as per-message envelope", "[admin-protocol]") {
+    auto dictionary = fastfix::tests::LoadFix44DictionaryView();
+    if (!dictionary.ok()) {
+        SKIP("FIX44 artifact not available: " << dictionary.status().message());
+    }
+
+    fastfix::store::MemorySessionStore store;
+    fastfix::session::AdminProtocol protocol(
+        fastfix::session::AdminProtocolConfig{
+            .session = fastfix::session::SessionConfig{
+                .session_id = 5005U,
+                .key = fastfix::session::SessionKey{"FIX.4.4", "SELL", "BUY"},
+                .profile_id = dictionary.value().profile().header().profile_id,
+                .heartbeat_interval_seconds = 30U,
+                .is_initiator = false,
+            },
+            .begin_string = "FIX.4.4",
+            .sender_comp_id = "SELL",
+            .target_comp_id = "BUY",
+            .heartbeat_interval_seconds = 30U,
+        },
+        dictionary.value(),
+        &store);
+
+    REQUIRE(protocol.OnTransportConnected(1U).ok());
+    REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
+
+    fastfix::message::MessageBuilder first_builder("D");
+    first_builder.set_string(kMsgType, "D").set_string(kClOrdID, "ORD-A");
+    auto first = protocol.SendApplication(
+        std::move(first_builder).build(),
+        100U,
+        {.sender_sub_id = "DESK-A", .target_sub_id = "ROUTE-A"});
+    REQUIRE(first.ok());
+
+    fastfix::message::MessageBuilder second_builder("D");
+    second_builder.set_string(kMsgType, "D").set_string(kClOrdID, "ORD-B");
+    auto second = protocol.SendApplication(
+        std::move(second_builder).build(),
+        110U,
+        {.sender_sub_id = "DESK-B", .target_sub_id = "ROUTE-B"});
+    REQUIRE(second.ok());
+
+    fastfix::message::MessageBuilder third_builder("D");
+    third_builder.set_string(kMsgType, "D").set_string(kClOrdID, "ORD-C");
+    auto third = protocol.SendApplication(std::move(third_builder).build(), 120U);
+    REQUIRE(third.ok());
+
+    auto decoded_first = fastfix::codec::DecodeFixMessage(first.value().bytes, dictionary.value());
+    auto decoded_second = fastfix::codec::DecodeFixMessage(second.value().bytes, dictionary.value());
+    auto decoded_third = fastfix::codec::DecodeFixMessage(third.value().bytes, dictionary.value());
+    REQUIRE(decoded_first.ok());
+    REQUIRE(decoded_second.ok());
+    REQUIRE(decoded_third.ok());
+
+    REQUIRE(decoded_first.value().header.msg_seq_num == 2U);
+    REQUIRE(decoded_second.value().header.msg_seq_num == 3U);
+    REQUIRE(decoded_third.value().header.msg_seq_num == 4U);
+
+    REQUIRE(decoded_first.value().header.sender_sub_id == "DESK-A");
+    REQUIRE(decoded_first.value().header.target_sub_id == "ROUTE-A");
+    REQUIRE(decoded_second.value().header.sender_sub_id == "DESK-B");
+    REQUIRE(decoded_second.value().header.target_sub_id == "ROUTE-B");
+    REQUIRE(decoded_third.value().header.sender_sub_id.empty());
+    REQUIRE(decoded_third.value().header.target_sub_id.empty());
+}
+
+auto ActivateAcceptorSession(
+    fastfix::session::AdminProtocol* protocol,
+    const fastfix::profile::NormalizedDictionaryView& dictionary,
+    std::string begin_string,
+    std::string default_appl_ver_id) -> fastfix::base::Status {
     fastfix::message::MessageBuilder logon_builder("A");
     logon_builder.set_string(kMsgType, "A").set_int(kEncryptMethod, 0).set_int(kHeartBtInt, 30);
     auto inbound = EncodeInboundFrame(

@@ -38,6 +38,82 @@ class OwnedOnlyCommandSink final : public fastfix::session::SessionCommandSink {
     std::uint64_t enqueued_{0};
 };
 
+class EncodedCommandSink final : public fastfix::session::SessionCommandSink {
+  public:
+    auto EnqueueSend(std::uint64_t session_id, fastfix::message::MessageRef message) -> fastfix::base::Status override {
+        return EnqueueSendWithEnvelope(session_id, std::move(message), {});
+    }
+
+    auto EnqueueSendWithEnvelope(
+        std::uint64_t session_id,
+        fastfix::message::MessageRef message,
+        fastfix::session::SessionSendEnvelopeRef envelope) -> fastfix::base::Status override {
+        last_session_id_ = session_id;
+        last_message_ = std::move(message);
+        last_plain_envelope_ = std::move(envelope);
+        ++plain_enqueued_;
+        return fastfix::base::Status::Ok();
+    }
+
+    auto EnqueueSendEncoded(
+        std::uint64_t session_id,
+        fastfix::session::EncodedApplicationMessageRef message) -> fastfix::base::Status override {
+        return EnqueueSendEncodedWithEnvelope(session_id, std::move(message), {});
+    }
+
+    auto EnqueueSendEncodedWithEnvelope(
+        std::uint64_t session_id,
+        fastfix::session::EncodedApplicationMessageRef message,
+        fastfix::session::SessionSendEnvelopeRef envelope) -> fastfix::base::Status override {
+        last_session_id_ = session_id;
+        last_encoded_message_ = std::move(message);
+        last_encoded_envelope_ = std::move(envelope);
+        ++encoded_enqueued_;
+        return fastfix::base::Status::Ok();
+    }
+
+    auto LoadSnapshot(std::uint64_t session_id) const -> fastfix::base::Result<fastfix::session::SessionSnapshot> override {
+        (void)session_id;
+        return fastfix::base::Status::InvalidArgument("snapshot unsupported in test sink");
+    }
+
+    auto Subscribe(std::uint64_t session_id, std::size_t queue_capacity)
+        -> fastfix::base::Result<fastfix::session::SessionSubscription> override {
+        (void)session_id;
+        (void)queue_capacity;
+        return fastfix::base::Status::InvalidArgument("subscribe unsupported in test sink");
+    }
+
+    [[nodiscard]] auto plain_enqueued() const -> std::uint64_t {
+        return plain_enqueued_;
+    }
+
+    [[nodiscard]] auto encoded_enqueued() const -> std::uint64_t {
+        return encoded_enqueued_;
+    }
+
+    [[nodiscard]] auto last_plain_envelope() const -> fastfix::session::SessionSendEnvelopeView {
+        return last_plain_envelope_.view();
+    }
+
+    [[nodiscard]] auto last_encoded_view() const -> fastfix::session::EncodedApplicationMessageView {
+        return last_encoded_message_.view();
+    }
+
+    [[nodiscard]] auto last_encoded_envelope() const -> fastfix::session::SessionSendEnvelopeView {
+        return last_encoded_envelope_.view();
+    }
+
+  private:
+    std::uint64_t last_session_id_{0};
+    fastfix::message::MessageRef last_message_{};
+    fastfix::session::EncodedApplicationMessageRef last_encoded_message_{};
+    fastfix::session::SessionSendEnvelopeRef last_plain_envelope_{};
+    fastfix::session::SessionSendEnvelopeRef last_encoded_envelope_{};
+    std::uint64_t plain_enqueued_{0};
+    std::uint64_t encoded_enqueued_{0};
+};
+
 auto MakeEvent(
     std::uint64_t session_id,
     std::uint32_t worker_id,
@@ -186,6 +262,41 @@ TEST_CASE("application-queue", "[application-queue]") {
 
         REQUIRE(handle.Send(message.view()).ok());
         REQUIRE(sink->enqueued() == 1U);
+    }
+
+    SECTION("encoded command sink") {
+        auto sink = std::make_shared<EncodedCommandSink>();
+        fastfix::session::SessionHandle handle(4002U, 0U, sink);
+
+        fastfix::message::MessageBuilder plain_builder("D");
+        plain_builder.set_string(fastfix::codec::tags::kMsgType, "D");
+        plain_builder.set_string(fastfix::codec::tags::kClOrdID, "ORD-PLAIN");
+        auto plain_message = std::move(plain_builder).build();
+
+        REQUIRE(handle.Send(plain_message.view(), {.sender_sub_id = "DESK-1", .target_sub_id = "ROUTE-1"}).ok());
+        REQUIRE(sink->plain_enqueued() == 1U);
+        REQUIRE(sink->last_plain_envelope().sender_sub_id == "DESK-1");
+        REQUIRE(sink->last_plain_envelope().target_sub_id == "ROUTE-1");
+
+        const auto encoded_body = fastfix::tests::Bytes("11=ORD-ENC\x01" "55=AAPL\x01");
+        fastfix::session::EncodedApplicationMessage encoded(
+            "D",
+            std::span<const std::byte>(encoded_body.data(), encoded_body.size()));
+
+        REQUIRE(handle.SendEncoded(encoded, {.sender_sub_id = "DESK-9", .target_sub_id = "ROUTE-7"}).ok());
+        REQUIRE(sink->plain_enqueued() == 1U);
+        REQUIRE(sink->encoded_enqueued() == 1U);
+        REQUIRE(sink->last_encoded_view().msg_type == "D");
+        REQUIRE(sink->last_encoded_view().body.size() == encoded_body.size());
+        REQUIRE(sink->last_encoded_envelope().sender_sub_id == "DESK-9");
+        REQUIRE(sink->last_encoded_envelope().target_sub_id == "ROUTE-7");
+
+        const auto borrowed = handle.SendEncodedBorrowed(fastfix::session::EncodedApplicationMessageView{
+            .msg_type = "D",
+            .body = std::span<const std::byte>(encoded_body.data(), encoded_body.size()),
+        }, {.sender_sub_id = "DESK-2"});
+        REQUIRE(borrowed.code() == fastfix::base::ErrorCode::kInvalidArgument);
+        REQUIRE(sink->encoded_enqueued() == 1U);
     }
 
 }

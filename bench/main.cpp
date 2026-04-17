@@ -22,6 +22,7 @@
 
 #include "fastfix/codec/compiled_decoder.h"
 #include "fastfix/codec/fix_codec.h"
+#include "fastfix/codec/raw_passthrough.h"
 #include "fastfix/message/message.h"
 #include "fastfix/message/fixed_layout_writer.h"
 #include "fastfix/profile/normalized_dictionary.h"
@@ -244,6 +245,38 @@ auto BuildFrame(
     options.default_appl_ver_id = std::move(default_appl_ver_id);
     options.msg_seq_num = msg_seq_num;
     return fastfix::codec::EncodeFixMessage(message, dictionary, options);
+}
+
+auto BuildPreEncodedApplicationMessage(
+    const fastfix::message::Message& message,
+    const fastfix::profile::NormalizedDictionaryView& dictionary,
+    std::string begin_string,
+    std::string sender_comp_id,
+    std::string sender_sub_id,
+    std::string target_comp_id,
+    std::string target_sub_id,
+    std::string default_appl_ver_id) -> fastfix::base::Result<fastfix::session::EncodedApplicationMessage> {
+    fastfix::codec::EncodeOptions options;
+    options.begin_string = std::move(begin_string);
+    options.sender_comp_id = std::move(sender_comp_id);
+    options.sender_sub_id = std::move(sender_sub_id);
+    options.target_comp_id = std::move(target_comp_id);
+    options.target_sub_id = std::move(target_sub_id);
+    options.default_appl_ver_id = std::move(default_appl_ver_id);
+    options.msg_seq_num = 2U;
+    options.sending_time = "20260417-12:34:56.789";
+
+    auto frame = fastfix::codec::EncodeFixMessage(message, dictionary, options);
+    if (!frame.ok()) {
+        return frame.status();
+    }
+
+    auto decoded = fastfix::codec::DecodeRawPassThrough(std::span<const std::byte>(frame.value().data(), frame.value().size()));
+    if (!decoded.ok()) {
+        return decoded.status();
+    }
+
+    return fastfix::session::EncodedApplicationMessage(decoded.value().msg_type, decoded.value().raw_body);
 }
 
 auto TotalFrameBytes(const std::vector<std::vector<std::byte>>& frames) -> std::size_t {
@@ -827,6 +860,127 @@ auto RunSessionBenchmark(
     return result;
 }
 
+auto RunSessionOutboundBenchmark(
+    const fastfix::profile::NormalizedDictionaryView& dictionary,
+    std::uint32_t iterations,
+    std::string begin_string,
+    std::string default_appl_ver_id,
+    bool pre_encoded) -> fastfix::base::Result<BenchmarkResult> {
+    fastfix::store::MemorySessionStore acceptor_store;
+    fastfix::store::MemorySessionStore initiator_store;
+    fastfix::session::AdminProtocol acceptor(
+        fastfix::session::AdminProtocolConfig{
+            .session = fastfix::session::SessionConfig{
+                .session_id = 422U,
+                .key = fastfix::session::SessionKey{begin_string, "SELL", "BUY"},
+                .profile_id = dictionary.profile().header().profile_id,
+                .default_appl_ver_id = default_appl_ver_id,
+                .heartbeat_interval_seconds = 30U,
+                .is_initiator = false,
+            },
+            .begin_string = begin_string,
+            .sender_comp_id = "SELL",
+            .target_comp_id = "BUY",
+            .default_appl_ver_id = default_appl_ver_id,
+            .heartbeat_interval_seconds = 30U,
+        },
+        dictionary,
+        &acceptor_store);
+    fastfix::session::AdminProtocol initiator(
+        fastfix::session::AdminProtocolConfig{
+            .session = fastfix::session::SessionConfig{
+                .session_id = 242U,
+                .key = fastfix::session::SessionKey{begin_string, "BUY", "SELL"},
+                .profile_id = dictionary.profile().header().profile_id,
+                .default_appl_ver_id = default_appl_ver_id,
+                .heartbeat_interval_seconds = 30U,
+                .is_initiator = true,
+            },
+            .begin_string = begin_string,
+            .sender_comp_id = "BUY",
+            .target_comp_id = "SELL",
+            .default_appl_ver_id = default_appl_ver_id,
+            .heartbeat_interval_seconds = 30U,
+        },
+        dictionary,
+        &initiator_store);
+
+    auto status = ActivateProtocolPair(initiator, acceptor);
+    if (!status.ok()) {
+        return status;
+    }
+
+    const auto sample = BuildSampleMessage();
+    fastfix::message::Message augmented_sample;
+    const auto& bench_message = [&]() -> const fastfix::message::Message& {
+        if (dictionary.find_field(5001U) != nullptr) {
+            fastfix::message::MessageBuilder builder{"D"};
+            PopulateFix44MessageBuilder(builder, BuildFix44BusinessOrder());
+            builder.set(5001U, "L");
+            augmented_sample = std::move(builder).build();
+            return augmented_sample;
+        }
+        return sample;
+    }();
+
+    const fastfix::session::SessionSendEnvelope envelope{"DESK-9", "ROUTE-7"};
+    fastfix::codec::EncodeOptions reserve_options;
+    reserve_options.begin_string = begin_string;
+    reserve_options.sender_comp_id = "BUY";
+    reserve_options.sender_sub_id = envelope.sender_sub_id;
+    reserve_options.target_comp_id = "SELL";
+    reserve_options.target_sub_id = envelope.target_sub_id;
+    reserve_options.default_appl_ver_id = default_appl_ver_id;
+    reserve_options.msg_seq_num = 2U;
+    reserve_options.sending_time = "20260417-12:34:56.789";
+    auto reserved_frame = fastfix::codec::EncodeFixMessage(bench_message, dictionary, reserve_options);
+    if (!reserved_frame.ok()) {
+        return reserved_frame.status();
+    }
+    initiator_store.ReserveAdditionalSessionStorage(
+        242U,
+        iterations,
+        0U,
+        reserved_frame.value().size() * static_cast<std::size_t>(iterations));
+
+    fastfix::session::EncodedApplicationMessage encoded_message;
+    if (pre_encoded) {
+        auto prepared = BuildPreEncodedApplicationMessage(
+            bench_message,
+            dictionary,
+            begin_string,
+            "BUY",
+            envelope.sender_sub_id,
+            "SELL",
+            envelope.target_sub_id,
+            default_appl_ver_id);
+        if (!prepared.ok()) {
+            return prepared.status();
+        }
+        encoded_message = std::move(prepared).value();
+    }
+
+    BenchmarkResult result;
+    result.samples_ns.reserve(iterations);
+    result.work_label = "messages";
+
+    BenchmarkMeasurement measurement;
+    for (std::uint32_t index = 0; index < iterations; ++index) {
+        const auto started = std::chrono::steady_clock::now();
+        auto outbound = pre_encoded
+            ? initiator.SendEncodedApplication(encoded_message, 10'000U + index, envelope.view())
+            : initiator.SendApplication(bench_message, 10'000U + index, envelope.view());
+        const auto finished = std::chrono::steady_clock::now();
+        if (!outbound.ok()) {
+            return outbound.status();
+        }
+        result.samples_ns.push_back(DurationNs(started, finished));
+        ++result.work_count;
+    }
+    measurement.Finish(result);
+    return result;
+}
+
 }  // namespace
 
 #if defined(_MSC_VER)
@@ -1063,6 +1217,20 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    auto session_outbound =
+        RunSessionOutboundBenchmark(dictionary.value(), iterations, begin_string, default_appl_ver_id, false);
+    if (!session_outbound.ok()) {
+        std::cerr << session_outbound.status().message() << '\n';
+        return 1;
+    }
+
+    auto session_outbound_pre_encoded =
+        RunSessionOutboundBenchmark(dictionary.value(), iterations, begin_string, default_appl_ver_id, true);
+    if (!session_outbound_pre_encoded.ok()) {
+        std::cerr << session_outbound_pre_encoded.status().message() << '\n';
+        return 1;
+    }
+
     // --- Shared benchmarks (aligned with QuickFIX compare order) ---
     std::vector<LabeledResult> results;
     results.push_back({"encode", std::move(encode_result).value()});
@@ -1097,6 +1265,9 @@ int main(int argc, char** argv) {
     }
 
     // --- FastFix-only benchmarks ---
+    results.push_back({"session-outbound", std::move(session_outbound).value()});
+    results.push_back({"session-outbound-pre-encoded", std::move(session_outbound_pre_encoded).value()});
+
     BenchmarkResult peek_result;
     peek_result.samples_ns.reserve(iterations);
     BenchmarkMeasurement peek_measurement;

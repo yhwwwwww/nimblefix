@@ -715,8 +715,10 @@ Typed API 可在此基础上包装成更具体的类型化 entry view。
 - Transport BeginString 或 transport profile
 - SenderCompID
 - TargetCompID
-- 可选 SubID / LocationID
+- 可选 LocationID
 - 可选 SessionQualifier
+
+`SenderSubID(50)` / `TargetSubID(57)` 不属于 `SessionKey`。它们是每消息可选的 session envelope 参数：调用方提供则写入 header，未提供则省略，同一 session 可以发送不同的 `50/57`。
 
 内部建议以规范化后的 `SessionKey` 做唯一键。
 

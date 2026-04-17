@@ -61,6 +61,8 @@ flowchart LR
 	B --> C["wire frame bytes<br/>EncodeBuffer"]
 	C -->|peek| D["PeekSessionHeaderView"]
 	C -->|parse| E["DecodeFixMessageView<br/>MessageView + validation"]
+	A -->|session-outbound| M["AdminProtocol::SendApplication<br/>full outbound session encode"]
+	A -->|session-outbound-pre-encoded| N["EncodedApplicationMessage<br/>+ AdminProtocol::SendEncodedApplication"]
 	C -->|session-inbound| F["AdminProtocol::OnInbound<br/>ProtocolEvent"]
 	G["preloaded outbound history<br/>in SessionStore"] --> H["ResendRequest frame"]
 	H -->|replay| I["ProtocolEvent.outbound_frames"]
@@ -91,9 +93,13 @@ Encode comparisons start from the same neutral business object. Both engines pin
 | `encode` | immediately before `writer.clear()` and field assignment on the generated `NewOrderSingleWriter` | after `writer.encode_to_buffer(...)` completes | field population, repeating-group population, frame serialization, BodyLength backfill, checksum append |
 | `peek` | immediately before `PeekSessionHeaderView(sample_frame)` | when the header view is returned | raw-frame header extraction only |
 | `parse` | immediately before `DecodeFixMessageView(sample_frame)` | when decoded `MessageView` + validation are available | full wire decode, validation, group handling |
+| `session-outbound` | immediately before `initiator.SendApplication(sample, ts, envelope)` | when `AdminProtocol` returns the encoded outbound frame | outbound seq allocation, full business-field serialization, session header/trailer assembly, store write |
+| `session-outbound-pre-encoded` | immediately before `initiator.SendEncodedApplication(encoded_body, ts, envelope)` | when `AdminProtocol` returns the encoded outbound frame | outbound seq allocation, session-managed header/trailer finalization, store write; excludes business-field serialization because the application body is pre-encoded |
 | `session-inbound` | immediately before `acceptor.OnInbound(std::move(frame), NowNs())` | when `ProtocolEvent` returns | full inbound decode, sequence validation, admin/session handling, store write, app-message extraction |
 | `replay` | immediately before `acceptor.OnInbound(std::move(resend_request), NowNs())` | when `ProtocolEvent.outbound_frames` returns | ResendRequest handling, store-backed replay generation for `replay_span` messages |
 | `loopback-roundtrip` | immediately before the live initiator submits the `NewOrderSingle` | when the initiator receives the `ExecutionReport` ack | full TCP round-trip, both runtimes, both protocol stacks |
+
+The outbound pair intentionally uses the same session setup, the same optional `50/57` envelope values, and the same persistence path. The only intended delta is whether the business body is serialized inside the timed region (`session-outbound`) or supplied as a pre-encoded application payload (`session-outbound-pre-encoded`).
 
 ### QuickFIX Metrics
 

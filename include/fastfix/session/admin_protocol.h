@@ -19,6 +19,7 @@
 #include "fastfix/message/message.h"
 #include "fastfix/profile/normalized_dictionary.h"
 #include "fastfix/session/session_core.h"
+#include "fastfix/session/session_send_envelope.h"
 #include "fastfix/session/transport_profile.h"
 #include "fastfix/session/validation_policy.h"
 #include "fastfix/store/session_store.h"
@@ -484,9 +485,30 @@ class AdminProtocol {
     auto OnInbound(const codec::DecodedMessageView& decoded, std::uint64_t timestamp_ns) -> base::Result<ProtocolEvent>;
     auto OnTimer(std::uint64_t timestamp_ns) -> base::Result<ProtocolEvent>;
     [[nodiscard]] auto NextTimerDeadline(std::uint64_t timestamp_ns) const -> std::optional<std::uint64_t>;
-    auto SendApplication(const message::Message& message, std::uint64_t timestamp_ns) -> base::Result<EncodedFrame>;
-    auto SendApplication(message::MessageView message, std::uint64_t timestamp_ns) -> base::Result<EncodedFrame>;
-    auto SendApplication(const message::MessageRef& message, std::uint64_t timestamp_ns) -> base::Result<EncodedFrame>;
+    auto SendApplication(
+        const message::Message& message,
+        std::uint64_t timestamp_ns,
+        SessionSendEnvelopeView envelope = {}) -> base::Result<EncodedFrame>;
+    auto SendApplication(
+        message::MessageView message,
+        std::uint64_t timestamp_ns,
+        SessionSendEnvelopeView envelope = {}) -> base::Result<EncodedFrame>;
+    auto SendApplication(
+        const message::MessageRef& message,
+        std::uint64_t timestamp_ns,
+        SessionSendEnvelopeView envelope = {}) -> base::Result<EncodedFrame>;
+    auto SendEncodedApplication(
+        const EncodedApplicationMessage& message,
+        std::uint64_t timestamp_ns,
+        SessionSendEnvelopeView envelope = {}) -> base::Result<EncodedFrame>;
+    auto SendEncodedApplication(
+        EncodedApplicationMessageView message,
+        std::uint64_t timestamp_ns,
+        SessionSendEnvelopeView envelope = {}) -> base::Result<EncodedFrame>;
+    auto SendEncodedApplication(
+        const EncodedApplicationMessageRef& message,
+        std::uint64_t timestamp_ns,
+        SessionSendEnvelopeView envelope = {}) -> base::Result<EncodedFrame>;
     auto BeginLogout(std::string text, std::uint64_t timestamp_ns) -> base::Result<EncodedFrame>;
     auto ReserveReplayStorage(std::size_t frame_count) -> void;
 
@@ -526,7 +548,8 @@ class AdminProtocol {
         bool allocate_seq,
         std::uint16_t extra_record_flags,
         std::uint32_t seq_override = 0,
-        std::string_view orig_sending_time = {}) -> base::Result<EncodedFrame>;
+        std::string_view orig_sending_time = {},
+        SessionSendEnvelopeView envelope = {}) -> base::Result<EncodedFrame>;
     auto EncodeFrame(
         message::MessageView message,
         bool admin,
@@ -536,7 +559,27 @@ class AdminProtocol {
         bool allocate_seq,
         std::uint16_t extra_record_flags,
         std::uint32_t seq_override = 0,
-        std::string_view orig_sending_time = {}) -> base::Result<EncodedFrame>;
+        std::string_view orig_sending_time = {},
+        SessionSendEnvelopeView envelope = {}) -> base::Result<EncodedFrame>;
+    auto EncodeFrame(
+        EncodedApplicationMessageView message,
+        bool admin,
+        std::uint64_t timestamp_ns,
+        bool persist,
+        bool poss_dup,
+        bool allocate_seq,
+        std::uint16_t extra_record_flags,
+        std::uint32_t seq_override = 0,
+        std::string_view orig_sending_time = {},
+        SessionSendEnvelopeView envelope = {}) -> base::Result<EncodedFrame>;
+    auto FinalizeEncodedFrame(
+        std::string_view msg_type,
+        bool admin,
+        std::uint64_t timestamp_ns,
+        bool persist,
+        bool poss_dup,
+        std::uint16_t extra_record_flags,
+        std::uint32_t seq_num) -> base::Result<EncodedFrame>;
     auto ResolveEncodeTemplate(std::string_view msg_type) -> const codec::FrameEncodeTemplate*;
     auto ReplayOutbound(
         std::uint32_t begin_seq,

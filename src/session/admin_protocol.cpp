@@ -1,11 +1,14 @@
 #include "fastfix/session/admin_protocol.h"
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstring>
 #include <string_view>
 
+#include "fastfix/codec/fast_int_format.h"
 #include "fastfix/codec/fix_tags.h"
+#include "fastfix/codec/simd_scan.h"
 #include "fastfix/message/typed_message.h"
 #include "fastfix/codec/raw_passthrough.h"
 
@@ -170,6 +173,16 @@ auto IsActiveAdminState(SessionState state) -> bool {
            state == SessionState::kResendProcessing;
 }
 
+auto ApplySessionSendEnvelope(
+    codec::EncodeOptions* options,
+    SessionSendEnvelopeView envelope) -> void {
+    if (options == nullptr) {
+        return;
+    }
+    options->sender_sub_id = std::string(envelope.sender_sub_id);
+    options->target_sub_id = std::string(envelope.target_sub_id);
+}
+
 auto AdminPhaseViolationText(SessionState state, std::string_view msg_type) -> std::optional<std::string> {
     if (!IsAdminMessage(msg_type)) {
         return std::nullopt;
@@ -184,6 +197,117 @@ auto AdminPhaseViolationText(SessionState state, std::string_view msg_type) -> s
     }
 
     return std::nullopt;
+}
+
+auto EncodePreEncodedApplicationToBuffer(
+    EncodedApplicationMessageView message,
+    const codec::EncodeOptions& options,
+    codec::EncodeBuffer* buffer) -> base::Status {
+    if (buffer == nullptr) {
+        return base::Status::InvalidArgument("encode buffer is null");
+    }
+    if (!message.valid()) {
+        return base::Status::InvalidArgument("encoded application message is invalid");
+    }
+
+    const char delimiter = options.delimiter == '\0' ? codec::kFixSoh : options.delimiter;
+    auto& out = buffer->storage;
+    out.clear();
+    out.reserve(kInitialEncodeBufferBytes + message.body.size());
+
+    const auto begin_string = options.begin_string.empty()
+        ? std::string_view("FIX.4.4")
+        : std::string_view(options.begin_string);
+
+    out.append(kBeginStringPrefix);
+    out.append(begin_string);
+    out.push_back(delimiter);
+    out.append(kBodyLengthPrefix);
+
+    constexpr std::size_t kBodyLengthPlaceholderWidth = 7U;
+    const auto body_length_offset = out.size();
+    out.append(kBodyLengthPlaceholderWidth, '0');
+    out.push_back(delimiter);
+    const auto body_start = out.size();
+
+    auto append_string_field = [&](std::string_view prefix, std::string_view value) {
+        out.append(prefix);
+        out.append(value);
+        out.push_back(delimiter);
+    };
+    auto append_uint_field = [&](std::string_view prefix, std::uint32_t value) {
+        char buf[10];
+        const auto len = codec::FormatUint32(buf, value);
+        out.append(prefix);
+        out.append(buf, len);
+        out.push_back(delimiter);
+    };
+
+    append_string_field(kMsgTypePrefix, message.msg_type);
+    append_uint_field(kMsgSeqNumPrefix, options.msg_seq_num == 0U ? 1U : options.msg_seq_num);
+    if (!options.sender_comp_id.empty()) {
+        append_string_field(kSenderCompIDPrefix, options.sender_comp_id);
+    }
+    if (!options.sender_sub_id.empty()) {
+        append_string_field(kSenderSubIDPrefix, options.sender_sub_id);
+    }
+    if (!options.target_comp_id.empty()) {
+        append_string_field(kTargetCompIDPrefix, options.target_comp_id);
+    }
+    if (!options.target_sub_id.empty()) {
+        append_string_field(kTargetSubIDPrefix, options.target_sub_id);
+    }
+
+    codec::UtcTimestampBuffer timestamp_buffer;
+    const auto sending_time = options.sending_time.empty()
+        ? codec::CurrentUtcTimestamp(&timestamp_buffer)
+        : options.sending_time;
+    append_string_field(kSendingTimePrefix, sending_time);
+
+    if (message.msg_type == "A" && !options.default_appl_ver_id.empty()) {
+        append_string_field(kDefaultApplVerIDPrefix, options.default_appl_ver_id);
+    }
+    if (options.poss_dup) {
+        out.append(kPossDupFlagYesField);
+        out.push_back(delimiter);
+    }
+    if (options.poss_resend) {
+        out.append(kPossResendYesField);
+        out.push_back(delimiter);
+    }
+    if (!options.orig_sending_time.empty()) {
+        append_string_field(kOrigSendingTimePrefix, options.orig_sending_time);
+    }
+    if (!options.on_behalf_of_comp_id.empty()) {
+        append_string_field(kOnBehalfOfCompIDPrefix, options.on_behalf_of_comp_id);
+    }
+    if (!options.deliver_to_comp_id.empty()) {
+        append_string_field(kDeliverToCompIDPrefix, options.deliver_to_comp_id);
+    }
+    if (!message.body.empty()) {
+        out.append(reinterpret_cast<const char*>(message.body.data()), message.body.size());
+    }
+
+    const auto body_length = static_cast<std::uint32_t>(out.size() - body_start);
+    {
+        char buf[10];
+        const auto len = codec::FormatUint32(buf, body_length);
+        if (len > kBodyLengthPlaceholderWidth) {
+            return base::Status::FormatError("encoded body length exceeds BodyLength placeholder width");
+        }
+        out.replace(body_length_offset, kBodyLengthPlaceholderWidth, buf, len);
+    }
+
+    const auto checksum = codec::ComputeChecksumSIMD(out.data(), out.size()) % 256U;
+    out.append(kCheckSumPrefix);
+    std::array<char, 3> checksum_digits{};
+    checksum_digits[0] = static_cast<char>('0' + ((checksum / 100U) % 10U));
+    checksum_digits[1] = static_cast<char>('0' + ((checksum / 10U) % 10U));
+    checksum_digits[2] = static_cast<char>('0' + (checksum % 10U));
+    out.append(checksum_digits.data(), checksum_digits.size());
+    out.push_back(delimiter);
+
+    return base::Status::Ok();
 }
 
 }  // namespace
@@ -556,7 +680,8 @@ auto AdminProtocol::EncodeFrame(
     bool allocate_seq,
     std::uint16_t extra_record_flags,
     std::uint32_t seq_override,
-    std::string_view orig_sending_time) -> base::Result<EncodedFrame> {
+    std::string_view orig_sending_time,
+    SessionSendEnvelopeView envelope) -> base::Result<EncodedFrame> {
     return EncodeFrame(
         message.view(),
         admin,
@@ -566,7 +691,8 @@ auto AdminProtocol::EncodeFrame(
         allocate_seq,
         extra_record_flags,
         seq_override,
-        std::move(orig_sending_time));
+        std::move(orig_sending_time),
+        envelope);
 }
 
 auto AdminProtocol::EncodeFrame(
@@ -578,7 +704,8 @@ auto AdminProtocol::EncodeFrame(
     bool allocate_seq,
     std::uint16_t extra_record_flags,
     std::uint32_t seq_override,
-    std::string_view orig_sending_time) -> base::Result<EncodedFrame> {
+    std::string_view orig_sending_time,
+    SessionSendEnvelopeView envelope) -> base::Result<EncodedFrame> {
     encode_buffer_.clear();
 
     std::uint32_t seq_num = seq_override;
@@ -598,6 +725,7 @@ auto AdminProtocol::EncodeFrame(
     options.orig_sending_time = orig_sending_time;
     options.msg_seq_num = seq_num;
     options.poss_dup = poss_dup;
+    ApplySessionSendEnvelope(&options, envelope);
 
     const auto msg_type = message.msg_type();
     auto encoded_status = [&]() -> base::Status {
@@ -613,9 +741,61 @@ auto AdminProtocol::EncodeFrame(
         return encoded_status;
     }
 
+    return FinalizeEncodedFrame(msg_type, admin, timestamp_ns, persist, poss_dup, extra_record_flags, seq_num);
+}
+
+auto AdminProtocol::EncodeFrame(
+    EncodedApplicationMessageView message,
+    bool admin,
+    std::uint64_t timestamp_ns,
+    bool persist,
+    bool poss_dup,
+    bool allocate_seq,
+    std::uint16_t extra_record_flags,
+    std::uint32_t seq_override,
+    std::string_view orig_sending_time,
+    SessionSendEnvelopeView envelope) -> base::Result<EncodedFrame> {
+    encode_buffer_.clear();
+
+    std::uint32_t seq_num = seq_override;
+    if (allocate_seq) {
+        auto allocated = session_.AllocateOutboundSeq();
+        if (!allocated.ok()) {
+            return allocated.status();
+        }
+        seq_num = allocated.value();
+    }
+
+    codec::EncodeOptions options;
+    options.begin_string = config_.begin_string;
+    options.sender_comp_id = config_.sender_comp_id;
+    options.target_comp_id = config_.target_comp_id;
+    options.default_appl_ver_id = config_.default_appl_ver_id;
+    options.orig_sending_time = orig_sending_time;
+    options.msg_seq_num = seq_num;
+    options.poss_dup = poss_dup;
+    ApplySessionSendEnvelope(&options, envelope);
+
+    auto encoded_status = EncodePreEncodedApplicationToBuffer(message, options, &encode_buffer_);
+    if (!encoded_status.ok()) {
+        return encoded_status;
+    }
+
+    return FinalizeEncodedFrame(message.msg_type, admin, timestamp_ns, persist, poss_dup, extra_record_flags, seq_num);
+}
+
+auto AdminProtocol::FinalizeEncodedFrame(
+    std::string_view msg_type,
+    bool admin,
+    std::uint64_t timestamp_ns,
+    bool persist,
+    bool poss_dup,
+    std::uint16_t extra_record_flags,
+    std::uint32_t seq_num) -> base::Result<EncodedFrame> {
+
     EncodedFrame encoded_frame;
     encoded_frame.bytes.assign(encode_buffer_.bytes());
-    encoded_frame.msg_type = std::string(message.msg_type());
+    encoded_frame.msg_type = std::string(msg_type);
     encoded_frame.admin = admin;
 
     auto status = session_.RecordOutboundActivity(timestamp_ns);
@@ -1528,7 +1708,10 @@ auto AdminProtocol::NextTimerDeadline(std::uint64_t timestamp_ns) const -> std::
     return deadline;
 }
 
-auto AdminProtocol::SendApplication(const message::Message& message, std::uint64_t timestamp_ns)
+auto AdminProtocol::SendApplication(
+    const message::Message& message,
+    std::uint64_t timestamp_ns,
+    SessionSendEnvelopeView envelope)
     -> base::Result<EncodedFrame> {
     auto status = EnsureInitialized();
     if (!status.ok()) {
@@ -1538,10 +1721,13 @@ auto AdminProtocol::SendApplication(const message::Message& message, std::uint64
     if (session_.state() != SessionState::kActive && session_.state() != SessionState::kAwaitingLogout) {
         return base::Status::InvalidArgument("cannot send application payload on an inactive FIX session");
     }
-    return EncodeFrame(message, false, timestamp_ns, true, false, true, 0U);
+    return EncodeFrame(message, false, timestamp_ns, true, false, true, 0U, 0U, {}, envelope);
 }
 
-auto AdminProtocol::SendApplication(message::MessageView message, std::uint64_t timestamp_ns)
+auto AdminProtocol::SendApplication(
+    message::MessageView message,
+    std::uint64_t timestamp_ns,
+    SessionSendEnvelopeView envelope)
     -> base::Result<EncodedFrame> {
     auto status = EnsureInitialized();
     if (!status.ok()) {
@@ -1551,12 +1737,44 @@ auto AdminProtocol::SendApplication(message::MessageView message, std::uint64_t 
     if (session_.state() != SessionState::kActive && session_.state() != SessionState::kAwaitingLogout) {
         return base::Status::InvalidArgument("cannot send application payload on an inactive FIX session");
     }
-    return EncodeFrame(message, false, timestamp_ns, true, false, true, 0U);
+    return EncodeFrame(message, false, timestamp_ns, true, false, true, 0U, 0U, {}, envelope);
 }
 
-auto AdminProtocol::SendApplication(const message::MessageRef& message, std::uint64_t timestamp_ns)
+auto AdminProtocol::SendApplication(
+    const message::MessageRef& message,
+    std::uint64_t timestamp_ns,
+    SessionSendEnvelopeView envelope)
     -> base::Result<EncodedFrame> {
-    return SendApplication(message.view(), timestamp_ns);
+    return SendApplication(message.view(), timestamp_ns, envelope);
+}
+
+auto AdminProtocol::SendEncodedApplication(
+    const EncodedApplicationMessage& message,
+    std::uint64_t timestamp_ns,
+    SessionSendEnvelopeView envelope) -> base::Result<EncodedFrame> {
+    return SendEncodedApplication(message.view(), timestamp_ns, envelope);
+}
+
+auto AdminProtocol::SendEncodedApplication(
+    EncodedApplicationMessageView message,
+    std::uint64_t timestamp_ns,
+    SessionSendEnvelopeView envelope) -> base::Result<EncodedFrame> {
+    auto status = EnsureInitialized();
+    if (!status.ok()) {
+        return status;
+    }
+
+    if (session_.state() != SessionState::kActive && session_.state() != SessionState::kAwaitingLogout) {
+        return base::Status::InvalidArgument("cannot send application payload on an inactive FIX session");
+    }
+    return EncodeFrame(message, false, timestamp_ns, true, false, true, 0U, 0U, {}, envelope);
+}
+
+auto AdminProtocol::SendEncodedApplication(
+    const EncodedApplicationMessageRef& message,
+    std::uint64_t timestamp_ns,
+    SessionSendEnvelopeView envelope) -> base::Result<EncodedFrame> {
+    return SendEncodedApplication(message.view(), timestamp_ns, envelope);
 }
 
 auto AdminProtocol::BeginLogout(std::string text, std::uint64_t timestamp_ns) -> base::Result<EncodedFrame> {
