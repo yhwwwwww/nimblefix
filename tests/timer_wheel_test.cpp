@@ -2,14 +2,14 @@
 
 #include <vector>
 
-#include "fastfix/runtime/timer_wheel.h"
+#include "nimblefix/runtime/timer_wheel.h"
 
 #include "test_support.h"
 
 namespace {
 
 auto
-PopExpired(fastfix::runtime::TimerWheel* wheel, std::uint64_t now_ns) -> std::vector<std::uint64_t>
+PopExpired(nimble::runtime::TimerWheel* wheel, std::uint64_t now_ns) -> std::vector<std::uint64_t>
 {
   std::vector<std::uint64_t> expired;
   wheel->PopExpired(now_ns, &expired);
@@ -22,7 +22,7 @@ TEST_CASE("timer-wheel", "[timer-wheel]")
 {
   SECTION("basic scheduling and expiration")
   {
-    fastfix::runtime::TimerWheel wheel(fastfix::runtime::TimerWheelOptions{ .tick_ns = 10U, .slot_count = 4U });
+    nimble::runtime::TimerWheel wheel(nimble::runtime::TimerWheelOptions{ .tick_ns = 10U, .slot_count = 4U });
     wheel.Schedule(1U, 10U, 0U);
     wheel.Schedule(2U, 80U, 0U);
 
@@ -39,7 +39,7 @@ TEST_CASE("timer-wheel", "[timer-wheel]")
 
   SECTION("reschedule and cancel")
   {
-    fastfix::runtime::TimerWheel wheel(fastfix::runtime::TimerWheelOptions{ .tick_ns = 10U, .slot_count = 4U });
+    nimble::runtime::TimerWheel wheel(nimble::runtime::TimerWheelOptions{ .tick_ns = 10U, .slot_count = 4U });
     wheel.Schedule(3U, 80U, 0U);
     wheel.Schedule(4U, 90U, 0U);
     wheel.Schedule(3U, 30U, 10U);
@@ -57,7 +57,7 @@ TEST_CASE("timer-wheel", "[timer-wheel]")
 
   SECTION("late expiration")
   {
-    fastfix::runtime::TimerWheel wheel(fastfix::runtime::TimerWheelOptions{ .tick_ns = 10U, .slot_count = 4U });
+    nimble::runtime::TimerWheel wheel(nimble::runtime::TimerWheelOptions{ .tick_ns = 10U, .slot_count = 4U });
     wheel.Schedule(5U, 15U, 40U);
 
     REQUIRE(wheel.NextDeadline().has_value());

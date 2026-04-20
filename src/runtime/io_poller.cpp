@@ -1,4 +1,4 @@
-#include "fastfix/runtime/io_poller.h"
+#include "nimblefix/runtime/io_poller.h"
 
 #include <cerrno>
 #include <cstring>
@@ -9,12 +9,12 @@
 #include <sys/poll.h>
 #include <unistd.h>
 
-#if !defined(FASTFIX_DISABLE_LIBURING) && __has_include(<liburing.h>)
-#define FASTFIX_HAS_LIBURING 1
+#if !defined(NIMBLEFIX_DISABLE_LIBURING) && __has_include(<liburing.h>)
+#define NIMBLEFIX_HAS_LIBURING 1
 #include <liburing.h>
 #endif
 
-namespace fastfix::runtime {
+namespace nimble::runtime {
 
 // ---------------------------------------------------------------------------
 // EpollPoller
@@ -103,7 +103,7 @@ private:
 // IoUringPoller
 // ---------------------------------------------------------------------------
 
-#ifdef FASTFIX_HAS_LIBURING
+#ifdef NIMBLEFIX_HAS_LIBURING
 class IoUringPoller final : public IoPoller
 {
 public:
@@ -234,7 +234,7 @@ private:
   std::unordered_map<int, std::size_t> fd_tags_;
   std::vector<std::size_t> ready_tags_;
 };
-#endif // FASTFIX_HAS_LIBURING
+#endif // NIMBLEFIX_HAS_LIBURING
 
 // ---------------------------------------------------------------------------
 // Free functions
@@ -243,7 +243,7 @@ private:
 auto
 DetectBestIoBackend() -> IoBackend
 {
-#ifdef FASTFIX_HAS_LIBURING
+#ifdef NIMBLEFIX_HAS_LIBURING
   if (IsIoBackendAvailable(IoBackend::kIoUring)) {
     return IoBackend::kIoUring;
   }
@@ -258,7 +258,7 @@ IsIoBackendAvailable(IoBackend backend) -> bool
     case IoBackend::kEpoll:
       return true;
     case IoBackend::kIoUring: {
-#ifdef FASTFIX_HAS_LIBURING
+#ifdef NIMBLEFIX_HAS_LIBURING
       io_uring ring{};
       int ret = io_uring_queue_init(1, &ring, 0);
       if (ret < 0)
@@ -277,7 +277,7 @@ auto
 CreateIoPoller(IoBackend backend) -> std::unique_ptr<IoPoller>
 {
   switch (backend) {
-#ifdef FASTFIX_HAS_LIBURING
+#ifdef NIMBLEFIX_HAS_LIBURING
     case IoBackend::kIoUring:
       return std::make_unique<IoUringPoller>();
 #else
@@ -291,4 +291,4 @@ CreateIoPoller(IoBackend backend) -> std::unique_ptr<IoPoller>
   }
 }
 
-} // namespace fastfix::runtime
+} // namespace nimble::runtime

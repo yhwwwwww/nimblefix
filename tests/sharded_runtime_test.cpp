@@ -1,30 +1,30 @@
 #include <catch2/catch_test_macros.hpp>
 
-#include "fastfix/runtime/sharded_runtime.h"
+#include "nimblefix/runtime/sharded_runtime.h"
 
 #include "test_support.h"
 
 TEST_CASE("sharded-runtime", "[sharded-runtime]")
 {
-  fastfix::runtime::ShardedRuntime runtime(4U);
+  nimble::runtime::ShardedRuntime runtime(4U);
   REQUIRE(runtime.worker_count() == 4U);
 
-  fastfix::session::SessionConfig first_config;
+  nimble::session::SessionConfig first_config;
   first_config.session_id = 100U;
   first_config.profile_id = 1U;
   first_config.key.begin_string = "FIX.4.4";
   first_config.key.sender_comp_id = "A";
   first_config.key.target_comp_id = "B";
 
-  fastfix::session::SessionConfig second_config;
+  nimble::session::SessionConfig second_config;
   second_config.session_id = 200U;
   second_config.profile_id = 2U;
   second_config.key.begin_string = "FIX.4.4";
   second_config.key.sender_comp_id = "C";
   second_config.key.target_comp_id = "D";
 
-  fastfix::session::SessionCore first(first_config);
-  fastfix::session::SessionCore second(second_config);
+  nimble::session::SessionCore first(first_config);
+  nimble::session::SessionCore second(second_config);
 
   REQUIRE(runtime.RegisterSession(first).ok());
   REQUIRE(runtime.RegisterSession(second).ok());
@@ -34,7 +34,7 @@ TEST_CASE("sharded-runtime", "[sharded-runtime]")
   REQUIRE(first_shard != nullptr);
   REQUIRE(second_shard != nullptr);
 
-  fastfix::runtime::PendingConnection pending;
+  nimble::runtime::PendingConnection pending;
   pending.connection_id = 300U;
   pending.profile_id = 1U;
   pending.session_key = first.key();

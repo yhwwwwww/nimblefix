@@ -1,4 +1,4 @@
-#include "fastfix/store/mmap_store.h"
+#include "nimblefix/store/mmap_store.h"
 
 #include <array>
 #include <cerrno>
@@ -13,7 +13,7 @@
 #include <unistd.h>
 #include <unordered_map>
 
-namespace fastfix::store {
+namespace nimble::store {
 
 namespace {
 
@@ -787,4 +787,4 @@ MmapSessionStore::ResetSession(std::uint64_t session_id) -> base::Status
   return Open();
 }
 
-} // namespace fastfix::store
+} // namespace nimble::store

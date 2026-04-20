@@ -1,13 +1,13 @@
 #include <iostream>
 
-#include "fastfix/runtime/soak.h"
+#include "nimblefix/runtime/soak.h"
 
 namespace {
 
 auto
 PrintUsage() -> void
 {
-  std::cout << "usage: fastfix-soak --profile <profile.art> [--workers N] "
+  std::cout << "usage: nimblefix-soak --profile <profile.art> [--workers N] "
                "[--sessions N] [--iterations N]"
                " [--gap-every N] [--duplicate-every N] [--replay-every N] "
                "[--reorder-every N]"
@@ -21,7 +21,7 @@ PrintUsage() -> void
 int
 main(int argc, char** argv)
 {
-  fastfix::runtime::SoakConfig config;
+  nimble::runtime::SoakConfig config;
 
   for (int index = 1; index < argc; ++index) {
     const std::string_view arg(argv[index]);
@@ -94,7 +94,7 @@ main(int argc, char** argv)
     return 1;
   }
 
-  auto report = fastfix::runtime::RunSoak(config);
+  auto report = nimble::runtime::RunSoak(config);
   if (!report.ok()) {
     std::cerr << report.status().message() << '\n';
     return 1;

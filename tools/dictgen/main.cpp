@@ -2,17 +2,17 @@
 #include <iostream>
 #include <vector>
 
-#include "fastfix/profile/artifact_builder.h"
-#include "fastfix/profile/builder_codegen.h"
-#include "fastfix/profile/dictgen_input.h"
-#include "fastfix/profile/overlay.h"
+#include "nimblefix/profile/artifact_builder.h"
+#include "nimblefix/profile/builder_codegen.h"
+#include "nimblefix/profile/dictgen_input.h"
+#include "nimblefix/profile/overlay.h"
 
 namespace {
 
 auto
 PrintUsage() -> void
 {
-  std::cout << "usage: fastfix-dictgen --input <dictionary.ffd> [--merge "
+  std::cout << "usage: nimblefix-dictgen --input <dictionary.ffd> [--merge "
                "<overlay.ffd> ...] --output <profile.art> [--cpp-builders "
                "<generated.hpp>] [--cpp-readers <generated.hpp>]\n";
 }
@@ -24,7 +24,7 @@ ResolveProjectPath(const std::filesystem::path& path) -> std::filesystem::path
     return path;
   }
 
-  return std::filesystem::path(FASTFIX_PROJECT_DIR) / path;
+  return std::filesystem::path(NIMBLEFIX_PROJECT_DIR) / path;
 }
 
 } // namespace
@@ -85,7 +85,7 @@ main(int argc, char** argv)
     std::filesystem::create_directories(parent);
   }
 
-  auto dictionary = fastfix::profile::LoadNormalizedDictionaryFile(input_path);
+  auto dictionary = nimble::profile::LoadNormalizedDictionaryFile(input_path);
   if (!dictionary.ok()) {
     std::cerr << dictionary.status().message() << '\n';
     return 1;
@@ -93,13 +93,13 @@ main(int argc, char** argv)
 
   auto merged = std::move(dictionary).value();
   for (const auto& merge_path : merge_paths) {
-    auto additional = fastfix::profile::LoadNormalizedDictionaryFile(merge_path);
+    auto additional = nimble::profile::LoadNormalizedDictionaryFile(merge_path);
     if (!additional.ok()) {
       std::cerr << additional.status().message() << '\n';
       return 1;
     }
 
-    auto applied = fastfix::profile::ApplyOverlay(merged, additional.value());
+    auto applied = nimble::profile::ApplyOverlay(merged, additional.value());
     if (!applied.ok()) {
       std::cerr << applied.status().message() << '\n';
       return 1;
@@ -107,20 +107,20 @@ main(int argc, char** argv)
     merged = std::move(applied).value();
   }
 
-  auto artifact = fastfix::profile::BuildProfileArtifact(merged);
+  auto artifact = nimble::profile::BuildProfileArtifact(merged);
   if (!artifact.ok()) {
     std::cerr << artifact.status().message() << '\n';
     return 1;
   }
 
-  const auto write_status = fastfix::profile::WriteProfileArtifact(output_path, artifact.value());
+  const auto write_status = nimble::profile::WriteProfileArtifact(output_path, artifact.value());
   if (!write_status.ok()) {
     std::cerr << write_status.message() << '\n';
     return 1;
   }
 
   if (!builder_output_path.empty()) {
-    const auto builder_status = fastfix::profile::WriteCppBuildersHeader(builder_output_path, merged);
+    const auto builder_status = nimble::profile::WriteCppBuildersHeader(builder_output_path, merged);
     if (!builder_status.ok()) {
       std::cerr << builder_status.message() << '\n';
       return 1;
@@ -128,7 +128,7 @@ main(int argc, char** argv)
   }
 
   if (!reader_output_path.empty()) {
-    const auto reader_status = fastfix::profile::WriteCppReadersHeader(reader_output_path, merged);
+    const auto reader_status = nimble::profile::WriteCppReadersHeader(reader_output_path, merged);
     if (!reader_status.ok()) {
       std::cerr << reader_status.message() << '\n';
       return 1;

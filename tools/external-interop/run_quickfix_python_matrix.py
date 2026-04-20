@@ -12,9 +12,9 @@ import time
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 BUILD_DIR = REPO_ROOT / "build"
 ARTIFACT_PATH = BUILD_DIR / "sample-basic.art"
-DICTGEN_BIN = REPO_ROOT / "build/linux/x86_64/release/fastfix-dictgen"
-ACCEPTOR_BIN = REPO_ROOT / "build/linux/x86_64/release/fastfix-acceptor"
-INITIATOR_BIN = REPO_ROOT / "build/linux/x86_64/release/fastfix-initiator"
+DICTGEN_BIN = REPO_ROOT / "build/linux/x86_64/release/nimblefix-dictgen"
+ACCEPTOR_BIN = REPO_ROOT / "build/linux/x86_64/release/nimblefix-acceptor"
+INITIATOR_BIN = REPO_ROOT / "build/linux/x86_64/release/nimblefix-initiator"
 QUICKFIX_IMAGE = "optimalflow/python-quickfix:3.12"
 QUICKFIX_SCRIPT = "/work/tools/external-interop/quickfix_python_echo.py"
 WORK_ROOT = BUILD_DIR / "external-interop"
@@ -131,7 +131,7 @@ def run_matrix() -> None:
             "SELL",
             "--target",
             "BUY",
-        ], name="fastfix-acceptor")
+        ], name="nimblefix-acceptor")
         wait_for_port("127.0.0.1", port, 10.0, acceptor)
         run_checked(
             quickfix_command(
@@ -146,7 +146,7 @@ def run_matrix() -> None:
             name="quickfix-python-initiator",
         )
     finally:
-        stop_process(acceptor, "fastfix-acceptor")
+        stop_process(acceptor, "nimblefix-acceptor")
 
     quickfix_acceptor = None
     try:
@@ -176,7 +176,7 @@ def run_matrix() -> None:
             "BUY",
             "--target",
             "SELL",
-        ], name="fastfix-initiator")
+        ], name="nimblefix-initiator")
         exit_code = quickfix_acceptor.wait(timeout=20)
         if exit_code != 0:
             raise RuntimeError(f"quickfix-python-acceptor failed with exit code {exit_code}")

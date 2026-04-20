@@ -3,35 +3,35 @@
 #include <filesystem>
 #include <fstream>
 
-#include "fastfix/profile/artifact_builder.h"
-#include "fastfix/profile/dictgen_input.h"
-#include "fastfix/runtime/interop_harness.h"
+#include "nimblefix/profile/artifact_builder.h"
+#include "nimblefix/profile/dictgen_input.h"
+#include "nimblefix/runtime/interop_harness.h"
 
 #include "test_support.h"
 
 namespace {
 
 auto
-BuildInteropArtifact(const std::filesystem::path& artifact_path) -> fastfix::base::Status
+BuildInteropArtifact(const std::filesystem::path& artifact_path) -> nimble::base::Status
 {
-  const auto ffd_path = std::filesystem::path(FASTFIX_PROJECT_DIR) / "build" / "bench" / "quickfix_FIX44.ffd";
-  auto dictionary = fastfix::profile::LoadNormalizedDictionaryFile(ffd_path);
+  const auto ffd_path = std::filesystem::path(NIMBLEFIX_PROJECT_DIR) / "build" / "bench" / "quickfix_FIX44.ffd";
+  auto dictionary = nimble::profile::LoadNormalizedDictionaryFile(ffd_path);
   if (!dictionary.ok()) {
     return dictionary.status();
   }
   dictionary.value().profile_id = 4400U;
-  auto artifact = fastfix::profile::BuildProfileArtifact(dictionary.value());
+  auto artifact = nimble::profile::BuildProfileArtifact(dictionary.value());
   if (!artifact.ok()) {
     return artifact.status();
   }
-  return fastfix::profile::WriteProfileArtifact(artifact_path, artifact.value());
+  return nimble::profile::WriteProfileArtifact(artifact_path, artifact.value());
 }
 
 } // namespace
 
 TEST_CASE("interop-harness", "[interop-harness]")
 {
-  const auto root = std::filesystem::path(FASTFIX_PROJECT_DIR) / "tests" / "data" / "interop";
+  const auto root = std::filesystem::path(NIMBLEFIX_PROJECT_DIR) / "tests" / "data" / "interop";
   const auto artifact_path = root / "loopback-profile.art";
   const auto store_path = root / "loopback-a.store";
 
@@ -39,10 +39,10 @@ TEST_CASE("interop-harness", "[interop-harness]")
   std::filesystem::remove(store_path);
   REQUIRE(BuildInteropArtifact(artifact_path).ok());
 
-  auto scenario = fastfix::runtime::LoadInteropScenarioFile(root / "loopback-basic.ffscenario");
+  auto scenario = nimble::runtime::LoadInteropScenarioFile(root / "loopback-basic.ffscenario");
   REQUIRE(scenario.ok());
 
-  auto report = fastfix::runtime::RunInteropScenario(scenario.value());
+  auto report = nimble::runtime::RunInteropScenario(scenario.value());
   REQUIRE(report.ok());
   REQUIRE(report.value().sessions.size() == 2U);
   REQUIRE(report.value().metrics.sessions.size() == 2U);
@@ -51,7 +51,7 @@ TEST_CASE("interop-harness", "[interop-harness]")
   std::filesystem::remove(artifact_path);
   std::filesystem::remove(store_path);
 
-  const auto durable_root = std::filesystem::temp_directory_path() / "fastfix-interop-durable-test";
+  const auto durable_root = std::filesystem::temp_directory_path() / "nimblefix-interop-durable-test";
   const auto durable_artifact_path = durable_root / "loopback-profile.art";
   const auto durable_config_path = durable_root / "loopback-runtime.ffcfg";
   const auto durable_scenario_path = durable_root / "loopback-basic.ffscenario";
@@ -96,10 +96,10 @@ TEST_CASE("interop-harness", "[interop-harness]")
     scenario_out << "expect-trace-min|8\n";
   }
 
-  auto durable_scenario = fastfix::runtime::LoadInteropScenarioFile(durable_scenario_path);
+  auto durable_scenario = nimble::runtime::LoadInteropScenarioFile(durable_scenario_path);
   REQUIRE(durable_scenario.ok());
 
-  auto durable_report = fastfix::runtime::RunInteropScenario(durable_scenario.value());
+  auto durable_report = nimble::runtime::RunInteropScenario(durable_scenario.value());
   REQUIRE(durable_report.ok());
   REQUIRE(durable_report.value().sessions.size() == 2U);
   REQUIRE(durable_report.value().trace_events.size() >= 8U);

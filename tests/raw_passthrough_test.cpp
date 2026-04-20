@@ -4,7 +4,7 @@
 #include <string_view>
 #include <vector>
 
-#include "fastfix/codec/raw_passthrough.h"
+#include "nimblefix/codec/raw_passthrough.h"
 #include "test_support.h"
 
 namespace {
@@ -16,7 +16,7 @@ ToStringView(std::span<const std::byte> bytes) -> std::string_view
 }
 
 auto
-FlattenFrameBytes(const fastfix::session::EncodedFrameBytes& frame) -> std::vector<std::byte>
+FlattenFrameBytes(const nimble::session::EncodedFrameBytes& frame) -> std::vector<std::byte>
 {
   const auto owned = frame.view();
   if (frame.external_body.empty()) {
@@ -37,11 +37,11 @@ TEST_CASE("raw-passthrough decode extracts session fields and raw body", "[raw-p
 {
   // Build a FIX message with known session fields and application body.
   // Body fields: 11=ORD-1, 55=AAPL, 54=1, 38=100
-  const auto frame = fastfix::tests::EncodeFixFrame("35=D|49=SENDER|50=DESK|56=TARGET|57="
-                                                    "ROUTE|34=42|52=20260413-10:00:00.000|"
-                                                    "11=ORD-1|55=AAPL|54=1|38=100|");
+  const auto frame = nimble::tests::EncodeFixFrame("35=D|49=SENDER|50=DESK|56=TARGET|57="
+                                                   "ROUTE|34=42|52=20260413-10:00:00.000|"
+                                                   "11=ORD-1|55=AAPL|54=1|38=100|");
 
-  auto result = fastfix::codec::DecodeRawPassThrough(std::span<const std::byte>(frame.data(), frame.size()));
+  auto result = nimble::codec::DecodeRawPassThrough(std::span<const std::byte>(frame.data(), frame.size()));
   REQUIRE(result.ok());
 
   const auto& view = result.value();
@@ -77,16 +77,16 @@ TEST_CASE("raw-passthrough forwarding rewrites sender and target sub ids as "
           "[raw-passthrough]")
 {
   const auto frame =
-    fastfix::tests::EncodeFixFrame("35=D|49=ORIG_SENDER|50=ORIG_DESK|56=ORIG_TARGET|57=ORIG_ROUTE|34=10|52="
-                                   "20260413-10:00:00.000|"
-                                   "11=ORD-1|55=MSFT|");
+    nimble::tests::EncodeFixFrame("35=D|49=ORIG_SENDER|50=ORIG_DESK|56=ORIG_TARGET|57=ORIG_ROUTE|34=10|52="
+                                  "20260413-10:00:00.000|"
+                                  "11=ORD-1|55=MSFT|");
 
-  auto decoded = fastfix::codec::DecodeRawPassThrough(std::span<const std::byte>(frame.data(), frame.size()));
+  auto decoded = nimble::codec::DecodeRawPassThrough(std::span<const std::byte>(frame.data(), frame.size()));
   REQUIRE(decoded.ok());
   REQUIRE(decoded.value().sender_sub_id == "ORIG_DESK");
   REQUIRE(decoded.value().target_sub_id == "ORIG_ROUTE");
 
-  fastfix::codec::ForwardingOptions opts;
+  nimble::codec::ForwardingOptions opts;
   opts.sender_comp_id = "DOWNSTREAM_S";
   opts.sender_sub_id = "DESK-9";
   opts.target_comp_id = "DOWNSTREAM_T";
@@ -94,11 +94,11 @@ TEST_CASE("raw-passthrough forwarding rewrites sender and target sub ids as "
   opts.msg_seq_num = 77;
   opts.sending_time = "20260413-11:00:00.000";
 
-  fastfix::codec::EncodeBuffer buffer;
-  auto status = fastfix::codec::EncodeForwarded(decoded.value(), opts, &buffer);
+  nimble::codec::EncodeBuffer buffer;
+  auto status = nimble::codec::EncodeForwarded(decoded.value(), opts, &buffer);
   REQUIRE(status.ok());
 
-  auto forwarded = fastfix::codec::DecodeRawPassThrough(buffer.bytes());
+  auto forwarded = nimble::codec::DecodeRawPassThrough(buffer.bytes());
   REQUIRE(forwarded.ok());
   CHECK(forwarded.value().sender_comp_id == "DOWNSTREAM_S");
   CHECK(forwarded.value().sender_sub_id == "DESK-9");
@@ -114,25 +114,25 @@ TEST_CASE("raw-passthrough forwarding rewrites sender and target sub ids as "
 
 TEST_CASE("raw-passthrough forwarding rewrites header and preserves body", "[raw-passthrough]")
 {
-  const auto frame = fastfix::tests::EncodeFixFrame("35=D|49=ORIG_SENDER|56=ORIG_TARGET|34=10|52=20260413-10:00:00.000|"
-                                                    "11=ORD-1|55=MSFT|54=2|38=200|44=150.25|");
+  const auto frame = nimble::tests::EncodeFixFrame("35=D|49=ORIG_SENDER|56=ORIG_TARGET|34=10|52=20260413-10:00:00.000|"
+                                                   "11=ORD-1|55=MSFT|54=2|38=200|44=150.25|");
 
-  auto decoded = fastfix::codec::DecodeRawPassThrough(std::span<const std::byte>(frame.data(), frame.size()));
+  auto decoded = nimble::codec::DecodeRawPassThrough(std::span<const std::byte>(frame.data(), frame.size()));
   REQUIRE(decoded.ok());
 
-  fastfix::codec::ForwardingOptions opts;
+  nimble::codec::ForwardingOptions opts;
   opts.sender_comp_id = "DOWNSTREAM_S";
   opts.target_comp_id = "DOWNSTREAM_T";
   opts.msg_seq_num = 77;
   opts.sending_time = "20260413-11:00:00.000";
 
-  fastfix::codec::EncodeBuffer buffer;
-  auto status = fastfix::codec::EncodeForwarded(decoded.value(), opts, &buffer);
+  nimble::codec::EncodeBuffer buffer;
+  auto status = nimble::codec::EncodeForwarded(decoded.value(), opts, &buffer);
   REQUIRE(status.ok());
 
   // Now decode the forwarded message using raw-passthrough again to verify it
   auto fwd_data = buffer.bytes();
-  auto fwd_decoded = fastfix::codec::DecodeRawPassThrough(fwd_data);
+  auto fwd_decoded = nimble::codec::DecodeRawPassThrough(fwd_data);
   REQUIRE(fwd_decoded.ok());
 
   const auto& fwd = fwd_decoded.value();
@@ -155,13 +155,13 @@ TEST_CASE("raw-passthrough forwarding rewrites header and preserves body", "[raw
 
 TEST_CASE("raw-passthrough forwarding with routing fields", "[raw-passthrough]")
 {
-  const auto frame = fastfix::tests::EncodeFixFrame("35=D|49=SENDER|56=TARGET|34=1|52=20260413-10:00:00.000|"
-                                                    "11=ORD-1|55=GOOG|");
+  const auto frame = nimble::tests::EncodeFixFrame("35=D|49=SENDER|56=TARGET|34=1|52=20260413-10:00:00.000|"
+                                                   "11=ORD-1|55=GOOG|");
 
-  auto decoded = fastfix::codec::DecodeRawPassThrough(std::span<const std::byte>(frame.data(), frame.size()));
+  auto decoded = nimble::codec::DecodeRawPassThrough(std::span<const std::byte>(frame.data(), frame.size()));
   REQUIRE(decoded.ok());
 
-  fastfix::codec::ForwardingOptions opts;
+  nimble::codec::ForwardingOptions opts;
   opts.sender_comp_id = "GW";
   opts.target_comp_id = "EXCH";
   opts.msg_seq_num = 5;
@@ -169,8 +169,8 @@ TEST_CASE("raw-passthrough forwarding with routing fields", "[raw-passthrough]")
   opts.on_behalf_of_comp_id = "SENDER";
   opts.deliver_to_comp_id = "TARGET";
 
-  fastfix::codec::EncodeBuffer buffer;
-  auto status = fastfix::codec::EncodeForwarded(decoded.value(), opts, &buffer);
+  nimble::codec::EncodeBuffer buffer;
+  auto status = nimble::codec::EncodeForwarded(decoded.value(), opts, &buffer);
   REQUIRE(status.ok());
 
   // Check that the routing fields are present in the output
@@ -179,7 +179,7 @@ TEST_CASE("raw-passthrough forwarding with routing fields", "[raw-passthrough]")
   CHECK(text.find("128=TARGET") != std::string_view::npos);
 
   // Verify it's still a valid FIX message
-  auto fwd_decoded = fastfix::codec::DecodeRawPassThrough(buffer.bytes());
+  auto fwd_decoded = nimble::codec::DecodeRawPassThrough(buffer.bytes());
   REQUIRE(fwd_decoded.ok());
   CHECK(fwd_decoded.value().sender_comp_id == "GW");
   CHECK(fwd_decoded.value().target_comp_id == "EXCH");
@@ -187,10 +187,10 @@ TEST_CASE("raw-passthrough forwarding with routing fields", "[raw-passthrough]")
 
 TEST_CASE("raw-passthrough decode excludes routing header fields from raw body", "[raw-passthrough]")
 {
-  const auto frame = fastfix::tests::EncodeFixFrame("35=D|49=SENDER|56=TARGET|34=1|52=20260413-10:00:00.000|"
-                                                    "115=CLIENT-A|128=VENUE-B|11=ORD-1|55=IBM|");
+  const auto frame = nimble::tests::EncodeFixFrame("35=D|49=SENDER|56=TARGET|34=1|52=20260413-10:00:00.000|"
+                                                   "115=CLIENT-A|128=VENUE-B|11=ORD-1|55=IBM|");
 
-  auto decoded = fastfix::codec::DecodeRawPassThrough(std::span<const std::byte>(frame.data(), frame.size()));
+  auto decoded = nimble::codec::DecodeRawPassThrough(std::span<const std::byte>(frame.data(), frame.size()));
   REQUIRE(decoded.ok());
 
   const auto body_sv = ToStringView(decoded.value().raw_body);
@@ -203,25 +203,25 @@ TEST_CASE("raw-passthrough decode excludes routing header fields from raw body",
 TEST_CASE("raw-passthrough preserves unknown application fields exactly", "[raw-passthrough]")
 {
   // Use non-standard tags in the body to simulate unknown/proprietary fields
-  const auto frame = fastfix::tests::EncodeFixFrame("35=D|49=S|56=T|34=1|52=20260413-10:00:00.000|"
-                                                    "11=ORD-1|9999=CUSTOM_VALUE|5555=ANOTHER|");
+  const auto frame = nimble::tests::EncodeFixFrame("35=D|49=S|56=T|34=1|52=20260413-10:00:00.000|"
+                                                   "11=ORD-1|9999=CUSTOM_VALUE|5555=ANOTHER|");
 
-  auto decoded = fastfix::codec::DecodeRawPassThrough(std::span<const std::byte>(frame.data(), frame.size()));
+  auto decoded = nimble::codec::DecodeRawPassThrough(std::span<const std::byte>(frame.data(), frame.size()));
   REQUIRE(decoded.ok());
 
   // Forward with new session identity
-  fastfix::codec::ForwardingOptions opts;
+  nimble::codec::ForwardingOptions opts;
   opts.sender_comp_id = "A";
   opts.target_comp_id = "B";
   opts.msg_seq_num = 1;
   opts.sending_time = "20260413-13:00:00.000";
 
-  fastfix::codec::EncodeBuffer buffer;
-  auto status = fastfix::codec::EncodeForwarded(decoded.value(), opts, &buffer);
+  nimble::codec::EncodeBuffer buffer;
+  auto status = nimble::codec::EncodeForwarded(decoded.value(), opts, &buffer);
   REQUIRE(status.ok());
 
   // The body should contain the proprietary fields verbatim
-  auto fwd_decoded = fastfix::codec::DecodeRawPassThrough(buffer.bytes());
+  auto fwd_decoded = nimble::codec::DecodeRawPassThrough(buffer.bytes());
   REQUIRE(fwd_decoded.ok());
 
   auto body_sv = ToStringView(fwd_decoded.value().raw_body);
@@ -232,45 +232,45 @@ TEST_CASE("raw-passthrough preserves unknown application fields exactly", "[raw-
 
 TEST_CASE("raw-passthrough forwarding with overridden BeginString", "[raw-passthrough]")
 {
-  const auto frame = fastfix::tests::EncodeFixFrame("35=D|49=S|56=T|34=1|52=20260413-10:00:00.000|11=X|", "FIX.4.4");
+  const auto frame = nimble::tests::EncodeFixFrame("35=D|49=S|56=T|34=1|52=20260413-10:00:00.000|11=X|", "FIX.4.4");
 
-  auto decoded = fastfix::codec::DecodeRawPassThrough(std::span<const std::byte>(frame.data(), frame.size()));
+  auto decoded = nimble::codec::DecodeRawPassThrough(std::span<const std::byte>(frame.data(), frame.size()));
   REQUIRE(decoded.ok());
   CHECK(decoded.value().begin_string == "FIX.4.4");
 
-  fastfix::codec::ForwardingOptions opts;
+  nimble::codec::ForwardingOptions opts;
   opts.sender_comp_id = "A";
   opts.target_comp_id = "B";
   opts.msg_seq_num = 1;
   opts.sending_time = "20260413-10:00:00.000";
   opts.begin_string = "FIX.4.2";
 
-  fastfix::codec::EncodeBuffer buffer;
-  auto status = fastfix::codec::EncodeForwarded(decoded.value(), opts, &buffer);
+  nimble::codec::EncodeBuffer buffer;
+  auto status = nimble::codec::EncodeForwarded(decoded.value(), opts, &buffer);
   REQUIRE(status.ok());
 
-  auto fwd = fastfix::codec::DecodeRawPassThrough(buffer.bytes());
+  auto fwd = nimble::codec::DecodeRawPassThrough(buffer.bytes());
   REQUIRE(fwd.ok());
   CHECK(fwd.value().begin_string == "FIX.4.2");
 }
 
 TEST_CASE("raw-passthrough decode rejects bad checksum", "[raw-passthrough]")
 {
-  auto frame = fastfix::tests::EncodeFixFrame("35=D|49=S|56=T|34=1|52=20260413-10:00:00.000|11=X|");
+  auto frame = nimble::tests::EncodeFixFrame("35=D|49=S|56=T|34=1|52=20260413-10:00:00.000|11=X|");
 
   // Corrupt a byte in the body to invalidate checksum
   frame[frame.size() - 5] = static_cast<std::byte>('9');
 
-  auto result = fastfix::codec::DecodeRawPassThrough(std::span<const std::byte>(frame.data(), frame.size()));
+  auto result = nimble::codec::DecodeRawPassThrough(std::span<const std::byte>(frame.data(), frame.size()));
   CHECK(!result.ok());
 }
 
 TEST_CASE("raw-passthrough decode rejects missing tag 8", "[raw-passthrough]")
 {
-  auto bytes = fastfix::tests::Bytes("9=5\x01"
-                                     "35=D\x01"
-                                     "10=000\x01");
-  auto result = fastfix::codec::DecodeRawPassThrough(std::span<const std::byte>(bytes.data(), bytes.size()));
+  auto bytes = nimble::tests::Bytes("9=5\x01"
+                                    "35=D\x01"
+                                    "10=000\x01");
+  auto result = nimble::codec::DecodeRawPassThrough(std::span<const std::byte>(bytes.data(), bytes.size()));
   CHECK(!result.ok());
 }
 
@@ -279,11 +279,11 @@ TEST_CASE("raw-passthrough replay preserves extended header semantics across "
           "[raw-passthrough]")
 {
   const auto frame =
-    fastfix::tests::EncodeFixFrame("35=A|34=4|49=SELLER|50=DESK|56=BUYER|57=ROUTE|52=20260413-10:00:00.000|"
-                                   "1137=9|43=Y|97=Y|122=20260413-09:59:59.999|115=CLIENT-A|128=VENUE-B|98="
-                                   "0|108=30|");
+    nimble::tests::EncodeFixFrame("35=A|34=4|49=SELLER|50=DESK|56=BUYER|57=ROUTE|52=20260413-10:00:00.000|"
+                                  "1137=9|43=Y|97=Y|122=20260413-09:59:59.999|115=CLIENT-A|128=VENUE-B|98="
+                                  "0|108=30|");
 
-  auto stored = fastfix::codec::DecodeRawPassThrough(std::span<const std::byte>(frame.data(), frame.size()));
+  auto stored = nimble::codec::DecodeRawPassThrough(std::span<const std::byte>(frame.data(), frame.size()));
   REQUIRE(stored.ok());
   CHECK(stored.value().sender_sub_id == "DESK");
   CHECK(stored.value().target_sub_id == "ROUTE");
@@ -303,23 +303,23 @@ TEST_CASE("raw-passthrough replay preserves extended header semantics across "
   CHECK(stored_body.find("115=CLIENT-A") == std::string_view::npos);
   CHECK(stored_body.find("128=VENUE-B") == std::string_view::npos);
 
-  fastfix::codec::ReplayOptions preserve_opts;
+  nimble::codec::ReplayOptions preserve_opts;
   preserve_opts.sender_comp_id = "REPLAY_S";
   preserve_opts.target_comp_id = "REPLAY_T";
   preserve_opts.msg_seq_num = 98U;
   preserve_opts.sending_time = "20260413-10:30:00.000";
   preserve_opts.orig_sending_time = "20260413-10:00:00.000";
 
-  fastfix::codec::EncodeBuffer preserve_buffer;
-  auto preserve_status = fastfix::codec::EncodeReplay(stored.value(), preserve_opts, &preserve_buffer);
+  nimble::codec::EncodeBuffer preserve_buffer;
+  auto preserve_status = nimble::codec::EncodeReplay(stored.value(), preserve_opts, &preserve_buffer);
   REQUIRE(preserve_status.ok());
 
-  auto preserved = fastfix::codec::DecodeRawPassThrough(preserve_buffer.bytes());
+  auto preserved = nimble::codec::DecodeRawPassThrough(preserve_buffer.bytes());
   REQUIRE(preserved.ok());
   CHECK(preserved.value().sender_sub_id == "DESK");
   CHECK(preserved.value().target_sub_id == "ROUTE");
 
-  fastfix::codec::ReplayOptions opts;
+  nimble::codec::ReplayOptions opts;
   opts.sender_comp_id = "REPLAY_S";
   opts.sender_sub_id = "REPLAY_DESK";
   opts.target_comp_id = "REPLAY_T";
@@ -329,11 +329,11 @@ TEST_CASE("raw-passthrough replay preserves extended header semantics across "
   opts.orig_sending_time = "20260413-10:00:00.000";
   opts.poss_resend = true;
 
-  fastfix::codec::EncodeBuffer replay_buffer;
-  auto replay_status = fastfix::codec::EncodeReplay(stored.value(), opts, &replay_buffer);
+  nimble::codec::EncodeBuffer replay_buffer;
+  auto replay_status = nimble::codec::EncodeReplay(stored.value(), opts, &replay_buffer);
   REQUIRE(replay_status.ok());
 
-  auto replayed = fastfix::codec::DecodeRawPassThrough(replay_buffer.bytes());
+  auto replayed = nimble::codec::DecodeRawPassThrough(replay_buffer.bytes());
   REQUIRE(replayed.ok());
   CHECK(replayed.value().sender_comp_id == "REPLAY_S");
   CHECK(replayed.value().sender_sub_id == "REPLAY_DESK");
@@ -347,10 +347,10 @@ TEST_CASE("raw-passthrough replay preserves extended header semantics across "
   CHECK(replayed.value().orig_sending_time == "20260413-10:00:00.000");
   CHECK(ToStringView(replayed.value().raw_body) == stored_body);
 
-  fastfix::session::EncodedFrameBytes zero_copy_frame;
+  nimble::session::EncodedFrameBytes zero_copy_frame;
   auto zero_copy_opts = opts;
   zero_copy_opts.zero_copy_body = true;
-  auto replay_into_status = fastfix::codec::EncodeReplayInto(stored.value(), zero_copy_opts, &zero_copy_frame);
+  auto replay_into_status = nimble::codec::EncodeReplayInto(stored.value(), zero_copy_opts, &zero_copy_frame);
   REQUIRE(replay_into_status.ok());
   REQUIRE(zero_copy_frame.external_body.size() == stored.value().raw_body.size());
   REQUIRE(zero_copy_frame.body_splice_offset > 0U);

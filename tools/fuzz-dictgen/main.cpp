@@ -3,14 +3,14 @@
 #include <iostream>
 #include <vector>
 
-#include "fastfix/profile/dictgen_input.h"
+#include "nimblefix/profile/dictgen_input.h"
 
 namespace {
 
 auto
 PrintUsage() -> void
 {
-  std::cout << "usage: fastfix-fuzz-dictgen --input <file-or-directory>\n";
+  std::cout << "usage: nimblefix-fuzz-dictgen --input <file-or-directory>\n";
 }
 
 auto
@@ -61,7 +61,7 @@ main(int argc, char** argv)
   std::size_t accepted = 0;
   for (const auto& file : files) {
     const auto text = ReadText(file);
-    auto result = fastfix::profile::LoadNormalizedDictionaryText(text);
+    auto result = nimble::profile::LoadNormalizedDictionaryText(text);
     if (result.ok()) {
       ++accepted;
     }

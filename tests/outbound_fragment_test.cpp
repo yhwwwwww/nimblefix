@@ -4,19 +4,19 @@
 #include <string>
 #include <string_view>
 
-#include "fastfix/codec/fix_codec.h"
-#include "fastfix/codec/fix_tags.h"
-#include "fastfix/message/fixed_layout_writer.h"
 #include "fix44_builders.h"
+#include "nimblefix/codec/fix_codec.h"
+#include "nimblefix/codec/fix_tags.h"
+#include "nimblefix/message/fixed_layout_writer.h"
 
 #include "test_support.h"
 
 namespace {
 
 auto
-EncodedExtras(std::string_view header, std::string_view body) -> fastfix::codec::EncodedOutboundExtras
+EncodedExtras(std::string_view header, std::string_view body) -> nimble::codec::EncodedOutboundExtras
 {
-  return fastfix::codec::EncodedOutboundExtras{
+  return nimble::codec::EncodedOutboundExtras{
     .header_fragment = std::string(header),
     .body_fragment = std::string(body),
   };
@@ -36,16 +36,16 @@ ToReadableFrame(std::span<const std::byte> bytes) -> std::string
 
 } // namespace
 
-using namespace fastfix::codec::tags;
+using namespace nimble::codec::tags;
 
 TEST_CASE("encoded fragments drive generic and template encoders end-to-end", "[fix-codec][outbound-fragment]")
 {
-  auto dictionary = fastfix::tests::LoadFix44DictionaryView();
+  auto dictionary = nimble::tests::LoadFix44DictionaryView();
   if (!dictionary.ok()) {
     SKIP("FIX44 artifact not available: " << dictionary.status().message());
   }
 
-  fastfix::message::MessageBuilder builder("D");
+  nimble::message::MessageBuilder builder("D");
   builder.set_string(kMsgType, "D")
     .set_string(kClOrdID, "ORD-42")
     .set_string(kSymbol, "AAPL")
@@ -63,31 +63,31 @@ TEST_CASE("encoded fragments drive generic and template encoders end-to-end", "[
                                     "1=ACC-77\x01"
                                     "9999=TAIL\x01");
 
-  fastfix::codec::EncodeOptions options;
+  nimble::codec::EncodeOptions options;
   options.begin_string = "FIX.4.4";
   options.sender_comp_id = "BUY";
   options.target_comp_id = "SELL";
   options.msg_seq_num = 17U;
   options.sending_time = "20260414-09:30:01.000";
 
-  auto encoded = fastfix::codec::EncodeFixMessage(message, dictionary.value(), options, extras.view());
+  auto encoded = nimble::codec::EncodeFixMessage(message, dictionary.value(), options, extras.view());
   REQUIRE(encoded.ok());
 
-  auto compiled = fastfix::codec::CompileFrameEncodeTemplate(dictionary.value(),
-                                                             "D",
-                                                             fastfix::codec::EncodeTemplateConfig{
-                                                               .begin_string = "FIX.4.4",
-                                                               .sender_comp_id = "BUY",
-                                                               .target_comp_id = "SELL",
-                                                               .delimiter = fastfix::codec::kFixSoh,
-                                                             });
+  auto compiled = nimble::codec::CompileFrameEncodeTemplate(dictionary.value(),
+                                                            "D",
+                                                            nimble::codec::EncodeTemplateConfig{
+                                                              .begin_string = "FIX.4.4",
+                                                              .sender_comp_id = "BUY",
+                                                              .target_comp_id = "SELL",
+                                                              .delimiter = nimble::codec::kFixSoh,
+                                                            });
   REQUIRE(compiled.ok());
 
   auto template_encoded = compiled.value().Encode(message, options, extras.view());
   REQUIRE(template_encoded.ok());
   CHECK(template_encoded.value() == encoded.value());
 
-  auto decoded = fastfix::codec::DecodeFixMessageView(encoded.value(), dictionary.value());
+  auto decoded = nimble::codec::DecodeFixMessageView(encoded.value(), dictionary.value());
   REQUIRE(decoded.ok());
   CHECK(decoded.value().header.msg_type == "D");
   CHECK(decoded.value().header.msg_seq_num == 17U);
@@ -99,7 +99,7 @@ TEST_CASE("encoded fragments drive generic and template encoders end-to-end", "[
   REQUIRE(decoded.value().message.view().get_string(kAccount).has_value());
   CHECK(decoded.value().message.view().get_string(kAccount).value() == "ACC-77");
 
-  auto peeked = fastfix::codec::PeekSessionHeaderView(encoded.value());
+  auto peeked = nimble::codec::PeekSessionHeaderView(encoded.value());
   REQUIRE(peeked.ok());
   CHECK(peeked.value().sender_sub_id == "DESK-9");
   CHECK(peeked.value().target_sub_id == "ROUTE-7");
@@ -135,12 +135,12 @@ TEST_CASE("encoded fragments drive generic and template encoders end-to-end", "[
 
 TEST_CASE("encoded fragments drive fixed layout writer end-to-end", "[fix-codec][outbound-fragment]")
 {
-  auto dictionary = fastfix::tests::LoadFix44DictionaryView();
+  auto dictionary = nimble::tests::LoadFix44DictionaryView();
   if (!dictionary.ok()) {
     SKIP("FIX44 artifact not available: " << dictionary.status().message());
   }
 
-  auto layout = fastfix::message::FixedLayout::Build(dictionary.value(), "D");
+  auto layout = nimble::message::FixedLayout::Build(dictionary.value(), "D");
   REQUIRE(layout.ok());
 
   const auto extras = EncodedExtras("50=DESK-9\x01"
@@ -151,7 +151,7 @@ TEST_CASE("encoded fragments drive fixed layout writer end-to-end", "[fix-codec]
                                     "1=ACC-77\x01"
                                     "9999=TAIL\x01");
 
-  fastfix::message::FixedLayoutWriter writer(layout.value());
+  nimble::message::FixedLayoutWriter writer(layout.value());
   writer.bind_session("FIX.4.4", "BUY", "SELL");
   writer.set_string(kClOrdID, "ORD-42")
     .set_string(kSymbol, "AAPL")
@@ -160,18 +160,18 @@ TEST_CASE("encoded fragments drive fixed layout writer end-to-end", "[fix-codec]
     .set_int(kOrderQty, 100)
     .set_char(kOrdType, '2');
 
-  fastfix::codec::EncodeOptions options;
+  nimble::codec::EncodeOptions options;
   options.begin_string = "FIX.4.4";
   options.sender_comp_id = "BUY";
   options.target_comp_id = "SELL";
   options.msg_seq_num = 17U;
   options.sending_time = "20260414-09:30:01.000";
 
-  fastfix::codec::EncodeBuffer buffer;
+  nimble::codec::EncodeBuffer buffer;
   auto status = writer.encode_to_buffer(dictionary.value(), options, extras.view(), &buffer);
   REQUIRE(status.ok());
 
-  auto decoded = fastfix::codec::DecodeFixMessageView(buffer.bytes(), dictionary.value());
+  auto decoded = nimble::codec::DecodeFixMessageView(buffer.bytes(), dictionary.value());
   REQUIRE(decoded.ok());
   CHECK(decoded.value().header.sender_sub_id == "DESK-9");
   CHECK(decoded.value().header.target_sub_id == "ROUTE-7");
@@ -200,12 +200,12 @@ TEST_CASE("encoded fragments drive fixed layout writer end-to-end", "[fix-codec]
 
 TEST_CASE("encoded fragments drive generated writer end-to-end", "[fix-codec][outbound-fragment]")
 {
-  auto dictionary = fastfix::tests::LoadFix44DictionaryView();
+  auto dictionary = nimble::tests::LoadFix44DictionaryView();
   if (!dictionary.ok()) {
     SKIP("FIX44 artifact not available: " << dictionary.status().message());
   }
 
-  auto layout = fastfix::message::FixedLayout::Build(dictionary.value(), "D");
+  auto layout = nimble::message::FixedLayout::Build(dictionary.value(), "D");
   REQUIRE(layout.ok());
 
   const auto extras = EncodedExtras("50=DESK-9\x01"
@@ -216,7 +216,7 @@ TEST_CASE("encoded fragments drive generated writer end-to-end", "[fix-codec][ou
                                     "1=ACC-77\x01"
                                     "9999=TAIL\x01");
 
-  fastfix::generated::profile_4400::NewOrderSingleWriter writer(layout.value());
+  nimble::generated::profile_4400::NewOrderSingleWriter writer(layout.value());
   writer.bind_session("FIX.4.4", "BUY", "SELL");
   writer.set_cl_ord_id("ORD-42")
     .set_symbol("AAPL")
@@ -225,18 +225,18 @@ TEST_CASE("encoded fragments drive generated writer end-to-end", "[fix-codec][ou
     .set_order_qty(100)
     .set_ord_type('2');
 
-  fastfix::codec::EncodeOptions options;
+  nimble::codec::EncodeOptions options;
   options.begin_string = "FIX.4.4";
   options.sender_comp_id = "BUY";
   options.target_comp_id = "SELL";
   options.msg_seq_num = 17U;
   options.sending_time = "20260414-09:30:01.000";
 
-  fastfix::codec::EncodeBuffer buffer;
+  nimble::codec::EncodeBuffer buffer;
   auto status = writer.encode_to_buffer(dictionary.value(), options, extras.view(), &buffer);
   REQUIRE(status.ok());
 
-  auto decoded = fastfix::codec::DecodeFixMessageView(buffer.bytes(), dictionary.value());
+  auto decoded = nimble::codec::DecodeFixMessageView(buffer.bytes(), dictionary.value());
   REQUIRE(decoded.ok());
   CHECK(decoded.value().header.sender_sub_id == "DESK-9");
   CHECK(decoded.value().header.target_sub_id == "ROUTE-7");

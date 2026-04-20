@@ -3,13 +3,28 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BUILD_SYSTEM="${FASTFIX_BUILD_SYSTEM:-auto}"
-XMAKE_MODE="${FASTFIX_XMAKE_MODE:-release}"
-XMAKE_CCACHE="${FASTFIX_XMAKE_CCACHE:-n}"
-PRESET="${FASTFIX_CMAKE_PRESET:-dev-release}"
-CMAKE_GENERATOR_KIND="${FASTFIX_CMAKE_GENERATOR:-auto}"
+env_or_default() {
+    local default_value="$1"
+    shift
+
+    local variable_name
+    for variable_name in "$@"; do
+        if [ -n "${!variable_name:-}" ]; then
+            printf '%s\n' "${!variable_name}"
+            return
+        fi
+    done
+
+    printf '%s\n' "$default_value"
+}
+
+BUILD_SYSTEM="$(env_or_default auto NIMBLEFIX_BUILD_SYSTEM)"
+XMAKE_MODE="$(env_or_default release NIMBLEFIX_XMAKE_MODE)"
+XMAKE_CCACHE="$(env_or_default n NIMBLEFIX_XMAKE_CCACHE)"
+PRESET="$(env_or_default dev-release NIMBLEFIX_CMAKE_PRESET)"
+CMAKE_GENERATOR_KIND="$(env_or_default auto NIMBLEFIX_CMAKE_GENERATOR)"
 BENCH_MODE="smoke"
-XMAKE_BIN_DIR="${FASTFIX_XMAKE_BIN_DIR:-$ROOT_DIR/build/linux/x86_64/$XMAKE_MODE}"
+XMAKE_BIN_DIR="$(env_or_default "$ROOT_DIR/build/linux/x86_64/$XMAKE_MODE" NIMBLEFIX_XMAKE_BIN_DIR)"
 RESOLVED_BUILD_SYSTEM=""
 RESOLVED_CMAKE_GENERATOR=""
 RESOLVED_CMAKE_GENERATOR_KIND=""
@@ -20,6 +35,14 @@ DETECTED_XMAKE_VERSION=""
 usage() {
     cat <<'EOF'
 usage: ./scripts/offline_build.sh [--build-system auto|xmake|cmake] [--mode debug|release] [--cmake-generator auto|ninja|make] [--preset <name>] [--bench skip|smoke|full]
+
+environment overrides:
+    NIMBLEFIX_BUILD_SYSTEM
+    NIMBLEFIX_XMAKE_MODE
+    NIMBLEFIX_XMAKE_CCACHE
+    NIMBLEFIX_XMAKE_BIN_DIR
+    NIMBLEFIX_CMAKE_GENERATOR
+    NIMBLEFIX_CMAKE_PRESET
 
 build systems:
     auto         Prefer xmake, then cmake + Ninja, then cmake + make
@@ -42,7 +65,7 @@ presets:
 
 bench modes:
     skip   Configure, build, and run tests only
-    smoke  Run reduced FastFix + QuickFIX benchmark passes after tests
+    smoke  Run reduced NimbleFIX + QuickFIX benchmark passes after tests
     full   Run the full benchmark compare suite after tests
 EOF
 }
@@ -60,7 +83,7 @@ validate_xmake_ccache() {
         y|n)
             ;;
         *)
-            echo "error: FASTFIX_XMAKE_CCACHE must be 'y' or 'n' (got '$XMAKE_CCACHE')" >&2
+            echo "error: NIMBLEFIX_XMAKE_CCACHE must be 'y' or 'n' (got '$XMAKE_CCACHE')" >&2
             exit 1
             ;;
     esac
@@ -392,7 +415,7 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 
-XMAKE_BIN_DIR="${FASTFIX_XMAKE_BIN_DIR:-$ROOT_DIR/build/linux/x86_64/$XMAKE_MODE}"
+XMAKE_BIN_DIR="$(env_or_default "$ROOT_DIR/build/linux/x86_64/$XMAKE_MODE" NIMBLEFIX_XMAKE_BIN_DIR)"
 
 case "$BUILD_SYSTEM" in
     auto|xmake|cmake)
@@ -439,8 +462,8 @@ resolve_build_system
 if [ "$RESOLVED_BUILD_SYSTEM" = "xmake" ]; then
     if configure_xmake; then
         echo "info: using xmake ($XMAKE_MODE)" >&2
-        run_xmake build fastfix-tests
-        "$XMAKE_BIN_DIR/fastfix-tests"
+        run_xmake build nimblefix-tests
+        "$XMAKE_BIN_DIR/nimblefix-tests"
     elif [ "$BUILD_SYSTEM" = "auto" ] && fallback_to_cmake; then
         :
     else
@@ -462,19 +485,19 @@ if [ "$BENCH_MODE" = "skip" ]; then
     exit 0
 fi
 
-export FASTFIX_BUILD_SYSTEM="$RESOLVED_BUILD_SYSTEM"
+export NIMBLEFIX_BUILD_SYSTEM="$RESOLVED_BUILD_SYSTEM"
 
 if [ "$RESOLVED_BUILD_SYSTEM" = "xmake" ]; then
-    export FASTFIX_XMAKE_MODE="$XMAKE_MODE"
-    export FASTFIX_XMAKE_CCACHE="$XMAKE_CCACHE"
-    export FASTFIX_XMAKE_BIN_DIR="$XMAKE_BIN_DIR"
+    export NIMBLEFIX_XMAKE_MODE="$XMAKE_MODE"
+    export NIMBLEFIX_XMAKE_CCACHE="$XMAKE_CCACHE"
+    export NIMBLEFIX_XMAKE_BIN_DIR="$XMAKE_BIN_DIR"
 else
-    export FASTFIX_CMAKE_GENERATOR="$RESOLVED_CMAKE_GENERATOR_KIND"
-    export FASTFIX_CMAKE_PRESET="$RESOLVED_CMAKE_PRESET"
+    export NIMBLEFIX_CMAKE_GENERATOR="$RESOLVED_CMAKE_GENERATOR_KIND"
+    export NIMBLEFIX_CMAKE_PRESET="$RESOLVED_CMAKE_PRESET"
 fi
 
 if [ "$BENCH_MODE" = "smoke" ]; then
-    ./bench/bench.sh fastfix --iterations 5000 --loopback 100 --replay 100
+    ./bench/bench.sh nimblefix --iterations 5000 --loopback 100 --replay 100
     ./bench/bench.sh quickfix --iterations 5000 --replay 100 --replay-span 32 --loopback 100
     exit 0
 fi

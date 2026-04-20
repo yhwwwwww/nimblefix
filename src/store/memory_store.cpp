@@ -1,8 +1,8 @@
-#include "fastfix/store/memory_store.h"
+#include "nimblefix/store/memory_store.h"
 
 #include <algorithm>
 
-namespace fastfix::store {
+namespace nimble::store {
 
 namespace {
 
@@ -310,4 +310,4 @@ MemorySessionStore::Rollover() -> base::Status
   return base::Status::Ok();
 }
 
-} // namespace fastfix::store
+} // namespace nimble::store

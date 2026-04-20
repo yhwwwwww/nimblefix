@@ -9,11 +9,11 @@
 #include <string_view>
 #include <vector>
 
-#include "fastfix/profile/artifact_builder.h"
-#include "fastfix/profile/normalized_dictionary.h"
-#include "fastfix/profile/profile_loader.h"
+#include "nimblefix/profile/artifact_builder.h"
+#include "nimblefix/profile/normalized_dictionary.h"
+#include "nimblefix/profile/profile_loader.h"
 
-namespace fastfix::tests {
+namespace nimble::tests {
 
 inline auto
 Bytes(std::string_view text) -> std::vector<std::byte>
@@ -61,7 +61,7 @@ EncodeFixFrame(std::string_view body_fields, std::string_view begin_string = "FI
 inline auto
 LoadFix44DictionaryView() -> base::Result<profile::NormalizedDictionaryView>
 {
-  const auto path = std::filesystem::path(FASTFIX_PROJECT_DIR) / "build" / "bench" / "quickfix_FIX44.art";
+  const auto path = std::filesystem::path(NIMBLEFIX_PROJECT_DIR) / "build" / "bench" / "quickfix_FIX44.art";
   auto profile = profile::LoadProfileArtifact(path);
   if (!profile.ok()) {
     return profile.status();
@@ -86,7 +86,7 @@ BuildDictionaryViewFromDictionary(profile::NormalizedDictionary dict) -> base::R
   if (!artifact.ok()) {
     return artifact.status();
   }
-  const auto artifact_path = std::filesystem::temp_directory_path() / "fastfix-test-support.art";
+  const auto artifact_path = std::filesystem::temp_directory_path() / "nimblefix-test-support.art";
   const auto write_status = profile::WriteProfileArtifact(artifact_path, artifact.value());
   if (!write_status.ok()) {
     return write_status;
@@ -99,4 +99,4 @@ BuildDictionaryViewFromDictionary(profile::NormalizedDictionary dict) -> base::R
   return profile::NormalizedDictionaryView::FromProfile(std::move(loaded).value());
 }
 
-} // namespace fastfix::tests
+} // namespace nimble::tests

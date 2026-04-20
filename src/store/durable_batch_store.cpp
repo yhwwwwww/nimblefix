@@ -1,4 +1,4 @@
-#include "fastfix/store/durable_batch_store.h"
+#include "nimblefix/store/durable_batch_store.h"
 
 #include <algorithm>
 #include <array>
@@ -19,7 +19,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-namespace fastfix::store {
+namespace nimble::store {
 
 namespace {
 
@@ -1543,4 +1543,4 @@ DurableBatchSessionStore::ResetSession(std::uint64_t session_id) -> base::Status
   return Open();
 }
 
-} // namespace fastfix::store
+} // namespace nimble::store

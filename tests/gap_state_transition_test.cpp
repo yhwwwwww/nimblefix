@@ -9,36 +9,36 @@
 
 #include <catch2/catch_test_macros.hpp>
 
-#include "fastfix/codec/fix_codec.h"
-#include "fastfix/codec/fix_tags.h"
-#include "fastfix/session/admin_protocol.h"
-#include "fastfix/session/session_core.h"
-#include "fastfix/store/memory_store.h"
+#include "nimblefix/codec/fix_codec.h"
+#include "nimblefix/codec/fix_tags.h"
+#include "nimblefix/session/admin_protocol.h"
+#include "nimblefix/session/session_core.h"
+#include "nimblefix/store/memory_store.h"
 
 #include "test_support.h"
 
-using fastfix::session::AdminProtocol;
-using fastfix::session::AdminProtocolConfig;
-using fastfix::session::SessionConfig;
-using namespace fastfix::codec::tags;
-using fastfix::session::SessionCore;
-using fastfix::session::SessionKey;
-using fastfix::session::SessionState;
+using nimble::session::AdminProtocol;
+using nimble::session::AdminProtocolConfig;
+using nimble::session::SessionConfig;
+using namespace nimble::codec::tags;
+using nimble::session::SessionCore;
+using nimble::session::SessionKey;
+using nimble::session::SessionState;
 
 namespace {
 
 auto
-EncodeInboundFrame(const fastfix::message::Message& message,
-                   const fastfix::profile::NormalizedDictionaryView& dictionary,
+EncodeInboundFrame(const nimble::message::Message& message,
+                   const nimble::profile::NormalizedDictionaryView& dictionary,
                    std::string begin_string,
                    std::string sender,
                    std::string target,
                    std::uint32_t seq_num,
                    bool poss_dup,
                    std::string default_appl_ver_id = {},
-                   std::string orig_sending_time = {}) -> fastfix::base::Result<std::vector<std::byte>>
+                   std::string orig_sending_time = {}) -> nimble::base::Result<std::vector<std::byte>>
 {
-  fastfix::codec::EncodeOptions options;
+  nimble::codec::EncodeOptions options;
   options.begin_string = std::move(begin_string);
   options.sender_comp_id = std::move(sender);
   options.target_comp_id = std::move(target);
@@ -47,16 +47,16 @@ EncodeInboundFrame(const fastfix::message::Message& message,
   options.poss_dup = poss_dup;
   options.sending_time = "20260414-12:00:00.000";
   options.orig_sending_time = std::move(orig_sending_time);
-  return fastfix::codec::EncodeFixMessage(message, dictionary, options);
+  return nimble::codec::EncodeFixMessage(message, dictionary, options);
 }
 
 // Activate an acceptor session by sending an inbound Logon at seq 1.
 auto
 ActivateAcceptorSession(AdminProtocol* protocol,
-                        const fastfix::profile::NormalizedDictionaryView& dictionary,
-                        std::string begin_string) -> fastfix::base::Status
+                        const nimble::profile::NormalizedDictionaryView& dictionary,
+                        std::string begin_string) -> nimble::base::Status
 {
-  fastfix::message::MessageBuilder logon_builder("A");
+  nimble::message::MessageBuilder logon_builder("A");
   logon_builder.set_string(35U, "A").set_int(98U, 0).set_int(108U, 30);
   auto inbound =
     EncodeInboundFrame(std::move(logon_builder).build(), dictionary, std::move(begin_string), "BUY", "SELL", 1U, false);
@@ -69,23 +69,23 @@ ActivateAcceptorSession(AdminProtocol* protocol,
     return event.status();
   }
   if (!event.value().session_active || event.value().outbound_frames.empty()) {
-    return fastfix::base::Status::InvalidArgument("acceptor session did not activate on inbound logon");
+    return nimble::base::Status::InvalidArgument("acceptor session did not activate on inbound logon");
   }
-  return fastfix::base::Status::Ok();
+  return nimble::base::Status::Ok();
 }
 
 // Helper: create an initiator AdminProtocol, connect, and send logon
 // (PendingLogon state). Returns the protocol and its outbound logon frame.
 struct InitiatorSetup
 {
-  fastfix::store::MemorySessionStore store;
+  nimble::store::MemorySessionStore store;
   std::unique_ptr<AdminProtocol> protocol;
 };
 
 auto
-MakeInitiatorPendingLogon(const fastfix::profile::NormalizedDictionaryView& dictionary,
+MakeInitiatorPendingLogon(const nimble::profile::NormalizedDictionaryView& dictionary,
                           std::uint64_t session_id,
-                          fastfix::store::MemorySessionStore& store) -> std::unique_ptr<AdminProtocol>
+                          nimble::store::MemorySessionStore& store) -> std::unique_ptr<AdminProtocol>
 {
   auto protocol = std::make_unique<AdminProtocol>(
     AdminProtocolConfig{
@@ -120,9 +120,9 @@ MakeInitiatorPendingLogon(const fastfix::profile::NormalizedDictionaryView& dict
 }
 
 auto
-MakeAcceptorProtocol(const fastfix::profile::NormalizedDictionaryView& dictionary,
+MakeAcceptorProtocol(const nimble::profile::NormalizedDictionaryView& dictionary,
                      std::uint64_t session_id,
-                     fastfix::store::MemorySessionStore& store) -> std::unique_ptr<AdminProtocol>
+                     nimble::store::MemorySessionStore& store) -> std::unique_ptr<AdminProtocol>
 {
   return std::make_unique<AdminProtocol>(
     AdminProtocolConfig{
@@ -154,19 +154,19 @@ MakeAcceptorProtocol(const fastfix::profile::NormalizedDictionaryView& dictionar
 
 TEST_CASE("gap-transition: initiator logon response with gap activates after fill", "[gap-transition][bug1][initiator]")
 {
-  auto dictionary = fastfix::tests::LoadFix44DictionaryView();
+  auto dictionary = nimble::tests::LoadFix44DictionaryView();
   if (!dictionary.ok()) {
     SKIP("FIX44 artifact not available: " << dictionary.status().message());
   }
 
-  fastfix::store::MemorySessionStore store;
+  nimble::store::MemorySessionStore store;
   auto protocol = MakeInitiatorPendingLogon(dictionary.value(), 9001U, store);
   REQUIRE(protocol != nullptr);
   REQUIRE(protocol->session().state() == SessionState::kPendingLogon);
   REQUIRE(protocol->session().Snapshot().next_in_seq == 1U);
 
   // Counterparty sends Logon at seq=3 (gap: expected 1, received 3)
-  fastfix::message::MessageBuilder logon_builder("A");
+  nimble::message::MessageBuilder logon_builder("A");
   logon_builder.set_string(35U, "A").set_int(98U, 0).set_int(108U, 30);
   auto logon_frame =
     EncodeInboundFrame(std::move(logon_builder).build(), dictionary.value(), "FIX.4.4", "SELL", "BUY", 3U, false);
@@ -178,14 +178,14 @@ TEST_CASE("gap-transition: initiator logon response with gap activates after fil
   REQUIRE(gap_event.value().outbound_frames.size() >= 1U);
 
   auto resend_decoded =
-    fastfix::codec::DecodeFixMessage(gap_event.value().outbound_frames.front().bytes, dictionary.value());
+    nimble::codec::DecodeFixMessage(gap_event.value().outbound_frames.front().bytes, dictionary.value());
   REQUIRE(resend_decoded.ok());
   REQUIRE(resend_decoded.value().header.msg_type == "2");
   REQUIRE(resend_decoded.value().message.view().get_int(7U).value() == 1);
   REQUIRE(resend_decoded.value().message.view().get_int(16U).value() == 2);
 
   // Now fill the gap with a GapFill covering [1, 3) → NewSeqNo=3
-  fastfix::message::MessageBuilder gap_fill_builder("4");
+  nimble::message::MessageBuilder gap_fill_builder("4");
   gap_fill_builder.set_string(35U, "4").set_boolean(123U, true).set_int(36U, 3);
   auto gap_fill = EncodeInboundFrame(std::move(gap_fill_builder).build(),
                                      dictionary.value(),
@@ -216,18 +216,18 @@ TEST_CASE("gap-transition: initiator logon response with gap activates after fil
 
 TEST_CASE("gap-transition: acceptor logon with gap activates after fill", "[gap-transition][bug1][acceptor]")
 {
-  auto dictionary = fastfix::tests::LoadFix44DictionaryView();
+  auto dictionary = nimble::tests::LoadFix44DictionaryView();
   if (!dictionary.ok()) {
     SKIP("FIX44 artifact not available: " << dictionary.status().message());
   }
 
-  fastfix::store::MemorySessionStore store;
+  nimble::store::MemorySessionStore store;
   auto protocol = MakeAcceptorProtocol(dictionary.value(), 9002U, store);
   REQUIRE(protocol->OnTransportConnected(1U).ok());
   REQUIRE(protocol->session().state() == SessionState::kConnected);
 
   // Counterparty sends Logon at seq=5 (gap: expected 1, received 5)
-  fastfix::message::MessageBuilder logon_builder("A");
+  nimble::message::MessageBuilder logon_builder("A");
   logon_builder.set_string(35U, "A").set_int(98U, 0).set_int(108U, 30);
   auto logon_frame =
     EncodeInboundFrame(std::move(logon_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 5U, false);
@@ -239,14 +239,14 @@ TEST_CASE("gap-transition: acceptor logon with gap activates after fill", "[gap-
   REQUIRE(gap_event.value().outbound_frames.size() >= 1U);
 
   auto resend_decoded =
-    fastfix::codec::DecodeFixMessage(gap_event.value().outbound_frames.front().bytes, dictionary.value());
+    nimble::codec::DecodeFixMessage(gap_event.value().outbound_frames.front().bytes, dictionary.value());
   REQUIRE(resend_decoded.ok());
   REQUIRE(resend_decoded.value().header.msg_type == "2");
   REQUIRE(resend_decoded.value().message.view().get_int(7U).value() == 1);
   REQUIRE(resend_decoded.value().message.view().get_int(16U).value() == 4);
 
   // Fill gap with GapFill [1, 5) → NewSeqNo=5
-  fastfix::message::MessageBuilder gap_fill_builder("4");
+  nimble::message::MessageBuilder gap_fill_builder("4");
   gap_fill_builder.set_string(35U, "4").set_boolean(123U, true).set_int(36U, 5);
   auto gap_fill = EncodeInboundFrame(std::move(gap_fill_builder).build(),
                                      dictionary.value(),
@@ -269,7 +269,7 @@ TEST_CASE("gap-transition: acceptor logon with gap activates after fill", "[gap-
   // Acceptor must have sent a Logon response
   bool has_logon_response = false;
   for (const auto& frame : fill_event.value().outbound_frames) {
-    auto decoded = fastfix::codec::DecodeFixMessage(frame.bytes, dictionary.value());
+    auto decoded = nimble::codec::DecodeFixMessage(frame.bytes, dictionary.value());
     if (decoded.ok() && decoded.value().header.msg_type == "A") {
       has_logon_response = true;
     }
@@ -277,7 +277,7 @@ TEST_CASE("gap-transition: acceptor logon with gap activates after fill", "[gap-
   // Either the logon response was in gap_event or fill_event
   if (!has_logon_response) {
     for (const auto& frame : gap_event.value().outbound_frames) {
-      auto decoded = fastfix::codec::DecodeFixMessage(frame.bytes, dictionary.value());
+      auto decoded = nimble::codec::DecodeFixMessage(frame.bytes, dictionary.value());
       if (decoded.ok() && decoded.value().header.msg_type == "A") {
         has_logon_response = true;
       }
@@ -294,12 +294,12 @@ TEST_CASE("gap-transition: acceptor logon with gap activates after fill", "[gap-
 
 TEST_CASE("gap-transition: app message triggering gap is delivered after fill", "[gap-transition][bug1][app-message]")
 {
-  auto dictionary = fastfix::tests::LoadFix44DictionaryView();
+  auto dictionary = nimble::tests::LoadFix44DictionaryView();
   if (!dictionary.ok()) {
     SKIP("FIX44 artifact not available: " << dictionary.status().message());
   }
 
-  fastfix::store::MemorySessionStore store;
+  nimble::store::MemorySessionStore store;
   auto protocol = MakeAcceptorProtocol(dictionary.value(), 9003U, store);
   REQUIRE(protocol->OnTransportConnected(1U).ok());
   REQUIRE(ActivateAcceptorSession(protocol.get(), dictionary.value(), "FIX.4.4").ok());
@@ -308,7 +308,7 @@ TEST_CASE("gap-transition: app message triggering gap is delivered after fill", 
 
   // Counterparty sends a NewOrderSingle (D) at seq=5 (gap: expected 2, received
   // 5)
-  fastfix::message::MessageBuilder order_builder("D");
+  nimble::message::MessageBuilder order_builder("D");
   order_builder.set_string(kMsgType, "D")
     .set_string(kClOrdID, "ORDER-001")
     .set_string(kSymbol, "AAPL")
@@ -327,7 +327,7 @@ TEST_CASE("gap-transition: app message triggering gap is delivered after fill", 
   REQUIRE(gap_event.value().outbound_frames.size() >= 1U);
 
   // Fill gap with GapFill [2, 5) → NewSeqNo=5
-  fastfix::message::MessageBuilder gap_fill_builder("4");
+  nimble::message::MessageBuilder gap_fill_builder("4");
   gap_fill_builder.set_string(35U, "4").set_boolean(123U, true).set_int(36U, 5);
   auto gap_fill = EncodeInboundFrame(std::move(gap_fill_builder).build(),
                                      dictionary.value(),
@@ -363,19 +363,19 @@ TEST_CASE("gap-transition: app message triggering gap is delivered after fill", 
 
 TEST_CASE("gap-transition: logout triggering gap causes disconnect after fill", "[gap-transition][bug1][logout]")
 {
-  auto dictionary = fastfix::tests::LoadFix44DictionaryView();
+  auto dictionary = nimble::tests::LoadFix44DictionaryView();
   if (!dictionary.ok()) {
     SKIP("FIX44 artifact not available: " << dictionary.status().message());
   }
 
-  fastfix::store::MemorySessionStore store;
+  nimble::store::MemorySessionStore store;
   auto protocol = MakeAcceptorProtocol(dictionary.value(), 9004U, store);
   REQUIRE(protocol->OnTransportConnected(1U).ok());
   REQUIRE(ActivateAcceptorSession(protocol.get(), dictionary.value(), "FIX.4.4").ok());
   REQUIRE(protocol->session().state() == SessionState::kActive);
 
   // Counterparty sends Logout at seq=4 (gap: expected 2, received 4)
-  fastfix::message::MessageBuilder logout_builder("5");
+  nimble::message::MessageBuilder logout_builder("5");
   logout_builder.set_string(35U, "5");
   auto logout_frame =
     EncodeInboundFrame(std::move(logout_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 4U, false);
@@ -385,7 +385,7 @@ TEST_CASE("gap-transition: logout triggering gap causes disconnect after fill", 
   REQUIRE(gap_event.ok());
 
   // Fill gap with GapFill [2, 4) → NewSeqNo=4
-  fastfix::message::MessageBuilder gap_fill_builder("4");
+  nimble::message::MessageBuilder gap_fill_builder("4");
   gap_fill_builder.set_string(35U, "4").set_boolean(123U, true).set_int(36U, 4);
   auto gap_fill = EncodeInboundFrame(std::move(gap_fill_builder).build(),
                                      dictionary.value(),
@@ -416,19 +416,19 @@ TEST_CASE("gap-transition: logout triggering gap causes disconnect after fill", 
 TEST_CASE("gap-transition: test request triggering gap gets heartbeat after fill",
           "[gap-transition][bug1][test-request]")
 {
-  auto dictionary = fastfix::tests::LoadFix44DictionaryView();
+  auto dictionary = nimble::tests::LoadFix44DictionaryView();
   if (!dictionary.ok()) {
     SKIP("FIX44 artifact not available: " << dictionary.status().message());
   }
 
-  fastfix::store::MemorySessionStore store;
+  nimble::store::MemorySessionStore store;
   auto protocol = MakeAcceptorProtocol(dictionary.value(), 9005U, store);
   REQUIRE(protocol->OnTransportConnected(1U).ok());
   REQUIRE(ActivateAcceptorSession(protocol.get(), dictionary.value(), "FIX.4.4").ok());
   REQUIRE(protocol->session().state() == SessionState::kActive);
 
   // Counterparty sends TestRequest at seq=4 (gap: expected 2, received 4)
-  fastfix::message::MessageBuilder test_req_builder("1");
+  nimble::message::MessageBuilder test_req_builder("1");
   test_req_builder.set_string(35U, "1").set_string(112U, "TR-12345");
   auto test_req_frame =
     EncodeInboundFrame(std::move(test_req_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 4U, false);
@@ -438,7 +438,7 @@ TEST_CASE("gap-transition: test request triggering gap gets heartbeat after fill
   REQUIRE(gap_event.ok());
 
   // Fill gap with GapFill [2, 4) → NewSeqNo=4
-  fastfix::message::MessageBuilder gap_fill_builder("4");
+  nimble::message::MessageBuilder gap_fill_builder("4");
   gap_fill_builder.set_string(35U, "4").set_boolean(123U, true).set_int(36U, 4);
   auto gap_fill = EncodeInboundFrame(std::move(gap_fill_builder).build(),
                                      dictionary.value(),
@@ -459,7 +459,7 @@ TEST_CASE("gap-transition: test request triggering gap gets heartbeat after fill
   bool found_heartbeat = false;
   auto check_frames = [&](const auto& frames) {
     for (const auto& frame : frames) {
-      auto decoded = fastfix::codec::DecodeFixMessage(frame.bytes, dictionary.value());
+      auto decoded = nimble::codec::DecodeFixMessage(frame.bytes, dictionary.value());
       if (decoded.ok() && decoded.value().header.msg_type == "0") {
         auto tr_id = decoded.value().message.view().get_string(112U);
         if (tr_id.has_value() && tr_id.value() == "TR-12345") {
@@ -517,18 +517,18 @@ TEST_CASE("gap-transition: ObserveInboundSeq auto-completes resend on normal "
 
 TEST_CASE("gap-transition: replayed messages complete gap recovery", "[gap-transition][bug2][protocol]")
 {
-  auto dictionary = fastfix::tests::LoadFix44DictionaryView();
+  auto dictionary = nimble::tests::LoadFix44DictionaryView();
   if (!dictionary.ok()) {
     SKIP("FIX44 artifact not available: " << dictionary.status().message());
   }
 
-  fastfix::store::MemorySessionStore store;
+  nimble::store::MemorySessionStore store;
   auto protocol = MakeAcceptorProtocol(dictionary.value(), 9011U, store);
   REQUIRE(protocol->OnTransportConnected(1U).ok());
   REQUIRE(ActivateAcceptorSession(protocol.get(), dictionary.value(), "FIX.4.4").ok());
 
   // Receive heartbeat at seq=4 → gap [2, 3]
-  fastfix::message::MessageBuilder hb_builder("0");
+  nimble::message::MessageBuilder hb_builder("0");
   hb_builder.set_string(35U, "0");
   auto hb_frame =
     EncodeInboundFrame(std::move(hb_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 4U, false);
@@ -539,7 +539,7 @@ TEST_CASE("gap-transition: replayed messages complete gap recovery", "[gap-trans
   REQUIRE(protocol->session().state() == SessionState::kResendProcessing);
 
   // Replay seq 2 as PossDup heartbeat
-  fastfix::message::MessageBuilder replay2("0");
+  nimble::message::MessageBuilder replay2("0");
   replay2.set_string(35U, "0");
   auto frame2 = EncodeInboundFrame(
     std::move(replay2).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 2U, true, {}, "20260414-11:59:00.000");
@@ -551,7 +551,7 @@ TEST_CASE("gap-transition: replayed messages complete gap recovery", "[gap-trans
   REQUIRE(protocol->session().state() == SessionState::kResendProcessing);
 
   // Replay seq 3 as PossDup heartbeat — should complete the gap
-  fastfix::message::MessageBuilder replay3("0");
+  nimble::message::MessageBuilder replay3("0");
   replay3.set_string(35U, "0");
   auto frame3 = EncodeInboundFrame(
     std::move(replay3).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 3U, true, {}, "20260414-11:59:00.000");
@@ -575,12 +575,12 @@ TEST_CASE("gap-transition: replayed messages complete gap recovery", "[gap-trans
 
 TEST_CASE("gap-transition: OnTimer disconnects stale PendingLogon", "[gap-transition][bug3][timeout]")
 {
-  auto dictionary = fastfix::tests::LoadFix44DictionaryView();
+  auto dictionary = nimble::tests::LoadFix44DictionaryView();
   if (!dictionary.ok()) {
     SKIP("FIX44 artifact not available: " << dictionary.status().message());
   }
 
-  fastfix::store::MemorySessionStore store;
+  nimble::store::MemorySessionStore store;
   auto protocol = MakeInitiatorPendingLogon(dictionary.value(), 9020U, store);
   REQUIRE(protocol != nullptr);
   REQUIRE(protocol->session().state() == SessionState::kPendingLogon);
@@ -603,12 +603,12 @@ TEST_CASE("gap-transition: OnTimer disconnects stale PendingLogon", "[gap-transi
 TEST_CASE("gap-transition: NextTimerDeadline provides deadline during PendingLogon",
           "[gap-transition][bug3][timer-deadline]")
 {
-  auto dictionary = fastfix::tests::LoadFix44DictionaryView();
+  auto dictionary = nimble::tests::LoadFix44DictionaryView();
   if (!dictionary.ok()) {
     SKIP("FIX44 artifact not available: " << dictionary.status().message());
   }
 
-  fastfix::store::MemorySessionStore store;
+  nimble::store::MemorySessionStore store;
   auto protocol = MakeInitiatorPendingLogon(dictionary.value(), 9021U, store);
   REQUIRE(protocol != nullptr);
   REQUIRE(protocol->session().state() == SessionState::kPendingLogon);
@@ -625,12 +625,12 @@ TEST_CASE("gap-transition: NextTimerDeadline provides deadline during PendingLog
 TEST_CASE("gap-transition: OnTimer does not disconnect PendingLogon before timeout",
           "[gap-transition][bug3][no-premature]")
 {
-  auto dictionary = fastfix::tests::LoadFix44DictionaryView();
+  auto dictionary = nimble::tests::LoadFix44DictionaryView();
   if (!dictionary.ok()) {
     SKIP("FIX44 artifact not available: " << dictionary.status().message());
   }
 
-  fastfix::store::MemorySessionStore store;
+  nimble::store::MemorySessionStore store;
   auto protocol = MakeInitiatorPendingLogon(dictionary.value(), 9022U, store);
   REQUIRE(protocol != nullptr);
 
@@ -651,19 +651,19 @@ TEST_CASE("gap-transition: second gap-triggering message extends gap then both "
           "delivered",
           "[gap-transition][bug1][extended-gap]")
 {
-  auto dictionary = fastfix::tests::LoadFix44DictionaryView();
+  auto dictionary = nimble::tests::LoadFix44DictionaryView();
   if (!dictionary.ok()) {
     SKIP("FIX44 artifact not available: " << dictionary.status().message());
   }
 
-  fastfix::store::MemorySessionStore store;
+  nimble::store::MemorySessionStore store;
   auto protocol = MakeAcceptorProtocol(dictionary.value(), 9030U, store);
   REQUIRE(protocol->OnTransportConnected(1U).ok());
   REQUIRE(ActivateAcceptorSession(protocol.get(), dictionary.value(), "FIX.4.4").ok());
   REQUIRE(protocol->session().Snapshot().next_in_seq == 2U);
 
   // First app message at seq=4 (gap [2, 3])
-  fastfix::message::MessageBuilder order1("D");
+  nimble::message::MessageBuilder order1("D");
   order1.set_string(kMsgType, "D")
     .set_string(kClOrdID, "ORD-1")
     .set_string(kSymbol, "AAPL")
@@ -679,7 +679,7 @@ TEST_CASE("gap-transition: second gap-triggering message extends gap then both "
   REQUIRE(protocol->session().state() == SessionState::kResendProcessing);
 
   // Second app message at seq=6 (extends gap to [2, 5])
-  fastfix::message::MessageBuilder order2("D");
+  nimble::message::MessageBuilder order2("D");
   order2.set_string(kMsgType, "D")
     .set_string(kClOrdID, "ORD-2")
     .set_string(kSymbol, "MSFT")
@@ -694,7 +694,7 @@ TEST_CASE("gap-transition: second gap-triggering message extends gap then both "
   REQUIRE(event2.ok());
 
   // Fill [2, 4) → advances next_in_seq to 4 (does not yet complete resend)
-  fastfix::message::MessageBuilder gap_fill1("4");
+  nimble::message::MessageBuilder gap_fill1("4");
   gap_fill1.set_string(35U, "4").set_boolean(123U, true).set_int(36U, 4);
   auto fill_frame1 = EncodeInboundFrame(
     std::move(gap_fill1).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 2U, true, {}, "20260414-11:59:00.000");
@@ -719,7 +719,7 @@ TEST_CASE("gap-transition: second gap-triggering message extends gap then both "
   // completes the resend and drains seq=6 from the deferred queue.
 
   // Counterparty replays seq=4 as PossDup
-  fastfix::message::MessageBuilder replay4("D");
+  nimble::message::MessageBuilder replay4("D");
   replay4.set_string(kMsgType, "D")
     .set_string(kClOrdID, "ORD-1-PD")
     .set_string(kSymbol, "AAPL")
@@ -737,7 +737,7 @@ TEST_CASE("gap-transition: second gap-triggering message extends gap then both "
   REQUIRE(protocol->session().Snapshot().next_in_seq == 5U);
 
   // GapFill [5, 6) fills seq=5, completing the gap → triggers drain
-  fastfix::message::MessageBuilder gap_fill2("4");
+  nimble::message::MessageBuilder gap_fill2("4");
   gap_fill2.set_string(35U, "4").set_boolean(123U, true).set_int(36U, 6);
   auto fill_frame2 = EncodeInboundFrame(
     std::move(gap_fill2).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 5U, true, {}, "20260414-11:59:02.000");
@@ -772,12 +772,12 @@ TEST_CASE("gap-transition: second gap-triggering message extends gap then both "
 
 TEST_CASE("gap-transition: initiator reset-seq-num logon with gap", "[gap-transition][bug1][reset-seq]")
 {
-  auto dictionary = fastfix::tests::LoadFix44DictionaryView();
+  auto dictionary = nimble::tests::LoadFix44DictionaryView();
   if (!dictionary.ok()) {
     SKIP("FIX44 artifact not available: " << dictionary.status().message());
   }
 
-  fastfix::store::MemorySessionStore store;
+  nimble::store::MemorySessionStore store;
   // Initiator with reset_seq_num_on_logon
   auto protocol = std::make_unique<AdminProtocol>(
     AdminProtocolConfig{
@@ -803,7 +803,7 @@ TEST_CASE("gap-transition: initiator reset-seq-num logon with gap", "[gap-transi
   REQUIRE(protocol->session().state() == SessionState::kPendingLogon);
 
   // Counterparty responds with Logon at seq=2 (expected=1, gap on 1)
-  fastfix::message::MessageBuilder logon_builder("A");
+  nimble::message::MessageBuilder logon_builder("A");
   logon_builder.set_string(35U, "A").set_int(98U, 0).set_int(108U, 30);
   auto logon_frame =
     EncodeInboundFrame(std::move(logon_builder).build(), dictionary.value(), "FIX.4.4", "SELL", "BUY", 2U, false);
@@ -813,7 +813,7 @@ TEST_CASE("gap-transition: initiator reset-seq-num logon with gap", "[gap-transi
   REQUIRE(gap_event.ok());
 
   // Fill gap [1,1] with GapFill
-  fastfix::message::MessageBuilder gap_fill("4");
+  nimble::message::MessageBuilder gap_fill("4");
   gap_fill.set_string(35U, "4").set_boolean(123U, true).set_int(36U, 2);
   auto fill_frame = EncodeInboundFrame(
     std::move(gap_fill).build(), dictionary.value(), "FIX.4.4", "SELL", "BUY", 1U, true, {}, "20260414-11:59:00.000");

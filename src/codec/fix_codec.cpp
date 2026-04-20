@@ -1,8 +1,8 @@
-#include "fastfix/codec/fix_codec.h"
-#include "fastfix/codec/compiled_decoder.h"
-#include "fastfix/codec/fast_int_format.h"
-#include "fastfix/codec/fix_tags.h"
-#include "fastfix/codec/simd_scan.h"
+#include "nimblefix/codec/fix_codec.h"
+#include "nimblefix/codec/compiled_decoder.h"
+#include "nimblefix/codec/fast_int_format.h"
+#include "nimblefix/codec/fix_tags.h"
+#include "nimblefix/codec/simd_scan.h"
 
 #include <algorithm>
 #include <array>
@@ -17,11 +17,11 @@
 #include <unordered_map>
 #include <unordered_set>
 
-namespace fastfix::codec {
+namespace nimble::codec {
 
 namespace {
 
-using namespace fastfix::codec::tags;
+using namespace nimble::codec::tags;
 
 template<typename Integer>
 inline constexpr std::size_t kIntegerTextBufferBytes =
@@ -870,7 +870,7 @@ MakeFixedFieldFragment(std::uint32_t tag, std::string_view value, char delimiter
   return fragment;
 }
 
-// ComputeChecksumSIMD is now in simd_scan.h (fastfix::codec namespace).
+// ComputeChecksumSIMD is now in simd_scan.h (nimble::codec namespace).
 
 auto
 AccumulateChecksum(std::string_view text, std::uint32_t* checksum) -> void
@@ -2564,7 +2564,7 @@ DecodeFixMessageView(std::span<const std::byte> bytes,
   const auto actual_checksum = [&]() -> std::uint32_t {
     const auto* data = bytes.data();
     std::uint32_t sum = 0;
-#if FASTFIX_HAS_SSE2
+#if NIMBLEFIX_HAS_SSE2
     const auto zero = _mm_setzero_si128();
     std::size_t i = 0;
     for (; i + 16 <= checksum_field_start; i += 16) {
@@ -2875,7 +2875,7 @@ DecodeFixMessageView(std::span<const std::byte> bytes,
   const auto actual_checksum = [&]() -> std::uint32_t {
     const auto* data = bytes.data();
     std::uint32_t sum = 0;
-#if FASTFIX_HAS_SSE2
+#if NIMBLEFIX_HAS_SSE2
     const auto zero = _mm_setzero_si128();
     std::size_t i = 0;
     for (; i + 16 <= checksum_field_start; i += 16) {
@@ -3147,4 +3147,4 @@ PeekSessionHeader(std::span<const std::byte> bytes, char delimiter) -> base::Res
   return header.value().ToOwned();
 }
 
-} // namespace fastfix::codec
+} // namespace nimble::codec

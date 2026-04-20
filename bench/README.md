@@ -1,10 +1,10 @@
-# FastFix Benchmarking
+# NimbleFIX Benchmarking
 
-This directory is the canonical benchmark subsystem for FastFix. It contains the two drivers, the neutral FIX44 business-order fixture shared across both engines, and the helper script used to reproduce the published FastFix vs QuickFIX numbers.
+This directory is the canonical benchmark subsystem for NimbleFIX. It contains the two drivers, the neutral FIX44 business-order fixture shared across both engines, and the helper script used to reproduce the published NimbleFIX vs QuickFIX numbers.
 
 ## Files
 
-- `main.cpp`: FastFix benchmark driver.
+- `main.cpp`: NimbleFIX benchmark driver.
 - `quickfix_main.cpp`: QuickFIX C++ comparison driver.
 - `bench_support.h`: shared fixture, allocation tracking, timing, perf-counter plumbing, percentile summaries.
 - `bench.sh`: build/run entrypoint for all common benchmark workflows.
@@ -15,28 +15,28 @@ This directory is the canonical benchmark subsystem for FastFix. It contains the
 
 ```bash
 ./bench/bench.sh build
-./bench/bench.sh fastfix
-./bench/bench.sh fastfix-ffd
+./bench/bench.sh nimblefix
+./bench/bench.sh nimblefix-ffd
 ./bench/bench.sh quickfix
 ./bench/bench.sh builder
 ./bench/bench.sh compare
 
 # Alternative CMake path
-FASTFIX_BUILD_SYSTEM=cmake FASTFIX_CMAKE_PRESET=dev-release ./bench/bench.sh build
-FASTFIX_BUILD_SYSTEM=cmake FASTFIX_CMAKE_PRESET=dev-release ./bench/bench.sh compare
+NIMBLEFIX_BUILD_SYSTEM=cmake NIMBLEFIX_CMAKE_PRESET=dev-release ./bench/bench.sh build
+NIMBLEFIX_BUILD_SYSTEM=cmake NIMBLEFIX_CMAKE_PRESET=dev-release ./bench/bench.sh compare
 
 # Force the make fallback
-FASTFIX_BUILD_SYSTEM=cmake FASTFIX_CMAKE_GENERATOR=make FASTFIX_CMAKE_PRESET=dev-release ./bench/bench.sh build
+NIMBLEFIX_BUILD_SYSTEM=cmake NIMBLEFIX_CMAKE_GENERATOR=make NIMBLEFIX_CMAKE_PRESET=dev-release ./bench/bench.sh build
 
 # Direct xmake path that matches the helper's ccache policy
 xmake f -m release --ccache=n -y
-xmake build fastfix-bench
-xmake build fastfix-quickfix-cpp-bench
+xmake build nimblefix-bench
+xmake build nimblefix-quickfix-cpp-bench
 ```
 
 Important environment notes:
 
-- `bench.sh` defaults `FASTFIX_XMAKE_CCACHE=n`. This is intentional: Linux xmake builds of the large QuickFIX targets can hit reproducible `.build_cache/... -> .objs/... file busy` failures when compiler cache is enabled.
+- `bench.sh` defaults `NIMBLEFIX_XMAKE_CCACHE=n`. This is intentional: Linux xmake builds of the large QuickFIX targets can hit reproducible `.build_cache/... -> .objs/... file busy` failures when compiler cache is enabled.
 - Ubuntu 24.04's packaged xmake is currently `2.8.7`, which is too old for this project. In auto mode the helper will print that fact and fall back to CMake.
 - All benchmark commands intentionally consume QuickFIX FIX44 inputs only: `bench/vendor/quickfix/spec/FIX44.xml`, `build/bench/quickfix_FIX44.ffd`, or `build/bench/quickfix_FIX44.art`.
 
@@ -45,15 +45,15 @@ Important environment notes:
 | Command | Default args | What it is for |
 |---------|--------------|----------------|
 | `build` | none | Build all benchmark binaries and regenerate the FIX44 benchmark artifacts |
-| `fastfix` | `--iterations 100000 --loopback 1000 --replay 1000` | Main FastFix suite against `quickfix_FIX44.art` |
-| `fastfix-ffd` | `--iterations 30000 --loopback 200 --replay 200` | Same FastFix suite but load the `.ffd` text dictionary directly |
+| `nimblefix` | `--iterations 100000 --loopback 1000 --replay 1000` | Main NimbleFIX suite against `quickfix_FIX44.art` |
+| `nimblefix-ffd` | `--iterations 30000 --loopback 200 --replay 200` | Same NimbleFIX suite but load the `.ffd` text dictionary directly |
 | `quickfix` | `--iterations 100000 --replay 1000 --replay-span 128 --loopback 1000` | Main QuickFIX comparison suite |
-| `builder` | `--iterations 100000 --loopback 0 --replay 0` | Encode-focused FastFix iteration loop without replay/loopback noise |
-| `compare` | FastFix defaults, then QuickFIX defaults | Full side-by-side report used by the README numbers |
+| `builder` | `--iterations 100000 --loopback 0 --replay 0` | Encode-focused NimbleFIX iteration loop without replay/loopback noise |
+| `compare` | NimbleFIX defaults, then QuickFIX defaults | Full side-by-side report used by the README numbers |
 
 ## Where Each Metric Sits In The Flow
 
-### FastFix Measurement Points
+### NimbleFIX Measurement Points
 
 ```mermaid
 flowchart LR
@@ -86,7 +86,7 @@ flowchart LR
 
 Encode comparisons start from the same neutral business object. Both engines pin `SendingTime` to a fixture timestamp so the encode tiers measure object construction and serialization rather than per-iteration clock formatting.
 
-### FastFix Metrics
+### NimbleFIX Metrics
 
 | Metric | Timing starts at | Timing ends at | What is included |
 |--------|------------------|----------------|------------------|
@@ -112,9 +112,9 @@ The outbound pair intentionally uses the same session setup, the same optional `
 | `quickfix-replay` | immediately before `acceptor_session.next(resend_frame, now)` | when `Session::next()` returns | in-process replay generation; emitted replay frames are counted through `BufferedResponder` |
 | `quickfix-loopback` | immediately before the threaded initiator sends the order | when the initiator-side loopback app sees the ack | real TCP round-trip via `ThreadedSocketAcceptor` / `ThreadedSocketInitiator` |
 
-## FastFix Loopback Breakdown
+## NimbleFIX Loopback Breakdown
 
-The FastFix loopback benchmark prints an additional per-phase breakdown inside the end-to-end RTT window:
+The NimbleFIX loopback benchmark prints an additional per-phase breakdown inside the end-to-end RTT window:
 
 - `session-outbound`: application message submission through outbound session encode.
 - `transport-send`: bytes written to the socket.
@@ -142,7 +142,7 @@ Environment:
 
 ### Cross-Engine Summary
 
-| Boundary | FastFix metric | QuickFIX metric | FastFix p50 | FastFix p95 | QuickFIX p50 | QuickFIX p95 | FastFix alloc/op | QuickFIX alloc/op |
+| Boundary | NimbleFIX metric | QuickFIX metric | NimbleFIX p50 | NimbleFIX p95 | QuickFIX p50 | QuickFIX p95 | NimbleFIX alloc/op | QuickFIX alloc/op |
 |----------|----------------|-----------------|-------------|-------------|--------------|--------------|------------------|-------------------|
 | object → wire (reused buffer) | `encode` | `quickfix-encode-buffer` | 371 ns | 401 ns | 1.24 us | 1.43 us | 0 | 29 |
 | wire → object | `parse` | `quickfix-parse` | 511 ns | 521 ns | 1.29 us | 1.33 us | 0 | 20 |
@@ -150,7 +150,7 @@ Environment:
 | replay (`replay_span=128`) | `replay` | `quickfix-replay` | 15.66 us | 16.81 us | 231.20 us | 269.07 us | 0 | 4117 |
 | TCP loopback RTT | `loopback-roundtrip` | `quickfix-loopback` | 17.58 us | 20.75 us | 20.55 us | 24.68 us | 3 | 77 |
 
-### FastFix Snapshot
+### NimbleFIX Snapshot
 
 | Metric | p50 | p95 | p99 | alloc/op | ops/sec | cache/op | branch/op |
 |--------|-----|-----|-----|----------|---------|----------|-----------|
@@ -201,8 +201,8 @@ The raw line additionally includes:
 
 ## Output Artifacts
 
-- `build/bench/quickfix_FIX44.ffd`: FastFix text dictionary generated from QuickFIX `FIX44.xml`.
-- `build/bench/quickfix_FIX44.art`: compiled FastFix artifact used by the main FIX44 suite.
+- `build/bench/quickfix_FIX44.ffd`: NimbleFIX text dictionary generated from QuickFIX `FIX44.xml`.
+- `build/bench/quickfix_FIX44.art`: compiled NimbleFIX artifact used by the main FIX44 suite.
 - `build/sample-basic.art`: shared sample artifact used by tests/codegen, not by the benchmark commands.
 - `build/linux/x86_64/release/quickfix-cpp-bench`: xmake output for the QuickFIX comparison binary.
 - `build/cmake/<preset>/bin/quickfix-cpp-bench`: Ninja-based CMake output for the QuickFIX comparison binary.

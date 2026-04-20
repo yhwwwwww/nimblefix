@@ -1,17 +1,17 @@
-FASTFIX_LOCAL_DEPS = {
-    fastfix = {
+NIMBLEFIX_LOCAL_DEPS = {
+    nimblefix = {
         include_dirs = {},
         link_dirs = {},
         links = {},
         defines = {},
     },
-    ["fastfix-dictgen"] = {
+    ["nimblefix-dictgen"] = {
         include_dirs = {},
         link_dirs = {},
         links = {},
         defines = {},
     },
-    ["fastfix-profile-loader-test"] = {
+    ["nimblefix-profile-loader-test"] = {
         include_dirs = {},
         link_dirs = {},
         links = {},

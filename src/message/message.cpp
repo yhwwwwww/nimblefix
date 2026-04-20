@@ -1,13 +1,13 @@
-#include "fastfix/message/message.h"
+#include "nimblefix/message/message.h"
 
 #include <charconv>
 
 #include <cstring>
 
-#include "fastfix/codec/fix_codec.h"
-#include "fastfix/codec/fix_tags.h"
+#include "nimblefix/codec/fix_codec.h"
+#include "nimblefix/codec/fix_tags.h"
 
-namespace fastfix::message {
+namespace nimble::message {
 
 namespace {
 
@@ -978,4 +978,4 @@ MessageView::raw_group(std::uint32_t count_tag) const -> std::optional<RawGroupV
   return RawGroupView(parsed_, group);
 }
 
-} // namespace fastfix::message
+} // namespace nimble::message

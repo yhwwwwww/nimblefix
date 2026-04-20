@@ -8,7 +8,7 @@
 #ifndef CATCH_USER_CONFIG_HPP_INCLUDED
 #define CATCH_USER_CONFIG_HPP_INCLUDED
 
-// FastFix uses the default upstream Catch2 configuration and provides this
+// NimbleFIX uses the default upstream Catch2 configuration and provides this
 // override header from the main repository so the Catch2 submodule stays clean.
 
 #endif

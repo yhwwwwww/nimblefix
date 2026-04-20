@@ -877,7 +877,7 @@ main(int argc, char** argv)
   auto session_inbound =
     RunQFSessionInboundBenchmark(dictionary, xml_path, business_order, fixed_sending_time, iterations);
 
-  // --- Shared benchmarks (aligned with FastFix compare order) ---
+  // --- Shared benchmarks (aligned with NimbleFIX compare order) ---
   std::vector<LabeledResult> results;
   results.push_back({ "quickfix-encode", encode_result });
   results.push_back({ "quickfix-parse", parse_result });

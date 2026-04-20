@@ -1,4 +1,4 @@
-#include "fastfix/session/admin_protocol.h"
+#include "nimblefix/session/admin_protocol.h"
 
 #include <algorithm>
 #include <array>
@@ -6,17 +6,17 @@
 #include <cstring>
 #include <string_view>
 
-#include "fastfix/codec/fast_int_format.h"
-#include "fastfix/codec/fix_tags.h"
-#include "fastfix/codec/raw_passthrough.h"
-#include "fastfix/codec/simd_scan.h"
-#include "fastfix/message/typed_message.h"
+#include "nimblefix/codec/fast_int_format.h"
+#include "nimblefix/codec/fix_tags.h"
+#include "nimblefix/codec/raw_passthrough.h"
+#include "nimblefix/codec/simd_scan.h"
+#include "nimblefix/message/typed_message.h"
 
-namespace fastfix::session {
+namespace nimble::session {
 
 namespace {
 
-using namespace fastfix::codec::tags;
+using namespace nimble::codec::tags;
 
 constexpr std::uint64_t kNanosPerSecond = 1'000'000'000ULL;
 constexpr std::uint32_t kSessionRejectRequiredTagMissing = 1U;
@@ -174,7 +174,7 @@ ComputeBodyStartOffset(std::span<const std::byte> frame) -> std::uint32_t
 
     const auto field_end = soh + 1;
 
-    if (fastfix::codec::tags::IsAggregateSessionEnvelopeTag(tag)) {
+    if (nimble::codec::tags::IsAggregateSessionEnvelopeTag(tag)) {
       last_header_end = field_end;
     } else {
       // First non-header tag — body starts at the current position
@@ -1948,4 +1948,4 @@ AdminProtocol::DrainDeferredGapFrames(std::uint64_t timestamp_ns, ProtocolEvent*
   return base::Status::Ok();
 }
 
-} // namespace fastfix::session
+} // namespace nimble::session

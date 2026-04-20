@@ -1,6 +1,6 @@
-#include "fastfix/session/transport_profile.h"
+#include "nimblefix/session/transport_profile.h"
 
-namespace fastfix::session {
+namespace nimble::session {
 
 auto
 TransportSessionProfile::Fix40() -> TransportSessionProfile
@@ -115,4 +115,4 @@ TransportSessionProfile::FromBeginString(std::string_view begin_string) -> Trans
   return profile;
 }
 
-} // namespace fastfix::session
+} // namespace nimble::session

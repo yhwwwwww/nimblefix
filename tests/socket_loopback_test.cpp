@@ -5,10 +5,10 @@
 #include <iostream>
 #include <thread>
 
-#include "fastfix/codec/fix_tags.h"
-#include "fastfix/session/admin_protocol.h"
-#include "fastfix/store/memory_store.h"
-#include "fastfix/transport/tcp_transport.h"
+#include "nimblefix/codec/fix_tags.h"
+#include "nimblefix/session/admin_protocol.h"
+#include "nimblefix/store/memory_store.h"
+#include "nimblefix/transport/tcp_transport.h"
 
 #include "test_support.h"
 
@@ -25,27 +25,27 @@ NowNs() -> std::uint64_t
 
 TEST_CASE("socket-loopback", "[socket-loopback]")
 {
-  auto dictionary = fastfix::tests::LoadFix44DictionaryView();
+  auto dictionary = nimble::tests::LoadFix44DictionaryView();
   if (!dictionary.ok()) {
     SKIP("FIX44 artifact not available: " << dictionary.status().message());
   }
 
-  auto acceptor = fastfix::transport::TcpAcceptor::Listen("127.0.0.1", 0U);
+  auto acceptor = nimble::transport::TcpAcceptor::Listen("127.0.0.1", 0U);
   REQUIRE(acceptor.ok());
   const auto listen_port = acceptor.value().port();
 
-  std::promise<fastfix::base::Status> acceptor_result;
+  std::promise<nimble::base::Status> acceptor_result;
   auto acceptor_future = acceptor_result.get_future();
 
   std::jthread acceptor_thread(
     [acceptor_socket = std::move(acceptor).value(), &acceptor_result, &dictionary]() mutable {
-      fastfix::store::MemorySessionStore store;
-      fastfix::session::AdminProtocol protocol(
-        fastfix::session::AdminProtocolConfig{
+      nimble::store::MemorySessionStore store;
+      nimble::session::AdminProtocol protocol(
+        nimble::session::AdminProtocolConfig{
           .session =
-            fastfix::session::SessionConfig{
+            nimble::session::SessionConfig{
               .session_id = 2001U,
-              .key = fastfix::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
+              .key = nimble::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
               .profile_id = dictionary.value().profile().header().profile_id,
               .heartbeat_interval_seconds = 1U,
               .is_initiator = false,
@@ -54,7 +54,7 @@ TEST_CASE("socket-loopback", "[socket-loopback]")
           .sender_comp_id = "SELL",
           .target_comp_id = "BUY",
           .heartbeat_interval_seconds = 1U,
-          .validation_policy = fastfix::session::ValidationPolicy::Permissive(),
+          .validation_policy = nimble::session::ValidationPolicy::Permissive(),
         },
         dictionary.value(),
         &store);
@@ -109,22 +109,22 @@ TEST_CASE("socket-loopback", "[socket-loopback]")
         if (event.value().disconnect) {
           protocol.OnTransportClosed();
           connection.Close();
-          acceptor_result.set_value(fastfix::base::Status::Ok());
+          acceptor_result.set_value(nimble::base::Status::Ok());
           return;
         }
       }
     });
 
-  auto connection = fastfix::transport::TcpConnection::Connect("127.0.0.1", listen_port, std::chrono::seconds(5));
+  auto connection = nimble::transport::TcpConnection::Connect("127.0.0.1", listen_port, std::chrono::seconds(5));
   REQUIRE(connection.ok());
 
-  fastfix::store::MemorySessionStore initiator_store;
-  fastfix::session::AdminProtocol initiator(
-    fastfix::session::AdminProtocolConfig{
+  nimble::store::MemorySessionStore initiator_store;
+  nimble::session::AdminProtocol initiator(
+    nimble::session::AdminProtocolConfig{
       .session =
-        fastfix::session::SessionConfig{
+        nimble::session::SessionConfig{
           .session_id = 1001U,
-          .key = fastfix::session::SessionKey{ "FIX.4.4", "BUY", "SELL" },
+          .key = nimble::session::SessionKey{ "FIX.4.4", "BUY", "SELL" },
           .profile_id = dictionary.value().profile().header().profile_id,
           .heartbeat_interval_seconds = 1U,
           .is_initiator = true,
@@ -133,7 +133,7 @@ TEST_CASE("socket-loopback", "[socket-loopback]")
       .sender_comp_id = "BUY",
       .target_comp_id = "SELL",
       .heartbeat_interval_seconds = 1U,
-      .validation_policy = fastfix::session::ValidationPolicy::Permissive(),
+      .validation_policy = nimble::session::ValidationPolicy::Permissive(),
     },
     dictionary.value(),
     &initiator_store);
@@ -146,7 +146,7 @@ TEST_CASE("socket-loopback", "[socket-loopback]")
 
   bool sent_app = false;
   bool received_echo = false;
-  while (!received_echo || initiator.session().state() != fastfix::session::SessionState::kAwaitingLogout) {
+  while (!received_echo || initiator.session().state() != nimble::session::SessionState::kAwaitingLogout) {
     auto frame = connection.value().ReceiveFrame(std::chrono::seconds(5));
     REQUIRE(frame.ok());
 
@@ -161,12 +161,12 @@ TEST_CASE("socket-loopback", "[socket-loopback]")
     }
 
     if (event.value().session_active && !sent_app) {
-      fastfix::message::MessageBuilder builder("D");
-      builder.set_string(fastfix::codec::tags::kMsgType, "D");
-      auto party = builder.add_group_entry(fastfix::codec::tags::kNoPartyIDs);
-      party.set_string(fastfix::codec::tags::kPartyID, "PARTY-A")
-        .set_char(fastfix::codec::tags::kPartyIDSource, 'D')
-        .set_int(fastfix::codec::tags::kPartyRole, 3);
+      nimble::message::MessageBuilder builder("D");
+      builder.set_string(nimble::codec::tags::kMsgType, "D");
+      auto party = builder.add_group_entry(nimble::codec::tags::kNoPartyIDs);
+      party.set_string(nimble::codec::tags::kPartyID, "PARTY-A")
+        .set_char(nimble::codec::tags::kPartyIDSource, 'D')
+        .set_int(nimble::codec::tags::kPartyRole, 3);
       auto outbound = initiator.SendApplication(std::move(builder).build(), NowNs());
       REQUIRE(outbound.ok());
       REQUIRE(connection.value().Send(outbound.value().bytes, std::chrono::seconds(5)).ok());
@@ -175,10 +175,10 @@ TEST_CASE("socket-loopback", "[socket-loopback]")
     }
 
     if (!event.value().application_messages.empty()) {
-      const auto group = event.value().application_messages.front().view().group(fastfix::codec::tags::kNoPartyIDs);
+      const auto group = event.value().application_messages.front().view().group(nimble::codec::tags::kNoPartyIDs);
       REQUIRE(group.has_value());
       REQUIRE(group->size() == 1U);
-      REQUIRE((*group)[0].get_string(fastfix::codec::tags::kPartyID).value() == "PARTY-A");
+      REQUIRE((*group)[0].get_string(nimble::codec::tags::kPartyID).value() == "PARTY-A");
       received_echo = true;
 
       auto logout = initiator.BeginLogout({}, NowNs());

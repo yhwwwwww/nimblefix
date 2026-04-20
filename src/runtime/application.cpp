@@ -1,4 +1,4 @@
-#include "fastfix/runtime/application.h"
+#include "nimblefix/runtime/application.h"
 
 #include <atomic>
 #include <limits>
@@ -9,10 +9,10 @@
 #include <utility>
 #include <vector>
 
-#include "fastfix/base/spsc_queue.h"
-#include "fastfix/runtime/thread_affinity.h"
+#include "nimblefix/base/spsc_queue.h"
+#include "nimblefix/runtime/thread_affinity.h"
 
-namespace fastfix::runtime {
+namespace nimble::runtime {
 
 namespace {
 
@@ -480,4 +480,4 @@ QueueApplicationRunner::running() const -> bool
   return impl_ != nullptr && impl_->running;
 }
 
-} // namespace fastfix::runtime
+} // namespace nimble::runtime

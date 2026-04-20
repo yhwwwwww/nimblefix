@@ -6,15 +6,15 @@
 #include <sstream>
 #include <string>
 
-#include "fastfix/codec/fix_tags.h"
-#include "fastfix/profile/dictgen_input.h"
-#include "fastfix/profile/normalized_dictionary.h"
+#include "nimblefix/codec/fix_tags.h"
+#include "nimblefix/profile/dictgen_input.h"
+#include "nimblefix/profile/normalized_dictionary.h"
 
 #include "../tools/xml2ffd/xml2ffd.h"
 
 namespace {
 
-using namespace fastfix::codec::tags;
+using namespace nimble::codec::tags;
 
 auto
 ReadFileContent(const std::filesystem::path& path) -> std::string
@@ -30,17 +30,17 @@ ReadFileContent(const std::filesystem::path& path) -> std::string
 
 TEST_CASE("xml2ffd converts QuickFIX XML to valid ffd", "[xml2ffd]")
 {
-  const auto project_root = std::filesystem::path(FASTFIX_PROJECT_DIR);
+  const auto project_root = std::filesystem::path(NIMBLEFIX_PROJECT_DIR);
   const auto xml_path = project_root / "tests" / "data" / "test_fix44.xml";
 
   const auto xml_content = ReadFileContent(xml_path);
   REQUIRE(!xml_content.empty());
 
-  const auto ffd_text = fastfix::tools::ConvertXmlToFfd(xml_content, 2001);
+  const auto ffd_text = nimble::tools::ConvertXmlToFfd(xml_content, 2001);
   REQUIRE(!ffd_text.empty());
 
   // Verify the output is valid ffd by loading it.
-  auto dictionary = fastfix::profile::LoadNormalizedDictionaryText(ffd_text);
+  auto dictionary = nimble::profile::LoadNormalizedDictionaryText(ffd_text);
   REQUIRE(dictionary.ok());
 
   const auto& dict = dictionary.value();
@@ -61,34 +61,34 @@ TEST_CASE("xml2ffd converts QuickFIX XML to valid ffd", "[xml2ffd]")
       std::find_if(dict.fields.begin(), dict.fields.end(), [](const auto& f) { return f.tag == kMsgType; });
     REQUIRE(msgtype_it != dict.fields.end());
     CHECK(msgtype_it->name == "MsgType");
-    CHECK(msgtype_it->value_type == fastfix::profile::ValueType::kString);
+    CHECK(msgtype_it->value_type == nimble::profile::ValueType::kString);
     CHECK(msgtype_it->flags == 0U);
 
     // Check Price (type float).
     auto price_it = std::find_if(dict.fields.begin(), dict.fields.end(), [](const auto& f) { return f.tag == kPrice; });
     REQUIRE(price_it != dict.fields.end());
     CHECK(price_it->name == "Price");
-    CHECK(price_it->value_type == fastfix::profile::ValueType::kFloat);
+    CHECK(price_it->value_type == nimble::profile::ValueType::kFloat);
 
     // Check TransactTime (type timestamp).
     auto tt_it =
       std::find_if(dict.fields.begin(), dict.fields.end(), [](const auto& f) { return f.tag == kTransactTime; });
     REQUIRE(tt_it != dict.fields.end());
     CHECK(tt_it->name == "TransactTime");
-    CHECK(tt_it->value_type == fastfix::profile::ValueType::kTimestamp);
+    CHECK(tt_it->value_type == nimble::profile::ValueType::kTimestamp);
 
     // Check GapFillFlag (type boolean).
     auto gff_it =
       std::find_if(dict.fields.begin(), dict.fields.end(), [](const auto& f) { return f.tag == kGapFillFlag; });
     REQUIRE(gff_it != dict.fields.end());
     CHECK(gff_it->name == "GapFillFlag");
-    CHECK(gff_it->value_type == fastfix::profile::ValueType::kBoolean);
+    CHECK(gff_it->value_type == nimble::profile::ValueType::kBoolean);
 
     // Check Side (type char).
     auto side_it = std::find_if(dict.fields.begin(), dict.fields.end(), [](const auto& f) { return f.tag == kSide; });
     REQUIRE(side_it != dict.fields.end());
     CHECK(side_it->name == "Side");
-    CHECK(side_it->value_type == fastfix::profile::ValueType::kChar);
+    CHECK(side_it->value_type == nimble::profile::ValueType::kChar);
   }
 
   SECTION("message definitions")

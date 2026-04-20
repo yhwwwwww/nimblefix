@@ -1,4 +1,4 @@
-#include "fastfix/profile/artifact_builder.h"
+#include "nimblefix/profile/artifact_builder.h"
 
 #include <algorithm>
 #include <cstring>
@@ -6,9 +6,9 @@
 #include <string>
 #include <unordered_map>
 
-#include "fastfix/profile/artifact.h"
+#include "nimblefix/profile/artifact.h"
 
-namespace fastfix::profile {
+namespace nimble::profile {
 
 namespace {
 
@@ -395,4 +395,4 @@ WriteProfileArtifact(const std::filesystem::path& path, std::span<const std::byt
   return base::Status::Ok();
 }
 
-} // namespace fastfix::profile
+} // namespace nimble::profile

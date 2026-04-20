@@ -6,12 +6,12 @@
 #include <unordered_set>
 #include <vector>
 
-#include "fastfix/profile/profile_loader.h"
-#include "fastfix/runtime/application.h"
-#include "fastfix/runtime/config.h"
-#include "fastfix/runtime/config_io.h"
-#include "fastfix/runtime/engine.h"
-#include "fastfix/runtime/live_acceptor.h"
+#include "nimblefix/profile/profile_loader.h"
+#include "nimblefix/runtime/application.h"
+#include "nimblefix/runtime/config.h"
+#include "nimblefix/runtime/config_io.h"
+#include "nimblefix/runtime/engine.h"
+#include "nimblefix/runtime/live_acceptor.h"
 
 namespace {
 
@@ -25,11 +25,11 @@ struct Options
   std::string target;
   std::string begin_string{ "FIX.4.4" };
   std::string default_appl_ver_id;
-  fastfix::runtime::AppDispatchMode dispatch_mode{ fastfix::runtime::AppDispatchMode::kInline };
-  fastfix::session::ValidationMode validation_mode{ fastfix::session::ValidationMode::kStrict };
+  nimble::runtime::AppDispatchMode dispatch_mode{ nimble::runtime::AppDispatchMode::kInline };
+  nimble::session::ValidationMode validation_mode{ nimble::session::ValidationMode::kStrict };
   std::optional<std::uint32_t> front_door_cpu;
   std::vector<std::uint32_t> worker_cpu_affinity;
-  std::optional<fastfix::runtime::QueueAppThreadingMode> queue_app_mode;
+  std::optional<nimble::runtime::QueueAppThreadingMode> queue_app_mode;
   std::vector<std::uint32_t> app_cpu_affinity;
   std::size_t max_sessions{ 1 };
   std::uint32_t idle_timeout_ms{ 30000 };
@@ -39,7 +39,7 @@ struct Options
 auto
 PrintUsage() -> void
 {
-  std::cout << "usage: fastfix-acceptor (--artifact <profile.art> --bind <host> "
+  std::cout << "usage: nimblefix-acceptor (--artifact <profile.art> --bind <host> "
                "--port <port> --sender <sender> --target <target> [--begin-string "
                "<value>] [--default-appl-ver-id <value>] [--dispatch-mode "
                "inline|queue] [--validation-mode "
@@ -57,52 +57,52 @@ ResolveProjectPath(const std::filesystem::path& path) -> std::filesystem::path
   if (path.empty() || path.is_absolute()) {
     return path;
   }
-  return std::filesystem::path(FASTFIX_PROJECT_DIR) / path;
+  return std::filesystem::path(NIMBLEFIX_PROJECT_DIR) / path;
 }
 
 auto
-MakeDirectCounterparty(const Options& options, std::uint64_t profile_id) -> fastfix::runtime::CounterpartyConfig
+MakeDirectCounterparty(const Options& options, std::uint64_t profile_id) -> nimble::runtime::CounterpartyConfig
 {
-  fastfix::runtime::CounterpartyConfig counterparty;
+  nimble::runtime::CounterpartyConfig counterparty;
   counterparty.name = "direct";
   counterparty.session.session_id = 1U;
-  counterparty.session.key = fastfix::session::SessionKey{ options.begin_string, options.sender, options.target };
+  counterparty.session.key = nimble::session::SessionKey{ options.begin_string, options.sender, options.target };
   counterparty.session.profile_id = profile_id;
   counterparty.session.default_appl_ver_id = options.default_appl_ver_id;
   counterparty.session.heartbeat_interval_seconds = 5U;
   counterparty.session.is_initiator = false;
   counterparty.default_appl_ver_id = options.default_appl_ver_id;
   counterparty.dispatch_mode = options.dispatch_mode;
-  counterparty.validation_policy = fastfix::session::MakeValidationPolicy(options.validation_mode);
+  counterparty.validation_policy = nimble::session::MakeValidationPolicy(options.validation_mode);
   return counterparty;
 }
 
 auto
-ParseDispatchMode(std::string_view token) -> std::optional<fastfix::runtime::AppDispatchMode>
+ParseDispatchMode(std::string_view token) -> std::optional<nimble::runtime::AppDispatchMode>
 {
   if (token == "inline") {
-    return fastfix::runtime::AppDispatchMode::kInline;
+    return nimble::runtime::AppDispatchMode::kInline;
   }
   if (token == "queue" || token == "queue-decoupled") {
-    return fastfix::runtime::AppDispatchMode::kQueueDecoupled;
+    return nimble::runtime::AppDispatchMode::kQueueDecoupled;
   }
   return std::nullopt;
 }
 
 auto
-ParseValidationMode(std::string_view token) -> std::optional<fastfix::session::ValidationMode>
+ParseValidationMode(std::string_view token) -> std::optional<nimble::session::ValidationMode>
 {
   if (token == "strict") {
-    return fastfix::session::ValidationMode::kStrict;
+    return nimble::session::ValidationMode::kStrict;
   }
   if (token == "compatible") {
-    return fastfix::session::ValidationMode::kCompatible;
+    return nimble::session::ValidationMode::kCompatible;
   }
   if (token == "permissive") {
-    return fastfix::session::ValidationMode::kPermissive;
+    return nimble::session::ValidationMode::kPermissive;
   }
   if (token == "raw-pass-through") {
-    return fastfix::session::ValidationMode::kRawPassThrough;
+    return nimble::session::ValidationMode::kRawPassThrough;
   }
   return std::nullopt;
 }
@@ -139,32 +139,32 @@ ParseCpuList(std::string_view token) -> std::optional<std::vector<std::uint32_t>
 }
 
 auto
-ParseQueueAppMode(std::string_view token) -> std::optional<fastfix::runtime::QueueAppThreadingMode>
+ParseQueueAppMode(std::string_view token) -> std::optional<nimble::runtime::QueueAppThreadingMode>
 {
   if (token == "co-scheduled" || token == "co_scheduled") {
-    return fastfix::runtime::QueueAppThreadingMode::kCoScheduled;
+    return nimble::runtime::QueueAppThreadingMode::kCoScheduled;
   }
   if (token == "threaded") {
-    return fastfix::runtime::QueueAppThreadingMode::kThreaded;
+    return nimble::runtime::QueueAppThreadingMode::kThreaded;
   }
   return std::nullopt;
 }
 
 auto
-ResolveManagedQueueRunnerMode(fastfix::runtime::QueueAppThreadingMode mode)
-  -> fastfix::runtime::ManagedQueueApplicationRunnerMode
+ResolveManagedQueueRunnerMode(nimble::runtime::QueueAppThreadingMode mode)
+  -> nimble::runtime::ManagedQueueApplicationRunnerMode
 {
-  return mode == fastfix::runtime::QueueAppThreadingMode::kThreaded
-           ? fastfix::runtime::ManagedQueueApplicationRunnerMode::kThreaded
-           : fastfix::runtime::ManagedQueueApplicationRunnerMode::kCoScheduled;
+  return mode == nimble::runtime::QueueAppThreadingMode::kThreaded
+           ? nimble::runtime::ManagedQueueApplicationRunnerMode::kThreaded
+           : nimble::runtime::ManagedQueueApplicationRunnerMode::kCoScheduled;
 }
 
 auto
-CollectQueueSessions(const fastfix::runtime::EngineConfig& config) -> std::unordered_set<std::uint64_t>
+CollectQueueSessions(const nimble::runtime::EngineConfig& config) -> std::unordered_set<std::uint64_t>
 {
   std::unordered_set<std::uint64_t> session_ids;
   for (const auto& counterparty : config.counterparties) {
-    if (counterparty.dispatch_mode == fastfix::runtime::AppDispatchMode::kQueueDecoupled) {
+    if (counterparty.dispatch_mode == nimble::runtime::AppDispatchMode::kQueueDecoupled) {
       session_ids.emplace(counterparty.session.session_id);
     }
   }
@@ -172,8 +172,8 @@ CollectQueueSessions(const fastfix::runtime::EngineConfig& config) -> std::unord
 }
 
 class ToolApplication final
-  : public fastfix::runtime::ApplicationCallbacks
-  , public fastfix::runtime::QueueApplicationProvider
+  : public nimble::runtime::ApplicationCallbacks
+  , public nimble::runtime::QueueApplicationProvider
 {
 public:
   ToolApplication(std::unordered_set<std::uint64_t> queue_sessions, std::uint32_t worker_count)
@@ -182,23 +182,23 @@ public:
   {
   }
 
-  auto OnSessionEvent(const fastfix::runtime::RuntimeEvent& event) -> fastfix::base::Status override
+  auto OnSessionEvent(const nimble::runtime::RuntimeEvent& event) -> nimble::base::Status override
   {
     if (queue_sessions_.contains(event.handle.session_id())) {
       return queue_.OnSessionEvent(event);
     }
-    return fastfix::base::Status::Ok();
+    return nimble::base::Status::Ok();
   }
 
-  auto OnAdminMessage(const fastfix::runtime::RuntimeEvent& event) -> fastfix::base::Status override
+  auto OnAdminMessage(const nimble::runtime::RuntimeEvent& event) -> nimble::base::Status override
   {
     if (queue_sessions_.contains(event.handle.session_id())) {
       return queue_.OnAdminMessage(event);
     }
-    return fastfix::base::Status::Ok();
+    return nimble::base::Status::Ok();
   }
 
-  auto OnAppMessage(const fastfix::runtime::RuntimeEvent& event) -> fastfix::base::Status override
+  auto OnAppMessage(const nimble::runtime::RuntimeEvent& event) -> nimble::base::Status override
   {
     if (queue_sessions_.contains(event.handle.session_id())) {
       return queue_.OnAppMessage(event);
@@ -206,20 +206,20 @@ public:
     return event.handle.Send(event.message);
   }
 
-  auto queue_application() -> fastfix::runtime::QueueApplication& override { return queue_; }
+  auto queue_application() -> nimble::runtime::QueueApplication& override { return queue_; }
 
 private:
   std::unordered_set<std::uint64_t> queue_sessions_;
-  fastfix::runtime::QueueApplication queue_;
+  nimble::runtime::QueueApplication queue_;
 };
 
-class EchoQueueHandler final : public fastfix::runtime::QueueApplicationEventHandler
+class EchoQueueHandler final : public nimble::runtime::QueueApplicationEventHandler
 {
 public:
-  auto OnRuntimeEvent(const fastfix::runtime::RuntimeEvent& event) -> fastfix::base::Status override
+  auto OnRuntimeEvent(const nimble::runtime::RuntimeEvent& event) -> nimble::base::Status override
   {
-    if (event.kind != fastfix::runtime::RuntimeEventKind::kApplicationMessage) {
-      return fastfix::base::Status::Ok();
+    if (event.kind != nimble::runtime::RuntimeEventKind::kApplicationMessage) {
+      return nimble::base::Status::Ok();
     }
     return event.handle.Send(event.message);
   }
@@ -331,13 +331,13 @@ main(int argc, char** argv)
     return 1;
   }
 
-  fastfix::runtime::Engine engine;
+  nimble::runtime::Engine engine;
   std::string listener_name;
-  fastfix::runtime::EngineConfig resolved_config;
+  nimble::runtime::EngineConfig resolved_config;
 
   if (!options.config_path.empty()) {
     options.config_path = ResolveProjectPath(options.config_path);
-    auto config = fastfix::runtime::LoadEngineConfigFile(options.config_path);
+    auto config = nimble::runtime::LoadEngineConfigFile(options.config_path);
     if (!config.ok()) {
       std::cerr << config.status().message() << '\n';
       return 1;
@@ -379,7 +379,7 @@ main(int argc, char** argv)
     }
 
     options.artifact_path = ResolveProjectPath(options.artifact_path);
-    fastfix::runtime::EngineConfig config;
+    nimble::runtime::EngineConfig config;
     config.worker_count = 1U;
     config.enable_metrics = true;
     config.front_door_cpu = options.front_door_cpu;
@@ -389,14 +389,14 @@ main(int argc, char** argv)
     }
     config.app_cpu_affinity = options.app_cpu_affinity;
     config.profile_artifacts.push_back(options.artifact_path);
-    config.listeners.push_back(fastfix::runtime::ListenerConfig{
+    config.listeners.push_back(nimble::runtime::ListenerConfig{
       .name = "direct",
       .host = options.bind_host,
       .port = options.port,
       .worker_hint = 0U,
     });
 
-    auto profile = fastfix::profile::LoadProfileArtifact(options.artifact_path);
+    auto profile = nimble::profile::LoadProfileArtifact(options.artifact_path);
     if (!profile.ok()) {
       std::cerr << profile.status().message() << '\n';
       return 1;
@@ -414,11 +414,11 @@ main(int argc, char** argv)
   }
 
   auto queue_sessions = CollectQueueSessions(resolved_config);
-  std::shared_ptr<fastfix::runtime::ApplicationCallbacks> application;
+  std::shared_ptr<nimble::runtime::ApplicationCallbacks> application;
   std::shared_ptr<ToolApplication> tool_application;
-  std::optional<fastfix::runtime::ManagedQueueApplicationRunnerOptions> managed_queue_runner;
+  std::optional<nimble::runtime::ManagedQueueApplicationRunnerOptions> managed_queue_runner;
   if (queue_sessions.empty()) {
-    application = std::make_shared<fastfix::runtime::EchoApplication>();
+    application = std::make_shared<nimble::runtime::EchoApplication>();
   } else {
     tool_application = std::make_shared<ToolApplication>(std::move(queue_sessions), resolved_config.worker_count);
     managed_queue_runner.emplace();
@@ -433,13 +433,13 @@ main(int argc, char** argv)
     application = tool_application;
   }
 
-  fastfix::runtime::LiveAcceptor acceptor(&engine,
-                                          fastfix::runtime::LiveAcceptor::Options{
-                                            .poll_timeout = std::chrono::milliseconds(50),
-                                            .io_timeout = std::chrono::seconds(5),
-                                            .application = application,
-                                            .managed_queue_runner = std::move(managed_queue_runner),
-                                          });
+  nimble::runtime::LiveAcceptor acceptor(&engine,
+                                         nimble::runtime::LiveAcceptor::Options{
+                                           .poll_timeout = std::chrono::milliseconds(50),
+                                           .io_timeout = std::chrono::seconds(5),
+                                           .application = application,
+                                           .managed_queue_runner = std::move(managed_queue_runner),
+                                         });
 
   auto status = acceptor.OpenListeners(listener_name);
   if (!status.ok()) {

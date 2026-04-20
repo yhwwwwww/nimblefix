@@ -1,28 +1,28 @@
 #include <catch2/catch_test_macros.hpp>
 
-#include "fastfix/codec/fix_codec.h"
-#include "fastfix/codec/fix_tags.h"
-#include "fastfix/session/admin_protocol.h"
-#include "fastfix/store/memory_store.h"
+#include "nimblefix/codec/fix_codec.h"
+#include "nimblefix/codec/fix_tags.h"
+#include "nimblefix/session/admin_protocol.h"
+#include "nimblefix/store/memory_store.h"
 
 #include "test_support.h"
 
 namespace {
 
-using namespace fastfix::codec::tags;
+using namespace nimble::codec::tags;
 
 auto
-EncodeInboundFrame(const fastfix::message::Message& message,
-                   const fastfix::profile::NormalizedDictionaryView& dictionary,
+EncodeInboundFrame(const nimble::message::Message& message,
+                   const nimble::profile::NormalizedDictionaryView& dictionary,
                    std::string begin_string,
                    std::string sender,
                    std::string target,
                    std::uint32_t seq_num,
                    bool poss_dup,
                    std::string default_appl_ver_id = {},
-                   std::string orig_sending_time = {}) -> fastfix::base::Result<std::vector<std::byte>>
+                   std::string orig_sending_time = {}) -> nimble::base::Result<std::vector<std::byte>>
 {
-  fastfix::codec::EncodeOptions options;
+  nimble::codec::EncodeOptions options;
   options.begin_string = std::move(begin_string);
   options.sender_comp_id = std::move(sender);
   options.target_comp_id = std::move(target);
@@ -32,29 +32,29 @@ EncodeInboundFrame(const fastfix::message::Message& message,
   options.poss_resend = message.view().get_boolean(kPossResend).value_or(false);
   options.sending_time = "20260402-12:00:00.000";
   options.orig_sending_time = std::move(orig_sending_time);
-  return fastfix::codec::EncodeFixMessage(message, dictionary, options);
+  return nimble::codec::EncodeFixMessage(message, dictionary, options);
 }
 
 auto
-ActivateAcceptorSession(fastfix::session::AdminProtocol* protocol,
-                        const fastfix::profile::NormalizedDictionaryView& dictionary,
+ActivateAcceptorSession(nimble::session::AdminProtocol* protocol,
+                        const nimble::profile::NormalizedDictionaryView& dictionary,
                         std::string begin_string,
-                        std::string default_appl_ver_id = {}) -> fastfix::base::Status;
+                        std::string default_appl_ver_id = {}) -> nimble::base::Status;
 
 TEST_CASE("admin protocol sends pre-encoded application payload", "[admin-protocol]")
 {
-  auto dictionary = fastfix::tests::LoadFix44DictionaryView();
+  auto dictionary = nimble::tests::LoadFix44DictionaryView();
   if (!dictionary.ok()) {
     SKIP("FIX44 artifact not available: " << dictionary.status().message());
   }
 
-  fastfix::store::MemorySessionStore store;
-  fastfix::session::AdminProtocol protocol(
-    fastfix::session::AdminProtocolConfig{
+  nimble::store::MemorySessionStore store;
+  nimble::session::AdminProtocol protocol(
+    nimble::session::AdminProtocolConfig{
       .session =
-        fastfix::session::SessionConfig{
+        nimble::session::SessionConfig{
           .session_id = 5004U,
-          .key = fastfix::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
+          .key = nimble::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
           .profile_id = dictionary.value().profile().header().profile_id,
           .heartbeat_interval_seconds = 30U,
           .is_initiator = false,
@@ -70,16 +70,16 @@ TEST_CASE("admin protocol sends pre-encoded application payload", "[admin-protoc
   REQUIRE(protocol.OnTransportConnected(1U).ok());
   REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
 
-  const auto encoded_body = fastfix::tests::Bytes("11=ORD-ENC\x01"
-                                                  "55=AAPL\x01");
-  fastfix::session::EncodedApplicationMessage encoded(
+  const auto encoded_body = nimble::tests::Bytes("11=ORD-ENC\x01"
+                                                 "55=AAPL\x01");
+  nimble::session::EncodedApplicationMessage encoded(
     "D", std::span<const std::byte>(encoded_body.data(), encoded_body.size()));
 
   auto outbound =
     protocol.SendEncodedApplication(encoded, 100U, { .sender_sub_id = "DESK-ENC", .target_sub_id = "ROUTE-ENC" });
   REQUIRE(outbound.ok());
 
-  auto decoded = fastfix::codec::DecodeFixMessage(outbound.value().bytes, dictionary.value());
+  auto decoded = nimble::codec::DecodeFixMessage(outbound.value().bytes, dictionary.value());
   REQUIRE(decoded.ok());
   REQUIRE(decoded.value().header.msg_type == "D");
   REQUIRE(decoded.value().header.msg_seq_num == 2U);
@@ -94,7 +94,7 @@ TEST_CASE("admin protocol sends pre-encoded application payload", "[admin-protoc
   REQUIRE(stored.value().front().payload ==
           std::vector<std::byte>(outbound.value().bytes.view().begin(), outbound.value().bytes.view().end()));
 
-  fastfix::message::MessageBuilder resend_builder("2");
+  nimble::message::MessageBuilder resend_builder("2");
   resend_builder.set_string(kMsgType, "2").set_int(kBeginSeqNo, 2).set_int(kEndSeqNo, 2);
   auto inbound =
     EncodeInboundFrame(std::move(resend_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 2U, false);
@@ -104,7 +104,7 @@ TEST_CASE("admin protocol sends pre-encoded application payload", "[admin-protoc
   REQUIRE(event.ok());
   REQUIRE(event.value().outbound_frames.size() == 1U);
 
-  auto replay = fastfix::codec::DecodeFixMessage(event.value().outbound_frames.front().bytes, dictionary.value());
+  auto replay = nimble::codec::DecodeFixMessage(event.value().outbound_frames.front().bytes, dictionary.value());
   REQUIRE(replay.ok());
   REQUIRE(replay.value().header.msg_type == "D");
   REQUIRE(replay.value().header.sender_sub_id == "DESK-ENC");
@@ -115,18 +115,18 @@ TEST_CASE("admin protocol sends pre-encoded application payload", "[admin-protoc
 
 TEST_CASE("admin protocol treats SenderSubID and TargetSubID as per-message envelope", "[admin-protocol]")
 {
-  auto dictionary = fastfix::tests::LoadFix44DictionaryView();
+  auto dictionary = nimble::tests::LoadFix44DictionaryView();
   if (!dictionary.ok()) {
     SKIP("FIX44 artifact not available: " << dictionary.status().message());
   }
 
-  fastfix::store::MemorySessionStore store;
-  fastfix::session::AdminProtocol protocol(
-    fastfix::session::AdminProtocolConfig{
+  nimble::store::MemorySessionStore store;
+  nimble::session::AdminProtocol protocol(
+    nimble::session::AdminProtocolConfig{
       .session =
-        fastfix::session::SessionConfig{
+        nimble::session::SessionConfig{
           .session_id = 5005U,
-          .key = fastfix::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
+          .key = nimble::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
           .profile_id = dictionary.value().profile().header().profile_id,
           .heartbeat_interval_seconds = 30U,
           .is_initiator = false,
@@ -142,26 +142,26 @@ TEST_CASE("admin protocol treats SenderSubID and TargetSubID as per-message enve
   REQUIRE(protocol.OnTransportConnected(1U).ok());
   REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
 
-  fastfix::message::MessageBuilder first_builder("D");
+  nimble::message::MessageBuilder first_builder("D");
   first_builder.set_string(kMsgType, "D").set_string(kClOrdID, "ORD-A");
   auto first = protocol.SendApplication(
     std::move(first_builder).build(), 100U, { .sender_sub_id = "DESK-A", .target_sub_id = "ROUTE-A" });
   REQUIRE(first.ok());
 
-  fastfix::message::MessageBuilder second_builder("D");
+  nimble::message::MessageBuilder second_builder("D");
   second_builder.set_string(kMsgType, "D").set_string(kClOrdID, "ORD-B");
   auto second = protocol.SendApplication(
     std::move(second_builder).build(), 110U, { .sender_sub_id = "DESK-B", .target_sub_id = "ROUTE-B" });
   REQUIRE(second.ok());
 
-  fastfix::message::MessageBuilder third_builder("D");
+  nimble::message::MessageBuilder third_builder("D");
   third_builder.set_string(kMsgType, "D").set_string(kClOrdID, "ORD-C");
   auto third = protocol.SendApplication(std::move(third_builder).build(), 120U);
   REQUIRE(third.ok());
 
-  auto decoded_first = fastfix::codec::DecodeFixMessage(first.value().bytes, dictionary.value());
-  auto decoded_second = fastfix::codec::DecodeFixMessage(second.value().bytes, dictionary.value());
-  auto decoded_third = fastfix::codec::DecodeFixMessage(third.value().bytes, dictionary.value());
+  auto decoded_first = nimble::codec::DecodeFixMessage(first.value().bytes, dictionary.value());
+  auto decoded_second = nimble::codec::DecodeFixMessage(second.value().bytes, dictionary.value());
+  auto decoded_third = nimble::codec::DecodeFixMessage(third.value().bytes, dictionary.value());
   REQUIRE(decoded_first.ok());
   REQUIRE(decoded_second.ok());
   REQUIRE(decoded_third.ok());
@@ -179,12 +179,12 @@ TEST_CASE("admin protocol treats SenderSubID and TargetSubID as per-message enve
 }
 
 auto
-ActivateAcceptorSession(fastfix::session::AdminProtocol* protocol,
-                        const fastfix::profile::NormalizedDictionaryView& dictionary,
+ActivateAcceptorSession(nimble::session::AdminProtocol* protocol,
+                        const nimble::profile::NormalizedDictionaryView& dictionary,
                         std::string begin_string,
-                        std::string default_appl_ver_id) -> fastfix::base::Status
+                        std::string default_appl_ver_id) -> nimble::base::Status
 {
-  fastfix::message::MessageBuilder logon_builder("A");
+  nimble::message::MessageBuilder logon_builder("A");
   logon_builder.set_string(kMsgType, "A").set_int(kEncryptMethod, 0).set_int(kHeartBtInt, 30);
   auto inbound = EncodeInboundFrame(std::move(logon_builder).build(),
                                     dictionary,
@@ -203,24 +203,24 @@ ActivateAcceptorSession(fastfix::session::AdminProtocol* protocol,
     return event.status();
   }
   if (!event.value().session_active || event.value().outbound_frames.empty()) {
-    return fastfix::base::Status::InvalidArgument("acceptor session did not activate on inbound logon");
+    return nimble::base::Status::InvalidArgument("acceptor session did not activate on inbound logon");
   }
-  return fastfix::base::Status::Ok();
+  return nimble::base::Status::Ok();
 }
 
 } // namespace
 
 TEST_CASE("admin-protocol", "[admin-protocol]")
 {
-  auto dictionary = fastfix::tests::LoadFix44DictionaryView();
+  auto dictionary = nimble::tests::LoadFix44DictionaryView();
   if (!dictionary.ok()) {
     SKIP("FIX44 artifact not available: " << dictionary.status().message());
   }
 
   {
-    fastfix::store::MemorySessionStore store;
+    nimble::store::MemorySessionStore store;
     REQUIRE(store
-              .SaveRecoveryState(fastfix::store::SessionRecoveryState{
+              .SaveRecoveryState(nimble::store::SessionRecoveryState{
                 .session_id = 5008U,
                 .next_in_seq = 7U,
                 .next_out_seq = 11U,
@@ -229,12 +229,12 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
                 .active = false,
               })
               .ok());
-    fastfix::session::AdminProtocol protocol(
-      fastfix::session::AdminProtocolConfig{
+    nimble::session::AdminProtocol protocol(
+      nimble::session::AdminProtocolConfig{
         .session =
-          fastfix::session::SessionConfig{
+          nimble::session::SessionConfig{
             .session_id = 5008U,
-            .key = fastfix::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
+            .key = nimble::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
             .profile_id = dictionary.value().profile().header().profile_id,
             .heartbeat_interval_seconds = 30U,
             .is_initiator = false,
@@ -249,7 +249,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
 
     REQUIRE(protocol.OnTransportConnected(1U).ok());
 
-    fastfix::message::MessageBuilder logon_builder("A");
+    nimble::message::MessageBuilder logon_builder("A");
     logon_builder.set_string(kMsgType, "A").set_int(kEncryptMethod, 0).set_int(kHeartBtInt, 30);
     auto inbound =
       EncodeInboundFrame(std::move(logon_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 7U, false);
@@ -260,7 +260,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(event.value().session_active);
     REQUIRE(event.value().outbound_frames.size() == 1U);
 
-    auto decoded = fastfix::codec::DecodeFixMessage(event.value().outbound_frames.front().bytes, dictionary.value());
+    auto decoded = nimble::codec::DecodeFixMessage(event.value().outbound_frames.front().bytes, dictionary.value());
     REQUIRE(decoded.ok());
     REQUIRE(decoded.value().header.msg_type == "A");
     REQUIRE(decoded.value().header.msg_seq_num == 11U);
@@ -271,9 +271,9 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
   }
 
   {
-    fastfix::store::MemorySessionStore store;
+    nimble::store::MemorySessionStore store;
     REQUIRE(store
-              .SaveRecoveryState(fastfix::store::SessionRecoveryState{
+              .SaveRecoveryState(nimble::store::SessionRecoveryState{
                 .session_id = 5009U,
                 .next_in_seq = 7U,
                 .next_out_seq = 11U,
@@ -282,12 +282,12 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
                 .active = false,
               })
               .ok());
-    fastfix::session::AdminProtocol protocol(
-      fastfix::session::AdminProtocolConfig{
+    nimble::session::AdminProtocol protocol(
+      nimble::session::AdminProtocolConfig{
         .session =
-          fastfix::session::SessionConfig{
+          nimble::session::SessionConfig{
             .session_id = 5009U,
-            .key = fastfix::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
+            .key = nimble::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
             .profile_id = dictionary.value().profile().header().profile_id,
             .heartbeat_interval_seconds = 30U,
             .is_initiator = false,
@@ -302,7 +302,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
 
     REQUIRE(protocol.OnTransportConnected(1U).ok());
 
-    fastfix::message::MessageBuilder logon_builder("A");
+    nimble::message::MessageBuilder logon_builder("A");
     logon_builder.set_string(kMsgType, "A")
       .set_int(kEncryptMethod, 0)
       .set_int(kHeartBtInt, 30)
@@ -316,7 +316,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(event.value().session_active);
     REQUIRE(event.value().outbound_frames.size() == 1U);
 
-    auto decoded = fastfix::codec::DecodeFixMessage(event.value().outbound_frames.front().bytes, dictionary.value());
+    auto decoded = nimble::codec::DecodeFixMessage(event.value().outbound_frames.front().bytes, dictionary.value());
     REQUIRE(decoded.ok());
     REQUIRE(decoded.value().header.msg_type == "A");
     REQUIRE(decoded.value().header.msg_seq_num == 1U);
@@ -328,9 +328,9 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
   }
 
   {
-    fastfix::store::MemorySessionStore store;
+    nimble::store::MemorySessionStore store;
     REQUIRE(store
-              .SaveRecoveryState(fastfix::store::SessionRecoveryState{
+              .SaveRecoveryState(nimble::store::SessionRecoveryState{
                 .session_id = 5010U,
                 .next_in_seq = 7U,
                 .next_out_seq = 11U,
@@ -339,12 +339,12 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
                 .active = false,
               })
               .ok());
-    fastfix::session::AdminProtocol protocol(
-      fastfix::session::AdminProtocolConfig{
+    nimble::session::AdminProtocol protocol(
+      nimble::session::AdminProtocolConfig{
         .session =
-          fastfix::session::SessionConfig{
+          nimble::session::SessionConfig{
             .session_id = 5010U,
-            .key = fastfix::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
+            .key = nimble::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
             .profile_id = dictionary.value().profile().header().profile_id,
             .heartbeat_interval_seconds = 30U,
             .is_initiator = true,
@@ -360,7 +360,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
       &store);
 
     REQUIRE(store
-              .SaveRecoveryState(fastfix::store::SessionRecoveryState{
+              .SaveRecoveryState(nimble::store::SessionRecoveryState{
                 .session_id = 5010U,
                 .next_in_seq = 13U,
                 .next_out_seq = 17U,
@@ -374,7 +374,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(event.ok());
     REQUIRE(event.value().outbound_frames.size() == 1U);
 
-    auto decoded = fastfix::codec::DecodeFixMessage(event.value().outbound_frames.front().bytes, dictionary.value());
+    auto decoded = nimble::codec::DecodeFixMessage(event.value().outbound_frames.front().bytes, dictionary.value());
     REQUIRE(decoded.ok());
     REQUIRE(decoded.value().header.msg_type == "A");
     REQUIRE(decoded.value().header.msg_seq_num == 17U);
@@ -382,9 +382,9 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
   }
 
   {
-    fastfix::store::MemorySessionStore store;
+    nimble::store::MemorySessionStore store;
     REQUIRE(store
-              .SaveRecoveryState(fastfix::store::SessionRecoveryState{
+              .SaveRecoveryState(nimble::store::SessionRecoveryState{
                 .session_id = 5011U,
                 .next_in_seq = 5U,
                 .next_out_seq = 9U,
@@ -393,12 +393,12 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
                 .active = true,
               })
               .ok());
-    fastfix::session::AdminProtocol protocol(
-      fastfix::session::AdminProtocolConfig{
+    nimble::session::AdminProtocol protocol(
+      nimble::session::AdminProtocolConfig{
         .session =
-          fastfix::session::SessionConfig{
+          nimble::session::SessionConfig{
             .session_id = 5011U,
-            .key = fastfix::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
+            .key = nimble::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
             .profile_id = dictionary.value().profile().header().profile_id,
             .heartbeat_interval_seconds = 30U,
             .is_initiator = true,
@@ -426,13 +426,13 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
   }
 
   {
-    fastfix::store::MemorySessionStore store;
-    fastfix::session::AdminProtocol protocol(
-      fastfix::session::AdminProtocolConfig{
+    nimble::store::MemorySessionStore store;
+    nimble::session::AdminProtocol protocol(
+      nimble::session::AdminProtocolConfig{
         .session =
-          fastfix::session::SessionConfig{
+          nimble::session::SessionConfig{
             .session_id = 5012U,
-            .key = fastfix::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
+            .key = nimble::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
             .profile_id = dictionary.value().profile().header().profile_id,
             .heartbeat_interval_seconds = 30U,
             .is_initiator = false,
@@ -463,13 +463,13 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
   }
 
   {
-    fastfix::store::MemorySessionStore store;
-    fastfix::session::AdminProtocol protocol(
-      fastfix::session::AdminProtocolConfig{
+    nimble::store::MemorySessionStore store;
+    nimble::session::AdminProtocol protocol(
+      nimble::session::AdminProtocolConfig{
         .session =
-          fastfix::session::SessionConfig{
+          nimble::session::SessionConfig{
             .session_id = 5001U,
-            .key = fastfix::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
+            .key = nimble::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
             .profile_id = dictionary.value().profile().header().profile_id,
             .heartbeat_interval_seconds = 30U,
             .is_initiator = false,
@@ -485,7 +485,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(protocol.OnTransportConnected(1U).ok());
     REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
 
-    fastfix::message::MessageBuilder heartbeat_builder("0");
+    nimble::message::MessageBuilder heartbeat_builder("0");
     heartbeat_builder.set_string(kMsgType, "0");
     auto inbound =
       EncodeInboundFrame(std::move(heartbeat_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 1U, true);
@@ -496,7 +496,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(event.value().outbound_frames.size() == 1U);
     REQUIRE(!event.value().disconnect);
 
-    auto decoded = fastfix::codec::DecodeFixMessage(event.value().outbound_frames.front().bytes, dictionary.value());
+    auto decoded = nimble::codec::DecodeFixMessage(event.value().outbound_frames.front().bytes, dictionary.value());
     REQUIRE(decoded.ok());
     REQUIRE(decoded.value().header.msg_type == "3");
     REQUIRE(decoded.value().message.view().get_int(kRefSeqNum).value() == 1);
@@ -506,13 +506,13 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
   }
 
   {
-    fastfix::store::MemorySessionStore store;
-    fastfix::session::AdminProtocol protocol(
-      fastfix::session::AdminProtocolConfig{
+    nimble::store::MemorySessionStore store;
+    nimble::session::AdminProtocol protocol(
+      nimble::session::AdminProtocolConfig{
         .session =
-          fastfix::session::SessionConfig{
+          nimble::session::SessionConfig{
             .session_id = 5033U,
-            .key = fastfix::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
+            .key = nimble::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
             .profile_id = dictionary.value().profile().header().profile_id,
             .heartbeat_interval_seconds = 30U,
             .is_initiator = false,
@@ -528,7 +528,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(protocol.OnTransportConnected(1U).ok());
     REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
 
-    fastfix::message::MessageBuilder heartbeat_builder("0");
+    nimble::message::MessageBuilder heartbeat_builder("0");
     heartbeat_builder.set_string(kMsgType, "0");
     auto inbound = EncodeInboundFrame(std::move(heartbeat_builder).build(),
                                       dictionary.value(),
@@ -555,13 +555,13 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
   }
 
   {
-    fastfix::store::MemorySessionStore store;
-    fastfix::session::AdminProtocol protocol(
-      fastfix::session::AdminProtocolConfig{
+    nimble::store::MemorySessionStore store;
+    nimble::session::AdminProtocol protocol(
+      nimble::session::AdminProtocolConfig{
         .session =
-          fastfix::session::SessionConfig{
+          nimble::session::SessionConfig{
             .session_id = 5021U,
-            .key = fastfix::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
+            .key = nimble::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
             .profile_id = dictionary.value().profile().header().profile_id,
             .heartbeat_interval_seconds = 30U,
             .is_initiator = false,
@@ -577,13 +577,13 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(protocol.OnTransportConnected(1U).ok());
     REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
 
-    const auto inbound = ::fastfix::tests::EncodeFixFrame("35=0|34=2|49=BUY|56=SELL|52=20260402-12:00:00.000|49=BUY|");
+    const auto inbound = ::nimble::tests::EncodeFixFrame("35=0|34=2|49=BUY|56=SELL|52=20260402-12:00:00.000|49=BUY|");
     auto event = protocol.OnInbound(inbound, 10U);
     REQUIRE(event.ok());
     REQUIRE(event.value().outbound_frames.size() == 1U);
     REQUIRE(!event.value().disconnect);
 
-    auto decoded = fastfix::codec::DecodeFixMessage(event.value().outbound_frames.front().bytes, dictionary.value());
+    auto decoded = nimble::codec::DecodeFixMessage(event.value().outbound_frames.front().bytes, dictionary.value());
     REQUIRE(decoded.ok());
     REQUIRE(decoded.value().header.msg_type == "3");
     REQUIRE(decoded.value().message.view().get_int(kRefTagID).value() == kSenderCompID);
@@ -592,13 +592,13 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
   }
 
   {
-    fastfix::store::MemorySessionStore store;
-    fastfix::session::AdminProtocol protocol(
-      fastfix::session::AdminProtocolConfig{
+    nimble::store::MemorySessionStore store;
+    nimble::session::AdminProtocol protocol(
+      nimble::session::AdminProtocolConfig{
         .session =
-          fastfix::session::SessionConfig{
+          nimble::session::SessionConfig{
             .session_id = 5006U,
-            .key = fastfix::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
+            .key = nimble::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
             .profile_id = dictionary.value().profile().header().profile_id,
             .heartbeat_interval_seconds = 30U,
             .is_initiator = false,
@@ -607,7 +607,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
         .sender_comp_id = "SELL",
         .target_comp_id = "BUY",
         .heartbeat_interval_seconds = 30U,
-        .validation_policy = fastfix::session::ValidationPolicy::Compatible(),
+        .validation_policy = nimble::session::ValidationPolicy::Compatible(),
       },
       dictionary.value(),
       &store);
@@ -615,7 +615,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(protocol.OnTransportConnected(1U).ok());
     REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
 
-    fastfix::message::MessageBuilder heartbeat_builder("0");
+    nimble::message::MessageBuilder heartbeat_builder("0");
     heartbeat_builder.set_string(kMsgType, "0");
     auto inbound =
       EncodeInboundFrame(std::move(heartbeat_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 1U, true);
@@ -628,13 +628,13 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
   }
 
   {
-    fastfix::store::MemorySessionStore store;
-    fastfix::session::AdminProtocol protocol(
-      fastfix::session::AdminProtocolConfig{
+    nimble::store::MemorySessionStore store;
+    nimble::session::AdminProtocol protocol(
+      nimble::session::AdminProtocolConfig{
         .session =
-          fastfix::session::SessionConfig{
+          nimble::session::SessionConfig{
             .session_id = 5022U,
-            .key = fastfix::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
+            .key = nimble::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
             .profile_id = dictionary.value().profile().header().profile_id,
             .heartbeat_interval_seconds = 30U,
             .is_initiator = false,
@@ -643,7 +643,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
         .sender_comp_id = "SELL",
         .target_comp_id = "BUY",
         .heartbeat_interval_seconds = 30U,
-        .validation_policy = fastfix::session::ValidationPolicy::Compatible(),
+        .validation_policy = nimble::session::ValidationPolicy::Compatible(),
       },
       dictionary.value(),
       &store);
@@ -651,7 +651,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(protocol.OnTransportConnected(1U).ok());
     REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
 
-    const auto inbound = ::fastfix::tests::EncodeFixFrame("35=0|34=2|49=BUY|56=SELL|52=20260402-12:00:00.000|49=BUY|");
+    const auto inbound = ::nimble::tests::EncodeFixFrame("35=0|34=2|49=BUY|56=SELL|52=20260402-12:00:00.000|49=BUY|");
     auto event = protocol.OnInbound(inbound, 10U);
     REQUIRE(event.ok());
     REQUIRE(event.value().outbound_frames.empty());
@@ -659,13 +659,13 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
   }
 
   {
-    fastfix::store::MemorySessionStore store;
-    fastfix::session::AdminProtocol protocol(
-      fastfix::session::AdminProtocolConfig{
+    nimble::store::MemorySessionStore store;
+    nimble::session::AdminProtocol protocol(
+      nimble::session::AdminProtocolConfig{
         .session =
-          fastfix::session::SessionConfig{
+          nimble::session::SessionConfig{
             .session_id = 5002U,
-            .key = fastfix::session::SessionKey{ "FIXT.1.1", "SELL", "BUY" },
+            .key = nimble::session::SessionKey{ "FIXT.1.1", "SELL", "BUY" },
             .profile_id = dictionary.value().profile().header().profile_id,
             .default_appl_ver_id = "9",
             .heartbeat_interval_seconds = 30U,
@@ -682,7 +682,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
 
     REQUIRE(protocol.OnTransportConnected(1U).ok());
 
-    fastfix::message::MessageBuilder logon_builder("A");
+    nimble::message::MessageBuilder logon_builder("A");
     logon_builder.set_string(kMsgType, "A").set_int(kEncryptMethod, 0).set_int(kHeartBtInt, 30);
     auto inbound = EncodeInboundFrame(
       std::move(logon_builder).build(), dictionary.value(), "FIXT.1.1", "OTHER", "SELL", 1U, false, "9");
@@ -693,20 +693,20 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(event.value().outbound_frames.size() == 1U);
     REQUIRE(event.value().disconnect);
 
-    auto decoded = fastfix::codec::DecodeFixMessage(event.value().outbound_frames.front().bytes, dictionary.value());
+    auto decoded = nimble::codec::DecodeFixMessage(event.value().outbound_frames.front().bytes, dictionary.value());
     REQUIRE(decoded.ok());
     REQUIRE(decoded.value().header.msg_type == "5");
     REQUIRE(decoded.value().message.view().get_string(kText).value() == "unexpected SenderCompID on inbound frame");
   }
 
   {
-    fastfix::store::MemorySessionStore store;
-    fastfix::session::AdminProtocol protocol(
-      fastfix::session::AdminProtocolConfig{
+    nimble::store::MemorySessionStore store;
+    nimble::session::AdminProtocol protocol(
+      nimble::session::AdminProtocolConfig{
         .session =
-          fastfix::session::SessionConfig{
+          nimble::session::SessionConfig{
             .session_id = 5039U,
-            .key = fastfix::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
+            .key = nimble::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
             .profile_id = dictionary.value().profile().header().profile_id,
             .heartbeat_interval_seconds = 30U,
             .is_initiator = false,
@@ -715,14 +715,14 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
         .sender_comp_id = "SELL",
         .target_comp_id = "BUY",
         .heartbeat_interval_seconds = 30U,
-        .validation_policy = fastfix::session::ValidationPolicy::Permissive(),
+        .validation_policy = nimble::session::ValidationPolicy::Permissive(),
       },
       dictionary.value(),
       &store);
 
     REQUIRE(protocol.OnTransportConnected(1U).ok());
 
-    fastfix::message::MessageBuilder logon_builder("A");
+    nimble::message::MessageBuilder logon_builder("A");
     logon_builder.set_string(kMsgType, "A").set_int(kEncryptMethod, 0).set_int(kHeartBtInt, 30);
     auto inbound =
       EncodeInboundFrame(std::move(logon_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "OTHER", 1U, false);
@@ -734,19 +734,19 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(event.value().outbound_frames.size() == 1U);
     REQUIRE(!event.value().disconnect);
 
-    auto decoded = fastfix::codec::DecodeFixMessage(event.value().outbound_frames.front().bytes, dictionary.value());
+    auto decoded = nimble::codec::DecodeFixMessage(event.value().outbound_frames.front().bytes, dictionary.value());
     REQUIRE(decoded.ok());
     REQUIRE(decoded.value().header.msg_type == "A");
   }
 
   {
-    fastfix::store::MemorySessionStore store;
-    fastfix::session::AdminProtocol protocol(
-      fastfix::session::AdminProtocolConfig{
+    nimble::store::MemorySessionStore store;
+    nimble::session::AdminProtocol protocol(
+      nimble::session::AdminProtocolConfig{
         .session =
-          fastfix::session::SessionConfig{
+          nimble::session::SessionConfig{
             .session_id = 5010U,
-            .key = fastfix::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
+            .key = nimble::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
             .profile_id = dictionary.value().profile().header().profile_id,
             .heartbeat_interval_seconds = 30U,
             .is_initiator = false,
@@ -761,7 +761,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
 
     REQUIRE(protocol.OnTransportConnected(1U).ok());
 
-    fastfix::message::MessageBuilder logon_builder("A");
+    nimble::message::MessageBuilder logon_builder("A");
     logon_builder.set_string(kMsgType, "A").set_int(kEncryptMethod, 0);
     auto inbound =
       EncodeInboundFrame(std::move(logon_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 1U, false);
@@ -772,20 +772,20 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(event.value().outbound_frames.size() == 1U);
     REQUIRE(event.value().disconnect);
 
-    auto decoded = fastfix::codec::DecodeFixMessage(event.value().outbound_frames.front().bytes, dictionary.value());
+    auto decoded = nimble::codec::DecodeFixMessage(event.value().outbound_frames.front().bytes, dictionary.value());
     REQUIRE(decoded.ok());
     REQUIRE(decoded.value().header.msg_type == "5");
     REQUIRE(decoded.value().message.view().get_string(kText).value() == "Logon requires HeartBtInt");
   }
 
   {
-    fastfix::store::MemorySessionStore store;
-    fastfix::session::AdminProtocol protocol(
-      fastfix::session::AdminProtocolConfig{
+    nimble::store::MemorySessionStore store;
+    nimble::session::AdminProtocol protocol(
+      nimble::session::AdminProtocolConfig{
         .session =
-          fastfix::session::SessionConfig{
+          nimble::session::SessionConfig{
             .session_id = 5023U,
-            .key = fastfix::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
+            .key = nimble::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
             .profile_id = dictionary.value().profile().header().profile_id,
             .heartbeat_interval_seconds = 30U,
             .is_initiator = false,
@@ -800,7 +800,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
 
     REQUIRE(protocol.OnTransportConnected(1U).ok());
 
-    fastfix::message::MessageBuilder logon_builder("A");
+    nimble::message::MessageBuilder logon_builder("A");
     logon_builder.set_string(kMsgType, "A").set_int(kEncryptMethod, 1).set_int(kHeartBtInt, 30);
     auto inbound =
       EncodeInboundFrame(std::move(logon_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 1U, false);
@@ -811,20 +811,20 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(event.value().outbound_frames.size() == 1U);
     REQUIRE(event.value().disconnect);
 
-    auto decoded = fastfix::codec::DecodeFixMessage(event.value().outbound_frames.front().bytes, dictionary.value());
+    auto decoded = nimble::codec::DecodeFixMessage(event.value().outbound_frames.front().bytes, dictionary.value());
     REQUIRE(decoded.ok());
     REQUIRE(decoded.value().header.msg_type == "5");
     REQUIRE(decoded.value().message.view().get_string(kText).value() == "Logon EncryptMethod must be 0");
   }
 
   {
-    fastfix::store::MemorySessionStore store;
-    fastfix::session::AdminProtocol protocol(
-      fastfix::session::AdminProtocolConfig{
+    nimble::store::MemorySessionStore store;
+    nimble::session::AdminProtocol protocol(
+      nimble::session::AdminProtocolConfig{
         .session =
-          fastfix::session::SessionConfig{
+          nimble::session::SessionConfig{
             .session_id = 5040U,
-            .key = fastfix::session::SessionKey{ "FIXT.1.1", "SELL", "BUY" },
+            .key = nimble::session::SessionKey{ "FIXT.1.1", "SELL", "BUY" },
             .profile_id = dictionary.value().profile().header().profile_id,
             .default_appl_ver_id = "9",
             .heartbeat_interval_seconds = 30U,
@@ -841,7 +841,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
 
     REQUIRE(protocol.OnTransportConnected(1U).ok());
 
-    fastfix::message::MessageBuilder logon_builder("A");
+    nimble::message::MessageBuilder logon_builder("A");
     logon_builder.set_string(kMsgType, "A").set_int(kEncryptMethod, 0).set_int(kHeartBtInt, 30);
     auto inbound =
       EncodeInboundFrame(std::move(logon_builder).build(), dictionary.value(), "FIXT.1.1", "BUY", "SELL", 1U, false);
@@ -852,20 +852,20 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(event.value().outbound_frames.size() == 1U);
     REQUIRE(event.value().disconnect);
 
-    auto decoded = fastfix::codec::DecodeFixMessage(event.value().outbound_frames.front().bytes, dictionary.value());
+    auto decoded = nimble::codec::DecodeFixMessage(event.value().outbound_frames.front().bytes, dictionary.value());
     REQUIRE(decoded.ok());
     REQUIRE(decoded.value().header.msg_type == "5");
     REQUIRE(decoded.value().message.view().get_string(kText).value() == "FIXT.1.1 logon requires DefaultApplVerID");
   }
 
   {
-    fastfix::store::MemorySessionStore store;
-    fastfix::session::AdminProtocol protocol(
-      fastfix::session::AdminProtocolConfig{
+    nimble::store::MemorySessionStore store;
+    nimble::session::AdminProtocol protocol(
+      nimble::session::AdminProtocolConfig{
         .session =
-          fastfix::session::SessionConfig{
+          nimble::session::SessionConfig{
             .session_id = 5041U,
-            .key = fastfix::session::SessionKey{ "FIXT.1.1", "SELL", "BUY" },
+            .key = nimble::session::SessionKey{ "FIXT.1.1", "SELL", "BUY" },
             .profile_id = dictionary.value().profile().header().profile_id,
             .default_appl_ver_id = "9",
             .heartbeat_interval_seconds = 30U,
@@ -876,14 +876,14 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
         .target_comp_id = "BUY",
         .default_appl_ver_id = "9",
         .heartbeat_interval_seconds = 30U,
-        .validation_policy = fastfix::session::ValidationPolicy::Compatible(),
+        .validation_policy = nimble::session::ValidationPolicy::Compatible(),
       },
       dictionary.value(),
       &store);
 
     REQUIRE(protocol.OnTransportConnected(1U).ok());
 
-    fastfix::message::MessageBuilder logon_builder("A");
+    nimble::message::MessageBuilder logon_builder("A");
     logon_builder.set_string(kMsgType, "A").set_int(kEncryptMethod, 0).set_int(kHeartBtInt, 30);
     auto inbound =
       EncodeInboundFrame(std::move(logon_builder).build(), dictionary.value(), "FIXT.1.1", "BUY", "SELL", 1U, false);
@@ -895,19 +895,19 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(event.value().outbound_frames.size() == 1U);
     REQUIRE(!event.value().disconnect);
 
-    auto decoded = fastfix::codec::DecodeFixMessage(event.value().outbound_frames.front().bytes, dictionary.value());
+    auto decoded = nimble::codec::DecodeFixMessage(event.value().outbound_frames.front().bytes, dictionary.value());
     REQUIRE(decoded.ok());
     REQUIRE(decoded.value().header.msg_type == "A");
   }
 
   {
-    fastfix::store::MemorySessionStore store;
-    fastfix::session::AdminProtocol protocol(
-      fastfix::session::AdminProtocolConfig{
+    nimble::store::MemorySessionStore store;
+    nimble::session::AdminProtocol protocol(
+      nimble::session::AdminProtocolConfig{
         .session =
-          fastfix::session::SessionConfig{
+          nimble::session::SessionConfig{
             .session_id = 5042U,
-            .key = fastfix::session::SessionKey{ "FIXT.1.1", "SELL", "BUY" },
+            .key = nimble::session::SessionKey{ "FIXT.1.1", "SELL", "BUY" },
             .profile_id = dictionary.value().profile().header().profile_id,
             .default_appl_ver_id = "9",
             .heartbeat_interval_seconds = 30U,
@@ -924,7 +924,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
 
     REQUIRE(protocol.OnTransportConnected(1U).ok());
 
-    fastfix::message::MessageBuilder logon_builder("A");
+    nimble::message::MessageBuilder logon_builder("A");
     logon_builder.set_string(kMsgType, "A").set_int(kEncryptMethod, 0).set_int(kHeartBtInt, 30);
     auto inbound = EncodeInboundFrame(
       std::move(logon_builder).build(), dictionary.value(), "FIXT.1.1", "BUY", "SELL", 1U, false, "7");
@@ -935,20 +935,20 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(event.value().outbound_frames.size() == 1U);
     REQUIRE(event.value().disconnect);
 
-    auto decoded = fastfix::codec::DecodeFixMessage(event.value().outbound_frames.front().bytes, dictionary.value());
+    auto decoded = nimble::codec::DecodeFixMessage(event.value().outbound_frames.front().bytes, dictionary.value());
     REQUIRE(decoded.ok());
     REQUIRE(decoded.value().header.msg_type == "5");
     REQUIRE(decoded.value().message.view().get_string(kText).value() == "unexpected DefaultApplVerID on inbound frame");
   }
 
   {
-    fastfix::store::MemorySessionStore store;
-    fastfix::session::AdminProtocol protocol(
-      fastfix::session::AdminProtocolConfig{
+    nimble::store::MemorySessionStore store;
+    nimble::session::AdminProtocol protocol(
+      nimble::session::AdminProtocolConfig{
         .session =
-          fastfix::session::SessionConfig{
+          nimble::session::SessionConfig{
             .session_id = 5043U,
-            .key = fastfix::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
+            .key = nimble::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
             .profile_id = dictionary.value().profile().header().profile_id,
             .heartbeat_interval_seconds = 30U,
             .is_initiator = false,
@@ -963,7 +963,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
 
     REQUIRE(protocol.OnTransportConnected(1U).ok());
 
-    fastfix::message::MessageBuilder logon_builder("A");
+    nimble::message::MessageBuilder logon_builder("A");
     logon_builder.set_string(kMsgType, "A").set_int(kEncryptMethod, 0).set_int(kHeartBtInt, 30);
     auto inbound =
       EncodeInboundFrame(std::move(logon_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 1U, true);
@@ -974,20 +974,20 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(event.value().outbound_frames.size() == 1U);
     REQUIRE(event.value().disconnect);
 
-    auto decoded = fastfix::codec::DecodeFixMessage(event.value().outbound_frames.front().bytes, dictionary.value());
+    auto decoded = nimble::codec::DecodeFixMessage(event.value().outbound_frames.front().bytes, dictionary.value());
     REQUIRE(decoded.ok());
     REQUIRE(decoded.value().header.msg_type == "5");
     REQUIRE(decoded.value().message.view().get_string(kText).value() == "PossDupFlag requires OrigSendingTime");
   }
 
   {
-    fastfix::store::MemorySessionStore store;
-    fastfix::session::AdminProtocol protocol(
-      fastfix::session::AdminProtocolConfig{
+    nimble::store::MemorySessionStore store;
+    nimble::session::AdminProtocol protocol(
+      nimble::session::AdminProtocolConfig{
         .session =
-          fastfix::session::SessionConfig{
+          nimble::session::SessionConfig{
             .session_id = 5044U,
-            .key = fastfix::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
+            .key = nimble::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
             .profile_id = dictionary.value().profile().header().profile_id,
             .heartbeat_interval_seconds = 30U,
             .is_initiator = false,
@@ -1002,26 +1002,26 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
 
     REQUIRE(protocol.OnTransportConnected(1U).ok());
 
-    const auto inbound = ::fastfix::tests::EncodeFixFrame("35=A|34=1|49=BUY|56=SELL|52=20260402-"
-                                                          "12:00:00.000|98=0|108=30|9999=BAD|");
+    const auto inbound = ::nimble::tests::EncodeFixFrame("35=A|34=1|49=BUY|56=SELL|52=20260402-"
+                                                         "12:00:00.000|98=0|108=30|9999=BAD|");
     auto event = protocol.OnInbound(inbound, 10U);
     REQUIRE(event.ok());
     REQUIRE(event.value().outbound_frames.size() == 1U);
     REQUIRE(event.value().disconnect);
 
-    auto decoded = fastfix::codec::DecodeFixMessage(event.value().outbound_frames.front().bytes, dictionary.value());
+    auto decoded = nimble::codec::DecodeFixMessage(event.value().outbound_frames.front().bytes, dictionary.value());
     REQUIRE(decoded.ok());
     REQUIRE(decoded.value().header.msg_type == "5");
   }
 
   {
-    fastfix::store::MemorySessionStore store;
-    fastfix::session::AdminProtocol protocol(
-      fastfix::session::AdminProtocolConfig{
+    nimble::store::MemorySessionStore store;
+    nimble::session::AdminProtocol protocol(
+      nimble::session::AdminProtocolConfig{
         .session =
-          fastfix::session::SessionConfig{
+          nimble::session::SessionConfig{
             .session_id = 5036U,
-            .key = fastfix::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
+            .key = nimble::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
             .profile_id = dictionary.value().profile().header().profile_id,
             .heartbeat_interval_seconds = 30U,
             .is_initiator = false,
@@ -1036,7 +1036,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
 
     REQUIRE(protocol.OnTransportConnected(1U).ok());
 
-    fastfix::message::MessageBuilder heartbeat_builder("0");
+    nimble::message::MessageBuilder heartbeat_builder("0");
     heartbeat_builder.set_string(kMsgType, "0");
     auto inbound =
       EncodeInboundFrame(std::move(heartbeat_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 1U, false);
@@ -1047,7 +1047,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(event.value().outbound_frames.size() == 1U);
     REQUIRE(event.value().disconnect);
 
-    auto decoded = fastfix::codec::DecodeFixMessage(event.value().outbound_frames.front().bytes, dictionary.value());
+    auto decoded = nimble::codec::DecodeFixMessage(event.value().outbound_frames.front().bytes, dictionary.value());
     REQUIRE(decoded.ok());
     REQUIRE(decoded.value().header.msg_type == "5");
     REQUIRE(decoded.value().message.view().get_string(kText).value() == "received 0 before Logon completed");
@@ -1058,13 +1058,13 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
   }
 
   {
-    fastfix::store::MemorySessionStore store;
-    fastfix::session::AdminProtocol protocol(
-      fastfix::session::AdminProtocolConfig{
+    nimble::store::MemorySessionStore store;
+    nimble::session::AdminProtocol protocol(
+      nimble::session::AdminProtocolConfig{
         .session =
-          fastfix::session::SessionConfig{
+          nimble::session::SessionConfig{
             .session_id = 5037U,
-            .key = fastfix::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
+            .key = nimble::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
             .profile_id = dictionary.value().profile().header().profile_id,
             .heartbeat_interval_seconds = 30U,
             .is_initiator = false,
@@ -1079,7 +1079,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
 
     REQUIRE(protocol.OnTransportConnected(1U).ok());
 
-    fastfix::message::MessageBuilder resend_builder("2");
+    nimble::message::MessageBuilder resend_builder("2");
     resend_builder.set_string(kMsgType, "2").set_int(kBeginSeqNo, 1).set_int(kEndSeqNo, 0);
     auto inbound =
       EncodeInboundFrame(std::move(resend_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 2U, false);
@@ -1090,25 +1090,25 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(event.value().outbound_frames.size() == 1U);
     REQUIRE(event.value().disconnect);
 
-    auto decoded = fastfix::codec::DecodeFixMessage(event.value().outbound_frames.front().bytes, dictionary.value());
+    auto decoded = nimble::codec::DecodeFixMessage(event.value().outbound_frames.front().bytes, dictionary.value());
     REQUIRE(decoded.ok());
     REQUIRE(decoded.value().header.msg_type == "5");
     REQUIRE(decoded.value().message.view().get_string(kText).value() == "received 2 before Logon completed");
 
     const auto snapshot = protocol.session().Snapshot();
-    REQUIRE(snapshot.state == fastfix::session::SessionState::kAwaitingLogout);
+    REQUIRE(snapshot.state == nimble::session::SessionState::kAwaitingLogout);
     REQUIRE(snapshot.next_in_seq == 1U);
     REQUIRE(snapshot.next_out_seq == 2U);
   }
 
   {
-    fastfix::store::MemorySessionStore store;
-    fastfix::session::AdminProtocol protocol(
-      fastfix::session::AdminProtocolConfig{
+    nimble::store::MemorySessionStore store;
+    nimble::session::AdminProtocol protocol(
+      nimble::session::AdminProtocolConfig{
         .session =
-          fastfix::session::SessionConfig{
+          nimble::session::SessionConfig{
             .session_id = 5004U,
-            .key = fastfix::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
+            .key = nimble::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
             .profile_id = dictionary.value().profile().header().profile_id,
             .heartbeat_interval_seconds = 30U,
             .is_initiator = false,
@@ -1124,7 +1124,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(protocol.OnTransportConnected(1U).ok());
     REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
 
-    fastfix::message::MessageBuilder heartbeat_builder("0");
+    nimble::message::MessageBuilder heartbeat_builder("0");
     heartbeat_builder.set_string(kMsgType, "0");
     auto inbound =
       EncodeInboundFrame(std::move(heartbeat_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 1U, false);
@@ -1135,20 +1135,20 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(event.value().outbound_frames.size() == 1U);
     REQUIRE(event.value().disconnect);
 
-    auto decoded = fastfix::codec::DecodeFixMessage(event.value().outbound_frames.front().bytes, dictionary.value());
+    auto decoded = nimble::codec::DecodeFixMessage(event.value().outbound_frames.front().bytes, dictionary.value());
     REQUIRE(decoded.ok());
     REQUIRE(decoded.value().header.msg_type == "5");
     REQUIRE(decoded.value().message.view().get_string(kText).value() == "received stale inbound FIX sequence number");
   }
 
   {
-    fastfix::store::MemorySessionStore store;
-    fastfix::session::AdminProtocol protocol(
-      fastfix::session::AdminProtocolConfig{
+    nimble::store::MemorySessionStore store;
+    nimble::session::AdminProtocol protocol(
+      nimble::session::AdminProtocolConfig{
         .session =
-          fastfix::session::SessionConfig{
+          nimble::session::SessionConfig{
             .session_id = 5038U,
-            .key = fastfix::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
+            .key = nimble::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
             .profile_id = dictionary.value().profile().header().profile_id,
             .heartbeat_interval_seconds = 30U,
             .is_initiator = false,
@@ -1164,7 +1164,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(protocol.OnTransportConnected(1U).ok());
     REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
 
-    fastfix::message::MessageBuilder logon_builder("A");
+    nimble::message::MessageBuilder logon_builder("A");
     logon_builder.set_string(kMsgType, "A").set_int(kEncryptMethod, 0).set_int(kHeartBtInt, 30);
     auto inbound =
       EncodeInboundFrame(std::move(logon_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 2U, false);
@@ -1175,26 +1175,26 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(event.value().outbound_frames.size() == 1U);
     REQUIRE(event.value().disconnect);
 
-    auto decoded = fastfix::codec::DecodeFixMessage(event.value().outbound_frames.front().bytes, dictionary.value());
+    auto decoded = nimble::codec::DecodeFixMessage(event.value().outbound_frames.front().bytes, dictionary.value());
     REQUIRE(decoded.ok());
     REQUIRE(decoded.value().header.msg_type == "5");
     REQUIRE(decoded.value().message.view().get_string(kText).value() ==
             "received unexpected Logon after session activation");
 
     const auto snapshot = protocol.session().Snapshot();
-    REQUIRE(snapshot.state == fastfix::session::SessionState::kAwaitingLogout);
+    REQUIRE(snapshot.state == nimble::session::SessionState::kAwaitingLogout);
     REQUIRE(snapshot.next_in_seq == 3U);
     REQUIRE(snapshot.next_out_seq == 3U);
   }
 
   {
-    fastfix::store::MemorySessionStore store;
-    fastfix::session::AdminProtocol protocol(
-      fastfix::session::AdminProtocolConfig{
+    nimble::store::MemorySessionStore store;
+    nimble::session::AdminProtocol protocol(
+      nimble::session::AdminProtocolConfig{
         .session =
-          fastfix::session::SessionConfig{
+          nimble::session::SessionConfig{
             .session_id = 5024U,
-            .key = fastfix::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
+            .key = nimble::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
             .profile_id = dictionary.value().profile().header().profile_id,
             .heartbeat_interval_seconds = 30U,
             .is_initiator = false,
@@ -1210,7 +1210,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(protocol.OnTransportConnected(1U).ok());
     REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
 
-    fastfix::message::MessageBuilder test_request_builder("1");
+    nimble::message::MessageBuilder test_request_builder("1");
     test_request_builder.set_string(kMsgType, "1");
     auto inbound = EncodeInboundFrame(
       std::move(test_request_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 2U, false);
@@ -1221,7 +1221,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(event.value().outbound_frames.size() == 1U);
     REQUIRE(!event.value().disconnect);
 
-    auto decoded = fastfix::codec::DecodeFixMessage(event.value().outbound_frames.front().bytes, dictionary.value());
+    auto decoded = nimble::codec::DecodeFixMessage(event.value().outbound_frames.front().bytes, dictionary.value());
     REQUIRE(decoded.ok());
     REQUIRE(decoded.value().header.msg_type == "3");
     REQUIRE(decoded.value().message.view().get_int(kRefTagID).value() == kTestReqID);
@@ -1230,13 +1230,13 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
   }
 
   {
-    fastfix::store::MemorySessionStore store;
-    fastfix::session::AdminProtocol protocol(
-      fastfix::session::AdminProtocolConfig{
+    nimble::store::MemorySessionStore store;
+    nimble::session::AdminProtocol protocol(
+      nimble::session::AdminProtocolConfig{
         .session =
-          fastfix::session::SessionConfig{
+          nimble::session::SessionConfig{
             .session_id = 5025U,
-            .key = fastfix::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
+            .key = nimble::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
             .profile_id = dictionary.value().profile().header().profile_id,
             .heartbeat_interval_seconds = 30U,
             .is_initiator = false,
@@ -1252,7 +1252,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(protocol.OnTransportConnected(1U).ok());
     REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
 
-    fastfix::message::MessageBuilder resend_builder("2");
+    nimble::message::MessageBuilder resend_builder("2");
     resend_builder.set_string(kMsgType, "2").set_int(kBeginSeqNo, 9).set_int(kEndSeqNo, 4);
     auto inbound =
       EncodeInboundFrame(std::move(resend_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 2U, false);
@@ -1263,7 +1263,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(event.value().outbound_frames.size() == 1U);
     REQUIRE(!event.value().disconnect);
 
-    auto decoded = fastfix::codec::DecodeFixMessage(event.value().outbound_frames.front().bytes, dictionary.value());
+    auto decoded = nimble::codec::DecodeFixMessage(event.value().outbound_frames.front().bytes, dictionary.value());
     REQUIRE(decoded.ok());
     REQUIRE(decoded.value().header.msg_type == "3");
     REQUIRE(decoded.value().message.view().get_int(kRefTagID).value() == kEndSeqNo);
@@ -1272,13 +1272,13 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
   }
 
   {
-    fastfix::store::MemorySessionStore store;
-    fastfix::session::AdminProtocol protocol(
-      fastfix::session::AdminProtocolConfig{
+    nimble::store::MemorySessionStore store;
+    nimble::session::AdminProtocol protocol(
+      nimble::session::AdminProtocolConfig{
         .session =
-          fastfix::session::SessionConfig{
+          nimble::session::SessionConfig{
             .session_id = 5005U,
-            .key = fastfix::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
+            .key = nimble::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
             .profile_id = dictionary.value().profile().header().profile_id,
             .heartbeat_interval_seconds = 30U,
             .is_initiator = false,
@@ -1294,7 +1294,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(protocol.OnTransportConnected(1U).ok());
     REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
 
-    fastfix::message::MessageBuilder reset_builder("4");
+    nimble::message::MessageBuilder reset_builder("4");
     reset_builder.set_string(kMsgType, "4");
     auto inbound =
       EncodeInboundFrame(std::move(reset_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 2U, false);
@@ -1305,7 +1305,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(event.value().outbound_frames.size() == 1U);
     REQUIRE(!event.value().disconnect);
 
-    auto decoded = fastfix::codec::DecodeFixMessage(event.value().outbound_frames.front().bytes, dictionary.value());
+    auto decoded = nimble::codec::DecodeFixMessage(event.value().outbound_frames.front().bytes, dictionary.value());
     REQUIRE(decoded.ok());
     REQUIRE(decoded.value().header.msg_type == "3");
     REQUIRE(decoded.value().message.view().get_int(kRefTagID).value() == kNewSeqNo);
@@ -1314,13 +1314,13 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
   }
 
   {
-    fastfix::store::MemorySessionStore store;
-    fastfix::session::AdminProtocol protocol(
-      fastfix::session::AdminProtocolConfig{
+    nimble::store::MemorySessionStore store;
+    nimble::session::AdminProtocol protocol(
+      nimble::session::AdminProtocolConfig{
         .session =
-          fastfix::session::SessionConfig{
+          nimble::session::SessionConfig{
             .session_id = 5026U,
-            .key = fastfix::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
+            .key = nimble::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
             .profile_id = dictionary.value().profile().header().profile_id,
             .heartbeat_interval_seconds = 30U,
             .is_initiator = false,
@@ -1336,7 +1336,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(protocol.OnTransportConnected(1U).ok());
     REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
 
-    fastfix::message::MessageBuilder reset_builder("4");
+    nimble::message::MessageBuilder reset_builder("4");
     reset_builder.set_string(kMsgType, "4").set_int(kNewSeqNo, 1);
     auto inbound =
       EncodeInboundFrame(std::move(reset_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 2U, false);
@@ -1347,7 +1347,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(event.value().outbound_frames.size() == 1U);
     REQUIRE(!event.value().disconnect);
 
-    auto decoded = fastfix::codec::DecodeFixMessage(event.value().outbound_frames.front().bytes, dictionary.value());
+    auto decoded = nimble::codec::DecodeFixMessage(event.value().outbound_frames.front().bytes, dictionary.value());
     REQUIRE(decoded.ok());
     REQUIRE(decoded.value().header.msg_type == "3");
     REQUIRE(decoded.value().message.view().get_int(kRefTagID).value() == kNewSeqNo);
@@ -1356,13 +1356,13 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
   }
 
   {
-    fastfix::store::MemorySessionStore store;
-    fastfix::session::AdminProtocol protocol(
-      fastfix::session::AdminProtocolConfig{
+    nimble::store::MemorySessionStore store;
+    nimble::session::AdminProtocol protocol(
+      nimble::session::AdminProtocolConfig{
         .session =
-          fastfix::session::SessionConfig{
+          nimble::session::SessionConfig{
             .session_id = 5034U,
-            .key = fastfix::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
+            .key = nimble::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
             .profile_id = dictionary.value().profile().header().profile_id,
             .heartbeat_interval_seconds = 30U,
             .is_initiator = false,
@@ -1378,7 +1378,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(protocol.OnTransportConnected(1U).ok());
     REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
 
-    fastfix::message::MessageBuilder heartbeat_builder("0");
+    nimble::message::MessageBuilder heartbeat_builder("0");
     heartbeat_builder.set_string(kMsgType, "0");
     auto gap_inbound =
       EncodeInboundFrame(std::move(heartbeat_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 5U, false);
@@ -1388,13 +1388,13 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(gap_event.ok());
     REQUIRE(gap_event.value().outbound_frames.size() == 1U);
 
-    auto resend = fastfix::codec::DecodeFixMessage(gap_event.value().outbound_frames.front().bytes, dictionary.value());
+    auto resend = nimble::codec::DecodeFixMessage(gap_event.value().outbound_frames.front().bytes, dictionary.value());
     REQUIRE(resend.ok());
     REQUIRE(resend.value().header.msg_type == "2");
     REQUIRE(resend.value().message.view().get_int(kBeginSeqNo).value() == 2);
     REQUIRE(resend.value().message.view().get_int(kEndSeqNo).value() == 4);
 
-    fastfix::message::MessageBuilder first_gap_fill_builder("4");
+    nimble::message::MessageBuilder first_gap_fill_builder("4");
     first_gap_fill_builder.set_string(kMsgType, "4").set_boolean(kGapFillFlag, true).set_int(kNewSeqNo, 4);
     auto first_gap_fill = EncodeInboundFrame(
       std::move(first_gap_fill_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 2U, false);
@@ -1406,13 +1406,13 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(!first_gap_fill_event.value().disconnect);
 
     const auto after_first_gap_fill = protocol.session().Snapshot();
-    REQUIRE(after_first_gap_fill.state == fastfix::session::SessionState::kResendProcessing);
+    REQUIRE(after_first_gap_fill.state == nimble::session::SessionState::kResendProcessing);
     REQUIRE(after_first_gap_fill.has_pending_resend);
     REQUIRE(after_first_gap_fill.pending_resend.begin_seq == 2U);
     REQUIRE(after_first_gap_fill.pending_resend.end_seq == 4U);
     REQUIRE(after_first_gap_fill.next_in_seq == 4U);
 
-    fastfix::message::MessageBuilder overlapping_gap_fill_builder("4");
+    nimble::message::MessageBuilder overlapping_gap_fill_builder("4");
     overlapping_gap_fill_builder.set_string(kMsgType, "4").set_boolean(kGapFillFlag, true).set_int(kNewSeqNo, 6);
     auto overlapping_gap_fill = EncodeInboundFrame(
       std::move(overlapping_gap_fill_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 3U, false);
@@ -1424,7 +1424,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(!overlapping_gap_fill_event.value().disconnect);
 
     const auto after_overlapping_gap_fill = protocol.session().Snapshot();
-    REQUIRE(after_overlapping_gap_fill.state == fastfix::session::SessionState::kActive);
+    REQUIRE(after_overlapping_gap_fill.state == nimble::session::SessionState::kActive);
     REQUIRE(!after_overlapping_gap_fill.has_pending_resend);
     REQUIRE(after_overlapping_gap_fill.next_in_seq == 6U);
     REQUIRE(after_overlapping_gap_fill.last_inbound_ns == 30U);
@@ -1436,13 +1436,13 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
   }
 
   {
-    fastfix::store::MemorySessionStore store;
-    fastfix::session::AdminProtocol protocol(
-      fastfix::session::AdminProtocolConfig{
+    nimble::store::MemorySessionStore store;
+    nimble::session::AdminProtocol protocol(
+      nimble::session::AdminProtocolConfig{
         .session =
-          fastfix::session::SessionConfig{
+          nimble::session::SessionConfig{
             .session_id = 5035U,
-            .key = fastfix::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
+            .key = nimble::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
             .profile_id = dictionary.value().profile().header().profile_id,
             .heartbeat_interval_seconds = 30U,
             .is_initiator = false,
@@ -1458,7 +1458,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(protocol.OnTransportConnected(1U).ok());
     REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
 
-    fastfix::message::MessageBuilder first_gap_fill_builder("4");
+    nimble::message::MessageBuilder first_gap_fill_builder("4");
     first_gap_fill_builder.set_string(kMsgType, "4").set_boolean(kGapFillFlag, true).set_int(kNewSeqNo, 5);
     auto first_gap_fill = EncodeInboundFrame(
       std::move(first_gap_fill_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 2U, false);
@@ -1469,7 +1469,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(first_gap_fill_event.value().outbound_frames.empty());
     REQUIRE(!first_gap_fill_event.value().disconnect);
 
-    fastfix::message::MessageBuilder duplicate_gap_fill_builder("4");
+    nimble::message::MessageBuilder duplicate_gap_fill_builder("4");
     duplicate_gap_fill_builder.set_string(kMsgType, "4").set_boolean(kGapFillFlag, true).set_int(kNewSeqNo, 5);
     auto duplicate_gap_fill = EncodeInboundFrame(
       std::move(duplicate_gap_fill_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 3U, false);
@@ -1481,7 +1481,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(!duplicate_gap_fill_event.value().disconnect);
 
     const auto snapshot = protocol.session().Snapshot();
-    REQUIRE(snapshot.state == fastfix::session::SessionState::kActive);
+    REQUIRE(snapshot.state == nimble::session::SessionState::kActive);
     REQUIRE(snapshot.next_in_seq == 5U);
     REQUIRE(snapshot.last_inbound_ns == 20U);
 
@@ -1492,13 +1492,13 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
   }
 
   {
-    fastfix::store::MemorySessionStore store;
-    fastfix::session::AdminProtocol protocol(
-      fastfix::session::AdminProtocolConfig{
+    nimble::store::MemorySessionStore store;
+    nimble::session::AdminProtocol protocol(
+      nimble::session::AdminProtocolConfig{
         .session =
-          fastfix::session::SessionConfig{
+          nimble::session::SessionConfig{
             .session_id = 5003U,
-            .key = fastfix::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
+            .key = nimble::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
             .profile_id = dictionary.value().profile().header().profile_id,
             .heartbeat_interval_seconds = 30U,
             .is_initiator = false,
@@ -1514,16 +1514,16 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(protocol.OnTransportConnected(1U).ok());
     REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
 
-    fastfix::message::MessageBuilder app_builder("D");
+    nimble::message::MessageBuilder app_builder("D");
     app_builder.set_string(kMsgType, "D").set_string(kClOrdID, "ORD-1");
     auto outbound = protocol.SendApplication(std::move(app_builder).build(), 100U);
     REQUIRE(outbound.ok());
 
-    auto original = fastfix::codec::DecodeFixMessage(outbound.value().bytes, dictionary.value());
+    auto original = nimble::codec::DecodeFixMessage(outbound.value().bytes, dictionary.value());
     REQUIRE(original.ok());
     REQUIRE(!original.value().header.sending_time.empty());
 
-    fastfix::message::MessageBuilder resend_builder("2");
+    nimble::message::MessageBuilder resend_builder("2");
     resend_builder.set_string(kMsgType, "2").set_int(kBeginSeqNo, 2).set_int(kEndSeqNo, 2);
     auto inbound =
       EncodeInboundFrame(std::move(resend_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 2U, false);
@@ -1533,7 +1533,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(event.ok());
     REQUIRE(event.value().outbound_frames.size() == 1U);
 
-    auto replay = fastfix::codec::DecodeFixMessage(event.value().outbound_frames.front().bytes, dictionary.value());
+    auto replay = nimble::codec::DecodeFixMessage(event.value().outbound_frames.front().bytes, dictionary.value());
     REQUIRE(replay.ok());
     REQUIRE(replay.value().header.msg_type == "D");
     REQUIRE(replay.value().header.poss_dup);
@@ -1543,13 +1543,13 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
   }
 
   {
-    fastfix::store::MemorySessionStore store;
-    fastfix::session::AdminProtocol protocol(
-      fastfix::session::AdminProtocolConfig{
+    nimble::store::MemorySessionStore store;
+    nimble::session::AdminProtocol protocol(
+      nimble::session::AdminProtocolConfig{
         .session =
-          fastfix::session::SessionConfig{
+          nimble::session::SessionConfig{
             .session_id = 5030U,
-            .key = fastfix::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
+            .key = nimble::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
             .profile_id = dictionary.value().profile().header().profile_id,
             .heartbeat_interval_seconds = 30U,
             .is_initiator = false,
@@ -1567,13 +1567,13 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
 
     auto logout = protocol.BeginLogout({}, 100U);
     REQUIRE(logout.ok());
-    REQUIRE(fastfix::codec::DecodeFixMessage(logout.value().bytes, dictionary.value()).ok());
+    REQUIRE(nimble::codec::DecodeFixMessage(logout.value().bytes, dictionary.value()).ok());
 
     const auto before_replay = protocol.session().Snapshot();
-    REQUIRE(before_replay.state == fastfix::session::SessionState::kAwaitingLogout);
+    REQUIRE(before_replay.state == nimble::session::SessionState::kAwaitingLogout);
     REQUIRE(before_replay.next_out_seq == 3U);
 
-    fastfix::message::MessageBuilder resend_builder("2");
+    nimble::message::MessageBuilder resend_builder("2");
     resend_builder.set_string(kMsgType, "2").set_int(kBeginSeqNo, 2).set_int(kEndSeqNo, 2);
     auto inbound =
       EncodeInboundFrame(std::move(resend_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 2U, false);
@@ -1584,7 +1584,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(event.value().outbound_frames.size() == 1U);
     REQUIRE(!event.value().disconnect);
 
-    auto replay = fastfix::codec::DecodeFixMessage(event.value().outbound_frames.front().bytes, dictionary.value());
+    auto replay = nimble::codec::DecodeFixMessage(event.value().outbound_frames.front().bytes, dictionary.value());
     REQUIRE(replay.ok());
     REQUIRE(replay.value().header.msg_type == "4");
     REQUIRE(replay.value().header.msg_seq_num == 2U);
@@ -1603,13 +1603,13 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
   }
 
   {
-    fastfix::store::MemorySessionStore store;
-    fastfix::session::AdminProtocol protocol(
-      fastfix::session::AdminProtocolConfig{
+    nimble::store::MemorySessionStore store;
+    nimble::session::AdminProtocol protocol(
+      nimble::session::AdminProtocolConfig{
         .session =
-          fastfix::session::SessionConfig{
+          nimble::session::SessionConfig{
             .session_id = 5031U,
-            .key = fastfix::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
+            .key = nimble::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
             .profile_id = dictionary.value().profile().header().profile_id,
             .heartbeat_interval_seconds = 30U,
             .is_initiator = false,
@@ -1625,7 +1625,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(protocol.OnTransportConnected(1U).ok());
     REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
 
-    fastfix::message::MessageBuilder logout_builder("5");
+    nimble::message::MessageBuilder logout_builder("5");
     logout_builder.set_string(kMsgType, "5");
     auto inbound =
       EncodeInboundFrame(std::move(logout_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 2U, false);
@@ -1636,24 +1636,24 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(event.value().outbound_frames.size() == 1U);
     REQUIRE(event.value().disconnect);
 
-    auto decoded = fastfix::codec::DecodeFixMessage(event.value().outbound_frames.front().bytes, dictionary.value());
+    auto decoded = nimble::codec::DecodeFixMessage(event.value().outbound_frames.front().bytes, dictionary.value());
     REQUIRE(decoded.ok());
     REQUIRE(decoded.value().header.msg_type == "5");
 
     const auto snapshot = protocol.session().Snapshot();
-    REQUIRE(snapshot.state == fastfix::session::SessionState::kAwaitingLogout);
+    REQUIRE(snapshot.state == nimble::session::SessionState::kAwaitingLogout);
     REQUIRE(snapshot.next_in_seq == 3U);
     REQUIRE(snapshot.next_out_seq == 3U);
   }
 
   {
-    fastfix::store::MemorySessionStore store;
-    fastfix::session::AdminProtocol protocol(
-      fastfix::session::AdminProtocolConfig{
+    nimble::store::MemorySessionStore store;
+    nimble::session::AdminProtocol protocol(
+      nimble::session::AdminProtocolConfig{
         .session =
-          fastfix::session::SessionConfig{
+          nimble::session::SessionConfig{
             .session_id = 5032U,
-            .key = fastfix::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
+            .key = nimble::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
             .profile_id = dictionary.value().profile().header().profile_id,
             .heartbeat_interval_seconds = 30U,
             .is_initiator = false,
@@ -1669,7 +1669,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(protocol.OnTransportConnected(1U).ok());
     REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
 
-    fastfix::message::MessageBuilder heartbeat_builder("0");
+    nimble::message::MessageBuilder heartbeat_builder("0");
     heartbeat_builder.set_string(kMsgType, "0");
     auto inbound =
       EncodeInboundFrame(std::move(heartbeat_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 4U, false);
@@ -1680,14 +1680,14 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(event.value().outbound_frames.size() == 1U);
     REQUIRE(!event.value().disconnect);
 
-    auto resend = fastfix::codec::DecodeFixMessage(event.value().outbound_frames.front().bytes, dictionary.value());
+    auto resend = nimble::codec::DecodeFixMessage(event.value().outbound_frames.front().bytes, dictionary.value());
     REQUIRE(resend.ok());
     REQUIRE(resend.value().header.msg_type == "2");
     REQUIRE(resend.value().message.view().get_int(kBeginSeqNo).value() == 2);
     REQUIRE(resend.value().message.view().get_int(kEndSeqNo).value() == 3);
 
     const auto snapshot = protocol.session().Snapshot();
-    REQUIRE(snapshot.state == fastfix::session::SessionState::kResendProcessing);
+    REQUIRE(snapshot.state == nimble::session::SessionState::kResendProcessing);
     REQUIRE(snapshot.has_pending_resend);
     REQUIRE(snapshot.pending_resend.begin_seq == 2U);
     REQUIRE(snapshot.pending_resend.end_seq == 3U);
@@ -1702,7 +1702,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(timer_event.value().outbound_frames.size() == 1U);
 
     auto heartbeat =
-      fastfix::codec::DecodeFixMessage(timer_event.value().outbound_frames.front().bytes, dictionary.value());
+      nimble::codec::DecodeFixMessage(timer_event.value().outbound_frames.front().bytes, dictionary.value());
     REQUIRE(heartbeat.ok());
     REQUIRE(heartbeat.value().header.msg_type == "0");
 
@@ -1711,20 +1711,20 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(timer_event.value().outbound_frames.size() == 1U);
 
     auto test_request =
-      fastfix::codec::DecodeFixMessage(timer_event.value().outbound_frames.front().bytes, dictionary.value());
+      nimble::codec::DecodeFixMessage(timer_event.value().outbound_frames.front().bytes, dictionary.value());
     REQUIRE(test_request.ok());
     REQUIRE(test_request.value().header.msg_type == "1");
     REQUIRE(test_request.value().message.view().get_string(kTestReqID).has_value());
   }
 
   {
-    fastfix::store::MemorySessionStore store;
-    fastfix::session::AdminProtocol protocol(
-      fastfix::session::AdminProtocolConfig{
+    nimble::store::MemorySessionStore store;
+    nimble::session::AdminProtocol protocol(
+      nimble::session::AdminProtocolConfig{
         .session =
-          fastfix::session::SessionConfig{
+          nimble::session::SessionConfig{
             .session_id = 5007U,
-            .key = fastfix::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
+            .key = nimble::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
             .profile_id = dictionary.value().profile().header().profile_id,
             .heartbeat_interval_seconds = 30U,
             .is_initiator = false,
@@ -1740,7 +1740,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(protocol.OnTransportConnected(1U).ok());
     REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
 
-    fastfix::message::MessageBuilder app_builder("ZZ");
+    nimble::message::MessageBuilder app_builder("ZZ");
     app_builder.set_string(kMsgType, "ZZ");
     auto inbound =
       EncodeInboundFrame(std::move(app_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 2U, false);
@@ -1752,7 +1752,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(event.value().application_messages.empty());
     REQUIRE(!event.value().disconnect);
 
-    auto decoded = fastfix::codec::DecodeFixMessage(event.value().outbound_frames.front().bytes, dictionary.value());
+    auto decoded = nimble::codec::DecodeFixMessage(event.value().outbound_frames.front().bytes, dictionary.value());
     REQUIRE(decoded.ok());
     REQUIRE(decoded.value().header.msg_type == "3");
     REQUIRE(decoded.value().message.view().get_int(kRefTagID).value() == kMsgType);
@@ -1761,13 +1761,13 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
   }
 
   {
-    fastfix::store::MemorySessionStore store;
-    fastfix::session::AdminProtocol protocol(
-      fastfix::session::AdminProtocolConfig{
+    nimble::store::MemorySessionStore store;
+    nimble::session::AdminProtocol protocol(
+      nimble::session::AdminProtocolConfig{
         .session =
-          fastfix::session::SessionConfig{
+          nimble::session::SessionConfig{
             .session_id = 5011U,
-            .key = fastfix::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
+            .key = nimble::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
             .profile_id = dictionary.value().profile().header().profile_id,
             .heartbeat_interval_seconds = 30U,
             .is_initiator = false,
@@ -1776,7 +1776,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
         .sender_comp_id = "SELL",
         .target_comp_id = "BUY",
         .heartbeat_interval_seconds = 30U,
-        .validation_policy = fastfix::session::ValidationPolicy::Compatible(),
+        .validation_policy = nimble::session::ValidationPolicy::Compatible(),
       },
       dictionary.value(),
       &store);
@@ -1784,7 +1784,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(protocol.OnTransportConnected(1U).ok());
     REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
 
-    fastfix::message::MessageBuilder app_builder("ZZ");
+    nimble::message::MessageBuilder app_builder("ZZ");
     app_builder.set_string(kMsgType, "ZZ");
     auto inbound =
       EncodeInboundFrame(std::move(app_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 2U, false);
@@ -1797,13 +1797,13 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
   }
 
   {
-    fastfix::store::MemorySessionStore store;
-    fastfix::session::AdminProtocol protocol(
-      fastfix::session::AdminProtocolConfig{
+    nimble::store::MemorySessionStore store;
+    nimble::session::AdminProtocol protocol(
+      nimble::session::AdminProtocolConfig{
         .session =
-          fastfix::session::SessionConfig{
+          nimble::session::SessionConfig{
             .session_id = 5012U,
-            .key = fastfix::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
+            .key = nimble::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
             .profile_id = dictionary.value().profile().header().profile_id,
             .heartbeat_interval_seconds = 30U,
             .is_initiator = false,
@@ -1820,13 +1820,13 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
 
     const auto inbound =
-      ::fastfix::tests::EncodeFixFrame("35=D|34=2|49=BUY|56=SELL|52=20260402-12:00:00.000|55=AAPL|9999=BAD|");
+      ::nimble::tests::EncodeFixFrame("35=D|34=2|49=BUY|56=SELL|52=20260402-12:00:00.000|55=AAPL|9999=BAD|");
     auto event = protocol.OnInbound(inbound, 10U);
     REQUIRE(event.ok());
     REQUIRE(event.value().outbound_frames.size() == 1U);
     REQUIRE(event.value().application_messages.empty());
 
-    auto decoded = fastfix::codec::DecodeFixMessage(event.value().outbound_frames.front().bytes, dictionary.value());
+    auto decoded = nimble::codec::DecodeFixMessage(event.value().outbound_frames.front().bytes, dictionary.value());
     REQUIRE(decoded.ok());
     REQUIRE(decoded.value().header.msg_type == "3");
     REQUIRE(decoded.value().message.view().get_int(kRefTagID).value() == 9999);
@@ -1835,13 +1835,13 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
   }
 
   {
-    fastfix::store::MemorySessionStore store;
-    fastfix::session::AdminProtocol protocol(
-      fastfix::session::AdminProtocolConfig{
+    nimble::store::MemorySessionStore store;
+    nimble::session::AdminProtocol protocol(
+      nimble::session::AdminProtocolConfig{
         .session =
-          fastfix::session::SessionConfig{
+          nimble::session::SessionConfig{
             .session_id = 5013U,
-            .key = fastfix::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
+            .key = nimble::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
             .profile_id = dictionary.value().profile().header().profile_id,
             .heartbeat_interval_seconds = 30U,
             .is_initiator = false,
@@ -1857,14 +1857,14 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(protocol.OnTransportConnected(1U).ok());
     REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
 
-    const auto inbound = ::fastfix::tests::EncodeFixFrame("35=D|34=2|49=BUY|56=SELL|52=20260402-"
-                                                          "12:00:00.000|55=AAPL|448=ORPHAN|");
+    const auto inbound = ::nimble::tests::EncodeFixFrame("35=D|34=2|49=BUY|56=SELL|52=20260402-"
+                                                         "12:00:00.000|55=AAPL|448=ORPHAN|");
     auto event = protocol.OnInbound(inbound, 10U);
     REQUIRE(event.ok());
     REQUIRE(event.value().outbound_frames.size() == 1U);
     REQUIRE(event.value().application_messages.empty());
 
-    auto decoded = fastfix::codec::DecodeFixMessage(event.value().outbound_frames.front().bytes, dictionary.value());
+    auto decoded = nimble::codec::DecodeFixMessage(event.value().outbound_frames.front().bytes, dictionary.value());
     REQUIRE(decoded.ok());
     REQUIRE(decoded.value().header.msg_type == "3");
     REQUIRE(decoded.value().message.view().get_int(kRefTagID).value() == kPartyID);
@@ -1873,13 +1873,13 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
   }
 
   {
-    fastfix::store::MemorySessionStore store;
-    fastfix::session::AdminProtocol protocol(
-      fastfix::session::AdminProtocolConfig{
+    nimble::store::MemorySessionStore store;
+    nimble::session::AdminProtocol protocol(
+      nimble::session::AdminProtocolConfig{
         .session =
-          fastfix::session::SessionConfig{
+          nimble::session::SessionConfig{
             .session_id = 5014U,
-            .key = fastfix::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
+            .key = nimble::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
             .profile_id = dictionary.value().profile().header().profile_id,
             .heartbeat_interval_seconds = 30U,
             .is_initiator = false,
@@ -1896,13 +1896,13 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
 
     const auto inbound =
-      ::fastfix::tests::EncodeFixFrame("35=D|34=2|49=BUY|56=SELL|52=20260402-12:00:00.000|55=AAPL|55=MSFT|");
+      ::nimble::tests::EncodeFixFrame("35=D|34=2|49=BUY|56=SELL|52=20260402-12:00:00.000|55=AAPL|55=MSFT|");
     auto event = protocol.OnInbound(inbound, 10U);
     REQUIRE(event.ok());
     REQUIRE(event.value().outbound_frames.size() == 1U);
     REQUIRE(event.value().application_messages.empty());
 
-    auto decoded = fastfix::codec::DecodeFixMessage(event.value().outbound_frames.front().bytes, dictionary.value());
+    auto decoded = nimble::codec::DecodeFixMessage(event.value().outbound_frames.front().bytes, dictionary.value());
     REQUIRE(decoded.ok());
     REQUIRE(decoded.value().header.msg_type == "3");
     REQUIRE(decoded.value().message.view().get_int(kRefTagID).value() == kSymbol);
@@ -1911,13 +1911,13 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
   }
 
   {
-    fastfix::store::MemorySessionStore store;
-    fastfix::session::AdminProtocol protocol(
-      fastfix::session::AdminProtocolConfig{
+    nimble::store::MemorySessionStore store;
+    nimble::session::AdminProtocol protocol(
+      nimble::session::AdminProtocolConfig{
         .session =
-          fastfix::session::SessionConfig{
+          nimble::session::SessionConfig{
             .session_id = 5015U,
-            .key = fastfix::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
+            .key = nimble::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
             .profile_id = dictionary.value().profile().header().profile_id,
             .heartbeat_interval_seconds = 30U,
             .is_initiator = false,
@@ -1934,14 +1934,14 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
 
     const auto inbound =
-      ::fastfix::tests::EncodeFixFrame("35=D|34=2|49=BUY|56=SELL|52=20260402-12:00:00.000|453=1|448=PTY1|447="
-                                       "D|452=7|55=AAPL|");
+      ::nimble::tests::EncodeFixFrame("35=D|34=2|49=BUY|56=SELL|52=20260402-12:00:00.000|453=1|448=PTY1|447="
+                                      "D|452=7|55=AAPL|");
     auto event = protocol.OnInbound(inbound, 10U);
     REQUIRE(event.ok());
     REQUIRE(event.value().outbound_frames.size() == 1U);
     REQUIRE(event.value().application_messages.empty());
 
-    auto decoded = fastfix::codec::DecodeFixMessage(event.value().outbound_frames.front().bytes, dictionary.value());
+    auto decoded = nimble::codec::DecodeFixMessage(event.value().outbound_frames.front().bytes, dictionary.value());
     REQUIRE(decoded.ok());
     REQUIRE(decoded.value().header.msg_type == "3");
     REQUIRE(decoded.value().message.view().get_int(kRefTagID).value() == kClOrdID);
@@ -1950,13 +1950,13 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
   }
 
   {
-    fastfix::store::MemorySessionStore store;
-    fastfix::session::AdminProtocol protocol(
-      fastfix::session::AdminProtocolConfig{
+    nimble::store::MemorySessionStore store;
+    nimble::session::AdminProtocol protocol(
+      nimble::session::AdminProtocolConfig{
         .session =
-          fastfix::session::SessionConfig{
+          nimble::session::SessionConfig{
             .session_id = 5019U,
-            .key = fastfix::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
+            .key = nimble::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
             .profile_id = dictionary.value().profile().header().profile_id,
             .heartbeat_interval_seconds = 30U,
             .is_initiator = false,
@@ -1973,13 +1973,13 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
 
     const auto inbound =
-      ::fastfix::tests::EncodeFixFrame("35=D|34=2|49=BUY|56=SELL|52=20260402-12:00:00.000|55=AAPL|453=1|");
+      ::nimble::tests::EncodeFixFrame("35=D|34=2|49=BUY|56=SELL|52=20260402-12:00:00.000|55=AAPL|453=1|");
     auto event = protocol.OnInbound(inbound, 10U);
     REQUIRE(event.ok());
     REQUIRE(event.value().outbound_frames.size() == 1U);
     REQUIRE(event.value().application_messages.empty());
 
-    auto decoded = fastfix::codec::DecodeFixMessage(event.value().outbound_frames.front().bytes, dictionary.value());
+    auto decoded = nimble::codec::DecodeFixMessage(event.value().outbound_frames.front().bytes, dictionary.value());
     REQUIRE(decoded.ok());
     REQUIRE(decoded.value().header.msg_type == "3");
     REQUIRE(decoded.value().message.view().get_int(kRefTagID).value() == kNoPartyIDs);
@@ -1988,13 +1988,13 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
   }
 
   {
-    fastfix::store::MemorySessionStore store;
-    fastfix::session::AdminProtocol protocol(
-      fastfix::session::AdminProtocolConfig{
+    nimble::store::MemorySessionStore store;
+    nimble::session::AdminProtocol protocol(
+      nimble::session::AdminProtocolConfig{
         .session =
-          fastfix::session::SessionConfig{
+          nimble::session::SessionConfig{
             .session_id = 5016U,
-            .key = fastfix::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
+            .key = nimble::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
             .profile_id = dictionary.value().profile().header().profile_id,
             .heartbeat_interval_seconds = 30U,
             .is_initiator = false,
@@ -2003,7 +2003,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
         .sender_comp_id = "SELL",
         .target_comp_id = "BUY",
         .heartbeat_interval_seconds = 30U,
-        .validation_policy = fastfix::session::ValidationPolicy::Compatible(),
+        .validation_policy = nimble::session::ValidationPolicy::Compatible(),
       },
       dictionary.value(),
       &store);
@@ -2012,8 +2012,8 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
 
     const auto inbound =
-      ::fastfix::tests::EncodeFixFrame("35=D|34=2|49=BUY|56=SELL|52=20260402-12:00:00.000|11=ORD1|54=1|60="
-                                       "20260402-12:00:00.000|40=2|55=AAPL|9999=BAD|");
+      ::nimble::tests::EncodeFixFrame("35=D|34=2|49=BUY|56=SELL|52=20260402-12:00:00.000|11=ORD1|54=1|60="
+                                      "20260402-12:00:00.000|40=2|55=AAPL|9999=BAD|");
     auto event = protocol.OnInbound(inbound, 10U);
     REQUIRE(event.ok());
     REQUIRE(event.value().outbound_frames.empty());
@@ -2021,13 +2021,13 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
   }
 
   {
-    fastfix::store::MemorySessionStore store;
-    fastfix::session::AdminProtocol protocol(
-      fastfix::session::AdminProtocolConfig{
+    nimble::store::MemorySessionStore store;
+    nimble::session::AdminProtocol protocol(
+      nimble::session::AdminProtocolConfig{
         .session =
-          fastfix::session::SessionConfig{
+          nimble::session::SessionConfig{
             .session_id = 5020U,
-            .key = fastfix::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
+            .key = nimble::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
             .profile_id = dictionary.value().profile().header().profile_id,
             .heartbeat_interval_seconds = 30U,
             .is_initiator = false,
@@ -2036,7 +2036,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
         .sender_comp_id = "SELL",
         .target_comp_id = "BUY",
         .heartbeat_interval_seconds = 30U,
-        .validation_policy = fastfix::session::ValidationPolicy::Compatible(),
+        .validation_policy = nimble::session::ValidationPolicy::Compatible(),
       },
       dictionary.value(),
       &store);
@@ -2045,8 +2045,8 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
 
     const auto inbound =
-      ::fastfix::tests::EncodeFixFrame("35=D|34=2|49=BUY|56=SELL|52=20260402-12:00:00.000|11=ORD1|54=1|60="
-                                       "20260402-12:00:00.000|40=2|55=AAPL|453=1|448=PARTY1|447=D|452=1|");
+      ::nimble::tests::EncodeFixFrame("35=D|34=2|49=BUY|56=SELL|52=20260402-12:00:00.000|11=ORD1|54=1|60="
+                                      "20260402-12:00:00.000|40=2|55=AAPL|453=1|448=PARTY1|447=D|452=1|");
     auto event = protocol.OnInbound(inbound, 10U);
     REQUIRE(event.ok());
     REQUIRE(event.value().outbound_frames.empty());
@@ -2054,13 +2054,13 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
   }
 
   {
-    fastfix::store::MemorySessionStore store;
-    fastfix::session::AdminProtocol protocol(
-      fastfix::session::AdminProtocolConfig{
+    nimble::store::MemorySessionStore store;
+    nimble::session::AdminProtocol protocol(
+      nimble::session::AdminProtocolConfig{
         .session =
-          fastfix::session::SessionConfig{
+          nimble::session::SessionConfig{
             .session_id = 5017U,
-            .key = fastfix::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
+            .key = nimble::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
             .profile_id = dictionary.value().profile().header().profile_id,
             .heartbeat_interval_seconds = 30U,
             .is_initiator = false,
@@ -2069,7 +2069,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
         .sender_comp_id = "SELL",
         .target_comp_id = "BUY",
         .heartbeat_interval_seconds = 30U,
-        .validation_policy = fastfix::session::ValidationPolicy::Compatible(),
+        .validation_policy = nimble::session::ValidationPolicy::Compatible(),
       },
       dictionary.value(),
       &store);
@@ -2078,8 +2078,8 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
 
     const auto inbound =
-      ::fastfix::tests::EncodeFixFrame("35=D|34=2|49=BUY|56=SELL|52=20260402-12:00:00.000|11=ORD1|54=1|60="
-                                       "20260402-12:00:00.000|40=2|55=AAPL|55=MSFT|");
+      ::nimble::tests::EncodeFixFrame("35=D|34=2|49=BUY|56=SELL|52=20260402-12:00:00.000|11=ORD1|54=1|60="
+                                      "20260402-12:00:00.000|40=2|55=AAPL|55=MSFT|");
     auto event = protocol.OnInbound(inbound, 10U);
     REQUIRE(event.ok());
     REQUIRE(event.value().outbound_frames.empty());
@@ -2087,13 +2087,13 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
   }
 
   {
-    fastfix::store::MemorySessionStore store;
-    fastfix::session::AdminProtocol protocol(
-      fastfix::session::AdminProtocolConfig{
+    nimble::store::MemorySessionStore store;
+    nimble::session::AdminProtocol protocol(
+      nimble::session::AdminProtocolConfig{
         .session =
-          fastfix::session::SessionConfig{
+          nimble::session::SessionConfig{
             .session_id = 5018U,
-            .key = fastfix::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
+            .key = nimble::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
             .profile_id = dictionary.value().profile().header().profile_id,
             .heartbeat_interval_seconds = 30U,
             .is_initiator = false,
@@ -2102,7 +2102,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
         .sender_comp_id = "SELL",
         .target_comp_id = "BUY",
         .heartbeat_interval_seconds = 30U,
-        .validation_policy = fastfix::session::ValidationPolicy::Compatible(),
+        .validation_policy = nimble::session::ValidationPolicy::Compatible(),
       },
       dictionary.value(),
       &store);
@@ -2111,8 +2111,8 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
 
     const auto inbound =
-      ::fastfix::tests::EncodeFixFrame("35=D|34=2|49=BUY|56=SELL|52=20260402-12:00:00.000|11=ORD1|54=1|60="
-                                       "20260402-12:00:00.000|40=2|453=1|448=PTY1|447=D|452=7|55=AAPL|");
+      ::nimble::tests::EncodeFixFrame("35=D|34=2|49=BUY|56=SELL|52=20260402-12:00:00.000|11=ORD1|54=1|60="
+                                      "20260402-12:00:00.000|40=2|453=1|448=PTY1|447=D|452=7|55=AAPL|");
     auto event = protocol.OnInbound(inbound, 10U);
     REQUIRE(event.ok());
     REQUIRE(event.value().outbound_frames.empty());
@@ -2120,13 +2120,13 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
   }
 
   {
-    fastfix::store::MemorySessionStore store;
-    fastfix::session::AdminProtocol protocol(
-      fastfix::session::AdminProtocolConfig{
+    nimble::store::MemorySessionStore store;
+    nimble::session::AdminProtocol protocol(
+      nimble::session::AdminProtocolConfig{
         .session =
-          fastfix::session::SessionConfig{
+          nimble::session::SessionConfig{
             .session_id = 5008U,
-            .key = fastfix::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
+            .key = nimble::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
             .profile_id = dictionary.value().profile().header().profile_id,
             .heartbeat_interval_seconds = 30U,
             .is_initiator = false,
@@ -2142,7 +2142,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(protocol.OnTransportConnected(1U).ok());
     REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
 
-    fastfix::message::MessageBuilder app_builder("D");
+    nimble::message::MessageBuilder app_builder("D");
     app_builder.set_string(kMsgType, "D");
     auto inbound =
       EncodeInboundFrame(std::move(app_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 2U, false);
@@ -2153,7 +2153,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(event.value().outbound_frames.size() == 1U);
     REQUIRE(event.value().application_messages.empty());
 
-    auto decoded = fastfix::codec::DecodeFixMessage(event.value().outbound_frames.front().bytes, dictionary.value());
+    auto decoded = nimble::codec::DecodeFixMessage(event.value().outbound_frames.front().bytes, dictionary.value());
     REQUIRE(decoded.ok());
     REQUIRE(decoded.value().header.msg_type == "3");
     REQUIRE(decoded.value().message.view().get_int(kRefTagID).value() == kClOrdID);
@@ -2162,13 +2162,13 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
   }
 
   {
-    fastfix::store::MemorySessionStore store;
-    fastfix::session::AdminProtocol protocol(
-      fastfix::session::AdminProtocolConfig{
+    nimble::store::MemorySessionStore store;
+    nimble::session::AdminProtocol protocol(
+      nimble::session::AdminProtocolConfig{
         .session =
-          fastfix::session::SessionConfig{
+          nimble::session::SessionConfig{
             .session_id = 5009U,
-            .key = fastfix::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
+            .key = nimble::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
             .profile_id = dictionary.value().profile().header().profile_id,
             .heartbeat_interval_seconds = 30U,
             .is_initiator = false,
@@ -2184,7 +2184,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(protocol.OnTransportConnected(1U).ok());
     REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
 
-    fastfix::message::MessageBuilder app_builder("D");
+    nimble::message::MessageBuilder app_builder("D");
     app_builder.set_string(kMsgType, "D").set_string(kSymbol, "AAPL");
     auto party = app_builder.add_group_entry(kNoPartyIDs);
     party.set_string(kPartyID, "PTY1").set_int(kPartyRole, 7);
@@ -2197,7 +2197,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(event.value().outbound_frames.size() == 1U);
     REQUIRE(event.value().application_messages.empty());
 
-    auto decoded = fastfix::codec::DecodeFixMessage(event.value().outbound_frames.front().bytes, dictionary.value());
+    auto decoded = nimble::codec::DecodeFixMessage(event.value().outbound_frames.front().bytes, dictionary.value());
     REQUIRE(decoded.ok());
     REQUIRE(decoded.value().header.msg_type == "3");
     REQUIRE(decoded.value().message.view().get_int(kRefTagID).value() == kClOrdID);
@@ -2206,13 +2206,13 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
   }
 
   {
-    fastfix::store::MemorySessionStore store;
-    fastfix::session::AdminProtocol protocol(
-      fastfix::session::AdminProtocolConfig{
+    nimble::store::MemorySessionStore store;
+    nimble::session::AdminProtocol protocol(
+      nimble::session::AdminProtocolConfig{
         .session =
-          fastfix::session::SessionConfig{
+          nimble::session::SessionConfig{
             .session_id = 5010U,
-            .key = fastfix::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
+            .key = nimble::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
             .profile_id = dictionary.value().profile().header().profile_id,
             .heartbeat_interval_seconds = 30U,
             .is_initiator = false,
@@ -2221,7 +2221,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
         .sender_comp_id = "SELL",
         .target_comp_id = "BUY",
         .heartbeat_interval_seconds = 30U,
-        .validation_policy = fastfix::session::ValidationPolicy::Permissive(),
+        .validation_policy = nimble::session::ValidationPolicy::Permissive(),
       },
       dictionary.value(),
       &store);
@@ -2229,7 +2229,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(protocol.OnTransportConnected(1U).ok());
     REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
 
-    fastfix::message::MessageBuilder app_builder("D");
+    nimble::message::MessageBuilder app_builder("D");
     app_builder.set_string(kMsgType, "D");
     auto inbound =
       EncodeInboundFrame(std::move(app_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 2U, false);
@@ -2242,13 +2242,13 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
   }
 
   {
-    fastfix::store::MemorySessionStore store;
-    fastfix::session::AdminProtocol protocol(
-      fastfix::session::AdminProtocolConfig{
+    nimble::store::MemorySessionStore store;
+    nimble::session::AdminProtocol protocol(
+      nimble::session::AdminProtocolConfig{
         .session =
-          fastfix::session::SessionConfig{
+          nimble::session::SessionConfig{
             .session_id = 5011U,
-            .key = fastfix::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
+            .key = nimble::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
             .profile_id = dictionary.value().profile().header().profile_id,
             .heartbeat_interval_seconds = 30U,
             .is_initiator = false,
@@ -2257,7 +2257,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
         .sender_comp_id = "SELL",
         .target_comp_id = "BUY",
         .heartbeat_interval_seconds = 30U,
-        .validation_policy = fastfix::session::ValidationPolicy::Permissive(),
+        .validation_policy = nimble::session::ValidationPolicy::Permissive(),
       },
       dictionary.value(),
       &store);
@@ -2265,7 +2265,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(protocol.OnTransportConnected(1U).ok());
     REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
 
-    fastfix::message::MessageBuilder app_builder("D");
+    nimble::message::MessageBuilder app_builder("D");
     app_builder.set_string(kMsgType, "D").set_string(kSymbol, "AAPL");
     auto party = app_builder.add_group_entry(kNoPartyIDs);
     party.set_string(kPartyID, "PTY1").set_char(kPartyIDSource, 'D').set_int(kPartyRole, 1);
@@ -2294,18 +2294,18 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
 
 TEST_CASE("PossResend flag detected on app message", "[admin-protocol]")
 {
-  auto dictionary = fastfix::tests::LoadFix44DictionaryView();
+  auto dictionary = nimble::tests::LoadFix44DictionaryView();
   if (!dictionary.ok()) {
     SKIP("FIX44 artifact not available: " << dictionary.status().message());
   }
 
-  fastfix::store::MemorySessionStore store;
-  fastfix::session::AdminProtocol protocol(
-    fastfix::session::AdminProtocolConfig{
+  nimble::store::MemorySessionStore store;
+  nimble::session::AdminProtocol protocol(
+    nimble::session::AdminProtocolConfig{
       .session =
-        fastfix::session::SessionConfig{
+        nimble::session::SessionConfig{
           .session_id = 6001U,
-          .key = fastfix::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
+          .key = nimble::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
           .profile_id = dictionary.value().profile().header().profile_id,
           .heartbeat_interval_seconds = 30U,
           .is_initiator = false,
@@ -2314,7 +2314,7 @@ TEST_CASE("PossResend flag detected on app message", "[admin-protocol]")
       .sender_comp_id = "SELL",
       .target_comp_id = "BUY",
       .heartbeat_interval_seconds = 30U,
-      .validation_policy = fastfix::session::ValidationPolicy::Permissive(),
+      .validation_policy = nimble::session::ValidationPolicy::Permissive(),
     },
     dictionary.value(),
     &store);
@@ -2322,7 +2322,7 @@ TEST_CASE("PossResend flag detected on app message", "[admin-protocol]")
   REQUIRE(protocol.OnTransportConnected(1U).ok());
   REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
 
-  fastfix::message::MessageBuilder app_builder("D");
+  nimble::message::MessageBuilder app_builder("D");
   app_builder.set_string(kMsgType, "D").set_string(kSymbol, "MSFT").set_boolean(kPossResend, true);
   auto inbound =
     EncodeInboundFrame(std::move(app_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 2U, false);
@@ -2336,18 +2336,18 @@ TEST_CASE("PossResend flag detected on app message", "[admin-protocol]")
 
 TEST_CASE("PossResend flag not set on normal message", "[admin-protocol]")
 {
-  auto dictionary = fastfix::tests::LoadFix44DictionaryView();
+  auto dictionary = nimble::tests::LoadFix44DictionaryView();
   if (!dictionary.ok()) {
     SKIP("FIX44 artifact not available: " << dictionary.status().message());
   }
 
-  fastfix::store::MemorySessionStore store;
-  fastfix::session::AdminProtocol protocol(
-    fastfix::session::AdminProtocolConfig{
+  nimble::store::MemorySessionStore store;
+  nimble::session::AdminProtocol protocol(
+    nimble::session::AdminProtocolConfig{
       .session =
-        fastfix::session::SessionConfig{
+        nimble::session::SessionConfig{
           .session_id = 6002U,
-          .key = fastfix::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
+          .key = nimble::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
           .profile_id = dictionary.value().profile().header().profile_id,
           .heartbeat_interval_seconds = 30U,
           .is_initiator = false,
@@ -2356,7 +2356,7 @@ TEST_CASE("PossResend flag not set on normal message", "[admin-protocol]")
       .sender_comp_id = "SELL",
       .target_comp_id = "BUY",
       .heartbeat_interval_seconds = 30U,
-      .validation_policy = fastfix::session::ValidationPolicy::Permissive(),
+      .validation_policy = nimble::session::ValidationPolicy::Permissive(),
     },
     dictionary.value(),
     &store);
@@ -2364,7 +2364,7 @@ TEST_CASE("PossResend flag not set on normal message", "[admin-protocol]")
   REQUIRE(protocol.OnTransportConnected(1U).ok());
   REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
 
-  fastfix::message::MessageBuilder app_builder("D");
+  nimble::message::MessageBuilder app_builder("D");
   app_builder.set_string(kMsgType, "D").set_string(kSymbol, "AAPL");
   auto inbound =
     EncodeInboundFrame(std::move(app_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 2U, false);
@@ -2378,18 +2378,18 @@ TEST_CASE("PossResend flag not set on normal message", "[admin-protocol]")
 
 TEST_CASE("PossResend message still processed by application", "[admin-protocol]")
 {
-  auto dictionary = fastfix::tests::LoadFix44DictionaryView();
+  auto dictionary = nimble::tests::LoadFix44DictionaryView();
   if (!dictionary.ok()) {
     SKIP("FIX44 artifact not available: " << dictionary.status().message());
   }
 
-  fastfix::store::MemorySessionStore store;
-  fastfix::session::AdminProtocol protocol(
-    fastfix::session::AdminProtocolConfig{
+  nimble::store::MemorySessionStore store;
+  nimble::session::AdminProtocol protocol(
+    nimble::session::AdminProtocolConfig{
       .session =
-        fastfix::session::SessionConfig{
+        nimble::session::SessionConfig{
           .session_id = 6003U,
-          .key = fastfix::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
+          .key = nimble::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
           .profile_id = dictionary.value().profile().header().profile_id,
           .heartbeat_interval_seconds = 30U,
           .is_initiator = false,
@@ -2398,7 +2398,7 @@ TEST_CASE("PossResend message still processed by application", "[admin-protocol]
       .sender_comp_id = "SELL",
       .target_comp_id = "BUY",
       .heartbeat_interval_seconds = 30U,
-      .validation_policy = fastfix::session::ValidationPolicy::Permissive(),
+      .validation_policy = nimble::session::ValidationPolicy::Permissive(),
     },
     dictionary.value(),
     &store);
@@ -2406,7 +2406,7 @@ TEST_CASE("PossResend message still processed by application", "[admin-protocol]
   REQUIRE(protocol.OnTransportConnected(1U).ok());
   REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
 
-  fastfix::message::MessageBuilder app_builder("D");
+  nimble::message::MessageBuilder app_builder("D");
   app_builder.set_string(kMsgType, "D").set_string(kSymbol, "GOOG").set_boolean(kPossResend, true);
   auto inbound =
     EncodeInboundFrame(std::move(app_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 2U, false);
@@ -2430,18 +2430,18 @@ TEST_CASE("PossResend message still processed by application", "[admin-protocol]
 
 TEST_CASE("ResendRequest happy path", "[admin-protocol]")
 {
-  auto dictionary = fastfix::tests::LoadFix44DictionaryView();
+  auto dictionary = nimble::tests::LoadFix44DictionaryView();
   if (!dictionary.ok()) {
     SKIP("FIX44 artifact not available: " << dictionary.status().message());
   }
 
-  fastfix::store::MemorySessionStore store;
-  fastfix::session::AdminProtocol protocol(
-    fastfix::session::AdminProtocolConfig{
+  nimble::store::MemorySessionStore store;
+  nimble::session::AdminProtocol protocol(
+    nimble::session::AdminProtocolConfig{
       .session =
-        fastfix::session::SessionConfig{
+        nimble::session::SessionConfig{
           .session_id = 7001U,
-          .key = fastfix::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
+          .key = nimble::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
           .profile_id = dictionary.value().profile().header().profile_id,
           .heartbeat_interval_seconds = 30U,
           .is_initiator = false,
@@ -2459,7 +2459,7 @@ TEST_CASE("ResendRequest happy path", "[admin-protocol]")
 
   // Send 3 outbound application messages (seqs 2, 3, 4)
   for (int i = 0; i < 3; ++i) {
-    fastfix::message::MessageBuilder app_builder("D");
+    nimble::message::MessageBuilder app_builder("D");
     app_builder.set_string(kMsgType, "D").set_string(kSymbol, "AAPL");
     auto sent = protocol.SendApplication(std::move(app_builder).build(), 100U + static_cast<std::uint64_t>(i));
     REQUIRE(sent.ok());
@@ -2467,7 +2467,7 @@ TEST_CASE("ResendRequest happy path", "[admin-protocol]")
   REQUIRE(protocol.session().Snapshot().next_out_seq == 5U);
 
   // Counterparty requests resend of seqs 2-4
-  fastfix::message::MessageBuilder resend_builder("2");
+  nimble::message::MessageBuilder resend_builder("2");
   resend_builder.set_string(kMsgType, "2").set_int(kBeginSeqNo, 2).set_int(kEndSeqNo, 4);
   auto inbound =
     EncodeInboundFrame(std::move(resend_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 2U, false);
@@ -2480,7 +2480,7 @@ TEST_CASE("ResendRequest happy path", "[admin-protocol]")
 
   // All replayed frames should be app messages with PossDup
   for (std::size_t i = 0U; i < 3U; ++i) {
-    auto replayed = fastfix::codec::DecodeFixMessage(event.value().outbound_frames[i].bytes, dictionary.value());
+    auto replayed = nimble::codec::DecodeFixMessage(event.value().outbound_frames[i].bytes, dictionary.value());
     REQUIRE(replayed.ok());
     REQUIRE(replayed.value().header.msg_type == "D");
     REQUIRE(replayed.value().header.poss_dup);
@@ -2489,18 +2489,18 @@ TEST_CASE("ResendRequest happy path", "[admin-protocol]")
 
 TEST_CASE("ResendRequest BeginSeqNo=0 rejected", "[admin-protocol]")
 {
-  auto dictionary = fastfix::tests::LoadFix44DictionaryView();
+  auto dictionary = nimble::tests::LoadFix44DictionaryView();
   if (!dictionary.ok()) {
     SKIP("FIX44 artifact not available: " << dictionary.status().message());
   }
 
-  fastfix::store::MemorySessionStore store;
-  fastfix::session::AdminProtocol protocol(
-    fastfix::session::AdminProtocolConfig{
+  nimble::store::MemorySessionStore store;
+  nimble::session::AdminProtocol protocol(
+    nimble::session::AdminProtocolConfig{
       .session =
-        fastfix::session::SessionConfig{
+        nimble::session::SessionConfig{
           .session_id = 7002U,
-          .key = fastfix::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
+          .key = nimble::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
           .profile_id = dictionary.value().profile().header().profile_id,
           .heartbeat_interval_seconds = 30U,
           .is_initiator = false,
@@ -2517,7 +2517,7 @@ TEST_CASE("ResendRequest BeginSeqNo=0 rejected", "[admin-protocol]")
   REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
 
   // BeginSeqNo=0 is invalid per FIX spec — must be positive
-  fastfix::message::MessageBuilder resend_builder("2");
+  nimble::message::MessageBuilder resend_builder("2");
   resend_builder.set_string(kMsgType, "2").set_int(kBeginSeqNo, 0).set_int(kEndSeqNo, 5);
   auto inbound =
     EncodeInboundFrame(std::move(resend_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 2U, false);
@@ -2528,7 +2528,7 @@ TEST_CASE("ResendRequest BeginSeqNo=0 rejected", "[admin-protocol]")
   REQUIRE(event.value().outbound_frames.size() == 1U);
   REQUIRE(!event.value().disconnect);
 
-  auto decoded = fastfix::codec::DecodeFixMessage(event.value().outbound_frames.front().bytes, dictionary.value());
+  auto decoded = nimble::codec::DecodeFixMessage(event.value().outbound_frames.front().bytes, dictionary.value());
   REQUIRE(decoded.ok());
   REQUIRE(decoded.value().header.msg_type == "3");
   REQUIRE(decoded.value().message.view().get_int(kRefTagID).value() == kBeginSeqNo);
@@ -2538,18 +2538,18 @@ TEST_CASE("ResendRequest BeginSeqNo=0 rejected", "[admin-protocol]")
 
 TEST_CASE("ResendRequest EndSeqNo=0 replays to infinity", "[admin-protocol]")
 {
-  auto dictionary = fastfix::tests::LoadFix44DictionaryView();
+  auto dictionary = nimble::tests::LoadFix44DictionaryView();
   if (!dictionary.ok()) {
     SKIP("FIX44 artifact not available: " << dictionary.status().message());
   }
 
-  fastfix::store::MemorySessionStore store;
-  fastfix::session::AdminProtocol protocol(
-    fastfix::session::AdminProtocolConfig{
+  nimble::store::MemorySessionStore store;
+  nimble::session::AdminProtocol protocol(
+    nimble::session::AdminProtocolConfig{
       .session =
-        fastfix::session::SessionConfig{
+        nimble::session::SessionConfig{
           .session_id = 7003U,
-          .key = fastfix::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
+          .key = nimble::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
           .profile_id = dictionary.value().profile().header().profile_id,
           .heartbeat_interval_seconds = 30U,
           .is_initiator = false,
@@ -2567,7 +2567,7 @@ TEST_CASE("ResendRequest EndSeqNo=0 replays to infinity", "[admin-protocol]")
 
   // Send 2 outbound app messages (seqs 2, 3)
   for (int i = 0; i < 2; ++i) {
-    fastfix::message::MessageBuilder app_builder("D");
+    nimble::message::MessageBuilder app_builder("D");
     app_builder.set_string(kMsgType, "D").set_string(kSymbol, "AAPL");
     auto sent = protocol.SendApplication(std::move(app_builder).build(), 100U + static_cast<std::uint64_t>(i));
     REQUIRE(sent.ok());
@@ -2575,7 +2575,7 @@ TEST_CASE("ResendRequest EndSeqNo=0 replays to infinity", "[admin-protocol]")
   REQUIRE(protocol.session().Snapshot().next_out_seq == 4U);
 
   // EndSeqNo=0 means "all messages from BeginSeqNo to end"
-  fastfix::message::MessageBuilder resend_builder("2");
+  nimble::message::MessageBuilder resend_builder("2");
   resend_builder.set_string(kMsgType, "2").set_int(kBeginSeqNo, 1).set_int(kEndSeqNo, 0);
   auto inbound =
     EncodeInboundFrame(std::move(resend_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 2U, false);
@@ -2588,14 +2588,14 @@ TEST_CASE("ResendRequest EndSeqNo=0 replays to infinity", "[admin-protocol]")
   // Seq 1 is logon (admin) → GapFill; seqs 2,3 are app → replay
   REQUIRE(event.value().outbound_frames.size() == 3U);
 
-  auto gap_fill = fastfix::codec::DecodeFixMessage(event.value().outbound_frames[0U].bytes, dictionary.value());
+  auto gap_fill = nimble::codec::DecodeFixMessage(event.value().outbound_frames[0U].bytes, dictionary.value());
   REQUIRE(gap_fill.ok());
   REQUIRE(gap_fill.value().header.msg_type == "4");
   REQUIRE(gap_fill.value().message.view().get_boolean(kGapFillFlag).value());
   REQUIRE(gap_fill.value().message.view().get_int(kNewSeqNo).value() == 2);
 
   for (std::size_t i = 1U; i < event.value().outbound_frames.size(); ++i) {
-    auto replayed = fastfix::codec::DecodeFixMessage(event.value().outbound_frames[i].bytes, dictionary.value());
+    auto replayed = nimble::codec::DecodeFixMessage(event.value().outbound_frames[i].bytes, dictionary.value());
     REQUIRE(replayed.ok());
     REQUIRE(replayed.value().header.msg_type == "D");
     REQUIRE(replayed.value().header.poss_dup);
@@ -2606,18 +2606,18 @@ TEST_CASE("ResendRequest EndSeqNo=0 replays to infinity", "[admin-protocol]")
 
 TEST_CASE("TestRequest happy path", "[admin-protocol]")
 {
-  auto dictionary = fastfix::tests::LoadFix44DictionaryView();
+  auto dictionary = nimble::tests::LoadFix44DictionaryView();
   if (!dictionary.ok()) {
     SKIP("FIX44 artifact not available: " << dictionary.status().message());
   }
 
-  fastfix::store::MemorySessionStore store;
-  fastfix::session::AdminProtocol protocol(
-    fastfix::session::AdminProtocolConfig{
+  nimble::store::MemorySessionStore store;
+  nimble::session::AdminProtocol protocol(
+    nimble::session::AdminProtocolConfig{
       .session =
-        fastfix::session::SessionConfig{
+        nimble::session::SessionConfig{
           .session_id = 7004U,
-          .key = fastfix::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
+          .key = nimble::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
           .profile_id = dictionary.value().profile().header().profile_id,
           .heartbeat_interval_seconds = 30U,
           .is_initiator = false,
@@ -2634,7 +2634,7 @@ TEST_CASE("TestRequest happy path", "[admin-protocol]")
   REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
 
   // Receive TestRequest with TestReqID
-  fastfix::message::MessageBuilder test_builder("1");
+  nimble::message::MessageBuilder test_builder("1");
   test_builder.set_string(kMsgType, "1").set_string(kTestReqID, "HELLO-123");
   auto inbound =
     EncodeInboundFrame(std::move(test_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 2U, false);
@@ -2646,7 +2646,7 @@ TEST_CASE("TestRequest happy path", "[admin-protocol]")
   REQUIRE(!event.value().disconnect);
 
   // Verify Heartbeat response echoes the TestReqID
-  auto decoded = fastfix::codec::DecodeFixMessage(event.value().outbound_frames.front().bytes, dictionary.value());
+  auto decoded = nimble::codec::DecodeFixMessage(event.value().outbound_frames.front().bytes, dictionary.value());
   REQUIRE(decoded.ok());
   REQUIRE(decoded.value().header.msg_type == "0");
   REQUIRE(decoded.value().message.view().get_string(kTestReqID).value() == "HELLO-123");
@@ -2654,18 +2654,18 @@ TEST_CASE("TestRequest happy path", "[admin-protocol]")
 
 TEST_CASE("TestRequest timeout triggers disconnect", "[admin-protocol]")
 {
-  auto dictionary = fastfix::tests::LoadFix44DictionaryView();
+  auto dictionary = nimble::tests::LoadFix44DictionaryView();
   if (!dictionary.ok()) {
     SKIP("FIX44 artifact not available: " << dictionary.status().message());
   }
 
-  fastfix::store::MemorySessionStore store;
-  fastfix::session::AdminProtocol protocol(
-    fastfix::session::AdminProtocolConfig{
+  nimble::store::MemorySessionStore store;
+  nimble::session::AdminProtocol protocol(
+    nimble::session::AdminProtocolConfig{
       .session =
-        fastfix::session::SessionConfig{
+        nimble::session::SessionConfig{
           .session_id = 7005U,
-          .key = fastfix::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
+          .key = nimble::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
           .profile_id = dictionary.value().profile().header().profile_id,
           .heartbeat_interval_seconds = 30U,
           .is_initiator = false,
@@ -2691,8 +2691,7 @@ TEST_CASE("TestRequest timeout triggers disconnect", "[admin-protocol]")
   REQUIRE(timer1.value().outbound_frames.size() == 1U);
   REQUIRE(!timer1.value().disconnect);
 
-  auto test_request =
-    fastfix::codec::DecodeFixMessage(timer1.value().outbound_frames.front().bytes, dictionary.value());
+  auto test_request = nimble::codec::DecodeFixMessage(timer1.value().outbound_frames.front().bytes, dictionary.value());
   REQUIRE(test_request.ok());
   REQUIRE(test_request.value().header.msg_type == "1");
   REQUIRE(test_request.value().message.view().has_field(kTestReqID));
@@ -2706,18 +2705,18 @@ TEST_CASE("TestRequest timeout triggers disconnect", "[admin-protocol]")
 
 TEST_CASE("TestRequest duplicate handling", "[admin-protocol]")
 {
-  auto dictionary = fastfix::tests::LoadFix44DictionaryView();
+  auto dictionary = nimble::tests::LoadFix44DictionaryView();
   if (!dictionary.ok()) {
     SKIP("FIX44 artifact not available: " << dictionary.status().message());
   }
 
-  fastfix::store::MemorySessionStore store;
-  fastfix::session::AdminProtocol protocol(
-    fastfix::session::AdminProtocolConfig{
+  nimble::store::MemorySessionStore store;
+  nimble::session::AdminProtocol protocol(
+    nimble::session::AdminProtocolConfig{
       .session =
-        fastfix::session::SessionConfig{
+        nimble::session::SessionConfig{
           .session_id = 7006U,
-          .key = fastfix::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
+          .key = nimble::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
           .profile_id = dictionary.value().profile().header().profile_id,
           .heartbeat_interval_seconds = 30U,
           .is_initiator = false,
@@ -2734,7 +2733,7 @@ TEST_CASE("TestRequest duplicate handling", "[admin-protocol]")
   REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
 
   // First TestRequest
-  fastfix::message::MessageBuilder test1("1");
+  nimble::message::MessageBuilder test1("1");
   test1.set_string(kMsgType, "1").set_string(kTestReqID, "DUP-REQ");
   auto inbound1 = EncodeInboundFrame(std::move(test1).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 2U, false);
   REQUIRE(inbound1.ok());
@@ -2743,13 +2742,13 @@ TEST_CASE("TestRequest duplicate handling", "[admin-protocol]")
   REQUIRE(event1.ok());
   REQUIRE(event1.value().outbound_frames.size() == 1U);
 
-  auto hb1 = fastfix::codec::DecodeFixMessage(event1.value().outbound_frames.front().bytes, dictionary.value());
+  auto hb1 = nimble::codec::DecodeFixMessage(event1.value().outbound_frames.front().bytes, dictionary.value());
   REQUIRE(hb1.ok());
   REQUIRE(hb1.value().header.msg_type == "0");
   REQUIRE(hb1.value().message.view().get_string(kTestReqID).value() == "DUP-REQ");
 
   // Second TestRequest with same TestReqID at next seq
-  fastfix::message::MessageBuilder test2("1");
+  nimble::message::MessageBuilder test2("1");
   test2.set_string(kMsgType, "1").set_string(kTestReqID, "DUP-REQ");
   auto inbound2 = EncodeInboundFrame(std::move(test2).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 3U, false);
   REQUIRE(inbound2.ok());
@@ -2758,7 +2757,7 @@ TEST_CASE("TestRequest duplicate handling", "[admin-protocol]")
   REQUIRE(event2.ok());
   REQUIRE(event2.value().outbound_frames.size() == 1U);
 
-  auto hb2 = fastfix::codec::DecodeFixMessage(event2.value().outbound_frames.front().bytes, dictionary.value());
+  auto hb2 = nimble::codec::DecodeFixMessage(event2.value().outbound_frames.front().bytes, dictionary.value());
   REQUIRE(hb2.ok());
   REQUIRE(hb2.value().header.msg_type == "0");
   REQUIRE(hb2.value().message.view().get_string(kTestReqID).value() == "DUP-REQ");
@@ -2768,14 +2767,14 @@ TEST_CASE("TestRequest duplicate handling", "[admin-protocol]")
 
 TEST_CASE("Acceptor reset_seq_num_on_logon resets local state before Logon response", "[admin-protocol][reset-seq]")
 {
-  auto dictionary = fastfix::tests::LoadFix44DictionaryView();
+  auto dictionary = nimble::tests::LoadFix44DictionaryView();
   if (!dictionary.ok()) {
     SKIP("FIX44 artifact not available: " << dictionary.status().message());
   }
 
-  fastfix::store::MemorySessionStore store;
+  nimble::store::MemorySessionStore store;
   REQUIRE(store
-            .SaveRecoveryState(fastfix::store::SessionRecoveryState{
+            .SaveRecoveryState(nimble::store::SessionRecoveryState{
               .session_id = 7006U,
               .next_in_seq = 11U,
               .next_out_seq = 17U,
@@ -2785,12 +2784,12 @@ TEST_CASE("Acceptor reset_seq_num_on_logon resets local state before Logon respo
             })
             .ok());
 
-  fastfix::session::AdminProtocol protocol(
-    fastfix::session::AdminProtocolConfig{
+  nimble::session::AdminProtocol protocol(
+    nimble::session::AdminProtocolConfig{
       .session =
-        fastfix::session::SessionConfig{
+        nimble::session::SessionConfig{
           .session_id = 7006U,
-          .key = fastfix::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
+          .key = nimble::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
           .profile_id = dictionary.value().profile().header().profile_id,
           .heartbeat_interval_seconds = 30U,
           .is_initiator = false,
@@ -2806,7 +2805,7 @@ TEST_CASE("Acceptor reset_seq_num_on_logon resets local state before Logon respo
 
   REQUIRE(protocol.OnTransportConnected(1U).ok());
 
-  fastfix::message::MessageBuilder logon_builder("A");
+  nimble::message::MessageBuilder logon_builder("A");
   logon_builder.set_string(kMsgType, "A").set_int(kEncryptMethod, 0).set_int(kHeartBtInt, 30);
   auto inbound =
     EncodeInboundFrame(std::move(logon_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 1U, false);
@@ -2816,7 +2815,7 @@ TEST_CASE("Acceptor reset_seq_num_on_logon resets local state before Logon respo
   REQUIRE(event.ok());
   REQUIRE(event.value().outbound_frames.size() == 1U);
 
-  auto decoded = fastfix::codec::DecodeFixMessage(event.value().outbound_frames.front().bytes, dictionary.value());
+  auto decoded = nimble::codec::DecodeFixMessage(event.value().outbound_frames.front().bytes, dictionary.value());
   REQUIRE(decoded.ok());
   REQUIRE(decoded.value().header.msg_type == "A");
   REQUIRE(decoded.value().header.msg_seq_num == 1U);
@@ -2829,18 +2828,18 @@ TEST_CASE("Acceptor reset_seq_num_on_logon resets local state before Logon respo
 
 TEST_CASE("SequenceReset-Reset happy path", "[admin-protocol]")
 {
-  auto dictionary = fastfix::tests::LoadFix44DictionaryView();
+  auto dictionary = nimble::tests::LoadFix44DictionaryView();
   if (!dictionary.ok()) {
     SKIP("FIX44 artifact not available: " << dictionary.status().message());
   }
 
-  fastfix::store::MemorySessionStore store;
-  fastfix::session::AdminProtocol protocol(
-    fastfix::session::AdminProtocolConfig{
+  nimble::store::MemorySessionStore store;
+  nimble::session::AdminProtocol protocol(
+    nimble::session::AdminProtocolConfig{
       .session =
-        fastfix::session::SessionConfig{
+        nimble::session::SessionConfig{
           .session_id = 7007U,
-          .key = fastfix::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
+          .key = nimble::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
           .profile_id = dictionary.value().profile().header().profile_id,
           .heartbeat_interval_seconds = 30U,
           .is_initiator = false,
@@ -2858,7 +2857,7 @@ TEST_CASE("SequenceReset-Reset happy path", "[admin-protocol]")
   REQUIRE(protocol.session().Snapshot().next_in_seq == 2U);
 
   // SequenceReset-Reset (no GapFillFlag) advances expected inbound seq
-  fastfix::message::MessageBuilder reset_builder("4");
+  nimble::message::MessageBuilder reset_builder("4");
   reset_builder.set_string(kMsgType, "4").set_int(kNewSeqNo, 10);
   auto inbound =
     EncodeInboundFrame(std::move(reset_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 2U, false);
@@ -2871,23 +2870,23 @@ TEST_CASE("SequenceReset-Reset happy path", "[admin-protocol]")
 
   const auto after = protocol.session().Snapshot();
   REQUIRE(after.next_in_seq == 10U);
-  REQUIRE(after.state == fastfix::session::SessionState::kActive);
+  REQUIRE(after.state == nimble::session::SessionState::kActive);
 }
 
 TEST_CASE("SequenceReset-Reset accepts stale reset frames", "[admin-protocol][reset-seq]")
 {
-  auto dictionary = fastfix::tests::LoadFix44DictionaryView();
+  auto dictionary = nimble::tests::LoadFix44DictionaryView();
   if (!dictionary.ok()) {
     SKIP("FIX44 artifact not available: " << dictionary.status().message());
   }
 
-  fastfix::store::MemorySessionStore store;
-  fastfix::session::AdminProtocol protocol(
-    fastfix::session::AdminProtocolConfig{
+  nimble::store::MemorySessionStore store;
+  nimble::session::AdminProtocol protocol(
+    nimble::session::AdminProtocolConfig{
       .session =
-        fastfix::session::SessionConfig{
+        nimble::session::SessionConfig{
           .session_id = 7017U,
-          .key = fastfix::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
+          .key = nimble::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
           .profile_id = dictionary.value().profile().header().profile_id,
           .heartbeat_interval_seconds = 30U,
           .is_initiator = false,
@@ -2903,7 +2902,7 @@ TEST_CASE("SequenceReset-Reset accepts stale reset frames", "[admin-protocol][re
   REQUIRE(protocol.OnTransportConnected(1U).ok());
   REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
 
-  fastfix::message::MessageBuilder gap_fill_builder("4");
+  nimble::message::MessageBuilder gap_fill_builder("4");
   gap_fill_builder.set_string(kMsgType, "4").set_boolean(kGapFillFlag, true).set_int(kNewSeqNo, 5);
   auto gap_fill =
     EncodeInboundFrame(std::move(gap_fill_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 2U, false);
@@ -2911,7 +2910,7 @@ TEST_CASE("SequenceReset-Reset accepts stale reset frames", "[admin-protocol][re
   REQUIRE(protocol.OnInbound(gap_fill.value(), 10U).ok());
   REQUIRE(protocol.session().Snapshot().next_in_seq == 5U);
 
-  fastfix::message::MessageBuilder reset_builder("4");
+  nimble::message::MessageBuilder reset_builder("4");
   reset_builder.set_string(kMsgType, "4").set_int(kNewSeqNo, 8);
   auto stale_reset =
     EncodeInboundFrame(std::move(reset_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 3U, false);
@@ -2926,18 +2925,18 @@ TEST_CASE("SequenceReset-Reset accepts stale reset frames", "[admin-protocol][re
 
 TEST_CASE("SequenceReset backward rejected", "[admin-protocol]")
 {
-  auto dictionary = fastfix::tests::LoadFix44DictionaryView();
+  auto dictionary = nimble::tests::LoadFix44DictionaryView();
   if (!dictionary.ok()) {
     SKIP("FIX44 artifact not available: " << dictionary.status().message());
   }
 
-  fastfix::store::MemorySessionStore store;
-  fastfix::session::AdminProtocol protocol(
-    fastfix::session::AdminProtocolConfig{
+  nimble::store::MemorySessionStore store;
+  nimble::session::AdminProtocol protocol(
+    nimble::session::AdminProtocolConfig{
       .session =
-        fastfix::session::SessionConfig{
+        nimble::session::SessionConfig{
           .session_id = 7008U,
-          .key = fastfix::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
+          .key = nimble::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
           .profile_id = dictionary.value().profile().header().profile_id,
           .heartbeat_interval_seconds = 30U,
           .is_initiator = false,
@@ -2954,7 +2953,7 @@ TEST_CASE("SequenceReset backward rejected", "[admin-protocol]")
   REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
 
   // NewSeqNo=1 is backward (next_in_seq will be 3 after ObserveInboundSeq(2))
-  fastfix::message::MessageBuilder reset_builder("4");
+  nimble::message::MessageBuilder reset_builder("4");
   reset_builder.set_string(kMsgType, "4").set_int(kNewSeqNo, 1);
   auto inbound =
     EncodeInboundFrame(std::move(reset_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 2U, false);
@@ -2965,7 +2964,7 @@ TEST_CASE("SequenceReset backward rejected", "[admin-protocol]")
   REQUIRE(event.value().outbound_frames.size() == 1U);
   REQUIRE(!event.value().disconnect);
 
-  auto decoded = fastfix::codec::DecodeFixMessage(event.value().outbound_frames.front().bytes, dictionary.value());
+  auto decoded = nimble::codec::DecodeFixMessage(event.value().outbound_frames.front().bytes, dictionary.value());
   REQUIRE(decoded.ok());
   REQUIRE(decoded.value().header.msg_type == "3");
   REQUIRE(decoded.value().message.view().get_int(kRefTagID).value() == kNewSeqNo);
@@ -2975,18 +2974,18 @@ TEST_CASE("SequenceReset backward rejected", "[admin-protocol]")
 
 TEST_CASE("SequenceReset-GapFill happy path", "[admin-protocol]")
 {
-  auto dictionary = fastfix::tests::LoadFix44DictionaryView();
+  auto dictionary = nimble::tests::LoadFix44DictionaryView();
   if (!dictionary.ok()) {
     SKIP("FIX44 artifact not available: " << dictionary.status().message());
   }
 
-  fastfix::store::MemorySessionStore store;
-  fastfix::session::AdminProtocol protocol(
-    fastfix::session::AdminProtocolConfig{
+  nimble::store::MemorySessionStore store;
+  nimble::session::AdminProtocol protocol(
+    nimble::session::AdminProtocolConfig{
       .session =
-        fastfix::session::SessionConfig{
+        nimble::session::SessionConfig{
           .session_id = 7009U,
-          .key = fastfix::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
+          .key = nimble::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
           .profile_id = dictionary.value().profile().header().profile_id,
           .heartbeat_interval_seconds = 30U,
           .is_initiator = false,
@@ -3004,7 +3003,7 @@ TEST_CASE("SequenceReset-GapFill happy path", "[admin-protocol]")
   REQUIRE(protocol.session().Snapshot().next_in_seq == 2U);
 
   // GapFill at expected seq advances inbound expected seq past the filled range
-  fastfix::message::MessageBuilder gap_fill_builder("4");
+  nimble::message::MessageBuilder gap_fill_builder("4");
   gap_fill_builder.set_string(kMsgType, "4").set_boolean(kGapFillFlag, true).set_int(kNewSeqNo, 5);
   auto inbound =
     EncodeInboundFrame(std::move(gap_fill_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 2U, false);
@@ -3017,23 +3016,23 @@ TEST_CASE("SequenceReset-GapFill happy path", "[admin-protocol]")
 
   const auto after = protocol.session().Snapshot();
   REQUIRE(after.next_in_seq == 5U);
-  REQUIRE(after.state == fastfix::session::SessionState::kActive);
+  REQUIRE(after.state == nimble::session::SessionState::kActive);
 }
 
 TEST_CASE("SequenceReset-GapFill partial fill", "[admin-protocol]")
 {
-  auto dictionary = fastfix::tests::LoadFix44DictionaryView();
+  auto dictionary = nimble::tests::LoadFix44DictionaryView();
   if (!dictionary.ok()) {
     SKIP("FIX44 artifact not available: " << dictionary.status().message());
   }
 
-  fastfix::store::MemorySessionStore store;
-  fastfix::session::AdminProtocol protocol(
-    fastfix::session::AdminProtocolConfig{
+  nimble::store::MemorySessionStore store;
+  nimble::session::AdminProtocol protocol(
+    nimble::session::AdminProtocolConfig{
       .session =
-        fastfix::session::SessionConfig{
+        nimble::session::SessionConfig{
           .session_id = 7010U,
-          .key = fastfix::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
+          .key = nimble::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
           .profile_id = dictionary.value().profile().header().profile_id,
           .heartbeat_interval_seconds = 30U,
           .is_initiator = false,
@@ -3050,7 +3049,7 @@ TEST_CASE("SequenceReset-GapFill partial fill", "[admin-protocol]")
   REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
 
   // Create a gap: receive heartbeat at seq 5 when expected is 2
-  fastfix::message::MessageBuilder heartbeat_builder("0");
+  nimble::message::MessageBuilder heartbeat_builder("0");
   heartbeat_builder.set_string(kMsgType, "0");
   auto gap_inbound =
     EncodeInboundFrame(std::move(heartbeat_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 5U, false);
@@ -3061,14 +3060,14 @@ TEST_CASE("SequenceReset-GapFill partial fill", "[admin-protocol]")
   REQUIRE(gap_event.value().outbound_frames.size() == 1U);
 
   auto resend_req =
-    fastfix::codec::DecodeFixMessage(gap_event.value().outbound_frames.front().bytes, dictionary.value());
+    nimble::codec::DecodeFixMessage(gap_event.value().outbound_frames.front().bytes, dictionary.value());
   REQUIRE(resend_req.ok());
   REQUIRE(resend_req.value().header.msg_type == "2");
   REQUIRE(resend_req.value().message.view().get_int(kBeginSeqNo).value() == 2);
   REQUIRE(resend_req.value().message.view().get_int(kEndSeqNo).value() == 4);
 
   // Partial GapFill: covers seqs 2-3 only (NewSeqNo=4), seq 4 still missing
-  fastfix::message::MessageBuilder gap_fill_builder("4");
+  nimble::message::MessageBuilder gap_fill_builder("4");
   gap_fill_builder.set_string(kMsgType, "4").set_boolean(kGapFillFlag, true).set_int(kNewSeqNo, 4);
   auto gap_fill_inbound =
     EncodeInboundFrame(std::move(gap_fill_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 2U, false);
@@ -3081,7 +3080,7 @@ TEST_CASE("SequenceReset-GapFill partial fill", "[admin-protocol]")
 
   // Gap not fully resolved — session stays in ResendProcessing
   const auto after = protocol.session().Snapshot();
-  REQUIRE(after.state == fastfix::session::SessionState::kResendProcessing);
+  REQUIRE(after.state == nimble::session::SessionState::kResendProcessing);
   REQUIRE(after.has_pending_resend);
   REQUIRE(after.next_in_seq == 4U);
 }
@@ -3090,18 +3089,18 @@ TEST_CASE("SequenceReset-GapFill partial fill", "[admin-protocol]")
 
 TEST_CASE("Reject received processed silently", "[admin-protocol]")
 {
-  auto dictionary = fastfix::tests::LoadFix44DictionaryView();
+  auto dictionary = nimble::tests::LoadFix44DictionaryView();
   if (!dictionary.ok()) {
     SKIP("FIX44 artifact not available: " << dictionary.status().message());
   }
 
-  fastfix::store::MemorySessionStore store;
-  fastfix::session::AdminProtocol protocol(
-    fastfix::session::AdminProtocolConfig{
+  nimble::store::MemorySessionStore store;
+  nimble::session::AdminProtocol protocol(
+    nimble::session::AdminProtocolConfig{
       .session =
-        fastfix::session::SessionConfig{
+        nimble::session::SessionConfig{
           .session_id = 7011U,
-          .key = fastfix::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
+          .key = nimble::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
           .profile_id = dictionary.value().profile().header().profile_id,
           .heartbeat_interval_seconds = 30U,
           .is_initiator = false,
@@ -3119,7 +3118,7 @@ TEST_CASE("Reject received processed silently", "[admin-protocol]")
   REQUIRE(protocol.session().Snapshot().next_in_seq == 2U);
 
   // Receive inbound Reject — protocol processes it silently
-  fastfix::message::MessageBuilder reject_builder("3");
+  nimble::message::MessageBuilder reject_builder("3");
   reject_builder.set_string(kMsgType, "3").set_int(kRefSeqNum, 1).set_string(kText, "invalid message");
   auto inbound =
     EncodeInboundFrame(std::move(reject_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 2U, false);

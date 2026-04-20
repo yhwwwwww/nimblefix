@@ -1,11 +1,11 @@
 #include <catch2/catch_test_macros.hpp>
 
-#include "fastfix/runtime/metrics.h"
-#include "fastfix/runtime/trace.h"
+#include "nimblefix/runtime/metrics.h"
+#include "nimblefix/runtime/trace.h"
 
 TEST_CASE("metrics-trace", "[metrics-trace]")
 {
-  fastfix::runtime::MetricsRegistry metrics;
+  nimble::runtime::MetricsRegistry metrics;
   metrics.Reset(2U);
   REQUIRE(metrics.RegisterSession(1001U, 1U).ok());
   REQUIRE(metrics.RecordInbound(1001U, false).ok());
@@ -32,18 +32,18 @@ TEST_CASE("metrics-trace", "[metrics-trace]")
   REQUIRE(snapshot.workers[1].registered_sessions == 1U);
   REQUIRE(snapshot.workers[1].outbound_queue_depth == 4U);
 
-  fastfix::runtime::TraceRecorder trace;
-  trace.Configure(fastfix::runtime::TraceMode::kRing, 2U, 2U);
-  trace.Record(fastfix::runtime::TraceEventKind::kConfigLoaded, 0U, 0U, 1U, 1U, 0U, "boot");
-  trace.Record(fastfix::runtime::TraceEventKind::kProfileLoaded, 1001U, 0U, 2U, 1001U, 0U, "profile");
-  trace.Record(fastfix::runtime::TraceEventKind::kSessionRegistered, 1001U, 1U, 3U, 1001U, 0U, "session-a");
-  trace.Record(fastfix::runtime::TraceEventKind::kSessionEvent, 1002U, 1U, 4U, 7U, 8U, "session-b");
-  trace.Record(fastfix::runtime::TraceEventKind::kStoreEvent, 1003U, 0U, 5U, 9U, 10U, "store");
+  nimble::runtime::TraceRecorder trace;
+  trace.Configure(nimble::runtime::TraceMode::kRing, 2U, 2U);
+  trace.Record(nimble::runtime::TraceEventKind::kConfigLoaded, 0U, 0U, 1U, 1U, 0U, "boot");
+  trace.Record(nimble::runtime::TraceEventKind::kProfileLoaded, 1001U, 0U, 2U, 1001U, 0U, "profile");
+  trace.Record(nimble::runtime::TraceEventKind::kSessionRegistered, 1001U, 1U, 3U, 1001U, 0U, "session-a");
+  trace.Record(nimble::runtime::TraceEventKind::kSessionEvent, 1002U, 1U, 4U, 7U, 8U, "session-b");
+  trace.Record(nimble::runtime::TraceEventKind::kStoreEvent, 1003U, 0U, 5U, 9U, 10U, "store");
 
   const auto events = trace.Snapshot();
   REQUIRE(events.size() == 4U);
   REQUIRE(events[0].sequence == 2U);
-  REQUIRE(events[0].kind == fastfix::runtime::TraceEventKind::kProfileLoaded);
+  REQUIRE(events[0].kind == nimble::runtime::TraceEventKind::kProfileLoaded);
   REQUIRE(events[1].sequence == 3U);
   REQUIRE(events[2].sequence == 4U);
   REQUIRE(events[3].sequence == 5U);

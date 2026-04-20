@@ -4,30 +4,30 @@
 #include <filesystem>
 #include <fstream>
 
-#include "fastfix/codec/fix_codec.h"
-#include "fastfix/message/message.h"
-#include "fastfix/profile/artifact_builder.h"
-#include "fastfix/profile/dictgen_input.h"
-#include "fastfix/runtime/config.h"
-#include "fastfix/runtime/config_io.h"
-#include "fastfix/runtime/engine.h"
+#include "nimblefix/codec/fix_codec.h"
+#include "nimblefix/message/message.h"
+#include "nimblefix/profile/artifact_builder.h"
+#include "nimblefix/profile/dictgen_input.h"
+#include "nimblefix/runtime/config.h"
+#include "nimblefix/runtime/config_io.h"
+#include "nimblefix/runtime/engine.h"
 
 namespace {
 
 auto
-BuildSampleArtifact(const std::filesystem::path& artifact_path, std::uint64_t profile_id) -> fastfix::base::Status
+BuildSampleArtifact(const std::filesystem::path& artifact_path, std::uint64_t profile_id) -> nimble::base::Status
 {
-  const auto ffd_path = std::filesystem::path(FASTFIX_PROJECT_DIR) / "build" / "bench" / "quickfix_FIX44.ffd";
-  auto dictionary = fastfix::profile::LoadNormalizedDictionaryFile(ffd_path);
+  const auto ffd_path = std::filesystem::path(NIMBLEFIX_PROJECT_DIR) / "build" / "bench" / "quickfix_FIX44.ffd";
+  auto dictionary = nimble::profile::LoadNormalizedDictionaryFile(ffd_path);
   if (!dictionary.ok()) {
     return dictionary.status();
   }
   dictionary.value().profile_id = profile_id;
-  auto artifact = fastfix::profile::BuildProfileArtifact(dictionary.value());
+  auto artifact = nimble::profile::BuildProfileArtifact(dictionary.value());
   if (!artifact.ok()) {
     return artifact.status();
   }
-  return fastfix::profile::WriteProfileArtifact(artifact_path, artifact.value());
+  return nimble::profile::WriteProfileArtifact(artifact_path, artifact.value());
 }
 
 auto
@@ -47,7 +47,7 @@ MakeUtcNs(int year, int month, int day, int hour, int minute, int second) -> std
 
 TEST_CASE("runtime-config", "[runtime-config]")
 {
-  const auto temp_root = std::filesystem::temp_directory_path() / "fastfix-runtime-config-test";
+  const auto temp_root = std::filesystem::temp_directory_path() / "nimblefix-runtime-config-test";
   std::filesystem::create_directories(temp_root);
 
   const auto artifact_path = temp_root / "sample-profile.art";
@@ -84,7 +84,7 @@ TEST_CASE("runtime-config", "[runtime-config]")
          "false\n";
   out.close();
 
-  auto config = fastfix::runtime::LoadEngineConfigFile(config_path);
+  auto config = nimble::runtime::LoadEngineConfigFile(config_path);
   REQUIRE(config.ok());
   REQUIRE(config.value().worker_count == 2U);
   REQUIRE(config.value().front_door_cpu.has_value());
@@ -92,26 +92,25 @@ TEST_CASE("runtime-config", "[runtime-config]")
   REQUIRE(config.value().worker_cpu_affinity.size() == 2U);
   REQUIRE(config.value().worker_cpu_affinity[0] == 3U);
   REQUIRE(config.value().worker_cpu_affinity[1] == 5U);
-  REQUIRE(config.value().queue_app_mode == fastfix::runtime::QueueAppThreadingMode::kThreaded);
+  REQUIRE(config.value().queue_app_mode == nimble::runtime::QueueAppThreadingMode::kThreaded);
   REQUIRE(config.value().app_cpu_affinity.size() == 2U);
   REQUIRE(config.value().app_cpu_affinity[0] == 11U);
   REQUIRE(config.value().app_cpu_affinity[1] == 13U);
   REQUIRE(config.value().profile_artifacts.size() == 2U);
   REQUIRE(config.value().counterparties.size() == 5U);
-  REQUIRE(config.value().counterparties[0].validation_policy.mode == fastfix::session::ValidationMode::kCompatible);
-  REQUIRE(config.value().counterparties[1].store_mode == fastfix::runtime::StoreMode::kMmap);
+  REQUIRE(config.value().counterparties[0].validation_policy.mode == nimble::session::ValidationMode::kCompatible);
+  REQUIRE(config.value().counterparties[1].store_mode == nimble::runtime::StoreMode::kMmap);
   REQUIRE(config.value().counterparties[1].store_path == store_path);
   REQUIRE(config.value().counterparties[2].default_appl_ver_id == "9");
   REQUIRE(config.value().counterparties[2].session.default_appl_ver_id == "9");
-  REQUIRE(config.value().counterparties[3].store_mode == fastfix::runtime::StoreMode::kDurableBatch);
+  REQUIRE(config.value().counterparties[3].store_mode == nimble::runtime::StoreMode::kDurableBatch);
   REQUIRE(config.value().counterparties[3].store_path == durable_store_path);
   REQUIRE(config.value().counterparties[3].durable_flush_threshold == 2U);
-  REQUIRE(config.value().counterparties[3].durable_rollover_mode ==
-          fastfix::store::DurableStoreRolloverMode::kExternal);
+  REQUIRE(config.value().counterparties[3].durable_rollover_mode == nimble::store::DurableStoreRolloverMode::kExternal);
   REQUIRE(config.value().counterparties[3].durable_archive_limit == 3U);
   REQUIRE(config.value().counterparties[4].store_path == durable_local_store_path);
   REQUIRE(config.value().counterparties[4].durable_rollover_mode ==
-          fastfix::store::DurableStoreRolloverMode::kLocalTime);
+          nimble::store::DurableStoreRolloverMode::kLocalTime);
   REQUIRE(config.value().counterparties[4].durable_archive_limit == 4U);
   REQUIRE(config.value().counterparties[4].reconnect_enabled);
   REQUIRE(config.value().counterparties[4].reconnect_initial_ms == 100U);
@@ -120,7 +119,7 @@ TEST_CASE("runtime-config", "[runtime-config]")
   REQUIRE(config.value().counterparties[4].durable_local_utc_offset_seconds == 3600);
   REQUIRE(!config.value().counterparties[4].durable_use_system_timezone);
 
-  fastfix::runtime::Engine engine;
+  nimble::runtime::Engine engine;
   REQUIRE(engine.Boot(config.value()).ok());
   REQUIRE(engine.runtime() != nullptr);
   REQUIRE(engine.runtime()->worker_count() == 2U);
@@ -128,16 +127,16 @@ TEST_CASE("runtime-config", "[runtime-config]")
   REQUIRE(engine.profiles().Find(4400U) != nullptr);
   REQUIRE(engine.profiles().Find(4401U) != nullptr);
   REQUIRE(engine.FindCounterpartyConfig(2002U) != nullptr);
-  REQUIRE(engine.FindCounterpartyConfig(2002U)->dispatch_mode == fastfix::runtime::AppDispatchMode::kQueueDecoupled);
+  REQUIRE(engine.FindCounterpartyConfig(2002U)->dispatch_mode == nimble::runtime::AppDispatchMode::kQueueDecoupled);
   REQUIRE(engine.FindListenerConfig("main") != nullptr);
 
   auto transport_dictionary = engine.LoadDictionaryView(4401U);
   REQUIRE(transport_dictionary.ok());
 
-  fastfix::message::MessageBuilder logon_builder("A");
+  nimble::message::MessageBuilder logon_builder("A");
   logon_builder.set_string(35U, "A").set_int(98U, 0).set_int(108U, 30);
 
-  fastfix::codec::EncodeOptions options;
+  nimble::codec::EncodeOptions options;
   options.begin_string = "FIXT.1.1";
   options.sender_comp_id = "BUYT";
   options.target_comp_id = "SELLT";
@@ -145,22 +144,22 @@ TEST_CASE("runtime-config", "[runtime-config]")
   options.msg_seq_num = 1U;
 
   auto encoded =
-    fastfix::codec::EncodeFixMessage(std::move(logon_builder).build(), transport_dictionary.value(), options);
+    nimble::codec::EncodeFixMessage(std::move(logon_builder).build(), transport_dictionary.value(), options);
   REQUIRE(encoded.ok());
 
-  auto peeked = fastfix::codec::PeekSessionHeader(encoded.value());
+  auto peeked = nimble::codec::PeekSessionHeader(encoded.value());
   REQUIRE(peeked.ok());
   REQUIRE(peeked.value().begin_string == "FIXT.1.1");
   REQUIRE(peeked.value().default_appl_ver_id == "9");
   REQUIRE(peeked.value().sender_comp_id == "BUYT");
   REQUIRE(peeked.value().target_comp_id == "SELLT");
 
-  fastfix::message::MessageBuilder heartbeat_builder("0");
+  nimble::message::MessageBuilder heartbeat_builder("0");
   heartbeat_builder.set_string(35U, "0");
   auto encoded_heartbeat =
-    fastfix::codec::EncodeFixMessage(std::move(heartbeat_builder).build(), transport_dictionary.value(), options);
+    nimble::codec::EncodeFixMessage(std::move(heartbeat_builder).build(), transport_dictionary.value(), options);
   REQUIRE(encoded_heartbeat.ok());
-  auto heartbeat_header = fastfix::codec::PeekSessionHeader(encoded_heartbeat.value());
+  auto heartbeat_header = nimble::codec::PeekSessionHeader(encoded_heartbeat.value());
   REQUIRE(heartbeat_header.ok());
   REQUIRE(heartbeat_header.value().msg_type == "0");
   REQUIRE(heartbeat_header.value().default_appl_ver_id.empty());
@@ -177,26 +176,26 @@ TEST_CASE("runtime-config", "[runtime-config]")
 
   const auto traces = engine.trace().Snapshot();
   REQUIRE(traces.size() >= 5U);
-  REQUIRE(traces[0].kind == fastfix::runtime::TraceEventKind::kConfigLoaded);
+  REQUIRE(traces[0].kind == nimble::runtime::TraceEventKind::kConfigLoaded);
 
   const auto invalid_config_text = std::string("engine.worker_count=1\n"
                                                "engine.worker_cpu_affinity=1,2\n"
                                                "profile=sample-transport-profile.art\n"
                                                "counterparty|bad-fixt|3001|4401|FIXT.1.1|SELLX|BUYX|memory||"
                                                "memory|inline|30|false\n");
-  auto invalid = fastfix::runtime::LoadEngineConfigText(invalid_config_text, temp_root);
+  auto invalid = nimble::runtime::LoadEngineConfigText(invalid_config_text, temp_root);
   REQUIRE(!invalid.ok());
 
   const auto invalid_listener_text = std::string("engine.worker_count=2\n"
                                                  "profile=sample-profile.art\n"
                                                  "listener|bad|127.0.0.1|9878|2\n");
-  auto invalid_listener = fastfix::runtime::LoadEngineConfigText(invalid_listener_text, temp_root);
+  auto invalid_listener = nimble::runtime::LoadEngineConfigText(invalid_listener_text, temp_root);
   REQUIRE(!invalid_listener.ok());
 
   const auto invalid_app_cpu_text = std::string("engine.worker_count=2\n"
                                                 "engine.app_cpu_affinity=7\n"
                                                 "profile=sample-profile.art\n");
-  auto invalid_app_cpu = fastfix::runtime::LoadEngineConfigText(invalid_app_cpu_text, temp_root);
+  auto invalid_app_cpu = nimble::runtime::LoadEngineConfigText(invalid_app_cpu_text, temp_root);
   REQUIRE(!invalid_app_cpu.ok());
 
   const auto advanced_config_text =
@@ -206,7 +205,7 @@ TEST_CASE("runtime-config", "[runtime-config]")
                 "30|true||strict|0|utc-day|0|false|1000|5000|3|0|true|no-auto-reset|0|0|"
                 "0|true|true|true|true|true|false|false|09:30:00|16:00:00|mon|fri|08:45:"
                 "00|16:15:00|mon|fri\n");
-  auto advanced = fastfix::runtime::LoadEngineConfigText(advanced_config_text, temp_root);
+  auto advanced = nimble::runtime::LoadEngineConfigText(advanced_config_text, temp_root);
   REQUIRE(advanced.ok());
   REQUIRE(advanced.value().counterparties.size() == 1U);
   const auto& scheduled = advanced.value().counterparties.front();
@@ -220,19 +219,19 @@ TEST_CASE("runtime-config", "[runtime-config]")
   REQUIRE(scheduled.session_schedule.start_time.has_value());
   REQUIRE(scheduled.session_schedule.start_time->hour == 9U);
   REQUIRE(scheduled.session_schedule.end_time->hour == 16U);
-  REQUIRE(scheduled.session_schedule.start_day == fastfix::runtime::SessionDayOfWeek::kMonday);
-  REQUIRE(scheduled.session_schedule.end_day == fastfix::runtime::SessionDayOfWeek::kFriday);
+  REQUIRE(scheduled.session_schedule.start_day == nimble::runtime::SessionDayOfWeek::kMonday);
+  REQUIRE(scheduled.session_schedule.end_day == nimble::runtime::SessionDayOfWeek::kFriday);
   REQUIRE(scheduled.session_schedule.logon_time.has_value());
   REQUIRE(scheduled.session_schedule.logon_time->hour == 8U);
   REQUIRE(scheduled.session_schedule.logout_time->minute == 15U);
 
-  fastfix::runtime::SessionScheduleConfig session_schedule;
-  session_schedule.start_time = fastfix::runtime::SessionTimeOfDay{ 9U, 0U, 0U };
-  session_schedule.end_time = fastfix::runtime::SessionTimeOfDay{ 17U, 0U, 0U };
-  REQUIRE(fastfix::runtime::ValidateSessionSchedule(session_schedule).ok());
-  REQUIRE(fastfix::runtime::IsWithinSessionWindow(session_schedule, MakeUtcNs(2026, 4, 6, 10, 0, 0)));
-  REQUIRE(!fastfix::runtime::IsWithinSessionWindow(session_schedule, MakeUtcNs(2026, 4, 6, 8, 0, 0)));
-  const auto next_logon = fastfix::runtime::NextLogonWindowStart(session_schedule, MakeUtcNs(2026, 4, 6, 8, 0, 0));
+  nimble::runtime::SessionScheduleConfig session_schedule;
+  session_schedule.start_time = nimble::runtime::SessionTimeOfDay{ 9U, 0U, 0U };
+  session_schedule.end_time = nimble::runtime::SessionTimeOfDay{ 17U, 0U, 0U };
+  REQUIRE(nimble::runtime::ValidateSessionSchedule(session_schedule).ok());
+  REQUIRE(nimble::runtime::IsWithinSessionWindow(session_schedule, MakeUtcNs(2026, 4, 6, 10, 0, 0)));
+  REQUIRE(!nimble::runtime::IsWithinSessionWindow(session_schedule, MakeUtcNs(2026, 4, 6, 8, 0, 0)));
+  const auto next_logon = nimble::runtime::NextLogonWindowStart(session_schedule, MakeUtcNs(2026, 4, 6, 8, 0, 0));
   REQUIRE(next_logon.has_value());
   REQUIRE(next_logon.value() == MakeUtcNs(2026, 4, 6, 9, 0, 0));
 

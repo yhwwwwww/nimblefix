@@ -1,4 +1,4 @@
-#include "fastfix/runtime/live_session_worker.h"
+#include "nimblefix/runtime/live_session_worker.h"
 
 #include <chrono>
 #include <cstddef>
@@ -11,14 +11,14 @@
 #include <thread>
 #include <utility>
 
-#include "fastfix/base/spsc_queue.h"
-#include "fastfix/codec/fix_tags.h"
-#include "fastfix/runtime/live_runtime_support.h"
-#include "fastfix/store/durable_batch_store.h"
-#include "fastfix/store/memory_store.h"
-#include "fastfix/store/mmap_store.h"
+#include "nimblefix/base/spsc_queue.h"
+#include "nimblefix/codec/fix_tags.h"
+#include "nimblefix/runtime/live_runtime_support.h"
+#include "nimblefix/store/durable_batch_store.h"
+#include "nimblefix/store/memory_store.h"
+#include "nimblefix/store/mmap_store.h"
 
-namespace fastfix::runtime {
+namespace nimble::runtime {
 
 namespace {
 
@@ -1030,4 +1030,4 @@ LiveSessionWorker::MakeActiveSessionBase(const CounterpartyConfig& counterparty,
   return session_state;
 }
 
-} // namespace fastfix::runtime
+} // namespace nimble::runtime

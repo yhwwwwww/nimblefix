@@ -1,8 +1,8 @@
-#include "fastfix/codec/compiled_decoder.h"
+#include "nimblefix/codec/compiled_decoder.h"
 
 #include <algorithm>
 
-namespace fastfix::codec {
+namespace nimble::codec {
 
 namespace {
 
@@ -120,4 +120,4 @@ CompiledDecoderTable::find(std::string_view msg_type) const -> const CompiledMes
   return nullptr;
 }
 
-} // namespace fastfix::codec
+} // namespace nimble::codec

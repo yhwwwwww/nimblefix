@@ -1,5 +1,5 @@
-#include "fastfix/runtime/config.h"
-#include "fastfix/runtime/config_io.h"
+#include "nimblefix/runtime/config.h"
+#include "nimblefix/runtime/config_io.h"
 
 #include <algorithm>
 #include <cctype>
@@ -10,7 +10,7 @@
 #include <type_traits>
 #include <unordered_set>
 
-namespace fastfix::runtime {
+namespace nimble::runtime {
 
 namespace {
 
@@ -1261,4 +1261,4 @@ LoadEngineConfigFile(const std::filesystem::path& path) -> base::Result<EngineCo
   return LoadEngineConfigText(text, path.parent_path());
 }
 
-} // namespace fastfix::runtime
+} // namespace nimble::runtime

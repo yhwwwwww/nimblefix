@@ -1,9 +1,9 @@
-#include "fastfix/profile/overlay.h"
+#include "nimblefix/profile/overlay.h"
 
 #include <algorithm>
 #include <array>
 
-namespace fastfix::profile {
+namespace nimble::profile {
 
 namespace {
 
@@ -173,4 +173,4 @@ ApplyOverlay(const NormalizedDictionary& baseline, const NormalizedDictionary& o
   return merged;
 }
 
-} // namespace fastfix::profile
+} // namespace nimble::profile

@@ -13,10 +13,10 @@
       "binaryDir": "${sourceDir}/build/cmake/${presetName}",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
-        "FASTFIX_BUILD_TESTS": "ON",
-        "FASTFIX_BUILD_BENCHMARKS": "ON",
-        "FASTFIX_BUILD_TOOLS": "ON",
-        "FASTFIX_BUILD_FUZZERS": "ON"
+        "NIMBLEFIX_BUILD_TESTS": "ON",
+        "NIMBLEFIX_BUILD_BENCHMARKS": "ON",
+        "NIMBLEFIX_BUILD_TOOLS": "ON",
+        "NIMBLEFIX_BUILD_FUZZERS": "ON"
       }
     },
     {
@@ -26,10 +26,10 @@
       "binaryDir": "${sourceDir}/build/cmake/${presetName}",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
-        "FASTFIX_BUILD_TESTS": "ON",
-        "FASTFIX_BUILD_BENCHMARKS": "ON",
-        "FASTFIX_BUILD_TOOLS": "ON",
-        "FASTFIX_BUILD_FUZZERS": "ON"
+        "NIMBLEFIX_BUILD_TESTS": "ON",
+        "NIMBLEFIX_BUILD_BENCHMARKS": "ON",
+        "NIMBLEFIX_BUILD_TOOLS": "ON",
+        "NIMBLEFIX_BUILD_FUZZERS": "ON"
       }
     },
     {

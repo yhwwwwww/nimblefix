@@ -11,7 +11,7 @@ import quickfix as fix
 
 
 SOH = "\x01"
-DICTIONARY_PATH = pathlib.Path(__file__).with_name("FastFixEchoFIX44.xml")
+DICTIONARY_PATH = pathlib.Path(__file__).with_name("NimbleFIXEchoFIX44.xml")
 
 
 def render_fix(message: fix.Message) -> str:

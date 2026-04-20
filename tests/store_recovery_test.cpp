@@ -6,9 +6,9 @@
 
 #include <filesystem>
 
-#include "fastfix/store/durable_batch_store.h"
-#include "fastfix/store/memory_store.h"
-#include "fastfix/store/mmap_store.h"
+#include "nimblefix/store/durable_batch_store.h"
+#include "nimblefix/store/memory_store.h"
+#include "nimblefix/store/mmap_store.h"
 
 namespace {
 
@@ -90,8 +90,8 @@ ReadOnlyFilesBlockReadWriteOpen(const std::filesystem::path& root) -> bool
 
 TEST_CASE("store-recovery", "[store-recovery]")
 {
-  fastfix::store::MemorySessionStore memory_store;
-  fastfix::store::MessageRecord outbound{
+  nimble::store::MemorySessionStore memory_store;
+  nimble::store::MessageRecord outbound{
     .session_id = 77U,
     .seq_num = 1U,
     .timestamp_ns = 1000U,
@@ -101,7 +101,7 @@ TEST_CASE("store-recovery", "[store-recovery]")
   };
   REQUIRE(memory_store.SaveOutbound(outbound).ok());
   REQUIRE(memory_store
-            .SaveRecoveryState(fastfix::store::SessionRecoveryState{
+            .SaveRecoveryState(nimble::store::SessionRecoveryState{
               .session_id = 77U,
               .next_in_seq = 12U,
               .next_out_seq = 19U,
@@ -130,15 +130,15 @@ TEST_CASE("store-recovery", "[store-recovery]")
   REQUIRE(memory_state.value().next_in_seq == 12U);
   REQUIRE(memory_state.value().next_out_seq == 19U);
 
-  const auto path = std::filesystem::temp_directory_path() / "fastfix-mmap-store-test.dat";
+  const auto path = std::filesystem::temp_directory_path() / "nimblefix-mmap-store-test.dat";
   std::filesystem::remove(path);
 
   {
-    fastfix::store::MmapSessionStore mmap_store(path);
+    nimble::store::MmapSessionStore mmap_store(path);
     REQUIRE(mmap_store.Open().ok());
     REQUIRE(mmap_store.SaveOutbound(outbound).ok());
     REQUIRE(mmap_store
-              .SaveRecoveryState(fastfix::store::SessionRecoveryState{
+              .SaveRecoveryState(nimble::store::SessionRecoveryState{
                 .session_id = 77U,
                 .next_in_seq = 21U,
                 .next_out_seq = 34U,
@@ -150,7 +150,7 @@ TEST_CASE("store-recovery", "[store-recovery]")
   }
 
   {
-    fastfix::store::MmapSessionStore mmap_store(path);
+    nimble::store::MmapSessionStore mmap_store(path);
     REQUIRE(mmap_store.Open().ok());
     auto loaded = mmap_store.LoadOutboundRange(77U, 1U, 1U);
     REQUIRE(loaded.ok());
@@ -175,21 +175,21 @@ TEST_CASE("store-recovery", "[store-recovery]")
 
   std::filesystem::remove(path);
 
-  const auto durable_root = std::filesystem::temp_directory_path() / "fastfix-durable-store-test";
+  const auto durable_root = std::filesystem::temp_directory_path() / "nimblefix-durable-store-test";
   std::filesystem::remove_all(durable_root);
 
   constexpr std::uint64_t kDay = 86'400ULL * 1'000'000'000ULL;
   {
-    fastfix::store::DurableBatchSessionStore durable_store(
+    nimble::store::DurableBatchSessionStore durable_store(
       durable_root,
-      fastfix::store::DurableBatchStoreOptions{
+      nimble::store::DurableBatchStoreOptions{
         .flush_threshold = 2U,
-        .rollover_mode = fastfix::store::DurableStoreRolloverMode::kUtcDay,
+        .rollover_mode = nimble::store::DurableStoreRolloverMode::kUtcDay,
         .max_archived_segments = 1U,
       });
     REQUIRE(durable_store.Open().ok());
     REQUIRE(durable_store
-              .SaveOutbound(fastfix::store::MessageRecord{
+              .SaveOutbound(nimble::store::MessageRecord{
                 .session_id = 88U,
                 .seq_num = 1U,
                 .timestamp_ns = 10U,
@@ -198,7 +198,7 @@ TEST_CASE("store-recovery", "[store-recovery]")
               })
               .ok());
     REQUIRE(durable_store
-              .SaveRecoveryState(fastfix::store::SessionRecoveryState{
+              .SaveRecoveryState(nimble::store::SessionRecoveryState{
                 .session_id = 88U,
                 .next_in_seq = 4U,
                 .next_out_seq = 9U,
@@ -209,7 +209,7 @@ TEST_CASE("store-recovery", "[store-recovery]")
               .ok());
     REQUIRE(std::filesystem::exists(durable_root / "active.log"));
     REQUIRE(durable_store
-              .SaveOutbound(fastfix::store::MessageRecord{
+              .SaveOutbound(nimble::store::MessageRecord{
                 .session_id = 88U,
                 .seq_num = 2U,
                 .timestamp_ns = 100U,
@@ -218,7 +218,7 @@ TEST_CASE("store-recovery", "[store-recovery]")
               })
               .ok());
     REQUIRE(durable_store
-              .SaveOutbound(fastfix::store::MessageRecord{
+              .SaveOutbound(nimble::store::MessageRecord{
                 .session_id = 88U,
                 .seq_num = 3U,
                 .timestamp_ns = kDay + 200U,
@@ -227,7 +227,7 @@ TEST_CASE("store-recovery", "[store-recovery]")
               })
               .ok());
     REQUIRE(durable_store
-              .SaveOutbound(fastfix::store::MessageRecord{
+              .SaveOutbound(nimble::store::MessageRecord{
                 .session_id = 88U,
                 .seq_num = 4U,
                 .timestamp_ns = (2U * kDay) + 300U,
@@ -236,7 +236,7 @@ TEST_CASE("store-recovery", "[store-recovery]")
               })
               .ok());
     REQUIRE(durable_store
-              .SaveRecoveryState(fastfix::store::SessionRecoveryState{
+              .SaveRecoveryState(nimble::store::SessionRecoveryState{
                 .session_id = 88U,
                 .next_in_seq = 8U,
                 .next_out_seq = 15U,
@@ -249,11 +249,11 @@ TEST_CASE("store-recovery", "[store-recovery]")
   }
 
   {
-    fastfix::store::DurableBatchSessionStore durable_store(
+    nimble::store::DurableBatchSessionStore durable_store(
       durable_root,
-      fastfix::store::DurableBatchStoreOptions{
+      nimble::store::DurableBatchStoreOptions{
         .flush_threshold = 2U,
-        .rollover_mode = fastfix::store::DurableStoreRolloverMode::kUtcDay,
+        .rollover_mode = nimble::store::DurableStoreRolloverMode::kUtcDay,
         .max_archived_segments = 1U,
       });
     REQUIRE(durable_store.Open().ok());
@@ -285,19 +285,19 @@ TEST_CASE("store-recovery", "[store-recovery]")
     REQUIRE(CountArchivedLogs(durable_root) == 1U);
   }
 
-  const auto external_root = std::filesystem::temp_directory_path() / "fastfix-durable-store-external-test";
+  const auto external_root = std::filesystem::temp_directory_path() / "nimblefix-durable-store-external-test";
   std::filesystem::remove_all(external_root);
   {
-    fastfix::store::DurableBatchSessionStore durable_store(
+    nimble::store::DurableBatchSessionStore durable_store(
       external_root,
-      fastfix::store::DurableBatchStoreOptions{
+      nimble::store::DurableBatchStoreOptions{
         .flush_threshold = 1U,
-        .rollover_mode = fastfix::store::DurableStoreRolloverMode::kExternal,
+        .rollover_mode = nimble::store::DurableStoreRolloverMode::kExternal,
         .max_archived_segments = 2U,
       });
     REQUIRE(durable_store.Open().ok());
     REQUIRE(durable_store
-              .SaveOutbound(fastfix::store::MessageRecord{
+              .SaveOutbound(nimble::store::MessageRecord{
                 .session_id = 91U,
                 .seq_num = 1U,
                 .timestamp_ns = 1U,
@@ -307,7 +307,7 @@ TEST_CASE("store-recovery", "[store-recovery]")
               .ok());
     REQUIRE(durable_store.Rollover().ok());
     REQUIRE(durable_store
-              .SaveOutbound(fastfix::store::MessageRecord{
+              .SaveOutbound(nimble::store::MessageRecord{
                 .session_id = 91U,
                 .seq_num = 2U,
                 .timestamp_ns = 2U,
@@ -318,11 +318,11 @@ TEST_CASE("store-recovery", "[store-recovery]")
   }
 
   {
-    fastfix::store::DurableBatchSessionStore durable_store(
+    nimble::store::DurableBatchSessionStore durable_store(
       external_root,
-      fastfix::store::DurableBatchStoreOptions{
+      nimble::store::DurableBatchStoreOptions{
         .flush_threshold = 1U,
-        .rollover_mode = fastfix::store::DurableStoreRolloverMode::kExternal,
+        .rollover_mode = nimble::store::DurableStoreRolloverMode::kExternal,
         .max_archived_segments = 2U,
       });
     REQUIRE(durable_store.Open().ok());
@@ -337,19 +337,19 @@ TEST_CASE("store-recovery", "[store-recovery]")
     REQUIRE(CountArchivedLogs(external_root) == 1U);
   }
 
-  const auto crash_root = std::filesystem::temp_directory_path() / "fastfix-durable-store-crash-test";
+  const auto crash_root = std::filesystem::temp_directory_path() / "nimblefix-durable-store-crash-test";
   std::filesystem::remove_all(crash_root);
   {
-    fastfix::store::DurableBatchSessionStore durable_store(
+    nimble::store::DurableBatchSessionStore durable_store(
       crash_root,
-      fastfix::store::DurableBatchStoreOptions{
+      nimble::store::DurableBatchStoreOptions{
         .flush_threshold = 3U,
-        .rollover_mode = fastfix::store::DurableStoreRolloverMode::kExternal,
+        .rollover_mode = nimble::store::DurableStoreRolloverMode::kExternal,
         .max_archived_segments = 2U,
       });
     REQUIRE(durable_store.Open().ok());
     REQUIRE(durable_store
-              .SaveOutbound(fastfix::store::MessageRecord{
+              .SaveOutbound(nimble::store::MessageRecord{
                 .session_id = 200U,
                 .seq_num = 1U,
                 .timestamp_ns = 10U,
@@ -358,7 +358,7 @@ TEST_CASE("store-recovery", "[store-recovery]")
               })
               .ok());
     REQUIRE(durable_store
-              .SaveOutbound(fastfix::store::MessageRecord{
+              .SaveOutbound(nimble::store::MessageRecord{
                 .session_id = 200U,
                 .seq_num = 2U,
                 .timestamp_ns = 11U,
@@ -367,7 +367,7 @@ TEST_CASE("store-recovery", "[store-recovery]")
               })
               .ok());
     REQUIRE(durable_store
-              .SaveRecoveryState(fastfix::store::SessionRecoveryState{
+              .SaveRecoveryState(nimble::store::SessionRecoveryState{
                 .session_id = 200U,
                 .next_in_seq = 41U,
                 .next_out_seq = 77U,
@@ -379,11 +379,11 @@ TEST_CASE("store-recovery", "[store-recovery]")
   }
 
   {
-    fastfix::store::DurableBatchSessionStore durable_store(
+    nimble::store::DurableBatchSessionStore durable_store(
       crash_root,
-      fastfix::store::DurableBatchStoreOptions{
+      nimble::store::DurableBatchStoreOptions{
         .flush_threshold = 3U,
-        .rollover_mode = fastfix::store::DurableStoreRolloverMode::kExternal,
+        .rollover_mode = nimble::store::DurableStoreRolloverMode::kExternal,
         .max_archived_segments = 2U,
       });
     REQUIRE(durable_store.Open().ok());
@@ -402,19 +402,19 @@ TEST_CASE("store-recovery", "[store-recovery]")
     REQUIRE(recovery.value().active);
   }
 
-  const auto corrupt_root = std::filesystem::temp_directory_path() / "fastfix-durable-store-corrupt-test";
+  const auto corrupt_root = std::filesystem::temp_directory_path() / "nimblefix-durable-store-corrupt-test";
   std::filesystem::remove_all(corrupt_root);
   {
-    fastfix::store::DurableBatchSessionStore durable_store(
+    nimble::store::DurableBatchSessionStore durable_store(
       corrupt_root,
-      fastfix::store::DurableBatchStoreOptions{
+      nimble::store::DurableBatchStoreOptions{
         .flush_threshold = 1U,
-        .rollover_mode = fastfix::store::DurableStoreRolloverMode::kExternal,
+        .rollover_mode = nimble::store::DurableStoreRolloverMode::kExternal,
         .max_archived_segments = 1U,
       });
     REQUIRE(durable_store.Open().ok());
     REQUIRE(durable_store
-              .SaveOutbound(fastfix::store::MessageRecord{
+              .SaveOutbound(nimble::store::MessageRecord{
                 .session_id = 201U,
                 .seq_num = 1U,
                 .timestamp_ns = 15U,
@@ -423,7 +423,7 @@ TEST_CASE("store-recovery", "[store-recovery]")
               })
               .ok());
     REQUIRE(durable_store
-              .SaveRecoveryState(fastfix::store::SessionRecoveryState{
+              .SaveRecoveryState(nimble::store::SessionRecoveryState{
                 .session_id = 201U,
                 .next_in_seq = 9U,
                 .next_out_seq = 12U,
@@ -441,16 +441,16 @@ TEST_CASE("store-recovery", "[store-recovery]")
   std::filesystem::resize_file(recovery_path, recovery_size - 1U);
 
   {
-    fastfix::store::DurableBatchSessionStore durable_store(
+    nimble::store::DurableBatchSessionStore durable_store(
       corrupt_root,
-      fastfix::store::DurableBatchStoreOptions{
+      nimble::store::DurableBatchStoreOptions{
         .flush_threshold = 1U,
-        .rollover_mode = fastfix::store::DurableStoreRolloverMode::kExternal,
+        .rollover_mode = nimble::store::DurableStoreRolloverMode::kExternal,
         .max_archived_segments = 1U,
       });
     const auto status = durable_store.Open();
     REQUIRE(!status.ok());
-    REQUIRE(status.code() == fastfix::base::ErrorCode::kFormatError);
+    REQUIRE(status.code() == nimble::base::ErrorCode::kFormatError);
   }
 
   std::filesystem::remove_all(durable_root);
@@ -461,13 +461,13 @@ TEST_CASE("store-recovery", "[store-recovery]")
 
 TEST_CASE("mmap store reset only removes target session", "[store-recovery]")
 {
-  const auto path = std::filesystem::temp_directory_path() / "fastfix-mmap-store-reset-test.dat";
+  const auto path = std::filesystem::temp_directory_path() / "nimblefix-mmap-store-reset-test.dat";
   std::filesystem::remove(path);
 
-  fastfix::store::MmapSessionStore store(path);
+  nimble::store::MmapSessionStore store(path);
   REQUIRE(store.Open().ok());
   REQUIRE(store
-            .SaveOutbound(fastfix::store::MessageRecord{
+            .SaveOutbound(nimble::store::MessageRecord{
               .session_id = 9001U,
               .seq_num = 1U,
               .timestamp_ns = 10U,
@@ -477,7 +477,7 @@ TEST_CASE("mmap store reset only removes target session", "[store-recovery]")
             })
             .ok());
   REQUIRE(store
-            .SaveOutbound(fastfix::store::MessageRecord{
+            .SaveOutbound(nimble::store::MessageRecord{
               .session_id = 9002U,
               .seq_num = 1U,
               .timestamp_ns = 20U,
@@ -487,11 +487,11 @@ TEST_CASE("mmap store reset only removes target session", "[store-recovery]")
             })
             .ok());
   REQUIRE(store
-            .SaveRecoveryState(fastfix::store::SessionRecoveryState{
+            .SaveRecoveryState(nimble::store::SessionRecoveryState{
               .session_id = 9001U, .next_in_seq = 3U, .next_out_seq = 4U, .active = true })
             .ok());
   REQUIRE(store
-            .SaveRecoveryState(fastfix::store::SessionRecoveryState{
+            .SaveRecoveryState(nimble::store::SessionRecoveryState{
               .session_id = 9002U, .next_in_seq = 5U, .next_out_seq = 6U, .active = true })
             .ok());
 
@@ -504,7 +504,7 @@ TEST_CASE("mmap store reset only removes target session", "[store-recovery]")
   REQUIRE(preserved.ok());
   REQUIRE(preserved.value().size() == 1U);
   REQUIRE(preserved.value().front().body_start_offset == 10U);
-  REQUIRE(store.LoadRecoveryState(9001U).status().code() == fastfix::base::ErrorCode::kNotFound);
+  REQUIRE(store.LoadRecoveryState(9001U).status().code() == nimble::base::ErrorCode::kNotFound);
   auto preserved_recovery = store.LoadRecoveryState(9002U);
   REQUIRE(preserved_recovery.ok());
   REQUIRE(preserved_recovery.value().next_out_seq == 6U);
@@ -514,18 +514,18 @@ TEST_CASE("mmap store reset only removes target session", "[store-recovery]")
 
 TEST_CASE("durable store reset only removes target session", "[store-recovery]")
 {
-  const auto root = std::filesystem::temp_directory_path() / "fastfix-durable-store-reset-test";
+  const auto root = std::filesystem::temp_directory_path() / "nimblefix-durable-store-reset-test";
   std::filesystem::remove_all(root);
 
-  fastfix::store::DurableBatchSessionStore store(root,
-                                                 fastfix::store::DurableBatchStoreOptions{
-                                                   .flush_threshold = 1U,
-                                                   .rollover_mode = fastfix::store::DurableStoreRolloverMode::kExternal,
-                                                   .max_archived_segments = 2U,
-                                                 });
+  nimble::store::DurableBatchSessionStore store(root,
+                                                nimble::store::DurableBatchStoreOptions{
+                                                  .flush_threshold = 1U,
+                                                  .rollover_mode = nimble::store::DurableStoreRolloverMode::kExternal,
+                                                  .max_archived_segments = 2U,
+                                                });
   REQUIRE(store.Open().ok());
   REQUIRE(store
-            .SaveOutbound(fastfix::store::MessageRecord{
+            .SaveOutbound(nimble::store::MessageRecord{
               .session_id = 9101U,
               .seq_num = 1U,
               .timestamp_ns = 11U,
@@ -535,7 +535,7 @@ TEST_CASE("durable store reset only removes target session", "[store-recovery]")
             })
             .ok());
   REQUIRE(store
-            .SaveOutbound(fastfix::store::MessageRecord{
+            .SaveOutbound(nimble::store::MessageRecord{
               .session_id = 9102U,
               .seq_num = 1U,
               .timestamp_ns = 12U,
@@ -545,11 +545,11 @@ TEST_CASE("durable store reset only removes target session", "[store-recovery]")
             })
             .ok());
   REQUIRE(store
-            .SaveRecoveryState(fastfix::store::SessionRecoveryState{
+            .SaveRecoveryState(nimble::store::SessionRecoveryState{
               .session_id = 9101U, .next_in_seq = 2U, .next_out_seq = 3U, .active = true })
             .ok());
   REQUIRE(store
-            .SaveRecoveryState(fastfix::store::SessionRecoveryState{
+            .SaveRecoveryState(nimble::store::SessionRecoveryState{
               .session_id = 9102U, .next_in_seq = 4U, .next_out_seq = 5U, .active = true })
             .ok());
 
@@ -562,7 +562,7 @@ TEST_CASE("durable store reset only removes target session", "[store-recovery]")
   REQUIRE(preserved.ok());
   REQUIRE(preserved.value().size() == 1U);
   REQUIRE(preserved.value().front().body_start_offset == 10U);
-  REQUIRE(store.LoadRecoveryState(9101U).status().code() == fastfix::base::ErrorCode::kNotFound);
+  REQUIRE(store.LoadRecoveryState(9101U).status().code() == nimble::base::ErrorCode::kNotFound);
   auto preserved_recovery = store.LoadRecoveryState(9102U);
   REQUIRE(preserved_recovery.ok());
   REQUIRE(preserved_recovery.value().next_out_seq == 5U);
@@ -572,14 +572,14 @@ TEST_CASE("durable store reset only removes target session", "[store-recovery]")
 
 TEST_CASE("mmap store repairs committed size after incomplete tail", "[store-recovery]")
 {
-  const auto path = std::filesystem::temp_directory_path() / "fastfix-mmap-store-tail-test.dat";
+  const auto path = std::filesystem::temp_directory_path() / "nimblefix-mmap-store-tail-test.dat";
   std::filesystem::remove(path);
 
   {
-    fastfix::store::MmapSessionStore store(path);
+    nimble::store::MmapSessionStore store(path);
     REQUIRE(store.Open().ok());
     REQUIRE(store
-              .SaveOutbound(fastfix::store::MessageRecord{
+              .SaveOutbound(nimble::store::MessageRecord{
                 .session_id = 9201U,
                 .seq_num = 1U,
                 .timestamp_ns = 100U,
@@ -595,7 +595,7 @@ TEST_CASE("mmap store repairs committed size after incomplete tail", "[store-rec
   WriteUint64AtOffset(path, 16U, original_size + 32U);
 
   {
-    fastfix::store::MmapSessionStore store(path);
+    nimble::store::MmapSessionStore store(path);
     REQUIRE(store.Open().ok());
     REQUIRE(std::filesystem::file_size(path) == original_size);
     auto loaded = store.LoadOutboundRange(9201U, 1U, 1U);
@@ -609,14 +609,14 @@ TEST_CASE("mmap store repairs committed size after incomplete tail", "[store-rec
 
 TEST_CASE("mmap store borrowed views survive remap growth", "[store-recovery]")
 {
-  const auto path = std::filesystem::temp_directory_path() / "fastfix-mmap-store-view-test.dat";
+  const auto path = std::filesystem::temp_directory_path() / "nimblefix-mmap-store-view-test.dat";
   std::filesystem::remove(path);
 
-  fastfix::store::MmapSessionStore store(path);
+  nimble::store::MmapSessionStore store(path);
   REQUIRE(store.Open().ok());
   const auto first_payload = std::string(256U, 'A');
   REQUIRE(store
-            .SaveOutbound(fastfix::store::MessageRecord{
+            .SaveOutbound(nimble::store::MessageRecord{
               .session_id = 9301U,
               .seq_num = 1U,
               .timestamp_ns = 1U,
@@ -633,7 +633,7 @@ TEST_CASE("mmap store borrowed views survive remap growth", "[store-recovery]")
 
   for (std::uint32_t seq = 2U; seq <= 24U; ++seq) {
     REQUIRE(store
-              .SaveOutbound(fastfix::store::MessageRecord{
+              .SaveOutbound(nimble::store::MessageRecord{
                 .session_id = 9301U,
                 .seq_num = seq,
                 .timestamp_ns = seq,
@@ -652,20 +652,19 @@ TEST_CASE("mmap store borrowed views survive remap growth", "[store-recovery]")
 
 TEST_CASE("durable store truncates uncommitted tail on reopen", "[store-recovery]")
 {
-  const auto root = std::filesystem::temp_directory_path() / "fastfix-durable-store-tail-test";
+  const auto root = std::filesystem::temp_directory_path() / "nimblefix-durable-store-tail-test";
   std::filesystem::remove_all(root);
 
   {
-    fastfix::store::DurableBatchSessionStore store(
-      root,
-      fastfix::store::DurableBatchStoreOptions{
-        .flush_threshold = 1U,
-        .rollover_mode = fastfix::store::DurableStoreRolloverMode::kExternal,
-        .max_archived_segments = 1U,
-      });
+    nimble::store::DurableBatchSessionStore store(root,
+                                                  nimble::store::DurableBatchStoreOptions{
+                                                    .flush_threshold = 1U,
+                                                    .rollover_mode = nimble::store::DurableStoreRolloverMode::kExternal,
+                                                    .max_archived_segments = 1U,
+                                                  });
     REQUIRE(store.Open().ok());
     REQUIRE(store
-              .SaveOutbound(fastfix::store::MessageRecord{
+              .SaveOutbound(nimble::store::MessageRecord{
                 .session_id = 9401U,
                 .seq_num = 1U,
                 .timestamp_ns = 1U,
@@ -682,13 +681,12 @@ TEST_CASE("durable store truncates uncommitted tail on reopen", "[store-recovery
   REQUIRE(std::filesystem::file_size(active_log) == committed_size + 4U);
 
   {
-    fastfix::store::DurableBatchSessionStore store(
-      root,
-      fastfix::store::DurableBatchStoreOptions{
-        .flush_threshold = 1U,
-        .rollover_mode = fastfix::store::DurableStoreRolloverMode::kExternal,
-        .max_archived_segments = 1U,
-      });
+    nimble::store::DurableBatchSessionStore store(root,
+                                                  nimble::store::DurableBatchStoreOptions{
+                                                    .flush_threshold = 1U,
+                                                    .rollover_mode = nimble::store::DurableStoreRolloverMode::kExternal,
+                                                    .max_archived_segments = 1U,
+                                                  });
     REQUIRE(store.Open().ok());
     REQUIRE(std::filesystem::file_size(active_log) == committed_size);
     auto loaded = store.LoadOutboundRange(9401U, 1U, 1U);
@@ -708,15 +706,15 @@ TEST_CASE("durable store kLocalTime rollover", "[store-recovery]")
   constexpr std::int32_t kUtcPlus8 = 28800;
   constexpr std::uint64_t kUtcMidnightLocal = kDay - static_cast<std::uint64_t>(kUtcPlus8) * 1'000'000'000ULL;
 
-  const auto local_root = std::filesystem::temp_directory_path() / "fastfix-durable-store-localtime-test";
+  const auto local_root = std::filesystem::temp_directory_path() / "nimblefix-durable-store-localtime-test";
   std::filesystem::remove_all(local_root);
 
   {
-    fastfix::store::DurableBatchSessionStore store(
+    nimble::store::DurableBatchSessionStore store(
       local_root,
-      fastfix::store::DurableBatchStoreOptions{
+      nimble::store::DurableBatchStoreOptions{
         .flush_threshold = 1U,
-        .rollover_mode = fastfix::store::DurableStoreRolloverMode::kLocalTime,
+        .rollover_mode = nimble::store::DurableStoreRolloverMode::kLocalTime,
         .max_archived_segments = 2U,
         .local_utc_offset_seconds = kUtcPlus8,
         .use_system_timezone = false,
@@ -726,7 +724,7 @@ TEST_CASE("durable store kLocalTime rollover", "[store-recovery]")
     // Message 1: UTC 15:00 of day 0 → local day 0 (15:00 + 8h = 23:00 local day
     // 0)
     REQUIRE(store
-              .SaveOutbound(fastfix::store::MessageRecord{
+              .SaveOutbound(nimble::store::MessageRecord{
                 .session_id = 300U,
                 .seq_num = 1U,
                 .timestamp_ns = kUtcMidnightLocal - 3'600'000'000'000ULL, // 15:00 UTC
@@ -737,7 +735,7 @@ TEST_CASE("durable store kLocalTime rollover", "[store-recovery]")
 
     // Message 2: UTC 15:59 of day 0 → local day 0 (23:59 local)
     REQUIRE(store
-              .SaveOutbound(fastfix::store::MessageRecord{
+              .SaveOutbound(nimble::store::MessageRecord{
                 .session_id = 300U,
                 .seq_num = 2U,
                 .timestamp_ns = kUtcMidnightLocal - 60'000'000'000ULL, // 15:59 UTC
@@ -749,7 +747,7 @@ TEST_CASE("durable store kLocalTime rollover", "[store-recovery]")
     // Message 3: UTC 16:01 of day 0 → local day 1 (00:01 local next day) →
     // triggers rollover
     REQUIRE(store
-              .SaveOutbound(fastfix::store::MessageRecord{
+              .SaveOutbound(nimble::store::MessageRecord{
                 .session_id = 300U,
                 .seq_num = 3U,
                 .timestamp_ns = kUtcMidnightLocal + 60'000'000'000ULL, // 16:01 UTC
@@ -759,7 +757,7 @@ TEST_CASE("durable store kLocalTime rollover", "[store-recovery]")
               .ok());
 
     REQUIRE(store
-              .SaveRecoveryState(fastfix::store::SessionRecoveryState{
+              .SaveRecoveryState(nimble::store::SessionRecoveryState{
                 .session_id = 300U,
                 .next_in_seq = 1U,
                 .next_out_seq = 4U,
@@ -773,11 +771,11 @@ TEST_CASE("durable store kLocalTime rollover", "[store-recovery]")
 
   // Verify: archived segment should contain seq 1 & 2, active segment has seq 3
   {
-    fastfix::store::DurableBatchSessionStore store(
+    nimble::store::DurableBatchSessionStore store(
       local_root,
-      fastfix::store::DurableBatchStoreOptions{
+      nimble::store::DurableBatchStoreOptions{
         .flush_threshold = 1U,
-        .rollover_mode = fastfix::store::DurableStoreRolloverMode::kLocalTime,
+        .rollover_mode = nimble::store::DurableStoreRolloverMode::kLocalTime,
         .max_archived_segments = 2U,
         .local_utc_offset_seconds = kUtcPlus8,
         .use_system_timezone = false,
@@ -803,15 +801,15 @@ TEST_CASE("durable store kLocalTime rollover", "[store-recovery]")
 
 TEST_CASE("durable store kLocalTime with system timezone", "[store-recovery]")
 {
-  const auto systz_root = std::filesystem::temp_directory_path() / "fastfix-durable-store-systz-test";
+  const auto systz_root = std::filesystem::temp_directory_path() / "nimblefix-durable-store-systz-test";
   std::filesystem::remove_all(systz_root);
 
   {
-    fastfix::store::DurableBatchSessionStore store(
+    nimble::store::DurableBatchSessionStore store(
       systz_root,
-      fastfix::store::DurableBatchStoreOptions{
+      nimble::store::DurableBatchStoreOptions{
         .flush_threshold = 2U,
-        .rollover_mode = fastfix::store::DurableStoreRolloverMode::kLocalTime,
+        .rollover_mode = nimble::store::DurableStoreRolloverMode::kLocalTime,
         .max_archived_segments = 1U,
         .local_utc_offset_seconds = 0,
         .use_system_timezone = true,
@@ -819,7 +817,7 @@ TEST_CASE("durable store kLocalTime with system timezone", "[store-recovery]")
     REQUIRE(store.Open().ok());
 
     REQUIRE(store
-              .SaveOutbound(fastfix::store::MessageRecord{
+              .SaveOutbound(nimble::store::MessageRecord{
                 .session_id = 301U,
                 .seq_num = 1U,
                 .timestamp_ns = 1'000'000'000ULL,
@@ -831,11 +829,11 @@ TEST_CASE("durable store kLocalTime with system timezone", "[store-recovery]")
   }
 
   {
-    fastfix::store::DurableBatchSessionStore store(
+    nimble::store::DurableBatchSessionStore store(
       systz_root,
-      fastfix::store::DurableBatchStoreOptions{
+      nimble::store::DurableBatchStoreOptions{
         .flush_threshold = 2U,
-        .rollover_mode = fastfix::store::DurableStoreRolloverMode::kLocalTime,
+        .rollover_mode = nimble::store::DurableStoreRolloverMode::kLocalTime,
         .max_archived_segments = 1U,
         .local_utc_offset_seconds = 0,
         .use_system_timezone = true,
@@ -852,22 +850,21 @@ TEST_CASE("durable store kLocalTime with system timezone", "[store-recovery]")
 
 TEST_CASE("inbound message recovery", "[store-recovery]")
 {
-  const auto root = std::filesystem::temp_directory_path() / "fastfix-durable-inbound-recovery-test";
+  const auto root = std::filesystem::temp_directory_path() / "nimblefix-durable-inbound-recovery-test";
   std::filesystem::remove_all(root);
 
   {
-    fastfix::store::DurableBatchSessionStore store(
-      root,
-      fastfix::store::DurableBatchStoreOptions{
-        .flush_threshold = 1U,
-        .rollover_mode = fastfix::store::DurableStoreRolloverMode::kExternal,
-        .max_archived_segments = 2U,
-      });
+    nimble::store::DurableBatchSessionStore store(root,
+                                                  nimble::store::DurableBatchStoreOptions{
+                                                    .flush_threshold = 1U,
+                                                    .rollover_mode = nimble::store::DurableStoreRolloverMode::kExternal,
+                                                    .max_archived_segments = 2U,
+                                                  });
     REQUIRE(store.Open().ok());
 
     // Save outbound messages
     REQUIRE(store
-              .SaveOutbound(fastfix::store::MessageRecord{
+              .SaveOutbound(nimble::store::MessageRecord{
                 .session_id = 500U,
                 .seq_num = 1U,
                 .timestamp_ns = 100U,
@@ -876,7 +873,7 @@ TEST_CASE("inbound message recovery", "[store-recovery]")
               })
               .ok());
     REQUIRE(store
-              .SaveOutbound(fastfix::store::MessageRecord{
+              .SaveOutbound(nimble::store::MessageRecord{
                 .session_id = 500U,
                 .seq_num = 2U,
                 .timestamp_ns = 200U,
@@ -887,7 +884,7 @@ TEST_CASE("inbound message recovery", "[store-recovery]")
 
     // Save inbound messages
     REQUIRE(store
-              .SaveInbound(fastfix::store::MessageRecord{
+              .SaveInbound(nimble::store::MessageRecord{
                 .session_id = 500U,
                 .seq_num = 1U,
                 .timestamp_ns = 150U,
@@ -896,7 +893,7 @@ TEST_CASE("inbound message recovery", "[store-recovery]")
               })
               .ok());
     REQUIRE(store
-              .SaveInbound(fastfix::store::MessageRecord{
+              .SaveInbound(nimble::store::MessageRecord{
                 .session_id = 500U,
                 .seq_num = 2U,
                 .timestamp_ns = 250U,
@@ -905,7 +902,7 @@ TEST_CASE("inbound message recovery", "[store-recovery]")
               })
               .ok());
     REQUIRE(store
-              .SaveInbound(fastfix::store::MessageRecord{
+              .SaveInbound(nimble::store::MessageRecord{
                 .session_id = 500U,
                 .seq_num = 3U,
                 .timestamp_ns = 350U,
@@ -916,7 +913,7 @@ TEST_CASE("inbound message recovery", "[store-recovery]")
 
     // Recovery state reflects 3 received inbound messages → next expected = 4
     REQUIRE(store
-              .SaveRecoveryState(fastfix::store::SessionRecoveryState{
+              .SaveRecoveryState(nimble::store::SessionRecoveryState{
                 .session_id = 500U,
                 .next_in_seq = 4U,
                 .next_out_seq = 3U,
@@ -930,13 +927,12 @@ TEST_CASE("inbound message recovery", "[store-recovery]")
 
   // Reopen and verify both outbound data and inbound recovery state survived
   {
-    fastfix::store::DurableBatchSessionStore store(
-      root,
-      fastfix::store::DurableBatchStoreOptions{
-        .flush_threshold = 1U,
-        .rollover_mode = fastfix::store::DurableStoreRolloverMode::kExternal,
-        .max_archived_segments = 2U,
-      });
+    nimble::store::DurableBatchSessionStore store(root,
+                                                  nimble::store::DurableBatchStoreOptions{
+                                                    .flush_threshold = 1U,
+                                                    .rollover_mode = nimble::store::DurableStoreRolloverMode::kExternal,
+                                                    .max_archived_segments = 2U,
+                                                  });
     REQUIRE(store.Open().ok());
 
     // Outbound messages are loadable
@@ -961,22 +957,21 @@ TEST_CASE("inbound message recovery", "[store-recovery]")
 
 TEST_CASE("inbound recovery sequence tracking", "[store-recovery]")
 {
-  const auto root = std::filesystem::temp_directory_path() / "fastfix-durable-inbound-seq-tracking-test";
+  const auto root = std::filesystem::temp_directory_path() / "nimblefix-durable-inbound-seq-tracking-test";
   std::filesystem::remove_all(root);
 
   // Phase 1: initial session with some inbound/outbound
   {
-    fastfix::store::DurableBatchSessionStore store(
-      root,
-      fastfix::store::DurableBatchStoreOptions{
-        .flush_threshold = 2U,
-        .rollover_mode = fastfix::store::DurableStoreRolloverMode::kExternal,
-        .max_archived_segments = 2U,
-      });
+    nimble::store::DurableBatchSessionStore store(root,
+                                                  nimble::store::DurableBatchStoreOptions{
+                                                    .flush_threshold = 2U,
+                                                    .rollover_mode = nimble::store::DurableStoreRolloverMode::kExternal,
+                                                    .max_archived_segments = 2U,
+                                                  });
     REQUIRE(store.Open().ok());
 
     REQUIRE(store
-              .SaveInbound(fastfix::store::MessageRecord{
+              .SaveInbound(nimble::store::MessageRecord{
                 .session_id = 501U,
                 .seq_num = 1U,
                 .timestamp_ns = 10U,
@@ -985,7 +980,7 @@ TEST_CASE("inbound recovery sequence tracking", "[store-recovery]")
               })
               .ok());
     REQUIRE(store
-              .SaveRecoveryState(fastfix::store::SessionRecoveryState{
+              .SaveRecoveryState(nimble::store::SessionRecoveryState{
                 .session_id = 501U,
                 .next_in_seq = 2U,
                 .next_out_seq = 1U,
@@ -999,13 +994,12 @@ TEST_CASE("inbound recovery sequence tracking", "[store-recovery]")
 
   // Phase 2: reopen, receive more inbound, update recovery state
   {
-    fastfix::store::DurableBatchSessionStore store(
-      root,
-      fastfix::store::DurableBatchStoreOptions{
-        .flush_threshold = 2U,
-        .rollover_mode = fastfix::store::DurableStoreRolloverMode::kExternal,
-        .max_archived_segments = 2U,
-      });
+    nimble::store::DurableBatchSessionStore store(root,
+                                                  nimble::store::DurableBatchStoreOptions{
+                                                    .flush_threshold = 2U,
+                                                    .rollover_mode = nimble::store::DurableStoreRolloverMode::kExternal,
+                                                    .max_archived_segments = 2U,
+                                                  });
     REQUIRE(store.Open().ok());
 
     // Verify phase 1 state survived
@@ -1015,7 +1009,7 @@ TEST_CASE("inbound recovery sequence tracking", "[store-recovery]")
 
     // More inbound messages arrive
     REQUIRE(store
-              .SaveInbound(fastfix::store::MessageRecord{
+              .SaveInbound(nimble::store::MessageRecord{
                 .session_id = 501U,
                 .seq_num = 2U,
                 .timestamp_ns = 20U,
@@ -1024,7 +1018,7 @@ TEST_CASE("inbound recovery sequence tracking", "[store-recovery]")
               })
               .ok());
     REQUIRE(store
-              .SaveInbound(fastfix::store::MessageRecord{
+              .SaveInbound(nimble::store::MessageRecord{
                 .session_id = 501U,
                 .seq_num = 3U,
                 .timestamp_ns = 30U,
@@ -1033,7 +1027,7 @@ TEST_CASE("inbound recovery sequence tracking", "[store-recovery]")
               })
               .ok());
     REQUIRE(store
-              .SaveRecoveryState(fastfix::store::SessionRecoveryState{
+              .SaveRecoveryState(nimble::store::SessionRecoveryState{
                 .session_id = 501U,
                 .next_in_seq = 4U,
                 .next_out_seq = 1U,
@@ -1047,13 +1041,12 @@ TEST_CASE("inbound recovery sequence tracking", "[store-recovery]")
 
   // Phase 3: reopen again, verify cumulative inbound tracking
   {
-    fastfix::store::DurableBatchSessionStore store(
-      root,
-      fastfix::store::DurableBatchStoreOptions{
-        .flush_threshold = 2U,
-        .rollover_mode = fastfix::store::DurableStoreRolloverMode::kExternal,
-        .max_archived_segments = 2U,
-      });
+    nimble::store::DurableBatchSessionStore store(root,
+                                                  nimble::store::DurableBatchStoreOptions{
+                                                    .flush_threshold = 2U,
+                                                    .rollover_mode = nimble::store::DurableStoreRolloverMode::kExternal,
+                                                    .max_archived_segments = 2U,
+                                                  });
     REQUIRE(store.Open().ok());
 
     auto recovery = store.LoadRecoveryState(501U);
@@ -1069,25 +1062,25 @@ TEST_CASE("inbound recovery sequence tracking", "[store-recovery]")
 
 TEST_CASE("multi session concurrent recovery", "[store-recovery]")
 {
-  const auto root_a = std::filesystem::temp_directory_path() / "fastfix-multi-session-recovery-a";
-  const auto root_b = std::filesystem::temp_directory_path() / "fastfix-multi-session-recovery-b";
+  const auto root_a = std::filesystem::temp_directory_path() / "nimblefix-multi-session-recovery-a";
+  const auto root_b = std::filesystem::temp_directory_path() / "nimblefix-multi-session-recovery-b";
   std::filesystem::remove_all(root_a);
   std::filesystem::remove_all(root_b);
 
   // Create two stores simultaneously and populate them
   {
-    fastfix::store::DurableBatchSessionStore store_a(
+    nimble::store::DurableBatchSessionStore store_a(
       root_a,
-      fastfix::store::DurableBatchStoreOptions{
+      nimble::store::DurableBatchStoreOptions{
         .flush_threshold = 1U,
-        .rollover_mode = fastfix::store::DurableStoreRolloverMode::kExternal,
+        .rollover_mode = nimble::store::DurableStoreRolloverMode::kExternal,
         .max_archived_segments = 2U,
       });
-    fastfix::store::DurableBatchSessionStore store_b(
+    nimble::store::DurableBatchSessionStore store_b(
       root_b,
-      fastfix::store::DurableBatchStoreOptions{
+      nimble::store::DurableBatchStoreOptions{
         .flush_threshold = 1U,
-        .rollover_mode = fastfix::store::DurableStoreRolloverMode::kExternal,
+        .rollover_mode = nimble::store::DurableStoreRolloverMode::kExternal,
         .max_archived_segments = 2U,
       });
 
@@ -1096,7 +1089,7 @@ TEST_CASE("multi session concurrent recovery", "[store-recovery]")
 
     // Session A: outbound seq 1-2, inbound seq 1
     REQUIRE(store_a
-              .SaveOutbound(fastfix::store::MessageRecord{
+              .SaveOutbound(nimble::store::MessageRecord{
                 .session_id = 600U,
                 .seq_num = 1U,
                 .timestamp_ns = 100U,
@@ -1105,7 +1098,7 @@ TEST_CASE("multi session concurrent recovery", "[store-recovery]")
               })
               .ok());
     REQUIRE(store_a
-              .SaveOutbound(fastfix::store::MessageRecord{
+              .SaveOutbound(nimble::store::MessageRecord{
                 .session_id = 600U,
                 .seq_num = 2U,
                 .timestamp_ns = 200U,
@@ -1114,7 +1107,7 @@ TEST_CASE("multi session concurrent recovery", "[store-recovery]")
               })
               .ok());
     REQUIRE(store_a
-              .SaveInbound(fastfix::store::MessageRecord{
+              .SaveInbound(nimble::store::MessageRecord{
                 .session_id = 600U,
                 .seq_num = 1U,
                 .timestamp_ns = 150U,
@@ -1123,7 +1116,7 @@ TEST_CASE("multi session concurrent recovery", "[store-recovery]")
               })
               .ok());
     REQUIRE(store_a
-              .SaveRecoveryState(fastfix::store::SessionRecoveryState{
+              .SaveRecoveryState(nimble::store::SessionRecoveryState{
                 .session_id = 600U,
                 .next_in_seq = 2U,
                 .next_out_seq = 3U,
@@ -1135,7 +1128,7 @@ TEST_CASE("multi session concurrent recovery", "[store-recovery]")
 
     // Session B: outbound seq 1-3, inbound seq 1-2
     REQUIRE(store_b
-              .SaveOutbound(fastfix::store::MessageRecord{
+              .SaveOutbound(nimble::store::MessageRecord{
                 .session_id = 700U,
                 .seq_num = 1U,
                 .timestamp_ns = 1000U,
@@ -1144,7 +1137,7 @@ TEST_CASE("multi session concurrent recovery", "[store-recovery]")
               })
               .ok());
     REQUIRE(store_b
-              .SaveOutbound(fastfix::store::MessageRecord{
+              .SaveOutbound(nimble::store::MessageRecord{
                 .session_id = 700U,
                 .seq_num = 2U,
                 .timestamp_ns = 2000U,
@@ -1153,7 +1146,7 @@ TEST_CASE("multi session concurrent recovery", "[store-recovery]")
               })
               .ok());
     REQUIRE(store_b
-              .SaveOutbound(fastfix::store::MessageRecord{
+              .SaveOutbound(nimble::store::MessageRecord{
                 .session_id = 700U,
                 .seq_num = 3U,
                 .timestamp_ns = 3000U,
@@ -1162,7 +1155,7 @@ TEST_CASE("multi session concurrent recovery", "[store-recovery]")
               })
               .ok());
     REQUIRE(store_b
-              .SaveInbound(fastfix::store::MessageRecord{
+              .SaveInbound(nimble::store::MessageRecord{
                 .session_id = 700U,
                 .seq_num = 1U,
                 .timestamp_ns = 1500U,
@@ -1171,7 +1164,7 @@ TEST_CASE("multi session concurrent recovery", "[store-recovery]")
               })
               .ok());
     REQUIRE(store_b
-              .SaveInbound(fastfix::store::MessageRecord{
+              .SaveInbound(nimble::store::MessageRecord{
                 .session_id = 700U,
                 .seq_num = 2U,
                 .timestamp_ns = 2500U,
@@ -1180,7 +1173,7 @@ TEST_CASE("multi session concurrent recovery", "[store-recovery]")
               })
               .ok());
     REQUIRE(store_b
-              .SaveRecoveryState(fastfix::store::SessionRecoveryState{
+              .SaveRecoveryState(nimble::store::SessionRecoveryState{
                 .session_id = 700U,
                 .next_in_seq = 3U,
                 .next_out_seq = 4U,
@@ -1196,18 +1189,18 @@ TEST_CASE("multi session concurrent recovery", "[store-recovery]")
 
   // Reopen both concurrently and verify independent recovery
   {
-    fastfix::store::DurableBatchSessionStore store_a(
+    nimble::store::DurableBatchSessionStore store_a(
       root_a,
-      fastfix::store::DurableBatchStoreOptions{
+      nimble::store::DurableBatchStoreOptions{
         .flush_threshold = 1U,
-        .rollover_mode = fastfix::store::DurableStoreRolloverMode::kExternal,
+        .rollover_mode = nimble::store::DurableStoreRolloverMode::kExternal,
         .max_archived_segments = 2U,
       });
-    fastfix::store::DurableBatchSessionStore store_b(
+    nimble::store::DurableBatchSessionStore store_b(
       root_b,
-      fastfix::store::DurableBatchStoreOptions{
+      nimble::store::DurableBatchStoreOptions{
         .flush_threshold = 1U,
-        .rollover_mode = fastfix::store::DurableStoreRolloverMode::kExternal,
+        .rollover_mode = nimble::store::DurableStoreRolloverMode::kExternal,
         .max_archived_segments = 2U,
       });
 
@@ -1247,7 +1240,7 @@ TEST_CASE("multi session concurrent recovery", "[store-recovery]")
     REQUIRE(cross_a.value().empty());
     auto cross_rec_a = store_a.LoadRecoveryState(700U);
     REQUIRE(!cross_rec_a.ok());
-    REQUIRE(cross_rec_a.status().code() == fastfix::base::ErrorCode::kNotFound);
+    REQUIRE(cross_rec_a.status().code() == nimble::base::ErrorCode::kNotFound);
 
     // Session B's store should NOT have session A's data
     auto cross_b = store_b.LoadOutboundRange(600U, 1U, 2U);
@@ -1255,7 +1248,7 @@ TEST_CASE("multi session concurrent recovery", "[store-recovery]")
     REQUIRE(cross_b.value().empty());
     auto cross_rec_b = store_b.LoadRecoveryState(600U);
     REQUIRE(!cross_rec_b.ok());
-    REQUIRE(cross_rec_b.status().code() == fastfix::base::ErrorCode::kNotFound);
+    REQUIRE(cross_rec_b.status().code() == nimble::base::ErrorCode::kNotFound);
   }
 
   std::filesystem::remove_all(root_a);
@@ -1265,22 +1258,21 @@ TEST_CASE("multi session concurrent recovery", "[store-recovery]")
 TEST_CASE("multi session recovery isolation", "[store-recovery]")
 {
   // Two sessions in the SAME store root but with different session_ids
-  const auto root = std::filesystem::temp_directory_path() / "fastfix-multi-session-isolation-test";
+  const auto root = std::filesystem::temp_directory_path() / "nimblefix-multi-session-isolation-test";
   std::filesystem::remove_all(root);
 
   {
-    fastfix::store::DurableBatchSessionStore store(
-      root,
-      fastfix::store::DurableBatchStoreOptions{
-        .flush_threshold = 1U,
-        .rollover_mode = fastfix::store::DurableStoreRolloverMode::kExternal,
-        .max_archived_segments = 2U,
-      });
+    nimble::store::DurableBatchSessionStore store(root,
+                                                  nimble::store::DurableBatchStoreOptions{
+                                                    .flush_threshold = 1U,
+                                                    .rollover_mode = nimble::store::DurableStoreRolloverMode::kExternal,
+                                                    .max_archived_segments = 2U,
+                                                  });
     REQUIRE(store.Open().ok());
 
     // Session 800: outbound seq 1-2
     REQUIRE(store
-              .SaveOutbound(fastfix::store::MessageRecord{
+              .SaveOutbound(nimble::store::MessageRecord{
                 .session_id = 800U,
                 .seq_num = 1U,
                 .timestamp_ns = 10U,
@@ -1289,7 +1281,7 @@ TEST_CASE("multi session recovery isolation", "[store-recovery]")
               })
               .ok());
     REQUIRE(store
-              .SaveOutbound(fastfix::store::MessageRecord{
+              .SaveOutbound(nimble::store::MessageRecord{
                 .session_id = 800U,
                 .seq_num = 2U,
                 .timestamp_ns = 20U,
@@ -1298,7 +1290,7 @@ TEST_CASE("multi session recovery isolation", "[store-recovery]")
               })
               .ok());
     REQUIRE(store
-              .SaveRecoveryState(fastfix::store::SessionRecoveryState{
+              .SaveRecoveryState(nimble::store::SessionRecoveryState{
                 .session_id = 800U,
                 .next_in_seq = 5U,
                 .next_out_seq = 3U,
@@ -1310,7 +1302,7 @@ TEST_CASE("multi session recovery isolation", "[store-recovery]")
 
     // Session 801: outbound seq 1
     REQUIRE(store
-              .SaveOutbound(fastfix::store::MessageRecord{
+              .SaveOutbound(nimble::store::MessageRecord{
                 .session_id = 801U,
                 .seq_num = 1U,
                 .timestamp_ns = 30U,
@@ -1319,7 +1311,7 @@ TEST_CASE("multi session recovery isolation", "[store-recovery]")
               })
               .ok());
     REQUIRE(store
-              .SaveRecoveryState(fastfix::store::SessionRecoveryState{
+              .SaveRecoveryState(nimble::store::SessionRecoveryState{
                 .session_id = 801U,
                 .next_in_seq = 10U,
                 .next_out_seq = 2U,
@@ -1332,13 +1324,12 @@ TEST_CASE("multi session recovery isolation", "[store-recovery]")
   }
 
   {
-    fastfix::store::DurableBatchSessionStore store(
-      root,
-      fastfix::store::DurableBatchStoreOptions{
-        .flush_threshold = 1U,
-        .rollover_mode = fastfix::store::DurableStoreRolloverMode::kExternal,
-        .max_archived_segments = 2U,
-      });
+    nimble::store::DurableBatchSessionStore store(root,
+                                                  nimble::store::DurableBatchStoreOptions{
+                                                    .flush_threshold = 1U,
+                                                    .rollover_mode = nimble::store::DurableStoreRolloverMode::kExternal,
+                                                    .max_archived_segments = 2U,
+                                                  });
     REQUIRE(store.Open().ok());
 
     // Session 800: recovery is independent
@@ -1374,21 +1365,20 @@ TEST_CASE("multi session recovery isolation", "[store-recovery]")
 
 TEST_CASE("write failure on read-only directory", "[store-recovery]")
 {
-  const auto root = std::filesystem::temp_directory_path() / "fastfix-durable-write-failure-test";
+  const auto root = std::filesystem::temp_directory_path() / "nimblefix-durable-write-failure-test";
   std::filesystem::remove_all(root);
 
   // Create and populate a store
   {
-    fastfix::store::DurableBatchSessionStore store(
-      root,
-      fastfix::store::DurableBatchStoreOptions{
-        .flush_threshold = 1U,
-        .rollover_mode = fastfix::store::DurableStoreRolloverMode::kExternal,
-        .max_archived_segments = 2U,
-      });
+    nimble::store::DurableBatchSessionStore store(root,
+                                                  nimble::store::DurableBatchStoreOptions{
+                                                    .flush_threshold = 1U,
+                                                    .rollover_mode = nimble::store::DurableStoreRolloverMode::kExternal,
+                                                    .max_archived_segments = 2U,
+                                                  });
     REQUIRE(store.Open().ok());
     REQUIRE(store
-              .SaveOutbound(fastfix::store::MessageRecord{
+              .SaveOutbound(nimble::store::MessageRecord{
                 .session_id = 900U,
                 .seq_num = 1U,
                 .timestamp_ns = 10U,
@@ -1397,7 +1387,7 @@ TEST_CASE("write failure on read-only directory", "[store-recovery]")
               })
               .ok());
     REQUIRE(store
-              .SaveRecoveryState(fastfix::store::SessionRecoveryState{
+              .SaveRecoveryState(nimble::store::SessionRecoveryState{
                 .session_id = 900U,
                 .next_in_seq = 1U,
                 .next_out_seq = 2U,
@@ -1422,17 +1412,16 @@ TEST_CASE("write failure on read-only directory", "[store-recovery]")
   // Some CI environments run as a privileged user that can still reopen
   // read-only files.
   {
-    fastfix::store::DurableBatchSessionStore store(
-      root,
-      fastfix::store::DurableBatchStoreOptions{
-        .flush_threshold = 1U,
-        .rollover_mode = fastfix::store::DurableStoreRolloverMode::kExternal,
-        .max_archived_segments = 2U,
-      });
+    nimble::store::DurableBatchSessionStore store(root,
+                                                  nimble::store::DurableBatchStoreOptions{
+                                                    .flush_threshold = 1U,
+                                                    .rollover_mode = nimble::store::DurableStoreRolloverMode::kExternal,
+                                                    .max_archived_segments = 2U,
+                                                  });
     const auto status = store.Open();
     if (read_only_blocks_reopen) {
       REQUIRE(!status.ok());
-      REQUIRE(status.code() == fastfix::base::ErrorCode::kIoError);
+      REQUIRE(status.code() == nimble::base::ErrorCode::kIoError);
     } else {
       REQUIRE(status.ok());
     }
@@ -1452,21 +1441,20 @@ TEST_CASE("write failure on read-only directory", "[store-recovery]")
 
 TEST_CASE("write failure recovery", "[store-recovery]")
 {
-  const auto root = std::filesystem::temp_directory_path() / "fastfix-durable-write-recovery-test";
+  const auto root = std::filesystem::temp_directory_path() / "nimblefix-durable-write-recovery-test";
   std::filesystem::remove_all(root);
 
   // Phase 1: create store with known-good data
   {
-    fastfix::store::DurableBatchSessionStore store(
-      root,
-      fastfix::store::DurableBatchStoreOptions{
-        .flush_threshold = 1U,
-        .rollover_mode = fastfix::store::DurableStoreRolloverMode::kExternal,
-        .max_archived_segments = 2U,
-      });
+    nimble::store::DurableBatchSessionStore store(root,
+                                                  nimble::store::DurableBatchStoreOptions{
+                                                    .flush_threshold = 1U,
+                                                    .rollover_mode = nimble::store::DurableStoreRolloverMode::kExternal,
+                                                    .max_archived_segments = 2U,
+                                                  });
     REQUIRE(store.Open().ok());
     REQUIRE(store
-              .SaveOutbound(fastfix::store::MessageRecord{
+              .SaveOutbound(nimble::store::MessageRecord{
                 .session_id = 901U,
                 .seq_num = 1U,
                 .timestamp_ns = 10U,
@@ -1475,7 +1463,7 @@ TEST_CASE("write failure recovery", "[store-recovery]")
               })
               .ok());
     REQUIRE(store
-              .SaveOutbound(fastfix::store::MessageRecord{
+              .SaveOutbound(nimble::store::MessageRecord{
                 .session_id = 901U,
                 .seq_num = 2U,
                 .timestamp_ns = 20U,
@@ -1484,7 +1472,7 @@ TEST_CASE("write failure recovery", "[store-recovery]")
               })
               .ok());
     REQUIRE(store
-              .SaveRecoveryState(fastfix::store::SessionRecoveryState{
+              .SaveRecoveryState(nimble::store::SessionRecoveryState{
                 .session_id = 901U,
                 .next_in_seq = 3U,
                 .next_out_seq = 3U,
@@ -1507,13 +1495,12 @@ TEST_CASE("write failure recovery", "[store-recovery]")
   const bool read_only_blocks_reopen = ReadOnlyFilesBlockReadWriteOpen(root);
 
   {
-    fastfix::store::DurableBatchSessionStore store(
-      root,
-      fastfix::store::DurableBatchStoreOptions{
-        .flush_threshold = 1U,
-        .rollover_mode = fastfix::store::DurableStoreRolloverMode::kExternal,
-        .max_archived_segments = 2U,
-      });
+    nimble::store::DurableBatchSessionStore store(root,
+                                                  nimble::store::DurableBatchStoreOptions{
+                                                    .flush_threshold = 1U,
+                                                    .rollover_mode = nimble::store::DurableStoreRolloverMode::kExternal,
+                                                    .max_archived_segments = 2U,
+                                                  });
     const auto status = store.Open();
     if (read_only_blocks_reopen) {
       REQUIRE(!status.ok());
@@ -1532,13 +1519,12 @@ TEST_CASE("write failure recovery", "[store-recovery]")
   }
 
   {
-    fastfix::store::DurableBatchSessionStore store(
-      root,
-      fastfix::store::DurableBatchStoreOptions{
-        .flush_threshold = 1U,
-        .rollover_mode = fastfix::store::DurableStoreRolloverMode::kExternal,
-        .max_archived_segments = 2U,
-      });
+    nimble::store::DurableBatchSessionStore store(root,
+                                                  nimble::store::DurableBatchStoreOptions{
+                                                    .flush_threshold = 1U,
+                                                    .rollover_mode = nimble::store::DurableStoreRolloverMode::kExternal,
+                                                    .max_archived_segments = 2U,
+                                                  });
     REQUIRE(store.Open().ok());
 
     auto loaded = store.LoadOutboundRange(901U, 1U, 2U);

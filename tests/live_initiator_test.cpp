@@ -12,19 +12,19 @@
 #include <unordered_set>
 #include <vector>
 
-#include "fastfix/codec/fix_tags.h"
-#include "fastfix/runtime/application.h"
-#include "fastfix/runtime/engine.h"
-#include "fastfix/runtime/live_initiator.h"
-#include "fastfix/session/admin_protocol.h"
-#include "fastfix/store/memory_store.h"
-#include "fastfix/transport/tcp_transport.h"
+#include "nimblefix/codec/fix_tags.h"
+#include "nimblefix/runtime/application.h"
+#include "nimblefix/runtime/engine.h"
+#include "nimblefix/runtime/live_initiator.h"
+#include "nimblefix/session/admin_protocol.h"
+#include "nimblefix/store/memory_store.h"
+#include "nimblefix/transport/tcp_transport.h"
 
 #include "test_support.h"
 
 namespace {
 
-using namespace fastfix::codec::tags;
+using namespace nimble::codec::tags;
 
 auto
 NowNs() -> std::uint64_t
@@ -34,9 +34,9 @@ NowNs() -> std::uint64_t
 }
 
 auto
-BuildInitiatorMessage() -> fastfix::message::Message
+BuildInitiatorMessage() -> nimble::message::Message
 {
-  fastfix::message::MessageBuilder builder("D");
+  nimble::message::MessageBuilder builder("D");
   builder.set_string(kMsgType, "D");
   auto party = builder.add_group_entry(kNoPartyIDs);
   party.set_string(kPartyID, "INITIATOR-PARTY").set_char(kPartyIDSource, 'D').set_int(kPartyRole, 3);
@@ -44,30 +44,30 @@ BuildInitiatorMessage() -> fastfix::message::Message
 }
 
 auto
-ValidateInitiatorEcho(fastfix::message::MessageView message) -> fastfix::base::Status
+ValidateInitiatorEcho(nimble::message::MessageView message) -> nimble::base::Status
 {
   const auto group = message.group(kNoPartyIDs);
   if (!group.has_value() || group->size() != 1U ||
       (*group)[0].get_string(kPartyID) != std::optional<std::string_view>{ "INITIATOR-PARTY" }) {
-    return fastfix::base::Status::InvalidArgument("runtime initiator application received an invalid echo");
+    return nimble::base::Status::InvalidArgument("runtime initiator application received an invalid echo");
   }
-  return fastfix::base::Status::Ok();
+  return nimble::base::Status::Ok();
 }
 
 auto
-RunAcceptorEchoSession(fastfix::transport::TcpAcceptor acceptor_socket,
-                       fastfix::profile::NormalizedDictionaryView dictionary,
+RunAcceptorEchoSession(nimble::transport::TcpAcceptor acceptor_socket,
+                       nimble::profile::NormalizedDictionaryView dictionary,
                        std::uint64_t session_id,
                        std::string sender_comp_id,
-                       std::string target_comp_id) -> fastfix::base::Status
+                       std::string target_comp_id) -> nimble::base::Status
 {
-  fastfix::store::MemorySessionStore store;
-  fastfix::session::AdminProtocol protocol(
-    fastfix::session::AdminProtocolConfig{
+  nimble::store::MemorySessionStore store;
+  nimble::session::AdminProtocol protocol(
+    nimble::session::AdminProtocolConfig{
       .session =
-        fastfix::session::SessionConfig{
+        nimble::session::SessionConfig{
           .session_id = session_id,
-          .key = fastfix::session::SessionKey{ "FIX.4.4", sender_comp_id, target_comp_id },
+          .key = nimble::session::SessionKey{ "FIX.4.4", sender_comp_id, target_comp_id },
           .profile_id = dictionary.profile().header().profile_id,
           .heartbeat_interval_seconds = 1U,
           .is_initiator = false,
@@ -76,7 +76,7 @@ RunAcceptorEchoSession(fastfix::transport::TcpAcceptor acceptor_socket,
       .sender_comp_id = sender_comp_id,
       .target_comp_id = target_comp_id,
       .heartbeat_interval_seconds = 1U,
-      .validation_policy = fastfix::session::ValidationPolicy::Permissive(),
+      .validation_policy = nimble::session::ValidationPolicy::Permissive(),
     },
     dictionary,
     &store);
@@ -132,17 +132,17 @@ RunAcceptorEchoSession(fastfix::transport::TcpAcceptor acceptor_socket,
 }
 
 auto
-RunAcceptorHeartbeatTimerSession(fastfix::transport::TcpAcceptor acceptor_socket,
-                                 fastfix::profile::NormalizedDictionaryView dictionary,
-                                 std::uint64_t session_id) -> fastfix::base::Status
+RunAcceptorHeartbeatTimerSession(nimble::transport::TcpAcceptor acceptor_socket,
+                                 nimble::profile::NormalizedDictionaryView dictionary,
+                                 std::uint64_t session_id) -> nimble::base::Status
 {
-  fastfix::store::MemorySessionStore store;
-  fastfix::session::AdminProtocol protocol(
-    fastfix::session::AdminProtocolConfig{
+  nimble::store::MemorySessionStore store;
+  nimble::session::AdminProtocol protocol(
+    nimble::session::AdminProtocolConfig{
       .session =
-        fastfix::session::SessionConfig{
+        nimble::session::SessionConfig{
           .session_id = session_id,
-          .key = fastfix::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
+          .key = nimble::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
           .profile_id = dictionary.profile().header().profile_id,
           .heartbeat_interval_seconds = 1U,
           .is_initiator = false,
@@ -151,7 +151,7 @@ RunAcceptorHeartbeatTimerSession(fastfix::transport::TcpAcceptor acceptor_socket
       .sender_comp_id = "SELL",
       .target_comp_id = "BUY",
       .heartbeat_interval_seconds = 1U,
-      .validation_policy = fastfix::session::ValidationPolicy::Permissive(),
+      .validation_policy = nimble::session::ValidationPolicy::Permissive(),
     },
     dictionary,
     &store);
@@ -175,7 +175,7 @@ RunAcceptorHeartbeatTimerSession(fastfix::transport::TcpAcceptor acceptor_socket
       return frame.status();
     }
 
-    auto header = fastfix::codec::PeekSessionHeaderView(frame.value());
+    auto header = nimble::codec::PeekSessionHeaderView(frame.value());
     if (!header.ok()) {
       return header.status();
     }
@@ -193,7 +193,7 @@ RunAcceptorHeartbeatTimerSession(fastfix::transport::TcpAcceptor acceptor_socket
     }
 
     if (!sent_logout && header.value().msg_type == "0" &&
-        protocol.session().state() == fastfix::session::SessionState::kActive) {
+        protocol.session().state() == nimble::session::SessionState::kActive) {
       saw_heartbeat = true;
       auto logout = protocol.BeginLogout({}, NowNs());
       if (!logout.ok()) {
@@ -211,9 +211,8 @@ RunAcceptorHeartbeatTimerSession(fastfix::transport::TcpAcceptor acceptor_socket
     }
 
     if (!saw_heartbeat) {
-      return fastfix::base::Status::InvalidArgument(
-        "live initiator did not emit heartbeat before the long poll timeout "
-        "elapsed");
+      return nimble::base::Status::InvalidArgument("live initiator did not emit heartbeat before the long poll timeout "
+                                                   "elapsed");
     }
 
     auto close_status = protocol.OnTransportClosed();
@@ -223,17 +222,17 @@ RunAcceptorHeartbeatTimerSession(fastfix::transport::TcpAcceptor acceptor_socket
 }
 
 auto
-RunAcceptorAwaitLogoutSession(fastfix::transport::TcpAcceptor acceptor_socket,
-                              fastfix::profile::NormalizedDictionaryView dictionary,
-                              std::uint64_t session_id) -> fastfix::base::Status
+RunAcceptorAwaitLogoutSession(nimble::transport::TcpAcceptor acceptor_socket,
+                              nimble::profile::NormalizedDictionaryView dictionary,
+                              std::uint64_t session_id) -> nimble::base::Status
 {
-  fastfix::store::MemorySessionStore store;
-  fastfix::session::AdminProtocol protocol(
-    fastfix::session::AdminProtocolConfig{
+  nimble::store::MemorySessionStore store;
+  nimble::session::AdminProtocol protocol(
+    nimble::session::AdminProtocolConfig{
       .session =
-        fastfix::session::SessionConfig{
+        nimble::session::SessionConfig{
           .session_id = session_id,
-          .key = fastfix::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
+          .key = nimble::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
           .profile_id = dictionary.profile().header().profile_id,
           .heartbeat_interval_seconds = 30U,
           .is_initiator = false,
@@ -242,7 +241,7 @@ RunAcceptorAwaitLogoutSession(fastfix::transport::TcpAcceptor acceptor_socket,
       .sender_comp_id = "SELL",
       .target_comp_id = "BUY",
       .heartbeat_interval_seconds = 30U,
-      .validation_policy = fastfix::session::ValidationPolicy::Permissive(),
+      .validation_policy = nimble::session::ValidationPolicy::Permissive(),
     },
     dictionary,
     &store);
@@ -266,7 +265,7 @@ RunAcceptorAwaitLogoutSession(fastfix::transport::TcpAcceptor acceptor_socket,
       return frame.status();
     }
 
-    auto header = fastfix::codec::PeekSessionHeaderView(frame.value());
+    auto header = nimble::codec::PeekSessionHeaderView(frame.value());
     if (!header.ok()) {
       return header.status();
     }
@@ -294,8 +293,8 @@ RunAcceptorAwaitLogoutSession(fastfix::transport::TcpAcceptor acceptor_socket,
     }
 
     if (!saw_logout) {
-      return fastfix::base::Status::InvalidArgument("live initiator did not wake promptly for an externally requested "
-                                                    "logout");
+      return nimble::base::Status::InvalidArgument("live initiator did not wake promptly for an externally requested "
+                                                   "logout");
     }
 
     auto close_status = protocol.OnTransportClosed();
@@ -304,43 +303,43 @@ RunAcceptorAwaitLogoutSession(fastfix::transport::TcpAcceptor acceptor_socket,
   }
 }
 
-class InitiatorApplication final : public fastfix::runtime::ApplicationCallbacks
+class InitiatorApplication final : public nimble::runtime::ApplicationCallbacks
 {
 public:
-  InitiatorApplication(fastfix::runtime::LiveInitiator* initiator, std::uint64_t session_id)
+  InitiatorApplication(nimble::runtime::LiveInitiator* initiator, std::uint64_t session_id)
     : initiator_(initiator)
     , session_id_(session_id)
   {
   }
 
-  auto BindInitiator(fastfix::runtime::LiveInitiator* initiator) -> void { initiator_ = initiator; }
+  auto BindInitiator(nimble::runtime::LiveInitiator* initiator) -> void { initiator_ = initiator; }
 
-  auto OnSessionEvent(const fastfix::runtime::RuntimeEvent& event) -> fastfix::base::Status override
+  auto OnSessionEvent(const nimble::runtime::RuntimeEvent& event) -> nimble::base::Status override
   {
     ++session_events_;
     auto status = TrackSession(event.handle);
     if (!status.ok()) {
       return status;
     }
-    if (event.handle.session_id() != session_id_ ||
-        event.session_event != fastfix::runtime::SessionEventKind::kActive || sent_application_.exchange(true)) {
-      return fastfix::base::Status::Ok();
+    if (event.handle.session_id() != session_id_ || event.session_event != nimble::runtime::SessionEventKind::kActive ||
+        sent_application_.exchange(true)) {
+      return nimble::base::Status::Ok();
     }
     return event.handle.Send(BuildInitiatorMessage());
   }
 
-  auto OnAdminMessage(const fastfix::runtime::RuntimeEvent& event) -> fastfix::base::Status override
+  auto OnAdminMessage(const nimble::runtime::RuntimeEvent& event) -> nimble::base::Status override
   {
     if (event.handle.session_id() == session_id_) {
       ++admin_events_;
     }
-    return fastfix::base::Status::Ok();
+    return nimble::base::Status::Ok();
   }
 
-  auto OnAppMessage(const fastfix::runtime::RuntimeEvent& event) -> fastfix::base::Status override
+  auto OnAppMessage(const nimble::runtime::RuntimeEvent& event) -> nimble::base::Status override
   {
     if (event.handle.session_id() != session_id_) {
-      return fastfix::base::Status::Ok();
+      return nimble::base::Status::Ok();
     }
 
     ++application_events_;
@@ -361,24 +360,24 @@ public:
 
   [[nodiscard]] auto application_events() const -> std::uint64_t { return application_events_.load(); }
 
-  [[nodiscard]] auto Snapshot() const -> std::optional<fastfix::session::SessionSnapshot>
+  [[nodiscard]] auto Snapshot() const -> std::optional<nimble::session::SessionSnapshot>
   {
     std::lock_guard lock(mutex_);
     return snapshot_;
   }
 
-  auto DrainSubscription() -> fastfix::base::Result<std::vector<fastfix::session::SessionNotification>>
+  auto DrainSubscription() -> nimble::base::Result<std::vector<nimble::session::SessionNotification>>
   {
-    fastfix::session::SessionSubscription subscription;
+    nimble::session::SessionSubscription subscription;
     {
       std::lock_guard lock(mutex_);
       if (!subscription_.valid()) {
-        return fastfix::base::Status::NotFound("initiator runtime subscription was not registered");
+        return nimble::base::Status::NotFound("initiator runtime subscription was not registered");
       }
       subscription = subscription_;
     }
 
-    std::vector<fastfix::session::SessionNotification> notifications;
+    std::vector<nimble::session::SessionNotification> notifications;
     while (true) {
       auto notification = subscription.TryPop();
       if (!notification.ok()) {
@@ -392,7 +391,7 @@ public:
   }
 
 private:
-  auto TrackSession(const fastfix::session::SessionHandle& handle) -> fastfix::base::Status
+  auto TrackSession(const nimble::session::SessionHandle& handle) -> nimble::base::Status
   {
     auto snapshot = handle.Snapshot();
     if (!snapshot.ok()) {
@@ -408,14 +407,14 @@ private:
       }
       subscription_ = std::move(subscription).value();
     }
-    return fastfix::base::Status::Ok();
+    return nimble::base::Status::Ok();
   }
 
-  fastfix::runtime::LiveInitiator* initiator_{ nullptr };
+  nimble::runtime::LiveInitiator* initiator_{ nullptr };
   std::uint64_t session_id_{ 0 };
   mutable std::mutex mutex_;
-  std::optional<fastfix::session::SessionSnapshot> snapshot_;
-  fastfix::session::SessionSubscription subscription_;
+  std::optional<nimble::session::SessionSnapshot> snapshot_;
+  nimble::session::SessionSubscription subscription_;
   std::atomic<bool> sent_application_{ false };
   std::atomic<bool> received_echo_{ false };
   std::atomic<std::uint64_t> session_events_{ 0 };
@@ -423,46 +422,46 @@ private:
   std::atomic<std::uint64_t> application_events_{ 0 };
 };
 
-class MultiInitiatorApplication final : public fastfix::runtime::ApplicationCallbacks
+class MultiInitiatorApplication final : public nimble::runtime::ApplicationCallbacks
 {
 public:
-  MultiInitiatorApplication(fastfix::runtime::LiveInitiator* initiator, std::vector<std::uint64_t> session_ids)
+  MultiInitiatorApplication(nimble::runtime::LiveInitiator* initiator, std::vector<std::uint64_t> session_ids)
     : initiator_(initiator)
     , session_ids_(session_ids.begin(), session_ids.end())
   {
   }
 
-  auto BindInitiator(fastfix::runtime::LiveInitiator* initiator) -> void { initiator_ = initiator; }
+  auto BindInitiator(nimble::runtime::LiveInitiator* initiator) -> void { initiator_ = initiator; }
 
-  auto OnSessionEvent(const fastfix::runtime::RuntimeEvent& event) -> fastfix::base::Status override
+  auto OnSessionEvent(const nimble::runtime::RuntimeEvent& event) -> nimble::base::Status override
   {
     if (!session_ids_.contains(event.handle.session_id()) ||
-        event.session_event != fastfix::runtime::SessionEventKind::kActive) {
-      return fastfix::base::Status::Ok();
+        event.session_event != nimble::runtime::SessionEventKind::kActive) {
+      return nimble::base::Status::Ok();
     }
 
     {
       std::lock_guard lock(mutex_);
       if (!sent_sessions_.insert(event.handle.session_id()).second) {
-        return fastfix::base::Status::Ok();
+        return nimble::base::Status::Ok();
       }
     }
 
     return event.handle.Send(BuildInitiatorMessage());
   }
 
-  auto OnAdminMessage(const fastfix::runtime::RuntimeEvent& event) -> fastfix::base::Status override
+  auto OnAdminMessage(const nimble::runtime::RuntimeEvent& event) -> nimble::base::Status override
   {
     if (session_ids_.contains(event.handle.session_id())) {
       ++admin_events_;
     }
-    return fastfix::base::Status::Ok();
+    return nimble::base::Status::Ok();
   }
 
-  auto OnAppMessage(const fastfix::runtime::RuntimeEvent& event) -> fastfix::base::Status override
+  auto OnAppMessage(const nimble::runtime::RuntimeEvent& event) -> nimble::base::Status override
   {
     if (!session_ids_.contains(event.handle.session_id())) {
-      return fastfix::base::Status::Ok();
+      return nimble::base::Status::Ok();
     }
 
     auto status = ValidateInitiatorEcho(event.message.view());
@@ -489,7 +488,7 @@ public:
   [[nodiscard]] auto application_events() const -> std::uint64_t { return application_events_.load(); }
 
 private:
-  fastfix::runtime::LiveInitiator* initiator_{ nullptr };
+  nimble::runtime::LiveInitiator* initiator_{ nullptr };
   std::unordered_set<std::uint64_t> session_ids_;
   mutable std::mutex mutex_;
   std::unordered_set<std::uint64_t> sent_sessions_;
@@ -498,7 +497,7 @@ private:
   std::atomic<std::uint64_t> application_events_{ 0 };
 };
 
-class PassiveInitiatorApplication final : public fastfix::runtime::ApplicationCallbacks
+class PassiveInitiatorApplication final : public nimble::runtime::ApplicationCallbacks
 {
 public:
   explicit PassiveInitiatorApplication(std::uint64_t session_id)
@@ -507,13 +506,13 @@ public:
   {
   }
 
-  auto OnSessionEvent(const fastfix::runtime::RuntimeEvent& event) -> fastfix::base::Status override
+  auto OnSessionEvent(const nimble::runtime::RuntimeEvent& event) -> nimble::base::Status override
   {
-    if (event.handle.session_id() == session_id_ &&
-        event.session_event == fastfix::runtime::SessionEventKind::kActive && !active_seen_.exchange(true)) {
+    if (event.handle.session_id() == session_id_ && event.session_event == nimble::runtime::SessionEventKind::kActive &&
+        !active_seen_.exchange(true)) {
       active_promise_.set_value();
     }
-    return fastfix::base::Status::Ok();
+    return nimble::base::Status::Ok();
   }
 
   [[nodiscard]] auto WaitForActive(std::chrono::milliseconds timeout) -> bool
@@ -535,8 +534,8 @@ struct QueueInitiatorState
 };
 
 class QueueInitiatorApplication final
-  : public fastfix::runtime::ApplicationCallbacks
-  , public fastfix::runtime::QueueApplicationProvider
+  : public nimble::runtime::ApplicationCallbacks
+  , public nimble::runtime::QueueApplicationProvider
 {
 public:
   QueueInitiatorApplication(std::uint64_t session_id,
@@ -548,7 +547,7 @@ public:
   {
   }
 
-  auto OnSessionEvent(const fastfix::runtime::RuntimeEvent& event) -> fastfix::base::Status override
+  auto OnSessionEvent(const nimble::runtime::RuntimeEvent& event) -> nimble::base::Status override
   {
     ++session_events_;
     auto status = TrackSession(event.handle);
@@ -556,27 +555,27 @@ public:
       return status;
     }
     if (event.handle.session_id() != session_id_) {
-      return fastfix::base::Status::Ok();
+      return nimble::base::Status::Ok();
     }
     return queue_.OnSessionEvent(event);
   }
 
-  auto OnAdminMessage(const fastfix::runtime::RuntimeEvent& event) -> fastfix::base::Status override
+  auto OnAdminMessage(const nimble::runtime::RuntimeEvent& event) -> nimble::base::Status override
   {
     if (event.handle.session_id() == session_id_) {
       ++admin_events_;
       return queue_.OnAdminMessage(event);
     }
-    return fastfix::base::Status::Ok();
+    return nimble::base::Status::Ok();
   }
 
-  auto OnAppMessage(const fastfix::runtime::RuntimeEvent& event) -> fastfix::base::Status override
+  auto OnAppMessage(const nimble::runtime::RuntimeEvent& event) -> nimble::base::Status override
   {
     if (event.handle.session_id() == session_id_) {
       ++application_events_;
       return queue_.OnAppMessage(event);
     }
-    return fastfix::base::Status::Ok();
+    return nimble::base::Status::Ok();
   }
 
   [[nodiscard]] auto received_echo() const -> bool { return state_->received_echo.load(); }
@@ -587,24 +586,24 @@ public:
 
   [[nodiscard]] auto application_events() const -> std::uint64_t { return application_events_.load(); }
 
-  [[nodiscard]] auto Snapshot() const -> std::optional<fastfix::session::SessionSnapshot>
+  [[nodiscard]] auto Snapshot() const -> std::optional<nimble::session::SessionSnapshot>
   {
     std::lock_guard lock(mutex_);
     return snapshot_;
   }
 
-  auto DrainSubscription() -> fastfix::base::Result<std::vector<fastfix::session::SessionNotification>>
+  auto DrainSubscription() -> nimble::base::Result<std::vector<nimble::session::SessionNotification>>
   {
-    fastfix::session::SessionSubscription subscription;
+    nimble::session::SessionSubscription subscription;
     {
       std::lock_guard lock(mutex_);
       if (!subscription_.valid()) {
-        return fastfix::base::Status::NotFound("initiator runtime subscription was not registered");
+        return nimble::base::Status::NotFound("initiator runtime subscription was not registered");
       }
       subscription = subscription_;
     }
 
-    std::vector<fastfix::session::SessionNotification> notifications;
+    std::vector<nimble::session::SessionNotification> notifications;
     while (true) {
       auto notification = subscription.TryPop();
       if (!notification.ok()) {
@@ -617,10 +616,10 @@ public:
     }
   }
 
-  auto queue_application() -> fastfix::runtime::QueueApplication& override { return queue_; }
+  auto queue_application() -> nimble::runtime::QueueApplication& override { return queue_; }
 
 private:
-  auto TrackSession(const fastfix::session::SessionHandle& handle) -> fastfix::base::Status
+  auto TrackSession(const nimble::session::SessionHandle& handle) -> nimble::base::Status
   {
     auto snapshot = handle.Snapshot();
     if (!snapshot.ok()) {
@@ -636,24 +635,24 @@ private:
       }
       subscription_ = std::move(subscription).value();
     }
-    return fastfix::base::Status::Ok();
+    return nimble::base::Status::Ok();
   }
 
   std::uint64_t session_id_{ 0 };
   std::shared_ptr<QueueInitiatorState> state_;
-  fastfix::runtime::QueueApplication queue_;
+  nimble::runtime::QueueApplication queue_;
   mutable std::mutex mutex_;
-  std::optional<fastfix::session::SessionSnapshot> snapshot_;
-  fastfix::session::SessionSubscription subscription_;
+  std::optional<nimble::session::SessionSnapshot> snapshot_;
+  nimble::session::SessionSubscription subscription_;
   std::atomic<std::uint64_t> session_events_{ 0 };
   std::atomic<std::uint64_t> admin_events_{ 0 };
   std::atomic<std::uint64_t> application_events_{ 0 };
 };
 
-class QueueInitiatorHandler final : public fastfix::runtime::QueueApplicationEventHandler
+class QueueInitiatorHandler final : public nimble::runtime::QueueApplicationEventHandler
 {
 public:
-  QueueInitiatorHandler(fastfix::runtime::LiveInitiator* initiator,
+  QueueInitiatorHandler(nimble::runtime::LiveInitiator* initiator,
                         std::uint64_t session_id,
                         std::shared_ptr<QueueInitiatorState> state)
     : initiator_(initiator)
@@ -662,22 +661,21 @@ public:
   {
   }
 
-  auto BindInitiator(fastfix::runtime::LiveInitiator* initiator) -> void { initiator_ = initiator; }
+  auto BindInitiator(nimble::runtime::LiveInitiator* initiator) -> void { initiator_ = initiator; }
 
-  auto OnRuntimeEvent(const fastfix::runtime::RuntimeEvent& event) -> fastfix::base::Status override
+  auto OnRuntimeEvent(const nimble::runtime::RuntimeEvent& event) -> nimble::base::Status override
   {
     if (event.handle.session_id() != session_id_) {
-      return fastfix::base::Status::Ok();
+      return nimble::base::Status::Ok();
     }
 
-    if (event.kind == fastfix::runtime::RuntimeEventKind::kSession &&
-        event.session_event == fastfix::runtime::SessionEventKind::kActive &&
-        !state_->sent_application.exchange(true)) {
+    if (event.kind == nimble::runtime::RuntimeEventKind::kSession &&
+        event.session_event == nimble::runtime::SessionEventKind::kActive && !state_->sent_application.exchange(true)) {
       return event.handle.Send(BuildInitiatorMessage());
     }
 
-    if (event.kind != fastfix::runtime::RuntimeEventKind::kApplicationMessage) {
-      return fastfix::base::Status::Ok();
+    if (event.kind != nimble::runtime::RuntimeEventKind::kApplicationMessage) {
+      return nimble::base::Status::Ok();
     }
 
     auto status = ValidateInitiatorEcho(event.message.view());
@@ -689,7 +687,7 @@ public:
   }
 
 private:
-  fastfix::runtime::LiveInitiator* initiator_{ nullptr };
+  nimble::runtime::LiveInitiator* initiator_{ nullptr };
   std::uint64_t session_id_{ 0 };
   std::shared_ptr<QueueInitiatorState> state_;
 };
@@ -698,28 +696,28 @@ private:
 
 TEST_CASE("live-initiator", "[live-initiator]")
 {
-  auto dictionary = fastfix::tests::LoadFix44DictionaryView();
+  auto dictionary = nimble::tests::LoadFix44DictionaryView();
   if (!dictionary.ok()) {
     SKIP("FIX44 artifact not available: " << dictionary.status().message());
   }
-  const auto artifact_path = std::filesystem::path(FASTFIX_PROJECT_DIR) / "build" / "bench" / "quickfix_FIX44.art";
+  const auto artifact_path = std::filesystem::path(NIMBLEFIX_PROJECT_DIR) / "build" / "bench" / "quickfix_FIX44.art";
   const auto profile_id = dictionary.value().profile().header().profile_id;
 
-  auto acceptor = fastfix::transport::TcpAcceptor::Listen("127.0.0.1", 0U);
+  auto acceptor = nimble::transport::TcpAcceptor::Listen("127.0.0.1", 0U);
   REQUIRE(acceptor.ok());
   const auto listen_port = acceptor.value().port();
 
-  std::promise<fastfix::base::Status> acceptor_result;
+  std::promise<nimble::base::Status> acceptor_result;
   auto acceptor_future = acceptor_result.get_future();
   std::jthread acceptor_thread(
     [acceptor_socket = std::move(acceptor).value(), dictionary = dictionary.value(), &acceptor_result]() mutable {
-      fastfix::store::MemorySessionStore store;
-      fastfix::session::AdminProtocol protocol(
-        fastfix::session::AdminProtocolConfig{
+      nimble::store::MemorySessionStore store;
+      nimble::session::AdminProtocol protocol(
+        nimble::session::AdminProtocolConfig{
           .session =
-            fastfix::session::SessionConfig{
+            nimble::session::SessionConfig{
               .session_id = 2201U,
-              .key = fastfix::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
+              .key = nimble::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
               .profile_id = dictionary.profile().header().profile_id,
               .heartbeat_interval_seconds = 1U,
               .is_initiator = false,
@@ -728,7 +726,7 @@ TEST_CASE("live-initiator", "[live-initiator]")
           .sender_comp_id = "SELL",
           .target_comp_id = "BUY",
           .heartbeat_interval_seconds = 1U,
-          .validation_policy = fastfix::session::ValidationPolicy::Permissive(),
+          .validation_policy = nimble::session::ValidationPolicy::Permissive(),
         },
         dictionary,
         &store);
@@ -789,18 +787,18 @@ TEST_CASE("live-initiator", "[live-initiator]")
       }
     });
 
-  fastfix::runtime::EngineConfig config;
+  nimble::runtime::EngineConfig config;
   config.worker_count = 1U;
   config.enable_metrics = true;
-  config.trace_mode = fastfix::runtime::TraceMode::kRing;
+  config.trace_mode = nimble::runtime::TraceMode::kRing;
   config.trace_capacity = 16U;
   config.profile_artifacts.push_back(artifact_path);
-  config.counterparties.push_back(fastfix::runtime::CounterpartyConfig{
+  config.counterparties.push_back(nimble::runtime::CounterpartyConfig{
     .name = "buy-sell-initiator",
     .session =
-      fastfix::session::SessionConfig{
+      nimble::session::SessionConfig{
         .session_id = 1201U,
-        .key = fastfix::session::SessionKey{ "FIX.4.4", "BUY", "SELL" },
+        .key = nimble::session::SessionKey{ "FIX.4.4", "BUY", "SELL" },
         .profile_id = profile_id,
         .default_appl_ver_id = {},
         .heartbeat_interval_seconds = 1U,
@@ -808,22 +806,22 @@ TEST_CASE("live-initiator", "[live-initiator]")
       },
     .store_path = {},
     .default_appl_ver_id = {},
-    .store_mode = fastfix::runtime::StoreMode::kMemory,
-    .recovery_mode = fastfix::session::RecoveryMode::kMemoryOnly,
-    .dispatch_mode = fastfix::runtime::AppDispatchMode::kInline,
-    .validation_policy = fastfix::session::ValidationPolicy::Permissive(),
+    .store_mode = nimble::runtime::StoreMode::kMemory,
+    .recovery_mode = nimble::session::RecoveryMode::kMemoryOnly,
+    .dispatch_mode = nimble::runtime::AppDispatchMode::kInline,
+    .validation_policy = nimble::session::ValidationPolicy::Permissive(),
   });
 
-  fastfix::runtime::Engine engine;
+  nimble::runtime::Engine engine;
   REQUIRE(engine.Boot(config).ok());
 
   auto application = std::make_shared<InitiatorApplication>(nullptr, 1201U);
-  fastfix::runtime::LiveInitiator runtime(&engine,
-                                          fastfix::runtime::LiveInitiator::Options{
-                                            .poll_timeout = std::chrono::milliseconds(25),
-                                            .io_timeout = std::chrono::seconds(5),
-                                            .application = application,
-                                          });
+  nimble::runtime::LiveInitiator runtime(&engine,
+                                         nimble::runtime::LiveInitiator::Options{
+                                           .poll_timeout = std::chrono::milliseconds(25),
+                                           .io_timeout = std::chrono::seconds(5),
+                                           .application = application,
+                                         });
   application->BindInitiator(&runtime);
 
   REQUIRE(runtime.OpenSession(1201U, "127.0.0.1", listen_port).ok());
@@ -837,28 +835,28 @@ TEST_CASE("live-initiator", "[live-initiator]")
 
   const auto snapshot = application->Snapshot();
   REQUIRE(snapshot.has_value());
-  REQUIRE(snapshot->state == fastfix::session::SessionState::kDisconnected);
+  REQUIRE(snapshot->state == nimble::session::SessionState::kDisconnected);
 
   auto notifications = application->DrainSubscription();
   REQUIRE(notifications.ok());
-  auto count_notifications = [&](fastfix::session::SessionNotificationKind kind) {
+  auto count_notifications = [&](nimble::session::SessionNotificationKind kind) {
     return static_cast<std::size_t>(std::count_if(notifications.value().begin(),
                                                   notifications.value().end(),
                                                   [&](const auto& notification) { return notification.kind == kind; }));
   };
-  auto find_notification = [&](fastfix::session::SessionNotificationKind kind) {
+  auto find_notification = [&](nimble::session::SessionNotificationKind kind) {
     const auto it = std::find_if(notifications.value().begin(),
                                  notifications.value().end(),
                                  [&](const auto& notification) { return notification.kind == kind; });
     return it == notifications.value().end() ? nullptr : &(*it);
   };
-  REQUIRE(count_notifications(fastfix::session::SessionNotificationKind::kSessionBound) == 1U);
-  REQUIRE(count_notifications(fastfix::session::SessionNotificationKind::kSessionActive) == 1U);
-  REQUIRE(count_notifications(fastfix::session::SessionNotificationKind::kSessionClosed) == 1U);
-  REQUIRE(count_notifications(fastfix::session::SessionNotificationKind::kAdminMessage) >= 2U);
-  REQUIRE(count_notifications(fastfix::session::SessionNotificationKind::kApplicationMessage) == 1U);
+  REQUIRE(count_notifications(nimble::session::SessionNotificationKind::kSessionBound) == 1U);
+  REQUIRE(count_notifications(nimble::session::SessionNotificationKind::kSessionActive) == 1U);
+  REQUIRE(count_notifications(nimble::session::SessionNotificationKind::kSessionClosed) == 1U);
+  REQUIRE(count_notifications(nimble::session::SessionNotificationKind::kAdminMessage) >= 2U);
+  REQUIRE(count_notifications(nimble::session::SessionNotificationKind::kApplicationMessage) == 1U);
 
-  const auto* app_notification = find_notification(fastfix::session::SessionNotificationKind::kApplicationMessage);
+  const auto* app_notification = find_notification(nimble::session::SessionNotificationKind::kApplicationMessage);
   REQUIRE(app_notification != nullptr);
   REQUIRE(app_notification->message.valid());
   const auto parties = app_notification->message_view().group(kNoPartyIDs);
@@ -871,11 +869,11 @@ TEST_CASE("live-initiator", "[live-initiator]")
   REQUIRE(metrics->inbound_messages > 0U);
   REQUIRE(metrics->outbound_messages > 0U);
 
-  auto logout_acceptor = fastfix::transport::TcpAcceptor::Listen("127.0.0.1", 0U);
+  auto logout_acceptor = nimble::transport::TcpAcceptor::Listen("127.0.0.1", 0U);
   REQUIRE(logout_acceptor.ok());
   const auto logout_listen_port = logout_acceptor.value().port();
 
-  std::promise<fastfix::base::Status> logout_acceptor_result;
+  std::promise<nimble::base::Status> logout_acceptor_result;
   auto logout_acceptor_future = logout_acceptor_result.get_future();
   std::jthread logout_acceptor_thread([acceptor_socket = std::move(logout_acceptor).value(),
                                        dictionary = dictionary.value(),
@@ -884,18 +882,18 @@ TEST_CASE("live-initiator", "[live-initiator]")
       RunAcceptorAwaitLogoutSession(std::move(acceptor_socket), std::move(dictionary), 2204U));
   });
 
-  fastfix::runtime::EngineConfig logout_config;
+  nimble::runtime::EngineConfig logout_config;
   logout_config.worker_count = 1U;
   logout_config.enable_metrics = true;
-  logout_config.trace_mode = fastfix::runtime::TraceMode::kRing;
+  logout_config.trace_mode = nimble::runtime::TraceMode::kRing;
   logout_config.trace_capacity = 16U;
   logout_config.profile_artifacts.push_back(artifact_path);
-  logout_config.counterparties.push_back(fastfix::runtime::CounterpartyConfig{
+  logout_config.counterparties.push_back(nimble::runtime::CounterpartyConfig{
     .name = "buy-sell-initiator-logout-wakeup",
     .session =
-      fastfix::session::SessionConfig{
+      nimble::session::SessionConfig{
         .session_id = 1206U,
-        .key = fastfix::session::SessionKey{ "FIX.4.4", "BUY", "SELL" },
+        .key = nimble::session::SessionKey{ "FIX.4.4", "BUY", "SELL" },
         .profile_id = profile_id,
         .default_appl_ver_id = {},
         .heartbeat_interval_seconds = 30U,
@@ -903,26 +901,26 @@ TEST_CASE("live-initiator", "[live-initiator]")
       },
     .store_path = {},
     .default_appl_ver_id = {},
-    .store_mode = fastfix::runtime::StoreMode::kMemory,
-    .recovery_mode = fastfix::session::RecoveryMode::kMemoryOnly,
-    .dispatch_mode = fastfix::runtime::AppDispatchMode::kInline,
-    .validation_policy = fastfix::session::ValidationPolicy::Permissive(),
+    .store_mode = nimble::runtime::StoreMode::kMemory,
+    .recovery_mode = nimble::session::RecoveryMode::kMemoryOnly,
+    .dispatch_mode = nimble::runtime::AppDispatchMode::kInline,
+    .validation_policy = nimble::session::ValidationPolicy::Permissive(),
   });
 
-  fastfix::runtime::Engine logout_engine;
+  nimble::runtime::Engine logout_engine;
   REQUIRE(logout_engine.Boot(logout_config).ok());
 
   auto logout_application = std::make_shared<PassiveInitiatorApplication>(1206U);
-  fastfix::runtime::LiveInitiator logout_runtime(&logout_engine,
-                                                 fastfix::runtime::LiveInitiator::Options{
-                                                   .poll_timeout = std::chrono::seconds(5),
-                                                   .io_timeout = std::chrono::seconds(5),
-                                                   .application = logout_application,
-                                                 });
+  nimble::runtime::LiveInitiator logout_runtime(&logout_engine,
+                                                nimble::runtime::LiveInitiator::Options{
+                                                  .poll_timeout = std::chrono::seconds(5),
+                                                  .io_timeout = std::chrono::seconds(5),
+                                                  .application = logout_application,
+                                                });
 
   REQUIRE(logout_runtime.OpenSession(1206U, "127.0.0.1", logout_listen_port).ok());
 
-  std::promise<fastfix::base::Status> logout_runtime_result;
+  std::promise<nimble::base::Status> logout_runtime_result;
   auto logout_runtime_future = logout_runtime_result.get_future();
   std::jthread logout_runtime_thread([&logout_runtime, &logout_runtime_result]() {
     logout_runtime_result.set_value(logout_runtime.Run(1U, std::chrono::seconds(10)));
@@ -941,7 +939,7 @@ TEST_CASE("live-initiator", "[live-initiator]")
     std::string sender_comp_id;
     for (std::uint32_t attempt = 0U; attempt < 256U; ++attempt) {
       const auto candidate = std::string("BUY-SHARD-") + std::to_string(worker_id) + '-' + std::to_string(attempt);
-      if ((fastfix::session::SessionKeyHash{}(fastfix::session::SessionKey{ "FIX.4.4", candidate, "SELL" }) % 2U) ==
+      if ((nimble::session::SessionKeyHash{}(nimble::session::SessionKey{ "FIX.4.4", candidate, "SELL" }) % 2U) ==
           worker_id) {
         sender_comp_id = candidate;
         break;
@@ -956,15 +954,15 @@ TEST_CASE("live-initiator", "[live-initiator]")
   REQUIRE(!routed_sender_1.empty());
   REQUIRE(routed_sender_0 != routed_sender_1);
 
-  auto shard_acceptor_0 = fastfix::transport::TcpAcceptor::Listen("127.0.0.1", 0U);
-  auto shard_acceptor_1 = fastfix::transport::TcpAcceptor::Listen("127.0.0.1", 0U);
+  auto shard_acceptor_0 = nimble::transport::TcpAcceptor::Listen("127.0.0.1", 0U);
+  auto shard_acceptor_1 = nimble::transport::TcpAcceptor::Listen("127.0.0.1", 0U);
   REQUIRE(shard_acceptor_0.ok());
   REQUIRE(shard_acceptor_1.ok());
   const auto shard_port_0 = shard_acceptor_0.value().port();
   const auto shard_port_1 = shard_acceptor_1.value().port();
 
-  std::promise<fastfix::base::Status> shard_acceptor_result_0;
-  std::promise<fastfix::base::Status> shard_acceptor_result_1;
+  std::promise<nimble::base::Status> shard_acceptor_result_0;
+  std::promise<nimble::base::Status> shard_acceptor_result_1;
   auto shard_acceptor_future_0 = shard_acceptor_result_0.get_future();
   auto shard_acceptor_future_1 = shard_acceptor_result_1.get_future();
   std::jthread shard_acceptor_thread_0([acceptor_socket = std::move(shard_acceptor_0).value(),
@@ -982,18 +980,18 @@ TEST_CASE("live-initiator", "[live-initiator]")
       RunAcceptorEchoSession(std::move(acceptor_socket), std::move(dictionary), 2302U, "SELL", sender_comp_id));
   });
 
-  fastfix::runtime::EngineConfig shard_config;
+  nimble::runtime::EngineConfig shard_config;
   shard_config.worker_count = 2U;
   shard_config.enable_metrics = true;
-  shard_config.trace_mode = fastfix::runtime::TraceMode::kRing;
+  shard_config.trace_mode = nimble::runtime::TraceMode::kRing;
   shard_config.trace_capacity = 16U;
   shard_config.profile_artifacts.push_back(artifact_path);
-  shard_config.counterparties.push_back(fastfix::runtime::CounterpartyConfig{
+  shard_config.counterparties.push_back(nimble::runtime::CounterpartyConfig{
     .name = "buy-sell-initiator-shard-0",
     .session =
-      fastfix::session::SessionConfig{
+      nimble::session::SessionConfig{
         .session_id = 1204U,
-        .key = fastfix::session::SessionKey{ "FIX.4.4", routed_sender_0, "SELL" },
+        .key = nimble::session::SessionKey{ "FIX.4.4", routed_sender_0, "SELL" },
         .profile_id = profile_id,
         .default_appl_ver_id = {},
         .heartbeat_interval_seconds = 1U,
@@ -1001,17 +999,17 @@ TEST_CASE("live-initiator", "[live-initiator]")
       },
     .store_path = {},
     .default_appl_ver_id = {},
-    .store_mode = fastfix::runtime::StoreMode::kMemory,
-    .recovery_mode = fastfix::session::RecoveryMode::kMemoryOnly,
-    .dispatch_mode = fastfix::runtime::AppDispatchMode::kInline,
-    .validation_policy = fastfix::session::ValidationPolicy::Permissive(),
+    .store_mode = nimble::runtime::StoreMode::kMemory,
+    .recovery_mode = nimble::session::RecoveryMode::kMemoryOnly,
+    .dispatch_mode = nimble::runtime::AppDispatchMode::kInline,
+    .validation_policy = nimble::session::ValidationPolicy::Permissive(),
   });
-  shard_config.counterparties.push_back(fastfix::runtime::CounterpartyConfig{
+  shard_config.counterparties.push_back(nimble::runtime::CounterpartyConfig{
     .name = "buy-sell-initiator-shard-1",
     .session =
-      fastfix::session::SessionConfig{
+      nimble::session::SessionConfig{
         .session_id = 1205U,
-        .key = fastfix::session::SessionKey{ "FIX.4.4", routed_sender_1, "SELL" },
+        .key = nimble::session::SessionKey{ "FIX.4.4", routed_sender_1, "SELL" },
         .profile_id = profile_id,
         .default_appl_ver_id = {},
         .heartbeat_interval_seconds = 1U,
@@ -1019,13 +1017,13 @@ TEST_CASE("live-initiator", "[live-initiator]")
       },
     .store_path = {},
     .default_appl_ver_id = {},
-    .store_mode = fastfix::runtime::StoreMode::kMemory,
-    .recovery_mode = fastfix::session::RecoveryMode::kMemoryOnly,
-    .dispatch_mode = fastfix::runtime::AppDispatchMode::kInline,
-    .validation_policy = fastfix::session::ValidationPolicy::Permissive(),
+    .store_mode = nimble::runtime::StoreMode::kMemory,
+    .recovery_mode = nimble::session::RecoveryMode::kMemoryOnly,
+    .dispatch_mode = nimble::runtime::AppDispatchMode::kInline,
+    .validation_policy = nimble::session::ValidationPolicy::Permissive(),
   });
 
-  fastfix::runtime::Engine shard_engine;
+  nimble::runtime::Engine shard_engine;
   REQUIRE(shard_engine.Boot(shard_config).ok());
   const auto* session_shard_0 = shard_engine.runtime()->FindSessionShard(1204U);
   const auto* session_shard_1 = shard_engine.runtime()->FindSessionShard(1205U);
@@ -1036,12 +1034,12 @@ TEST_CASE("live-initiator", "[live-initiator]")
 
   auto shard_application =
     std::make_shared<MultiInitiatorApplication>(nullptr, std::vector<std::uint64_t>{ 1204U, 1205U });
-  fastfix::runtime::LiveInitiator shard_runtime(&shard_engine,
-                                                fastfix::runtime::LiveInitiator::Options{
-                                                  .poll_timeout = std::chrono::milliseconds(25),
-                                                  .io_timeout = std::chrono::seconds(5),
-                                                  .application = shard_application,
-                                                });
+  nimble::runtime::LiveInitiator shard_runtime(&shard_engine,
+                                               nimble::runtime::LiveInitiator::Options{
+                                                 .poll_timeout = std::chrono::milliseconds(25),
+                                                 .io_timeout = std::chrono::seconds(5),
+                                                 .application = shard_application,
+                                               });
   shard_application->BindInitiator(&shard_runtime);
 
   REQUIRE(shard_runtime.OpenSession(1204U, "127.0.0.1", shard_port_0).ok());
@@ -1054,11 +1052,11 @@ TEST_CASE("live-initiator", "[live-initiator]")
   REQUIRE(shard_application->application_events() == 2U);
   REQUIRE(shard_application->admin_events() >= 4U);
 
-  auto timer_acceptor = fastfix::transport::TcpAcceptor::Listen("127.0.0.1", 0U);
+  auto timer_acceptor = nimble::transport::TcpAcceptor::Listen("127.0.0.1", 0U);
   REQUIRE(timer_acceptor.ok());
   const auto timer_listen_port = timer_acceptor.value().port();
 
-  std::promise<fastfix::base::Status> timer_acceptor_result;
+  std::promise<nimble::base::Status> timer_acceptor_result;
   auto timer_acceptor_future = timer_acceptor_result.get_future();
   std::jthread timer_acceptor_thread([acceptor_socket = std::move(timer_acceptor).value(),
                                       dictionary = dictionary.value(),
@@ -1067,18 +1065,18 @@ TEST_CASE("live-initiator", "[live-initiator]")
       RunAcceptorHeartbeatTimerSession(std::move(acceptor_socket), std::move(dictionary), 2203U));
   });
 
-  fastfix::runtime::EngineConfig timer_config;
+  nimble::runtime::EngineConfig timer_config;
   timer_config.worker_count = 1U;
   timer_config.enable_metrics = true;
-  timer_config.trace_mode = fastfix::runtime::TraceMode::kRing;
+  timer_config.trace_mode = nimble::runtime::TraceMode::kRing;
   timer_config.trace_capacity = 16U;
   timer_config.profile_artifacts.push_back(artifact_path);
-  timer_config.counterparties.push_back(fastfix::runtime::CounterpartyConfig{
+  timer_config.counterparties.push_back(nimble::runtime::CounterpartyConfig{
     .name = "buy-sell-initiator-timer",
     .session =
-      fastfix::session::SessionConfig{
+      nimble::session::SessionConfig{
         .session_id = 1203U,
-        .key = fastfix::session::SessionKey{ "FIX.4.4", "BUY", "SELL" },
+        .key = nimble::session::SessionKey{ "FIX.4.4", "BUY", "SELL" },
         .profile_id = profile_id,
         .default_appl_ver_id = {},
         .heartbeat_interval_seconds = 1U,
@@ -1086,21 +1084,21 @@ TEST_CASE("live-initiator", "[live-initiator]")
       },
     .store_path = {},
     .default_appl_ver_id = {},
-    .store_mode = fastfix::runtime::StoreMode::kMemory,
-    .recovery_mode = fastfix::session::RecoveryMode::kMemoryOnly,
-    .dispatch_mode = fastfix::runtime::AppDispatchMode::kInline,
-    .validation_policy = fastfix::session::ValidationPolicy::Permissive(),
+    .store_mode = nimble::runtime::StoreMode::kMemory,
+    .recovery_mode = nimble::session::RecoveryMode::kMemoryOnly,
+    .dispatch_mode = nimble::runtime::AppDispatchMode::kInline,
+    .validation_policy = nimble::session::ValidationPolicy::Permissive(),
   });
 
-  fastfix::runtime::Engine timer_engine;
+  nimble::runtime::Engine timer_engine;
   REQUIRE(timer_engine.Boot(timer_config).ok());
 
-  fastfix::runtime::LiveInitiator timer_runtime(&timer_engine,
-                                                fastfix::runtime::LiveInitiator::Options{
-                                                  .poll_timeout = std::chrono::seconds(5),
-                                                  .io_timeout = std::chrono::seconds(5),
-                                                  .application = {},
-                                                });
+  nimble::runtime::LiveInitiator timer_runtime(&timer_engine,
+                                               nimble::runtime::LiveInitiator::Options{
+                                                 .poll_timeout = std::chrono::seconds(5),
+                                                 .io_timeout = std::chrono::seconds(5),
+                                                 .application = {},
+                                               });
 
   REQUIRE(timer_runtime.OpenSession(1203U, "127.0.0.1", timer_listen_port).ok());
   REQUIRE(timer_runtime.Run(1U, std::chrono::seconds(10)).ok());
@@ -1114,28 +1112,28 @@ TEST_CASE("live-initiator", "[live-initiator]")
 
 TEST_CASE("live-initiator-queue", "[live-initiator-queue]")
 {
-  auto dictionary = fastfix::tests::LoadFix44DictionaryView();
+  auto dictionary = nimble::tests::LoadFix44DictionaryView();
   if (!dictionary.ok()) {
     SKIP("FIX44 artifact not available: " << dictionary.status().message());
   }
-  const auto artifact_path = std::filesystem::path(FASTFIX_PROJECT_DIR) / "build" / "bench" / "quickfix_FIX44.art";
+  const auto artifact_path = std::filesystem::path(NIMBLEFIX_PROJECT_DIR) / "build" / "bench" / "quickfix_FIX44.art";
   const auto profile_id = dictionary.value().profile().header().profile_id;
 
-  auto acceptor = fastfix::transport::TcpAcceptor::Listen("127.0.0.1", 0U);
+  auto acceptor = nimble::transport::TcpAcceptor::Listen("127.0.0.1", 0U);
   REQUIRE(acceptor.ok());
   const auto listen_port = acceptor.value().port();
 
-  std::promise<fastfix::base::Status> acceptor_result;
+  std::promise<nimble::base::Status> acceptor_result;
   auto acceptor_future = acceptor_result.get_future();
   std::jthread acceptor_thread(
     [acceptor_socket = std::move(acceptor).value(), dictionary = dictionary.value(), &acceptor_result]() mutable {
-      fastfix::store::MemorySessionStore store;
-      fastfix::session::AdminProtocol protocol(
-        fastfix::session::AdminProtocolConfig{
+      nimble::store::MemorySessionStore store;
+      nimble::session::AdminProtocol protocol(
+        nimble::session::AdminProtocolConfig{
           .session =
-            fastfix::session::SessionConfig{
+            nimble::session::SessionConfig{
               .session_id = 2202U,
-              .key = fastfix::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
+              .key = nimble::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
               .profile_id = dictionary.profile().header().profile_id,
               .heartbeat_interval_seconds = 1U,
               .is_initiator = false,
@@ -1144,7 +1142,7 @@ TEST_CASE("live-initiator-queue", "[live-initiator-queue]")
           .sender_comp_id = "SELL",
           .target_comp_id = "BUY",
           .heartbeat_interval_seconds = 1U,
-          .validation_policy = fastfix::session::ValidationPolicy::Permissive(),
+          .validation_policy = nimble::session::ValidationPolicy::Permissive(),
         },
         dictionary,
         &store);
@@ -1205,18 +1203,18 @@ TEST_CASE("live-initiator-queue", "[live-initiator-queue]")
       }
     });
 
-  fastfix::runtime::EngineConfig config;
+  nimble::runtime::EngineConfig config;
   config.worker_count = 1U;
   config.enable_metrics = true;
-  config.trace_mode = fastfix::runtime::TraceMode::kRing;
+  config.trace_mode = nimble::runtime::TraceMode::kRing;
   config.trace_capacity = 16U;
   config.profile_artifacts.push_back(artifact_path);
-  config.counterparties.push_back(fastfix::runtime::CounterpartyConfig{
+  config.counterparties.push_back(nimble::runtime::CounterpartyConfig{
     .name = "buy-sell-initiator-queue",
     .session =
-      fastfix::session::SessionConfig{
+      nimble::session::SessionConfig{
         .session_id = 1202U,
-        .key = fastfix::session::SessionKey{ "FIX.4.4", "BUY", "SELL" },
+        .key = nimble::session::SessionKey{ "FIX.4.4", "BUY", "SELL" },
         .profile_id = profile_id,
         .default_appl_ver_id = {},
         .heartbeat_interval_seconds = 1U,
@@ -1224,19 +1222,19 @@ TEST_CASE("live-initiator-queue", "[live-initiator-queue]")
       },
     .store_path = {},
     .default_appl_ver_id = {},
-    .store_mode = fastfix::runtime::StoreMode::kMemory,
-    .recovery_mode = fastfix::session::RecoveryMode::kMemoryOnly,
-    .dispatch_mode = fastfix::runtime::AppDispatchMode::kQueueDecoupled,
-    .validation_policy = fastfix::session::ValidationPolicy::Permissive(),
+    .store_mode = nimble::runtime::StoreMode::kMemory,
+    .recovery_mode = nimble::session::RecoveryMode::kMemoryOnly,
+    .dispatch_mode = nimble::runtime::AppDispatchMode::kQueueDecoupled,
+    .validation_policy = nimble::session::ValidationPolicy::Permissive(),
   });
 
-  fastfix::runtime::Engine engine;
+  nimble::runtime::Engine engine;
   REQUIRE(engine.Boot(config).ok());
 
   auto state = std::make_shared<QueueInitiatorState>();
   auto application = std::make_shared<QueueInitiatorApplication>(1202U, config.worker_count, state);
-  fastfix::runtime::ManagedQueueApplicationRunnerOptions managed_queue_runner;
-  managed_queue_runner.mode = fastfix::runtime::ManagedQueueApplicationRunnerMode::kCoScheduled;
+  nimble::runtime::ManagedQueueApplicationRunnerOptions managed_queue_runner;
+  managed_queue_runner.mode = nimble::runtime::ManagedQueueApplicationRunnerMode::kCoScheduled;
   std::vector<QueueInitiatorHandler*> handler_ptrs;
   managed_queue_runner.handlers.reserve(application->queue_application().worker_count());
   for (std::uint32_t worker_id = 0; worker_id < application->queue_application().worker_count(); ++worker_id) {
@@ -1246,13 +1244,13 @@ TEST_CASE("live-initiator-queue", "[live-initiator-queue]")
     managed_queue_runner.handlers.push_back(std::move(handler));
   }
 
-  fastfix::runtime::LiveInitiator runtime(&engine,
-                                          fastfix::runtime::LiveInitiator::Options{
-                                            .poll_timeout = std::chrono::milliseconds(25),
-                                            .io_timeout = std::chrono::seconds(5),
-                                            .application = application,
-                                            .managed_queue_runner = std::move(managed_queue_runner),
-                                          });
+  nimble::runtime::LiveInitiator runtime(&engine,
+                                         nimble::runtime::LiveInitiator::Options{
+                                           .poll_timeout = std::chrono::milliseconds(25),
+                                           .io_timeout = std::chrono::seconds(5),
+                                           .application = application,
+                                           .managed_queue_runner = std::move(managed_queue_runner),
+                                         });
   for (auto* handler : handler_ptrs) {
     handler->BindInitiator(&runtime);
   }
@@ -1268,28 +1266,28 @@ TEST_CASE("live-initiator-queue", "[live-initiator-queue]")
 
   const auto snapshot = application->Snapshot();
   REQUIRE(snapshot.has_value());
-  REQUIRE(snapshot->state == fastfix::session::SessionState::kDisconnected);
+  REQUIRE(snapshot->state == nimble::session::SessionState::kDisconnected);
 
   auto notifications = application->DrainSubscription();
   REQUIRE(notifications.ok());
-  auto count_notifications = [&](fastfix::session::SessionNotificationKind kind) {
+  auto count_notifications = [&](nimble::session::SessionNotificationKind kind) {
     return static_cast<std::size_t>(std::count_if(notifications.value().begin(),
                                                   notifications.value().end(),
                                                   [&](const auto& notification) { return notification.kind == kind; }));
   };
-  auto find_notification = [&](fastfix::session::SessionNotificationKind kind) {
+  auto find_notification = [&](nimble::session::SessionNotificationKind kind) {
     const auto it = std::find_if(notifications.value().begin(),
                                  notifications.value().end(),
                                  [&](const auto& notification) { return notification.kind == kind; });
     return it == notifications.value().end() ? nullptr : &(*it);
   };
-  REQUIRE(count_notifications(fastfix::session::SessionNotificationKind::kSessionBound) == 1U);
-  REQUIRE(count_notifications(fastfix::session::SessionNotificationKind::kSessionActive) == 1U);
-  REQUIRE(count_notifications(fastfix::session::SessionNotificationKind::kSessionClosed) == 1U);
-  REQUIRE(count_notifications(fastfix::session::SessionNotificationKind::kAdminMessage) >= 2U);
-  REQUIRE(count_notifications(fastfix::session::SessionNotificationKind::kApplicationMessage) == 1U);
+  REQUIRE(count_notifications(nimble::session::SessionNotificationKind::kSessionBound) == 1U);
+  REQUIRE(count_notifications(nimble::session::SessionNotificationKind::kSessionActive) == 1U);
+  REQUIRE(count_notifications(nimble::session::SessionNotificationKind::kSessionClosed) == 1U);
+  REQUIRE(count_notifications(nimble::session::SessionNotificationKind::kAdminMessage) >= 2U);
+  REQUIRE(count_notifications(nimble::session::SessionNotificationKind::kApplicationMessage) == 1U);
 
-  const auto* app_notification = find_notification(fastfix::session::SessionNotificationKind::kApplicationMessage);
+  const auto* app_notification = find_notification(nimble::session::SessionNotificationKind::kApplicationMessage);
   REQUIRE(app_notification != nullptr);
   REQUIRE(app_notification->message.valid());
   const auto parties = app_notification->message_view().group(kNoPartyIDs);
@@ -1302,21 +1300,21 @@ TEST_CASE("live-initiator-queue", "[live-initiator-queue]")
   REQUIRE(metrics->inbound_messages > 0U);
   REQUIRE(metrics->outbound_messages > 0U);
 
-  auto mismatch_acceptor = fastfix::transport::TcpAcceptor::Listen("127.0.0.1", 0U);
+  auto mismatch_acceptor = nimble::transport::TcpAcceptor::Listen("127.0.0.1", 0U);
   REQUIRE(mismatch_acceptor.ok());
   const auto mismatch_port = mismatch_acceptor.value().port();
 
-  fastfix::runtime::EngineConfig mismatch_config;
+  nimble::runtime::EngineConfig mismatch_config;
   mismatch_config.worker_count = 2U;
-  mismatch_config.trace_mode = fastfix::runtime::TraceMode::kRing;
+  mismatch_config.trace_mode = nimble::runtime::TraceMode::kRing;
   mismatch_config.trace_capacity = 16U;
   mismatch_config.profile_artifacts.push_back(artifact_path);
-  mismatch_config.counterparties.push_back(fastfix::runtime::CounterpartyConfig{
+  mismatch_config.counterparties.push_back(nimble::runtime::CounterpartyConfig{
     .name = "buy-sell-initiator-queue-mismatch",
     .session =
-      fastfix::session::SessionConfig{
+      nimble::session::SessionConfig{
         .session_id = 1206U,
-        .key = fastfix::session::SessionKey{ "FIX.4.4", "BUY-MISMATCH", "SELL-MISMATCH" },
+        .key = nimble::session::SessionKey{ "FIX.4.4", "BUY-MISMATCH", "SELL-MISMATCH" },
         .profile_id = profile_id,
         .default_appl_ver_id = {},
         .heartbeat_interval_seconds = 1U,
@@ -1324,30 +1322,30 @@ TEST_CASE("live-initiator-queue", "[live-initiator-queue]")
       },
     .store_path = {},
     .default_appl_ver_id = {},
-    .store_mode = fastfix::runtime::StoreMode::kMemory,
-    .recovery_mode = fastfix::session::RecoveryMode::kMemoryOnly,
-    .dispatch_mode = fastfix::runtime::AppDispatchMode::kQueueDecoupled,
-    .validation_policy = fastfix::session::ValidationPolicy::Permissive(),
+    .store_mode = nimble::runtime::StoreMode::kMemory,
+    .recovery_mode = nimble::session::RecoveryMode::kMemoryOnly,
+    .dispatch_mode = nimble::runtime::AppDispatchMode::kQueueDecoupled,
+    .validation_policy = nimble::session::ValidationPolicy::Permissive(),
   });
 
-  fastfix::runtime::Engine mismatch_engine;
+  nimble::runtime::Engine mismatch_engine;
   REQUIRE(mismatch_engine.Boot(mismatch_config).ok());
 
   auto mismatch_state = std::make_shared<QueueInitiatorState>();
   auto mismatch_application = std::make_shared<QueueInitiatorApplication>(1206U, 1U, mismatch_state);
-  fastfix::runtime::ManagedQueueApplicationRunnerOptions mismatch_runner;
-  mismatch_runner.mode = fastfix::runtime::ManagedQueueApplicationRunnerMode::kCoScheduled;
+  nimble::runtime::ManagedQueueApplicationRunnerOptions mismatch_runner;
+  mismatch_runner.mode = nimble::runtime::ManagedQueueApplicationRunnerMode::kCoScheduled;
   auto mismatch_handler = std::make_unique<QueueInitiatorHandler>(nullptr, 1206U, mismatch_state);
   auto* mismatch_handler_ptr = mismatch_handler.get();
   mismatch_runner.handlers.push_back(std::move(mismatch_handler));
 
-  fastfix::runtime::LiveInitiator mismatch_runtime(&mismatch_engine,
-                                                   fastfix::runtime::LiveInitiator::Options{
-                                                     .poll_timeout = std::chrono::milliseconds(5),
-                                                     .io_timeout = std::chrono::seconds(1),
-                                                     .application = mismatch_application,
-                                                     .managed_queue_runner = std::move(mismatch_runner),
-                                                   });
+  nimble::runtime::LiveInitiator mismatch_runtime(&mismatch_engine,
+                                                  nimble::runtime::LiveInitiator::Options{
+                                                    .poll_timeout = std::chrono::milliseconds(5),
+                                                    .io_timeout = std::chrono::seconds(1),
+                                                    .application = mismatch_application,
+                                                    .managed_queue_runner = std::move(mismatch_runner),
+                                                  });
   mismatch_handler_ptr->BindInitiator(&mismatch_runtime);
 
   auto open_status = mismatch_runtime.OpenSession(1206U, "127.0.0.1", mismatch_port);
@@ -1356,7 +1354,7 @@ TEST_CASE("live-initiator-queue", "[live-initiator-queue]")
     // worker_id.
     auto mismatch_status = mismatch_runtime.Run(1U, std::chrono::milliseconds(5));
     REQUIRE(!mismatch_status.ok());
-    REQUIRE(mismatch_status.code() == fastfix::base::ErrorCode::kInvalidArgument);
+    REQUIRE(mismatch_status.code() == nimble::base::ErrorCode::kInvalidArgument);
     REQUIRE(mismatch_status.message().find("queue application worker_count must match engine worker_count") !=
             std::string::npos);
   } else {
@@ -1366,11 +1364,11 @@ TEST_CASE("live-initiator-queue", "[live-initiator-queue]")
   }
   mismatch_runtime.Stop();
 
-  auto threaded_acceptor = fastfix::transport::TcpAcceptor::Listen("127.0.0.1", 0U);
+  auto threaded_acceptor = nimble::transport::TcpAcceptor::Listen("127.0.0.1", 0U);
   REQUIRE(threaded_acceptor.ok());
   const auto threaded_port = threaded_acceptor.value().port();
 
-  std::promise<fastfix::base::Status> threaded_acceptor_result;
+  std::promise<nimble::base::Status> threaded_acceptor_result;
   auto threaded_acceptor_future = threaded_acceptor_result.get_future();
   std::jthread threaded_acceptor_thread([acceptor_socket = std::move(threaded_acceptor).value(),
                                          dictionary = dictionary.value(),
@@ -1379,19 +1377,19 @@ TEST_CASE("live-initiator-queue", "[live-initiator-queue]")
       RunAcceptorEchoSession(std::move(acceptor_socket), std::move(dictionary), 2205U, "SELL", "BUY"));
   });
 
-  fastfix::runtime::EngineConfig threaded_config;
+  nimble::runtime::EngineConfig threaded_config;
   threaded_config.worker_count = 1U;
   threaded_config.enable_metrics = true;
-  threaded_config.trace_mode = fastfix::runtime::TraceMode::kRing;
+  threaded_config.trace_mode = nimble::runtime::TraceMode::kRing;
   threaded_config.trace_capacity = 16U;
-  threaded_config.queue_app_mode = fastfix::runtime::QueueAppThreadingMode::kThreaded;
+  threaded_config.queue_app_mode = nimble::runtime::QueueAppThreadingMode::kThreaded;
   threaded_config.profile_artifacts.push_back(artifact_path);
-  threaded_config.counterparties.push_back(fastfix::runtime::CounterpartyConfig{
+  threaded_config.counterparties.push_back(nimble::runtime::CounterpartyConfig{
     .name = "buy-sell-initiator-threaded-queue",
     .session =
-      fastfix::session::SessionConfig{
+      nimble::session::SessionConfig{
         .session_id = 1207U,
-        .key = fastfix::session::SessionKey{ "FIX.4.4", "BUY", "SELL" },
+        .key = nimble::session::SessionKey{ "FIX.4.4", "BUY", "SELL" },
         .profile_id = profile_id,
         .default_appl_ver_id = {},
         .heartbeat_interval_seconds = 1U,
@@ -1399,20 +1397,20 @@ TEST_CASE("live-initiator-queue", "[live-initiator-queue]")
       },
     .store_path = {},
     .default_appl_ver_id = {},
-    .store_mode = fastfix::runtime::StoreMode::kMemory,
-    .recovery_mode = fastfix::session::RecoveryMode::kMemoryOnly,
-    .dispatch_mode = fastfix::runtime::AppDispatchMode::kQueueDecoupled,
-    .validation_policy = fastfix::session::ValidationPolicy::Permissive(),
+    .store_mode = nimble::runtime::StoreMode::kMemory,
+    .recovery_mode = nimble::session::RecoveryMode::kMemoryOnly,
+    .dispatch_mode = nimble::runtime::AppDispatchMode::kQueueDecoupled,
+    .validation_policy = nimble::session::ValidationPolicy::Permissive(),
   });
 
-  fastfix::runtime::Engine threaded_engine;
+  nimble::runtime::Engine threaded_engine;
   REQUIRE(threaded_engine.Boot(threaded_config).ok());
 
   auto threaded_state = std::make_shared<QueueInitiatorState>();
   auto threaded_application =
     std::make_shared<QueueInitiatorApplication>(1207U, threaded_config.worker_count, threaded_state);
-  fastfix::runtime::ManagedQueueApplicationRunnerOptions threaded_runner;
-  threaded_runner.mode = fastfix::runtime::ManagedQueueApplicationRunnerMode::kThreaded;
+  nimble::runtime::ManagedQueueApplicationRunnerOptions threaded_runner;
+  threaded_runner.mode = nimble::runtime::ManagedQueueApplicationRunnerMode::kThreaded;
   std::vector<QueueInitiatorHandler*> threaded_handler_ptrs;
   threaded_runner.handlers.reserve(threaded_application->queue_application().worker_count());
   for (std::uint32_t worker_id = 0; worker_id < threaded_application->queue_application().worker_count(); ++worker_id) {
@@ -1421,13 +1419,13 @@ TEST_CASE("live-initiator-queue", "[live-initiator-queue]")
     threaded_runner.handlers.push_back(std::move(handler));
   }
 
-  fastfix::runtime::LiveInitiator threaded_runtime(&threaded_engine,
-                                                   fastfix::runtime::LiveInitiator::Options{
-                                                     .poll_timeout = std::chrono::milliseconds(25),
-                                                     .io_timeout = std::chrono::seconds(5),
-                                                     .application = threaded_application,
-                                                     .managed_queue_runner = std::move(threaded_runner),
-                                                   });
+  nimble::runtime::LiveInitiator threaded_runtime(&threaded_engine,
+                                                  nimble::runtime::LiveInitiator::Options{
+                                                    .poll_timeout = std::chrono::milliseconds(25),
+                                                    .io_timeout = std::chrono::seconds(5),
+                                                    .application = threaded_application,
+                                                    .managed_queue_runner = std::move(threaded_runner),
+                                                  });
   for (auto* handler : threaded_handler_ptrs) {
     handler->BindInitiator(&threaded_runtime);
   }
@@ -1442,17 +1440,17 @@ TEST_CASE("live-initiator-queue", "[live-initiator-queue]")
 namespace {
 
 auto
-RunAcceptorDropAndReconnectEcho(fastfix::transport::TcpAcceptor& acceptor_socket,
-                                fastfix::profile::NormalizedDictionaryView dictionary,
-                                std::uint64_t session_id) -> fastfix::base::Status
+RunAcceptorDropAndReconnectEcho(nimble::transport::TcpAcceptor& acceptor_socket,
+                                nimble::profile::NormalizedDictionaryView dictionary,
+                                std::uint64_t session_id) -> nimble::base::Status
 {
-  fastfix::store::MemorySessionStore store;
-  fastfix::session::AdminProtocol protocol(
-    fastfix::session::AdminProtocolConfig{
+  nimble::store::MemorySessionStore store;
+  nimble::session::AdminProtocol protocol(
+    nimble::session::AdminProtocolConfig{
       .session =
-        fastfix::session::SessionConfig{
+        nimble::session::SessionConfig{
           .session_id = session_id,
-          .key = fastfix::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
+          .key = nimble::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
           .profile_id = dictionary.profile().header().profile_id,
           .heartbeat_interval_seconds = 30U,
           .is_initiator = false,
@@ -1461,7 +1459,7 @@ RunAcceptorDropAndReconnectEcho(fastfix::transport::TcpAcceptor& acceptor_socket
       .sender_comp_id = "SELL",
       .target_comp_id = "BUY",
       .heartbeat_interval_seconds = 30U,
-      .validation_policy = fastfix::session::ValidationPolicy::Permissive(),
+      .validation_policy = nimble::session::ValidationPolicy::Permissive(),
     },
     dictionary,
     &store);
@@ -1547,23 +1545,23 @@ RunAcceptorDropAndReconnectEcho(fastfix::transport::TcpAcceptor& acceptor_socket
     if (event.value().disconnect) {
       static_cast<void>(protocol.OnTransportClosed());
       connection2.Close();
-      return fastfix::base::Status::Ok();
+      return nimble::base::Status::Ok();
     }
   }
 }
 
 auto
-RunAcceptorDropOnce(fastfix::transport::TcpAcceptor& acceptor_socket,
-                    fastfix::profile::NormalizedDictionaryView dictionary,
-                    std::uint64_t session_id) -> fastfix::base::Status
+RunAcceptorDropOnce(nimble::transport::TcpAcceptor& acceptor_socket,
+                    nimble::profile::NormalizedDictionaryView dictionary,
+                    std::uint64_t session_id) -> nimble::base::Status
 {
-  fastfix::store::MemorySessionStore store;
-  fastfix::session::AdminProtocol protocol(
-    fastfix::session::AdminProtocolConfig{
+  nimble::store::MemorySessionStore store;
+  nimble::session::AdminProtocol protocol(
+    nimble::session::AdminProtocolConfig{
       .session =
-        fastfix::session::SessionConfig{
+        nimble::session::SessionConfig{
           .session_id = session_id,
-          .key = fastfix::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
+          .key = nimble::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
           .profile_id = dictionary.profile().header().profile_id,
           .heartbeat_interval_seconds = 30U,
           .is_initiator = false,
@@ -1572,7 +1570,7 @@ RunAcceptorDropOnce(fastfix::transport::TcpAcceptor& acceptor_socket,
       .sender_comp_id = "SELL",
       .target_comp_id = "BUY",
       .heartbeat_interval_seconds = 30U,
-      .validation_policy = fastfix::session::ValidationPolicy::Permissive(),
+      .validation_policy = nimble::session::ValidationPolicy::Permissive(),
     },
     dictionary,
     &store);
@@ -1611,41 +1609,41 @@ RunAcceptorDropOnce(fastfix::transport::TcpAcceptor& acceptor_socket,
   // Force close without clean logout
   static_cast<void>(protocol.OnTransportClosed());
   connection.Close();
-  return fastfix::base::Status::Ok();
+  return nimble::base::Status::Ok();
 }
 
-class ReconnectInitiatorApplication final : public fastfix::runtime::ApplicationCallbacks
+class ReconnectInitiatorApplication final : public nimble::runtime::ApplicationCallbacks
 {
 public:
-  ReconnectInitiatorApplication(fastfix::runtime::LiveInitiator* initiator, std::uint64_t session_id)
+  ReconnectInitiatorApplication(nimble::runtime::LiveInitiator* initiator, std::uint64_t session_id)
     : initiator_(initiator)
     , session_id_(session_id)
   {
   }
 
-  auto BindInitiator(fastfix::runtime::LiveInitiator* initiator) -> void { initiator_ = initiator; }
+  auto BindInitiator(nimble::runtime::LiveInitiator* initiator) -> void { initiator_ = initiator; }
 
-  auto OnSessionEvent(const fastfix::runtime::RuntimeEvent& event) -> fastfix::base::Status override
+  auto OnSessionEvent(const nimble::runtime::RuntimeEvent& event) -> nimble::base::Status override
   {
     if (event.handle.session_id() != session_id_) {
-      return fastfix::base::Status::Ok();
+      return nimble::base::Status::Ok();
     }
-    if (event.session_event == fastfix::runtime::SessionEventKind::kClosed) {
+    if (event.session_event == nimble::runtime::SessionEventKind::kClosed) {
       close_count_.fetch_add(1U);
       sent_application_.store(false);
     }
-    if (event.session_event == fastfix::runtime::SessionEventKind::kActive && close_count_.load() >= 1U &&
+    if (event.session_event == nimble::runtime::SessionEventKind::kActive && close_count_.load() >= 1U &&
         !sent_application_.exchange(true)) {
       active_count_.fetch_add(1U);
       return event.handle.Send(BuildInitiatorMessage());
     }
-    return fastfix::base::Status::Ok();
+    return nimble::base::Status::Ok();
   }
 
-  auto OnAppMessage(const fastfix::runtime::RuntimeEvent& event) -> fastfix::base::Status override
+  auto OnAppMessage(const nimble::runtime::RuntimeEvent& event) -> nimble::base::Status override
   {
     if (event.handle.session_id() != session_id_) {
-      return fastfix::base::Status::Ok();
+      return nimble::base::Status::Ok();
     }
     auto status = ValidateInitiatorEcho(event.message.view());
     if (!status.ok()) {
@@ -1660,7 +1658,7 @@ public:
   [[nodiscard]] auto active_count() const -> std::uint64_t { return active_count_.load(); }
 
 private:
-  fastfix::runtime::LiveInitiator* initiator_{ nullptr };
+  nimble::runtime::LiveInitiator* initiator_{ nullptr };
   std::uint64_t session_id_{ 0 };
   std::atomic<bool> sent_application_{ false };
   std::atomic<bool> received_echo_{ false };
@@ -1668,7 +1666,7 @@ private:
   std::atomic<std::uint64_t> active_count_{ 0 };
 };
 
-class TimingInitiatorApplication final : public fastfix::runtime::ApplicationCallbacks
+class TimingInitiatorApplication final : public nimble::runtime::ApplicationCallbacks
 {
 public:
   explicit TimingInitiatorApplication(std::uint64_t session_id)
@@ -1676,19 +1674,19 @@ public:
   {
   }
 
-  auto OnSessionEvent(const fastfix::runtime::RuntimeEvent& event) -> fastfix::base::Status override
+  auto OnSessionEvent(const nimble::runtime::RuntimeEvent& event) -> nimble::base::Status override
   {
     if (event.handle.session_id() != session_id_) {
-      return fastfix::base::Status::Ok();
+      return nimble::base::Status::Ok();
     }
-    if (event.session_event == fastfix::runtime::SessionEventKind::kClosed) {
+    if (event.session_event == nimble::runtime::SessionEventKind::kClosed) {
       close_time_ns_.store(NowNs());
     }
-    if (event.session_event == fastfix::runtime::SessionEventKind::kBound) {
+    if (event.session_event == nimble::runtime::SessionEventKind::kBound) {
       bound_count_.fetch_add(1U);
       last_bound_time_ns_.store(NowNs());
     }
-    return fastfix::base::Status::Ok();
+    return nimble::base::Status::Ok();
   }
 
   [[nodiscard]] auto close_time_ns() const -> std::uint64_t { return close_time_ns_.load(); }
@@ -1706,34 +1704,34 @@ private:
 
 TEST_CASE("live-initiator-reconnect-after-disconnect", "[live-initiator]")
 {
-  auto dictionary = fastfix::tests::LoadFix44DictionaryView();
+  auto dictionary = nimble::tests::LoadFix44DictionaryView();
   if (!dictionary.ok()) {
     SKIP("FIX44 artifact not available: " << dictionary.status().message());
   }
-  const auto artifact_path = std::filesystem::path(FASTFIX_PROJECT_DIR) / "build" / "bench" / "quickfix_FIX44.art";
+  const auto artifact_path = std::filesystem::path(NIMBLEFIX_PROJECT_DIR) / "build" / "bench" / "quickfix_FIX44.art";
   const auto profile_id = dictionary.value().profile().header().profile_id;
 
-  auto acceptor = fastfix::transport::TcpAcceptor::Listen("127.0.0.1", 0U);
+  auto acceptor = nimble::transport::TcpAcceptor::Listen("127.0.0.1", 0U);
   REQUIRE(acceptor.ok());
   const auto listen_port = acceptor.value().port();
 
-  std::promise<fastfix::base::Status> acceptor_result;
+  std::promise<nimble::base::Status> acceptor_result;
   auto acceptor_future = acceptor_result.get_future();
   std::jthread acceptor_thread(
     [&acceptor_socket = acceptor.value(), dictionary = dictionary.value(), &acceptor_result]() mutable {
       acceptor_result.set_value(RunAcceptorDropAndReconnectEcho(acceptor_socket, std::move(dictionary), 2401U));
     });
 
-  fastfix::runtime::EngineConfig config;
+  nimble::runtime::EngineConfig config;
   config.worker_count = 1U;
   config.enable_metrics = true;
   config.profile_artifacts.push_back(artifact_path);
-  config.counterparties.push_back(fastfix::runtime::CounterpartyConfig{
+  config.counterparties.push_back(nimble::runtime::CounterpartyConfig{
     .name = "reconnect-initiator",
     .session =
-      fastfix::session::SessionConfig{
+      nimble::session::SessionConfig{
         .session_id = 1401U,
-        .key = fastfix::session::SessionKey{ "FIX.4.4", "BUY", "SELL" },
+        .key = nimble::session::SessionKey{ "FIX.4.4", "BUY", "SELL" },
         .profile_id = profile_id,
         .default_appl_ver_id = {},
         .heartbeat_interval_seconds = 30U,
@@ -1741,26 +1739,26 @@ TEST_CASE("live-initiator-reconnect-after-disconnect", "[live-initiator]")
       },
     .store_path = {},
     .default_appl_ver_id = {},
-    .store_mode = fastfix::runtime::StoreMode::kMemory,
-    .recovery_mode = fastfix::session::RecoveryMode::kMemoryOnly,
-    .dispatch_mode = fastfix::runtime::AppDispatchMode::kInline,
-    .validation_policy = fastfix::session::ValidationPolicy::Permissive(),
+    .store_mode = nimble::runtime::StoreMode::kMemory,
+    .recovery_mode = nimble::session::RecoveryMode::kMemoryOnly,
+    .dispatch_mode = nimble::runtime::AppDispatchMode::kInline,
+    .validation_policy = nimble::session::ValidationPolicy::Permissive(),
     .reconnect_enabled = true,
     .reconnect_initial_ms = 100,
     .reconnect_max_ms = 2000,
     .reconnect_max_retries = 0,
   });
 
-  fastfix::runtime::Engine engine;
+  nimble::runtime::Engine engine;
   REQUIRE(engine.Boot(config).ok());
 
   auto application = std::make_shared<ReconnectInitiatorApplication>(nullptr, 1401U);
-  fastfix::runtime::LiveInitiator runtime(&engine,
-                                          fastfix::runtime::LiveInitiator::Options{
-                                            .poll_timeout = std::chrono::milliseconds(25),
-                                            .io_timeout = std::chrono::seconds(5),
-                                            .application = application,
-                                          });
+  nimble::runtime::LiveInitiator runtime(&engine,
+                                         nimble::runtime::LiveInitiator::Options{
+                                           .poll_timeout = std::chrono::milliseconds(25),
+                                           .io_timeout = std::chrono::seconds(5),
+                                           .application = application,
+                                         });
   application->BindInitiator(&runtime);
 
   REQUIRE(runtime.OpenSession(1401U, "127.0.0.1", listen_port).ok());
@@ -1774,34 +1772,34 @@ TEST_CASE("live-initiator-reconnect-after-disconnect", "[live-initiator]")
 
 TEST_CASE("live-initiator-reconnect-max-retries", "[live-initiator]")
 {
-  auto dictionary = fastfix::tests::LoadFix44DictionaryView();
+  auto dictionary = nimble::tests::LoadFix44DictionaryView();
   if (!dictionary.ok()) {
     SKIP("FIX44 artifact not available: " << dictionary.status().message());
   }
-  const auto artifact_path = std::filesystem::path(FASTFIX_PROJECT_DIR) / "build" / "bench" / "quickfix_FIX44.art";
+  const auto artifact_path = std::filesystem::path(NIMBLEFIX_PROJECT_DIR) / "build" / "bench" / "quickfix_FIX44.art";
   const auto profile_id = dictionary.value().profile().header().profile_id;
 
-  auto acceptor = fastfix::transport::TcpAcceptor::Listen("127.0.0.1", 0U);
+  auto acceptor = nimble::transport::TcpAcceptor::Listen("127.0.0.1", 0U);
   REQUIRE(acceptor.ok());
   const auto listen_port = acceptor.value().port();
 
-  std::promise<fastfix::base::Status> acceptor_result;
+  std::promise<nimble::base::Status> acceptor_result;
   auto acceptor_future = acceptor_result.get_future();
   std::jthread acceptor_thread(
     [&acceptor_socket = acceptor.value(), dictionary = dictionary.value(), &acceptor_result]() mutable {
       acceptor_result.set_value(RunAcceptorDropOnce(acceptor_socket, std::move(dictionary), 2402U));
     });
 
-  fastfix::runtime::EngineConfig config;
+  nimble::runtime::EngineConfig config;
   config.worker_count = 1U;
   config.enable_metrics = true;
   config.profile_artifacts.push_back(artifact_path);
-  config.counterparties.push_back(fastfix::runtime::CounterpartyConfig{
+  config.counterparties.push_back(nimble::runtime::CounterpartyConfig{
     .name = "reconnect-max-retries",
     .session =
-      fastfix::session::SessionConfig{
+      nimble::session::SessionConfig{
         .session_id = 1402U,
-        .key = fastfix::session::SessionKey{ "FIX.4.4", "BUY", "SELL" },
+        .key = nimble::session::SessionKey{ "FIX.4.4", "BUY", "SELL" },
         .profile_id = profile_id,
         .default_appl_ver_id = {},
         .heartbeat_interval_seconds = 30U,
@@ -1809,26 +1807,26 @@ TEST_CASE("live-initiator-reconnect-max-retries", "[live-initiator]")
       },
     .store_path = {},
     .default_appl_ver_id = {},
-    .store_mode = fastfix::runtime::StoreMode::kMemory,
-    .recovery_mode = fastfix::session::RecoveryMode::kMemoryOnly,
-    .dispatch_mode = fastfix::runtime::AppDispatchMode::kInline,
-    .validation_policy = fastfix::session::ValidationPolicy::Permissive(),
+    .store_mode = nimble::runtime::StoreMode::kMemory,
+    .recovery_mode = nimble::session::RecoveryMode::kMemoryOnly,
+    .dispatch_mode = nimble::runtime::AppDispatchMode::kInline,
+    .validation_policy = nimble::session::ValidationPolicy::Permissive(),
     .reconnect_enabled = true,
     .reconnect_initial_ms = 50,
     .reconnect_max_ms = 200,
     .reconnect_max_retries = 2,
   });
 
-  fastfix::runtime::Engine engine;
+  nimble::runtime::Engine engine;
   REQUIRE(engine.Boot(config).ok());
 
   auto application = std::make_shared<ReconnectInitiatorApplication>(nullptr, 1402U);
-  fastfix::runtime::LiveInitiator runtime(&engine,
-                                          fastfix::runtime::LiveInitiator::Options{
-                                            .poll_timeout = std::chrono::milliseconds(10),
-                                            .io_timeout = std::chrono::milliseconds(500),
-                                            .application = application,
-                                          });
+  nimble::runtime::LiveInitiator runtime(&engine,
+                                         nimble::runtime::LiveInitiator::Options{
+                                           .poll_timeout = std::chrono::milliseconds(10),
+                                           .io_timeout = std::chrono::milliseconds(500),
+                                           .application = application,
+                                         });
   application->BindInitiator(&runtime);
 
   REQUIRE(runtime.OpenSession(1402U, "127.0.0.1", listen_port).ok());
@@ -1846,19 +1844,19 @@ TEST_CASE("live-initiator-reconnect-max-retries", "[live-initiator]")
 
 TEST_CASE("live-initiator-reconnect-backoff-timing", "[live-initiator]")
 {
-  auto dictionary = fastfix::tests::LoadFix44DictionaryView();
+  auto dictionary = nimble::tests::LoadFix44DictionaryView();
   if (!dictionary.ok()) {
     SKIP("FIX44 artifact not available: " << dictionary.status().message());
   }
-  const auto artifact_path = std::filesystem::path(FASTFIX_PROJECT_DIR) / "build" / "bench" / "quickfix_FIX44.art";
+  const auto artifact_path = std::filesystem::path(NIMBLEFIX_PROJECT_DIR) / "build" / "bench" / "quickfix_FIX44.art";
   const auto profile_id = dictionary.value().profile().header().profile_id;
 
-  auto acceptor = fastfix::transport::TcpAcceptor::Listen("127.0.0.1", 0U);
+  auto acceptor = nimble::transport::TcpAcceptor::Listen("127.0.0.1", 0U);
   REQUIRE(acceptor.ok());
   const auto listen_port = acceptor.value().port();
 
   // Acceptor: establish session, force close, then accept reconnect
-  std::promise<fastfix::base::Status> acceptor_result;
+  std::promise<nimble::base::Status> acceptor_result;
   auto acceptor_future = acceptor_result.get_future();
   std::jthread acceptor_thread(
     [&acceptor_socket = acceptor.value(), dictionary = dictionary.value(), &acceptor_result]() mutable {
@@ -1866,16 +1864,16 @@ TEST_CASE("live-initiator-reconnect-backoff-timing", "[live-initiator]")
     });
 
   const std::uint32_t initial_ms = 200;
-  fastfix::runtime::EngineConfig config;
+  nimble::runtime::EngineConfig config;
   config.worker_count = 1U;
   config.enable_metrics = true;
   config.profile_artifacts.push_back(artifact_path);
-  config.counterparties.push_back(fastfix::runtime::CounterpartyConfig{
+  config.counterparties.push_back(nimble::runtime::CounterpartyConfig{
     .name = "reconnect-timing",
     .session =
-      fastfix::session::SessionConfig{
+      nimble::session::SessionConfig{
         .session_id = 1403U,
-        .key = fastfix::session::SessionKey{ "FIX.4.4", "BUY", "SELL" },
+        .key = nimble::session::SessionKey{ "FIX.4.4", "BUY", "SELL" },
         .profile_id = profile_id,
         .default_appl_ver_id = {},
         .heartbeat_interval_seconds = 30U,
@@ -1883,24 +1881,24 @@ TEST_CASE("live-initiator-reconnect-backoff-timing", "[live-initiator]")
       },
     .store_path = {},
     .default_appl_ver_id = {},
-    .store_mode = fastfix::runtime::StoreMode::kMemory,
-    .recovery_mode = fastfix::session::RecoveryMode::kMemoryOnly,
-    .dispatch_mode = fastfix::runtime::AppDispatchMode::kInline,
-    .validation_policy = fastfix::session::ValidationPolicy::Permissive(),
+    .store_mode = nimble::runtime::StoreMode::kMemory,
+    .recovery_mode = nimble::session::RecoveryMode::kMemoryOnly,
+    .dispatch_mode = nimble::runtime::AppDispatchMode::kInline,
+    .validation_policy = nimble::session::ValidationPolicy::Permissive(),
     .reconnect_enabled = true,
     .reconnect_initial_ms = initial_ms,
     .reconnect_max_ms = 5000,
     .reconnect_max_retries = 0,
   });
 
-  fastfix::runtime::Engine engine;
+  nimble::runtime::Engine engine;
   REQUIRE(engine.Boot(config).ok());
 
   auto application = std::make_shared<TimingInitiatorApplication>(1403U);
   auto reconnect_app = std::make_shared<ReconnectInitiatorApplication>(nullptr, 1403U);
 
   // Combine: timing tracks events, reconnect_app drives the echo/logout
-  class CombinedApplication final : public fastfix::runtime::ApplicationCallbacks
+  class CombinedApplication final : public nimble::runtime::ApplicationCallbacks
   {
   public:
     CombinedApplication(std::shared_ptr<TimingInitiatorApplication> timing,
@@ -1910,7 +1908,7 @@ TEST_CASE("live-initiator-reconnect-backoff-timing", "[live-initiator]")
     {
     }
 
-    auto OnSessionEvent(const fastfix::runtime::RuntimeEvent& event) -> fastfix::base::Status override
+    auto OnSessionEvent(const nimble::runtime::RuntimeEvent& event) -> nimble::base::Status override
     {
       auto status = timing_->OnSessionEvent(event);
       if (!status.ok()) {
@@ -1919,7 +1917,7 @@ TEST_CASE("live-initiator-reconnect-backoff-timing", "[live-initiator]")
       return driver_->OnSessionEvent(event);
     }
 
-    auto OnAppMessage(const fastfix::runtime::RuntimeEvent& event) -> fastfix::base::Status override
+    auto OnAppMessage(const nimble::runtime::RuntimeEvent& event) -> nimble::base::Status override
     {
       return driver_->OnAppMessage(event);
     }
@@ -1931,12 +1929,12 @@ TEST_CASE("live-initiator-reconnect-backoff-timing", "[live-initiator]")
 
   auto combined = std::make_shared<CombinedApplication>(application, reconnect_app);
 
-  fastfix::runtime::LiveInitiator runtime(&engine,
-                                          fastfix::runtime::LiveInitiator::Options{
-                                            .poll_timeout = std::chrono::milliseconds(10),
-                                            .io_timeout = std::chrono::seconds(5),
-                                            .application = combined,
-                                          });
+  nimble::runtime::LiveInitiator runtime(&engine,
+                                         nimble::runtime::LiveInitiator::Options{
+                                           .poll_timeout = std::chrono::milliseconds(10),
+                                           .io_timeout = std::chrono::seconds(5),
+                                           .application = combined,
+                                         });
   reconnect_app->BindInitiator(&runtime);
 
   REQUIRE(runtime.OpenSession(1403U, "127.0.0.1", listen_port).ok());
@@ -1958,15 +1956,15 @@ TEST_CASE("live-initiator-reconnect-backoff-timing", "[live-initiator]")
 
 TEST_CASE("live-initiator-defers-outside-logon-window", "[live-initiator]")
 {
-  auto dictionary = fastfix::tests::LoadFix44DictionaryView();
+  auto dictionary = nimble::tests::LoadFix44DictionaryView();
   if (!dictionary.ok()) {
     SKIP("FIX44 artifact not available: " << dictionary.status().message());
   }
 
-  const auto artifact_path = std::filesystem::path(FASTFIX_PROJECT_DIR) / "build" / "bench" / "quickfix_FIX44.art";
+  const auto artifact_path = std::filesystem::path(NIMBLEFIX_PROJECT_DIR) / "build" / "bench" / "quickfix_FIX44.art";
   const auto profile_id = dictionary.value().profile().header().profile_id;
 
-  auto acceptor = fastfix::transport::TcpAcceptor::Listen("127.0.0.1", 0U);
+  auto acceptor = nimble::transport::TcpAcceptor::Listen("127.0.0.1", 0U);
   REQUIRE(acceptor.ok());
   const auto listen_port = acceptor.value().port();
 
@@ -1974,15 +1972,15 @@ TEST_CASE("live-initiator-defers-outside-logon-window", "[live-initiator]")
   std::tm utc_now{};
   gmtime_r(&now, &utc_now);
 
-  fastfix::runtime::EngineConfig config;
+  nimble::runtime::EngineConfig config;
   config.worker_count = 1U;
   config.profile_artifacts.push_back(artifact_path);
-  config.counterparties.push_back(fastfix::runtime::CounterpartyConfig{
+  config.counterparties.push_back(nimble::runtime::CounterpartyConfig{
     .name = "buy-sell-windowed-initiator",
     .session =
-      fastfix::session::SessionConfig{
+      nimble::session::SessionConfig{
         .session_id = 1450U,
-        .key = fastfix::session::SessionKey{ "FIX.4.4", "BUY", "SELL" },
+        .key = nimble::session::SessionKey{ "FIX.4.4", "BUY", "SELL" },
         .profile_id = profile_id,
         .default_appl_ver_id = {},
         .heartbeat_interval_seconds = 1U,
@@ -1990,22 +1988,22 @@ TEST_CASE("live-initiator-defers-outside-logon-window", "[live-initiator]")
       },
     .store_path = {},
     .default_appl_ver_id = {},
-    .store_mode = fastfix::runtime::StoreMode::kMemory,
-    .recovery_mode = fastfix::session::RecoveryMode::kMemoryOnly,
-    .dispatch_mode = fastfix::runtime::AppDispatchMode::kInline,
-    .validation_policy = fastfix::session::ValidationPolicy::Permissive(),
+    .store_mode = nimble::runtime::StoreMode::kMemory,
+    .recovery_mode = nimble::session::RecoveryMode::kMemoryOnly,
+    .dispatch_mode = nimble::runtime::AppDispatchMode::kInline,
+    .validation_policy = nimble::session::ValidationPolicy::Permissive(),
     .session_schedule =
-      fastfix::runtime::SessionScheduleConfig{
+      nimble::runtime::SessionScheduleConfig{
         .use_local_time = false,
         .non_stop_session = false,
         .start_time =
-          fastfix::runtime::SessionTimeOfDay{
+          nimble::runtime::SessionTimeOfDay{
             static_cast<std::uint8_t>((utc_now.tm_hour + 1) % 24),
             0U,
             0U,
           },
         .end_time =
-          fastfix::runtime::SessionTimeOfDay{
+          nimble::runtime::SessionTimeOfDay{
             static_cast<std::uint8_t>((utc_now.tm_hour + 2) % 24),
             0U,
             0U,
@@ -2013,14 +2011,14 @@ TEST_CASE("live-initiator-defers-outside-logon-window", "[live-initiator]")
       },
   });
 
-  fastfix::runtime::Engine engine;
+  nimble::runtime::Engine engine;
   REQUIRE(engine.Boot(config).ok());
 
-  fastfix::runtime::LiveInitiator runtime(&engine,
-                                          fastfix::runtime::LiveInitiator::Options{
-                                            .poll_timeout = std::chrono::milliseconds(10),
-                                            .io_timeout = std::chrono::milliseconds(50),
-                                          });
+  nimble::runtime::LiveInitiator runtime(&engine,
+                                         nimble::runtime::LiveInitiator::Options{
+                                           .poll_timeout = std::chrono::milliseconds(10),
+                                           .io_timeout = std::chrono::milliseconds(50),
+                                         });
 
   REQUIRE(runtime.OpenSession(1450U, "127.0.0.1", listen_port).ok());
   REQUIRE(runtime.active_connection_count() == 0U);
@@ -2029,27 +2027,27 @@ TEST_CASE("live-initiator-defers-outside-logon-window", "[live-initiator]")
 
 TEST_CASE("live-initiator-open-session-async queues immediate dial", "[live-initiator]")
 {
-  auto dictionary = fastfix::tests::LoadFix44DictionaryView();
+  auto dictionary = nimble::tests::LoadFix44DictionaryView();
   if (!dictionary.ok()) {
     SKIP("FIX44 artifact not available: " << dictionary.status().message());
   }
 
-  const auto artifact_path = std::filesystem::path(FASTFIX_PROJECT_DIR) / "build" / "bench" / "quickfix_FIX44.art";
+  const auto artifact_path = std::filesystem::path(NIMBLEFIX_PROJECT_DIR) / "build" / "bench" / "quickfix_FIX44.art";
   const auto profile_id = dictionary.value().profile().header().profile_id;
 
-  auto acceptor = fastfix::transport::TcpAcceptor::Listen("127.0.0.1", 0U);
+  auto acceptor = nimble::transport::TcpAcceptor::Listen("127.0.0.1", 0U);
   REQUIRE(acceptor.ok());
   const auto listen_port = acceptor.value().port();
 
-  fastfix::runtime::EngineConfig config;
+  nimble::runtime::EngineConfig config;
   config.worker_count = 1U;
   config.profile_artifacts.push_back(artifact_path);
-  config.counterparties.push_back(fastfix::runtime::CounterpartyConfig{
+  config.counterparties.push_back(nimble::runtime::CounterpartyConfig{
     .name = "buy-sell-async-initiator",
     .session =
-      fastfix::session::SessionConfig{
+      nimble::session::SessionConfig{
         .session_id = 1451U,
-        .key = fastfix::session::SessionKey{ "FIX.4.4", "BUY", "SELL" },
+        .key = nimble::session::SessionKey{ "FIX.4.4", "BUY", "SELL" },
         .profile_id = profile_id,
         .default_appl_ver_id = {},
         .heartbeat_interval_seconds = 1U,
@@ -2057,25 +2055,25 @@ TEST_CASE("live-initiator-open-session-async queues immediate dial", "[live-init
       },
     .store_path = {},
     .default_appl_ver_id = {},
-    .store_mode = fastfix::runtime::StoreMode::kMemory,
-    .recovery_mode = fastfix::session::RecoveryMode::kMemoryOnly,
-    .dispatch_mode = fastfix::runtime::AppDispatchMode::kInline,
-    .validation_policy = fastfix::session::ValidationPolicy::Permissive(),
+    .store_mode = nimble::runtime::StoreMode::kMemory,
+    .recovery_mode = nimble::session::RecoveryMode::kMemoryOnly,
+    .dispatch_mode = nimble::runtime::AppDispatchMode::kInline,
+    .validation_policy = nimble::session::ValidationPolicy::Permissive(),
     .session_schedule =
-      fastfix::runtime::SessionScheduleConfig{
+      nimble::runtime::SessionScheduleConfig{
         .use_local_time = false,
         .non_stop_session = true,
       },
   });
 
-  fastfix::runtime::Engine engine;
+  nimble::runtime::Engine engine;
   REQUIRE(engine.Boot(config).ok());
 
-  fastfix::runtime::LiveInitiator runtime(&engine,
-                                          fastfix::runtime::LiveInitiator::Options{
-                                            .poll_timeout = std::chrono::milliseconds(10),
-                                            .io_timeout = std::chrono::milliseconds(50),
-                                          });
+  nimble::runtime::LiveInitiator runtime(&engine,
+                                         nimble::runtime::LiveInitiator::Options{
+                                           .poll_timeout = std::chrono::milliseconds(10),
+                                           .io_timeout = std::chrono::milliseconds(50),
+                                         });
 
   REQUIRE(runtime.OpenSessionAsync(1451U, "127.0.0.1", listen_port).ok());
   REQUIRE(runtime.active_connection_count() == 0U);

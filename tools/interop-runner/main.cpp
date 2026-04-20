@@ -1,13 +1,13 @@
 #include <iostream>
 
-#include "fastfix/runtime/interop_harness.h"
+#include "nimblefix/runtime/interop_harness.h"
 
 namespace {
 
 auto
 PrintUsage() -> void
 {
-  std::cout << "usage: fastfix-interop-runner --scenario <scenario.ffscenario>\n";
+  std::cout << "usage: nimblefix-interop-runner --scenario <scenario.ffscenario>\n";
 }
 
 } // namespace
@@ -31,13 +31,13 @@ main(int argc, char** argv)
     return 1;
   }
 
-  auto scenario = fastfix::runtime::LoadInteropScenarioFile(scenario_path);
+  auto scenario = nimble::runtime::LoadInteropScenarioFile(scenario_path);
   if (!scenario.ok()) {
     std::cerr << scenario.status().message() << '\n';
     return 1;
   }
 
-  auto report = fastfix::runtime::RunInteropScenario(scenario.value());
+  auto report = nimble::runtime::RunInteropScenario(scenario.value());
   if (!report.ok()) {
     std::cerr << report.status().message() << '\n';
     return 1;

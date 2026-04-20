@@ -1,8 +1,8 @@
-#include "fastfix/session/resend_recovery.h"
+#include "nimblefix/session/resend_recovery.h"
 
 #include <cstddef>
 
-namespace fastfix::session {
+namespace nimble::session {
 
 namespace {
 
@@ -148,4 +148,4 @@ RecoverSession(SessionCore& session, const store::SessionStore& store, RecoveryM
   return session.FinishRecovery();
 }
 
-} // namespace fastfix::session
+} // namespace nimble::session

@@ -1,4 +1,4 @@
-set_project("fastfix")
+set_project("nimblefix")
 set_version("0.1.0")
 set_languages("cxx20")
 set_warnings("all")
@@ -6,7 +6,7 @@ add_rules("mode.debug", "mode.release")
 
 includes("config/deps.lua")
 
-local local_deps = FASTFIX_LOCAL_DEPS or {}
+local local_deps = NIMBLEFIX_LOCAL_DEPS or {}
 local vendor_hint = "run `git submodule update --init --recursive`"
 local catch2_override_root = path.join("deps", "include")
 local quickfix_root = path.join("bench", "vendor", "quickfix")
@@ -94,8 +94,8 @@ local function any_output_is_stale(output_paths, input_paths)
 end
 
 local function enqueue_fix44_assets(batchcmds)
-    local xml2ffd_bin = generated_tool_path("fastfix-xml2ffd")
-    local dictgen_bin = generated_tool_path("fastfix-dictgen")
+    local xml2ffd_bin = generated_tool_path("nimblefix-xml2ffd")
+    local dictgen_bin = generated_tool_path("nimblefix-dictgen")
     local fix44_xml = path.join(quickfix_root, "spec", "FIX44.xml")
     local fix44_ffd = path.join("build", "bench", "quickfix_FIX44.ffd")
     local fix44_art = path.join("build", "bench", "quickfix_FIX44.art")
@@ -116,7 +116,7 @@ local function enqueue_fix44_assets(batchcmds)
 
     local needs_fix44_ffd = output_is_stale(fix44_ffd, {fix44_xml, xml2ffd_bin})
     if needs_fix44_ffd then
-        batchcmds_show(batchcmds, "[fastfix] regenerating %s", fix44_ffd)
+        batchcmds_show(batchcmds, "[nimblefix] regenerating %s", fix44_ffd)
         batchcmds:vrunv(xml2ffd_bin, {
             "--xml", fix44_xml,
             "--output", fix44_ffd,
@@ -125,7 +125,7 @@ local function enqueue_fix44_assets(batchcmds)
     end
 
     if needs_fix44_ffd or any_output_is_stale({fix44_art, fix44_builders}, {fix44_ffd, dictgen_bin}) then
-        batchcmds_show(batchcmds, "[fastfix] regenerating %s and %s", fix44_art, fix44_builders)
+        batchcmds_show(batchcmds, "[nimblefix] regenerating %s and %s", fix44_art, fix44_builders)
         batchcmds:vrunv(dictgen_bin, {
             "--input", fix44_ffd,
             "--output", fix44_art,
@@ -184,7 +184,7 @@ local quickfix_vendor_sources = {
 }
 
 local function enqueue_sample_assets(batchcmds)
-    local dictgen_bin = generated_tool_path("fastfix-dictgen")
+    local dictgen_bin = generated_tool_path("nimblefix-dictgen")
     local sample_profile = path.join("samples", "basic_profile.ffd")
     local sample_overlay = path.join("samples", "basic_overlay.ffd")
     local sample_art = path.join("build", "sample-basic.art")
@@ -204,7 +204,7 @@ local function enqueue_sample_assets(batchcmds)
     batchcmds:mkdir(path.join("build", "generated"))
 
     if any_output_is_stale({sample_art, sample_builders}, {sample_profile, sample_overlay, dictgen_bin}) then
-        batchcmds_show(batchcmds, "[fastfix] regenerating %s and %s", sample_art, sample_builders)
+        batchcmds_show(batchcmds, "[nimblefix] regenerating %s and %s", sample_art, sample_builders)
         batchcmds:vrunv(dictgen_bin, {
             "--input", sample_profile,
             "--merge", sample_overlay,
@@ -214,24 +214,24 @@ local function enqueue_sample_assets(batchcmds)
     end
 end
 
-rule("fastfix.fix44_assets")
+rule("nimblefix.fix44_assets")
     before_buildcmd(function (target, batchcmds, opt)
         enqueue_fix44_assets(batchcmds)
     end)
 
-rule("fastfix.sample_assets")
+rule("nimblefix.sample_assets")
     before_buildcmd(function (target, batchcmds, opt)
         enqueue_sample_assets(batchcmds)
     end)
 
-target("fastfix-thirdparty-pugixml")
+target("nimblefix-thirdparty-pugixml")
     set_kind("static")
     set_default(false)
     set_warnings("none")
     add_includedirs("deps/src/pugixml/src", {public = true})
     add_files("deps/src/pugixml/src/pugixml.cpp")
 
-target("fastfix-thirdparty-catch2-main")
+target("nimblefix-thirdparty-catch2-main")
     set_kind("static")
     set_default(false)
     set_warnings("none")
@@ -240,99 +240,99 @@ target("fastfix-thirdparty-catch2-main")
     add_includedirs("deps/src/Catch2/extras")
     add_files("deps/src/Catch2/extras/catch_amalgamated.cpp")
 
-target("fastfix")
+target("nimblefix")
     set_kind("static")
     add_includedirs("include", {public = true})
-    add_defines("FASTFIX_PROJECT_DIR=\"$(projectdir)\"", {public = true})
+    add_defines("NIMBLEFIX_PROJECT_DIR=\"$(projectdir)\"", {public = true})
     add_files("src/profile/*.cpp", "src/runtime/*.cpp", "src/session/*.cpp", "src/store/*.cpp", "src/message/*.cpp", "src/codec/*.cpp", "src/transport/*.cpp")
     if os.isfile("/usr/include/liburing.h") or os.isfile("/usr/local/include/liburing.h") then
         add_syslinks("uring")
     else
-        add_defines("FASTFIX_DISABLE_LIBURING")
+        add_defines("NIMBLEFIX_DISABLE_LIBURING")
     end
 
-target("fastfix-dictgen")
+target("nimblefix-dictgen")
     set_kind("binary")
     set_policy("build.fence", true)
-    add_deps("fastfix")
+    add_deps("nimblefix")
     add_files("tools/dictgen/*.cpp")
 
-target("fastfix-interop-runner")
+target("nimblefix-interop-runner")
     set_kind("binary")
-    add_deps("fastfix")
+    add_deps("nimblefix")
     add_files("tools/interop-runner/*.cpp")
 
-target("fastfix-soak")
+target("nimblefix-soak")
     set_kind("binary")
-    add_deps("fastfix")
+    add_deps("nimblefix")
     add_files("tools/soak/*.cpp")
 
-target("fastfix-fuzz-config")
+target("nimblefix-fuzz-config")
     set_kind("binary")
-    add_deps("fastfix")
+    add_deps("nimblefix")
     add_files("tools/fuzz-config/*.cpp")
 
-target("fastfix-fuzz-dictgen")
+target("nimblefix-fuzz-dictgen")
     set_kind("binary")
-    add_deps("fastfix")
+    add_deps("nimblefix")
     add_files("tools/fuzz-dictgen/*.cpp")
 
-target("fastfix-fuzz-codec")
+target("nimblefix-fuzz-codec")
     set_kind("binary")
-    add_deps("fastfix")
+    add_deps("nimblefix")
     add_files("tools/fuzz-codec/main.cpp")
 
-target("fastfix-fuzz-codec-libfuzzer")
+target("nimblefix-fuzz-codec-libfuzzer")
     set_kind("binary")
     set_default(false)
-    add_deps("fastfix")
+    add_deps("nimblefix")
     add_files("tools/fuzz-codec/fuzz_entry.cpp")
     add_cxflags("-fsanitize=fuzzer", {force = true})
     add_ldflags("-fsanitize=fuzzer", {force = true})
 
-target("fastfix-initiator")
+target("nimblefix-initiator")
     set_kind("binary")
-    add_deps("fastfix")
+    add_deps("nimblefix")
     add_files("tools/initiator/*.cpp")
 
-target("fastfix-acceptor")
+target("nimblefix-acceptor")
     set_kind("binary")
-    add_deps("fastfix")
+    add_deps("nimblefix")
     add_files("tools/acceptor/*.cpp")
 
-target("fastfix-xml2ffd")
+target("nimblefix-xml2ffd")
     set_kind("binary")
     set_policy("build.fence", true)
-    add_deps("fastfix", "fastfix-thirdparty-pugixml")
+    add_deps("nimblefix", "nimblefix-thirdparty-pugixml")
     add_files("tools/xml2ffd/*.cpp")
 
-target("fastfix-fix44-assets")
+target("nimblefix-fix44-assets")
     set_kind("phony")
     set_default(false)
     set_policy("build.fence", true)
-    add_deps("fastfix-xml2ffd", "fastfix-dictgen")
-    add_rules("fastfix.fix44_assets")
+    add_deps("nimblefix-xml2ffd", "nimblefix-dictgen")
+    add_rules("nimblefix.fix44_assets")
 
-target("fastfix-sample-assets")
+target("nimblefix-sample-assets")
     set_kind("phony")
     set_default(false)
     set_policy("build.fence", true)
-    add_deps("fastfix-dictgen")
-    add_rules("fastfix.sample_assets")
+    add_deps("nimblefix-dictgen")
+    add_rules("nimblefix.sample_assets")
 
-target("fastfix-generated-assets")
+target("nimblefix-generated-assets")
     set_kind("phony")
     set_default(false)
     set_policy("build.fence", true)
-    add_deps("fastfix-fix44-assets", "fastfix-sample-assets")
+    add_deps("nimblefix-fix44-assets", "nimblefix-sample-assets")
 
-target("fastfix-bench")
+target("nimblefix-bench")
     set_kind("binary")
-    add_deps("fastfix", "fastfix-fix44-assets")
+    add_deps("nimblefix", "nimblefix-fix44-assets")
     add_includedirs("build/generated")
     add_files("bench/main.cpp")
 
-target("fastfix-vendor-quickfix")
+target("nimblefix-vendor-quickfix")
     set_kind("static")
     set_default(false)
     set_warnings("none")
@@ -345,36 +345,36 @@ target("fastfix-vendor-quickfix")
         add_syslinks("pthread")
     end
 
-target("fastfix-quickfix-cpp-bench")
+target("nimblefix-quickfix-cpp-bench")
     set_kind("binary")
     set_default(false)
     set_basename("quickfix-cpp-bench")
     set_languages("cxx17")
-    add_deps("fastfix-vendor-quickfix")
+    add_deps("nimblefix-vendor-quickfix")
     add_includedirs("bench")
     add_files("bench/quickfix_main.cpp")
     if is_plat("linux") then
         add_syslinks("pthread")
     end
 
-target("fastfix-tests")
+target("nimblefix-tests")
     set_kind("binary")
-    add_deps("fastfix", "fastfix-thirdparty-catch2-main", "fastfix-thirdparty-pugixml", "fastfix-generated-assets")
+    add_deps("nimblefix", "nimblefix-thirdparty-catch2-main", "nimblefix-thirdparty-pugixml", "nimblefix-generated-assets")
     add_includedirs("build/generated")
     add_files("tests/*.cpp", "tools/xml2ffd/xml2ffd.cpp")
     remove_files("tests/test_main.cpp")
 
-apply_local_dep("fastfix", "fastfix")
-apply_local_dep("fastfix-dictgen", "fastfix-dictgen")
-apply_local_dep("fastfix-interop-runner", "fastfix-interop-runner")
-apply_local_dep("fastfix-soak", "fastfix-soak")
-apply_local_dep("fastfix-fuzz-config", "fastfix-fuzz-config")
-apply_local_dep("fastfix-fuzz-dictgen", "fastfix-fuzz-dictgen")
-apply_local_dep("fastfix-fuzz-codec", "fastfix-fuzz-codec")
-apply_local_dep("fastfix-fuzz-codec-libfuzzer", "fastfix-fuzz-codec-libfuzzer")
-apply_local_dep("fastfix-initiator", "fastfix-initiator")
-apply_local_dep("fastfix-acceptor", "fastfix-acceptor")
-apply_local_dep("fastfix-bench", "fastfix-bench")
-apply_local_dep("fastfix-vendor-quickfix", "fastfix-vendor-quickfix")
-apply_local_dep("fastfix-quickfix-cpp-bench", "fastfix-quickfix-cpp-bench")
-apply_local_dep("fastfix-tests", "fastfix-tests")
+apply_local_dep("nimblefix", "nimblefix")
+apply_local_dep("nimblefix-dictgen", "nimblefix-dictgen")
+apply_local_dep("nimblefix-interop-runner", "nimblefix-interop-runner")
+apply_local_dep("nimblefix-soak", "nimblefix-soak")
+apply_local_dep("nimblefix-fuzz-config", "nimblefix-fuzz-config")
+apply_local_dep("nimblefix-fuzz-dictgen", "nimblefix-fuzz-dictgen")
+apply_local_dep("nimblefix-fuzz-codec", "nimblefix-fuzz-codec")
+apply_local_dep("nimblefix-fuzz-codec-libfuzzer", "nimblefix-fuzz-codec-libfuzzer")
+apply_local_dep("nimblefix-initiator", "nimblefix-initiator")
+apply_local_dep("nimblefix-acceptor", "nimblefix-acceptor")
+apply_local_dep("nimblefix-bench", "nimblefix-bench")
+apply_local_dep("nimblefix-vendor-quickfix", "nimblefix-vendor-quickfix")
+apply_local_dep("nimblefix-quickfix-cpp-bench", "nimblefix-quickfix-cpp-bench")
+apply_local_dep("nimblefix-tests", "nimblefix-tests")

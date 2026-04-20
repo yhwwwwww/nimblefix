@@ -1,4 +1,4 @@
-#include "fastfix/profile/dictgen_input.h"
+#include "nimblefix/profile/dictgen_input.h"
 
 #include <algorithm>
 #include <cctype>
@@ -7,7 +7,7 @@
 #include <sstream>
 #include <string>
 
-namespace fastfix::profile {
+namespace nimble::profile {
 
 namespace {
 
@@ -451,4 +451,4 @@ LoadNormalizedDictionaryFile(const std::filesystem::path& path) -> base::Result<
   return ParseDictionary(path);
 }
 
-} // namespace fastfix::profile
+} // namespace nimble::profile

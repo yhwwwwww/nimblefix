@@ -1,12 +1,12 @@
 #include <catch2/catch_test_macros.hpp>
 
-#include "fastfix/session/session_core.h"
+#include "nimblefix/session/session_core.h"
 
 #include "test_support.h"
 
-using fastfix::session::SessionConfig;
-using fastfix::session::SessionCore;
-using fastfix::session::SessionState;
+using nimble::session::SessionConfig;
+using nimble::session::SessionCore;
+using nimble::session::SessionState;
 
 namespace {
 

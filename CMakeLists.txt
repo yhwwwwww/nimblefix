@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(fastfix VERSION 0.1.0 LANGUAGES CXX)
+project(nimblefix VERSION 0.1.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -10,12 +10,12 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
 
-option(FASTFIX_BUILD_TOOLS "Build FastFix command-line tools" ON)
-option(FASTFIX_BUILD_TESTS "Build the FastFix Catch2 test suite" ON)
-option(FASTFIX_BUILD_BENCHMARKS "Build the FastFix and QuickFIX benchmark drivers" ON)
-option(FASTFIX_BUILD_FUZZERS "Build the standalone fuzz corpus runners" ON)
-option(FASTFIX_BUILD_LIBFUZZER "Build the libFuzzer entrypoint" OFF)
-option(FASTFIX_ENABLE_LIBURING "Enable io_uring when liburing headers and library are available" ON)
+option(NIMBLEFIX_BUILD_TOOLS "Build NimbleFIX command-line tools" ON)
+option(NIMBLEFIX_BUILD_TESTS "Build the NimbleFIX Catch2 test suite" ON)
+option(NIMBLEFIX_BUILD_BENCHMARKS "Build the NimbleFIX and QuickFIX benchmark drivers" ON)
+option(NIMBLEFIX_BUILD_FUZZERS "Build the standalone fuzz corpus runners" ON)
+option(NIMBLEFIX_BUILD_LIBFUZZER "Build the libFuzzer entrypoint" OFF)
+option(NIMBLEFIX_ENABLE_LIBURING "Enable io_uring when liburing headers and library are available" ON)
 
 include(CTest)
 include(GNUInstallDirs)
@@ -23,72 +23,72 @@ include(CheckIncludeFileCXX)
 
 find_package(Threads REQUIRED)
 
-set(FASTFIX_PROJECT_ROOT "${PROJECT_SOURCE_DIR}")
-set(FASTFIX_VENDOR_HINT "Run 'git submodule update --init --recursive'.")
-set(FASTFIX_CATCH2_ROOT "${PROJECT_SOURCE_DIR}/deps/src/Catch2")
-set(FASTFIX_CATCH2_OVERRIDE_DIR "${PROJECT_SOURCE_DIR}/deps/include")
-set(FASTFIX_PUGIXML_ROOT "${PROJECT_SOURCE_DIR}/deps/src/pugixml")
-set(FASTFIX_QUICKFIX_ROOT "${PROJECT_SOURCE_DIR}/bench/vendor/quickfix")
-set(FASTFIX_QUICKFIX_OVERRIDE_DIR "${PROJECT_SOURCE_DIR}/deps/include/quickfix")
-set(FASTFIX_GENERATED_DIR "${FASTFIX_PROJECT_ROOT}/build/generated")
-set(FASTFIX_OUTPUT_ROOT "${FASTFIX_PROJECT_ROOT}/build")
-set(FASTFIX_BENCH_OUTPUT_DIR "${FASTFIX_OUTPUT_ROOT}/bench")
-set(FASTFIX_FIX44_XML "${FASTFIX_QUICKFIX_ROOT}/spec/FIX44.xml")
-set(FASTFIX_FIX44_FFD "${FASTFIX_BENCH_OUTPUT_DIR}/quickfix_FIX44.ffd")
-set(FASTFIX_FIX44_ART "${FASTFIX_BENCH_OUTPUT_DIR}/quickfix_FIX44.art")
-set(FASTFIX_FIX44_BUILDERS "${FASTFIX_GENERATED_DIR}/fix44_builders.h")
-set(FASTFIX_FIX44_READERS "${FASTFIX_GENERATED_DIR}/fix44_readers.h")
-set(FASTFIX_SAMPLE_ART "${FASTFIX_OUTPUT_ROOT}/sample-basic.art")
-set(FASTFIX_SAMPLE_BUILDERS "${FASTFIX_GENERATED_DIR}/sample_basic_builders.h")
-set(FASTFIX_SAMPLE_READERS "${FASTFIX_GENERATED_DIR}/sample_basic_readers.h")
+set(NIMBLEFIX_PROJECT_ROOT "${PROJECT_SOURCE_DIR}")
+set(NIMBLEFIX_VENDOR_HINT "Run 'git submodule update --init --recursive'.")
+set(NIMBLEFIX_CATCH2_ROOT "${PROJECT_SOURCE_DIR}/deps/src/Catch2")
+set(NIMBLEFIX_CATCH2_OVERRIDE_DIR "${PROJECT_SOURCE_DIR}/deps/include")
+set(NIMBLEFIX_PUGIXML_ROOT "${PROJECT_SOURCE_DIR}/deps/src/pugixml")
+set(NIMBLEFIX_QUICKFIX_ROOT "${PROJECT_SOURCE_DIR}/bench/vendor/quickfix")
+set(NIMBLEFIX_QUICKFIX_OVERRIDE_DIR "${PROJECT_SOURCE_DIR}/deps/include/quickfix")
+set(NIMBLEFIX_GENERATED_DIR "${NIMBLEFIX_PROJECT_ROOT}/build/generated")
+set(NIMBLEFIX_OUTPUT_ROOT "${NIMBLEFIX_PROJECT_ROOT}/build")
+set(NIMBLEFIX_BENCH_OUTPUT_DIR "${NIMBLEFIX_OUTPUT_ROOT}/bench")
+set(NIMBLEFIX_FIX44_XML "${NIMBLEFIX_QUICKFIX_ROOT}/spec/FIX44.xml")
+set(NIMBLEFIX_FIX44_FFD "${NIMBLEFIX_BENCH_OUTPUT_DIR}/quickfix_FIX44.ffd")
+set(NIMBLEFIX_FIX44_ART "${NIMBLEFIX_BENCH_OUTPUT_DIR}/quickfix_FIX44.art")
+set(NIMBLEFIX_FIX44_BUILDERS "${NIMBLEFIX_GENERATED_DIR}/fix44_builders.h")
+set(NIMBLEFIX_FIX44_READERS "${NIMBLEFIX_GENERATED_DIR}/fix44_readers.h")
+set(NIMBLEFIX_SAMPLE_ART "${NIMBLEFIX_OUTPUT_ROOT}/sample-basic.art")
+set(NIMBLEFIX_SAMPLE_BUILDERS "${NIMBLEFIX_GENERATED_DIR}/sample_basic_builders.h")
+set(NIMBLEFIX_SAMPLE_READERS "${NIMBLEFIX_GENERATED_DIR}/sample_basic_readers.h")
 
-file(MAKE_DIRECTORY "${FASTFIX_GENERATED_DIR}")
-file(MAKE_DIRECTORY "${FASTFIX_BENCH_OUTPUT_DIR}")
+file(MAKE_DIRECTORY "${NIMBLEFIX_GENERATED_DIR}")
+file(MAKE_DIRECTORY "${NIMBLEFIX_BENCH_OUTPUT_DIR}")
 
-function(fastfix_require_checkout required_path label)
+function(nimblefix_require_checkout required_path label)
     if(NOT EXISTS "${required_path}")
-        message(FATAL_ERROR "Missing ${label} at ${required_path}. ${FASTFIX_VENDOR_HINT}")
+        message(FATAL_ERROR "Missing ${label} at ${required_path}. ${NIMBLEFIX_VENDOR_HINT}")
     endif()
 endfunction()
 
-fastfix_require_checkout("${FASTFIX_CATCH2_ROOT}/extras/catch_amalgamated.cpp" "Catch2 submodule checkout")
-fastfix_require_checkout("${FASTFIX_CATCH2_OVERRIDE_DIR}/catch2/catch_user_config.hpp" "Catch2 override header")
-fastfix_require_checkout("${FASTFIX_PUGIXML_ROOT}/src/pugixml.cpp" "pugixml submodule checkout")
-fastfix_require_checkout("${FASTFIX_QUICKFIX_ROOT}/spec/FIX44.xml" "QuickFIX submodule checkout")
-fastfix_require_checkout("${FASTFIX_QUICKFIX_OVERRIDE_DIR}/Allocator.h" "QuickFIX override header")
+nimblefix_require_checkout("${NIMBLEFIX_CATCH2_ROOT}/extras/catch_amalgamated.cpp" "Catch2 submodule checkout")
+nimblefix_require_checkout("${NIMBLEFIX_CATCH2_OVERRIDE_DIR}/catch2/catch_user_config.hpp" "Catch2 override header")
+nimblefix_require_checkout("${NIMBLEFIX_PUGIXML_ROOT}/src/pugixml.cpp" "pugixml submodule checkout")
+nimblefix_require_checkout("${NIMBLEFIX_QUICKFIX_ROOT}/spec/FIX44.xml" "QuickFIX submodule checkout")
+nimblefix_require_checkout("${NIMBLEFIX_QUICKFIX_OVERRIDE_DIR}/Allocator.h" "QuickFIX override header")
 
-check_include_file_cxx("liburing.h" FASTFIX_HAVE_LIBURING_HEADER)
-find_library(FASTFIX_URING_LIBRARY NAMES uring)
+check_include_file_cxx("liburing.h" NIMBLEFIX_HAVE_LIBURING_HEADER)
+find_library(NIMBLEFIX_URING_LIBRARY NAMES uring)
 
-if(FASTFIX_ENABLE_LIBURING AND FASTFIX_HAVE_LIBURING_HEADER AND FASTFIX_URING_LIBRARY)
-    set(FASTFIX_USE_LIBURING ON)
-    message(STATUS "FastFix: enabling io_uring backend")
+if(NIMBLEFIX_ENABLE_LIBURING AND NIMBLEFIX_HAVE_LIBURING_HEADER AND NIMBLEFIX_URING_LIBRARY)
+    set(NIMBLEFIX_USE_LIBURING ON)
+    message(STATUS "NimbleFIX: enabling io_uring backend")
 else()
-    set(FASTFIX_USE_LIBURING OFF)
-    message(STATUS "FastFix: building without io_uring backend")
+    set(NIMBLEFIX_USE_LIBURING OFF)
+    message(STATUS "NimbleFIX: building without io_uring backend")
 endif()
 
-add_library(fastfix-thirdparty-pugixml STATIC
-    "${FASTFIX_PUGIXML_ROOT}/src/pugixml.cpp"
+add_library(nimblefix-thirdparty-pugixml STATIC
+    "${NIMBLEFIX_PUGIXML_ROOT}/src/pugixml.cpp"
 )
-target_include_directories(fastfix-thirdparty-pugixml
+target_include_directories(nimblefix-thirdparty-pugixml
     PUBLIC
-        "${FASTFIX_PUGIXML_ROOT}/src"
+        "${NIMBLEFIX_PUGIXML_ROOT}/src"
 )
 
-add_library(fastfix-thirdparty-catch2-main STATIC
-    "${FASTFIX_CATCH2_ROOT}/extras/catch_amalgamated.cpp"
+add_library(nimblefix-thirdparty-catch2-main STATIC
+    "${NIMBLEFIX_CATCH2_ROOT}/extras/catch_amalgamated.cpp"
 )
-target_include_directories(fastfix-thirdparty-catch2-main
+target_include_directories(nimblefix-thirdparty-catch2-main
     PUBLIC
-        "${FASTFIX_CATCH2_OVERRIDE_DIR}"
-        "${FASTFIX_CATCH2_ROOT}/src"
+        "${NIMBLEFIX_CATCH2_OVERRIDE_DIR}"
+        "${NIMBLEFIX_CATCH2_ROOT}/src"
     PRIVATE
-        "${FASTFIX_CATCH2_ROOT}/extras"
+        "${NIMBLEFIX_CATCH2_ROOT}/extras"
 )
-target_compile_features(fastfix-thirdparty-catch2-main PUBLIC cxx_std_14)
+target_compile_features(nimblefix-thirdparty-catch2-main PUBLIC cxx_std_14)
 
-file(GLOB FASTFIX_LIBRARY_SOURCES CONFIGURE_DEPENDS
+file(GLOB NIMBLEFIX_LIBRARY_SOURCES CONFIGURE_DEPENDS
     "${PROJECT_SOURCE_DIR}/src/profile/*.cpp"
     "${PROJECT_SOURCE_DIR}/src/runtime/*.cpp"
     "${PROJECT_SOURCE_DIR}/src/session/*.cpp"
@@ -98,163 +98,163 @@ file(GLOB FASTFIX_LIBRARY_SOURCES CONFIGURE_DEPENDS
     "${PROJECT_SOURCE_DIR}/src/transport/*.cpp"
 )
 
-add_library(fastfix STATIC ${FASTFIX_LIBRARY_SOURCES})
-target_include_directories(fastfix
+add_library(nimblefix STATIC ${NIMBLEFIX_LIBRARY_SOURCES})
+target_include_directories(nimblefix
     PUBLIC
         "${PROJECT_SOURCE_DIR}/include"
 )
-target_compile_definitions(fastfix
+target_compile_definitions(nimblefix
     PUBLIC
-        FASTFIX_PROJECT_DIR=\"${FASTFIX_PROJECT_ROOT}\"
+        NIMBLEFIX_PROJECT_DIR=\"${NIMBLEFIX_PROJECT_ROOT}\"
 )
-target_link_libraries(fastfix PUBLIC Threads::Threads)
+target_link_libraries(nimblefix PUBLIC Threads::Threads)
 
-if(FASTFIX_USE_LIBURING)
-    target_link_libraries(fastfix PUBLIC "${FASTFIX_URING_LIBRARY}")
+if(NIMBLEFIX_USE_LIBURING)
+    target_link_libraries(nimblefix PUBLIC "${NIMBLEFIX_URING_LIBRARY}")
 else()
-    target_compile_definitions(fastfix PRIVATE FASTFIX_DISABLE_LIBURING)
+    target_compile_definitions(nimblefix PRIVATE NIMBLEFIX_DISABLE_LIBURING)
 endif()
 
-function(fastfix_add_binary target_name)
+function(nimblefix_add_binary target_name)
     add_executable(${target_name} ${ARGN})
-    target_link_libraries(${target_name} PRIVATE fastfix)
+    target_link_libraries(${target_name} PRIVATE nimblefix)
 endfunction()
 
-file(GLOB FASTFIX_DICTGEN_SOURCES CONFIGURE_DEPENDS
+file(GLOB NIMBLEFIX_DICTGEN_SOURCES CONFIGURE_DEPENDS
     "${PROJECT_SOURCE_DIR}/tools/dictgen/*.cpp"
 )
-fastfix_add_binary(fastfix-dictgen ${FASTFIX_DICTGEN_SOURCES})
+nimblefix_add_binary(nimblefix-dictgen ${NIMBLEFIX_DICTGEN_SOURCES})
 
-file(GLOB FASTFIX_XML2FFD_SOURCES CONFIGURE_DEPENDS
+file(GLOB NIMBLEFIX_XML2FFD_SOURCES CONFIGURE_DEPENDS
     "${PROJECT_SOURCE_DIR}/tools/xml2ffd/*.cpp"
 )
-add_executable(fastfix-xml2ffd ${FASTFIX_XML2FFD_SOURCES})
-target_link_libraries(fastfix-xml2ffd PRIVATE fastfix fastfix-thirdparty-pugixml)
+add_executable(nimblefix-xml2ffd ${NIMBLEFIX_XML2FFD_SOURCES})
+target_link_libraries(nimblefix-xml2ffd PRIVATE nimblefix nimblefix-thirdparty-pugixml)
 
-if(FASTFIX_BUILD_TOOLS)
-    file(GLOB FASTFIX_INTEROP_RUNNER_SOURCES CONFIGURE_DEPENDS
+if(NIMBLEFIX_BUILD_TOOLS)
+    file(GLOB NIMBLEFIX_INTEROP_RUNNER_SOURCES CONFIGURE_DEPENDS
         "${PROJECT_SOURCE_DIR}/tools/interop-runner/*.cpp"
     )
-    fastfix_add_binary(fastfix-interop-runner ${FASTFIX_INTEROP_RUNNER_SOURCES})
+    nimblefix_add_binary(nimblefix-interop-runner ${NIMBLEFIX_INTEROP_RUNNER_SOURCES})
 
-    file(GLOB FASTFIX_SOAK_SOURCES CONFIGURE_DEPENDS
+    file(GLOB NIMBLEFIX_SOAK_SOURCES CONFIGURE_DEPENDS
         "${PROJECT_SOURCE_DIR}/tools/soak/*.cpp"
     )
-    fastfix_add_binary(fastfix-soak ${FASTFIX_SOAK_SOURCES})
+    nimblefix_add_binary(nimblefix-soak ${NIMBLEFIX_SOAK_SOURCES})
 
-    file(GLOB FASTFIX_INITIATOR_SOURCES CONFIGURE_DEPENDS
+    file(GLOB NIMBLEFIX_INITIATOR_SOURCES CONFIGURE_DEPENDS
         "${PROJECT_SOURCE_DIR}/tools/initiator/*.cpp"
     )
-    fastfix_add_binary(fastfix-initiator ${FASTFIX_INITIATOR_SOURCES})
+    nimblefix_add_binary(nimblefix-initiator ${NIMBLEFIX_INITIATOR_SOURCES})
 
-    file(GLOB FASTFIX_ACCEPTOR_SOURCES CONFIGURE_DEPENDS
+    file(GLOB NIMBLEFIX_ACCEPTOR_SOURCES CONFIGURE_DEPENDS
         "${PROJECT_SOURCE_DIR}/tools/acceptor/*.cpp"
     )
-    fastfix_add_binary(fastfix-acceptor ${FASTFIX_ACCEPTOR_SOURCES})
+    nimblefix_add_binary(nimblefix-acceptor ${NIMBLEFIX_ACCEPTOR_SOURCES})
 endif()
 
-if(FASTFIX_BUILD_FUZZERS)
-    file(GLOB FASTFIX_FUZZ_CONFIG_SOURCES CONFIGURE_DEPENDS
+if(NIMBLEFIX_BUILD_FUZZERS)
+    file(GLOB NIMBLEFIX_FUZZ_CONFIG_SOURCES CONFIGURE_DEPENDS
         "${PROJECT_SOURCE_DIR}/tools/fuzz-config/*.cpp"
     )
-    fastfix_add_binary(fastfix-fuzz-config ${FASTFIX_FUZZ_CONFIG_SOURCES})
+    nimblefix_add_binary(nimblefix-fuzz-config ${NIMBLEFIX_FUZZ_CONFIG_SOURCES})
 
-    file(GLOB FASTFIX_FUZZ_DICTGEN_SOURCES CONFIGURE_DEPENDS
+    file(GLOB NIMBLEFIX_FUZZ_DICTGEN_SOURCES CONFIGURE_DEPENDS
         "${PROJECT_SOURCE_DIR}/tools/fuzz-dictgen/*.cpp"
     )
-    fastfix_add_binary(fastfix-fuzz-dictgen ${FASTFIX_FUZZ_DICTGEN_SOURCES})
+    nimblefix_add_binary(nimblefix-fuzz-dictgen ${NIMBLEFIX_FUZZ_DICTGEN_SOURCES})
 
-    add_executable(fastfix-fuzz-codec
+    add_executable(nimblefix-fuzz-codec
         "${PROJECT_SOURCE_DIR}/tools/fuzz-codec/main.cpp"
     )
-    target_link_libraries(fastfix-fuzz-codec PRIVATE fastfix)
+    target_link_libraries(nimblefix-fuzz-codec PRIVATE nimblefix)
 endif()
 
-if(FASTFIX_BUILD_LIBFUZZER)
-    add_executable(fastfix-fuzz-codec-libfuzzer
+if(NIMBLEFIX_BUILD_LIBFUZZER)
+    add_executable(nimblefix-fuzz-codec-libfuzzer
         "${PROJECT_SOURCE_DIR}/tools/fuzz-codec/fuzz_entry.cpp"
     )
-    target_link_libraries(fastfix-fuzz-codec-libfuzzer PRIVATE fastfix)
-    target_compile_options(fastfix-fuzz-codec-libfuzzer PRIVATE -fsanitize=fuzzer)
-    target_link_options(fastfix-fuzz-codec-libfuzzer PRIVATE -fsanitize=fuzzer)
+    target_link_libraries(nimblefix-fuzz-codec-libfuzzer PRIVATE nimblefix)
+    target_compile_options(nimblefix-fuzz-codec-libfuzzer PRIVATE -fsanitize=fuzzer)
+    target_link_options(nimblefix-fuzz-codec-libfuzzer PRIVATE -fsanitize=fuzzer)
 endif()
 
 add_custom_command(
     OUTPUT
-        "${FASTFIX_FIX44_FFD}"
-        "${FASTFIX_FIX44_ART}"
-        "${FASTFIX_FIX44_BUILDERS}"
-        "${FASTFIX_FIX44_READERS}"
-    COMMAND "${CMAKE_COMMAND}" -E make_directory "${FASTFIX_BENCH_OUTPUT_DIR}"
-    COMMAND "${CMAKE_COMMAND}" -E make_directory "${FASTFIX_GENERATED_DIR}"
-    COMMAND $<TARGET_FILE:fastfix-xml2ffd>
-        --xml "${FASTFIX_FIX44_XML}"
-        --output "${FASTFIX_FIX44_FFD}"
+        "${NIMBLEFIX_FIX44_FFD}"
+        "${NIMBLEFIX_FIX44_ART}"
+        "${NIMBLEFIX_FIX44_BUILDERS}"
+        "${NIMBLEFIX_FIX44_READERS}"
+    COMMAND "${CMAKE_COMMAND}" -E make_directory "${NIMBLEFIX_BENCH_OUTPUT_DIR}"
+    COMMAND "${CMAKE_COMMAND}" -E make_directory "${NIMBLEFIX_GENERATED_DIR}"
+    COMMAND $<TARGET_FILE:nimblefix-xml2ffd>
+        --xml "${NIMBLEFIX_FIX44_XML}"
+        --output "${NIMBLEFIX_FIX44_FFD}"
         --profile-id 4400
-    COMMAND $<TARGET_FILE:fastfix-dictgen>
-        --input "${FASTFIX_FIX44_FFD}"
-        --output "${FASTFIX_FIX44_ART}"
-        --cpp-builders "${FASTFIX_FIX44_BUILDERS}"
-        --cpp-readers "${FASTFIX_FIX44_READERS}"
+    COMMAND $<TARGET_FILE:nimblefix-dictgen>
+        --input "${NIMBLEFIX_FIX44_FFD}"
+        --output "${NIMBLEFIX_FIX44_ART}"
+        --cpp-builders "${NIMBLEFIX_FIX44_BUILDERS}"
+        --cpp-readers "${NIMBLEFIX_FIX44_READERS}"
     DEPENDS
-        fastfix-xml2ffd
-        fastfix-dictgen
-        "${FASTFIX_FIX44_XML}"
+        nimblefix-xml2ffd
+        nimblefix-dictgen
+        "${NIMBLEFIX_FIX44_XML}"
     VERBATIM
 )
-add_custom_target(fastfix-fix44-assets
+add_custom_target(nimblefix-fix44-assets
     DEPENDS
-        "${FASTFIX_FIX44_FFD}"
-        "${FASTFIX_FIX44_ART}"
-        "${FASTFIX_FIX44_BUILDERS}"
-        "${FASTFIX_FIX44_READERS}"
+        "${NIMBLEFIX_FIX44_FFD}"
+        "${NIMBLEFIX_FIX44_ART}"
+        "${NIMBLEFIX_FIX44_BUILDERS}"
+        "${NIMBLEFIX_FIX44_READERS}"
 )
 
 add_custom_command(
     OUTPUT
-        "${FASTFIX_SAMPLE_ART}"
-        "${FASTFIX_SAMPLE_BUILDERS}"
-        "${FASTFIX_SAMPLE_READERS}"
-    COMMAND "${CMAKE_COMMAND}" -E make_directory "${FASTFIX_OUTPUT_ROOT}"
-    COMMAND "${CMAKE_COMMAND}" -E make_directory "${FASTFIX_GENERATED_DIR}"
-    COMMAND $<TARGET_FILE:fastfix-dictgen>
+        "${NIMBLEFIX_SAMPLE_ART}"
+        "${NIMBLEFIX_SAMPLE_BUILDERS}"
+        "${NIMBLEFIX_SAMPLE_READERS}"
+    COMMAND "${CMAKE_COMMAND}" -E make_directory "${NIMBLEFIX_OUTPUT_ROOT}"
+    COMMAND "${CMAKE_COMMAND}" -E make_directory "${NIMBLEFIX_GENERATED_DIR}"
+    COMMAND $<TARGET_FILE:nimblefix-dictgen>
         --input "${PROJECT_SOURCE_DIR}/samples/basic_profile.ffd"
         --merge "${PROJECT_SOURCE_DIR}/samples/basic_overlay.ffd"
-        --output "${FASTFIX_SAMPLE_ART}"
-        --cpp-builders "${FASTFIX_SAMPLE_BUILDERS}"
-        --cpp-readers "${FASTFIX_SAMPLE_READERS}"
+        --output "${NIMBLEFIX_SAMPLE_ART}"
+        --cpp-builders "${NIMBLEFIX_SAMPLE_BUILDERS}"
+        --cpp-readers "${NIMBLEFIX_SAMPLE_READERS}"
     DEPENDS
-        fastfix-dictgen
+        nimblefix-dictgen
         "${PROJECT_SOURCE_DIR}/samples/basic_profile.ffd"
         "${PROJECT_SOURCE_DIR}/samples/basic_overlay.ffd"
     VERBATIM
 )
-add_custom_target(fastfix-sample-assets
+add_custom_target(nimblefix-sample-assets
     DEPENDS
-        "${FASTFIX_SAMPLE_ART}"
-        "${FASTFIX_SAMPLE_BUILDERS}"
-        "${FASTFIX_SAMPLE_READERS}"
+        "${NIMBLEFIX_SAMPLE_ART}"
+        "${NIMBLEFIX_SAMPLE_BUILDERS}"
+        "${NIMBLEFIX_SAMPLE_READERS}"
 )
 
-add_custom_target(fastfix-generated-assets
+add_custom_target(nimblefix-generated-assets
     DEPENDS
-        fastfix-fix44-assets
-        fastfix-sample-assets
+        nimblefix-fix44-assets
+        nimblefix-sample-assets
 )
 
-if(FASTFIX_BUILD_BENCHMARKS)
-    add_executable(fastfix-bench
+if(NIMBLEFIX_BUILD_BENCHMARKS)
+    add_executable(nimblefix-bench
         "${PROJECT_SOURCE_DIR}/bench/main.cpp"
     )
-    target_link_libraries(fastfix-bench PRIVATE fastfix)
-    target_include_directories(fastfix-bench PRIVATE "${FASTFIX_GENERATED_DIR}")
-    add_dependencies(fastfix-bench fastfix-fix44-assets)
+    target_link_libraries(nimblefix-bench PRIVATE nimblefix)
+    target_include_directories(nimblefix-bench PRIVATE "${NIMBLEFIX_GENERATED_DIR}")
+    add_dependencies(nimblefix-bench nimblefix-fix44-assets)
 
     if(WIN32)
         message(FATAL_ERROR "The QuickFIX comparison benchmark target currently supports Unix-like builds only")
     endif()
 
-    set(FASTFIX_VENDOR_QUICKFIX_SOURCES
+    set(NIMBLEFIX_VENDOR_QUICKFIX_SOURCES
         Acceptor.cpp
         DataDictionary.cpp
         DataDictionaryProvider.cpp
@@ -296,38 +296,38 @@ if(FASTFIX_BUILD_BENCHMARKS)
         Utility.cpp
         pugixml.cpp
     )
-    list(TRANSFORM FASTFIX_VENDOR_QUICKFIX_SOURCES PREPEND "${FASTFIX_QUICKFIX_ROOT}/src/C++/")
+    list(TRANSFORM NIMBLEFIX_VENDOR_QUICKFIX_SOURCES PREPEND "${NIMBLEFIX_QUICKFIX_ROOT}/src/C++/")
 
-    add_library(fastfix-vendor-quickfix STATIC ${FASTFIX_VENDOR_QUICKFIX_SOURCES})
-    target_compile_definitions(fastfix-vendor-quickfix PRIVATE NOMINMAX _FILE_OFFSET_BITS=64)
-    target_compile_features(fastfix-vendor-quickfix PUBLIC cxx_std_17)
-    target_include_directories(fastfix-vendor-quickfix
+    add_library(nimblefix-vendor-quickfix STATIC ${NIMBLEFIX_VENDOR_QUICKFIX_SOURCES})
+    target_compile_definitions(nimblefix-vendor-quickfix PRIVATE NOMINMAX _FILE_OFFSET_BITS=64)
+    target_compile_features(nimblefix-vendor-quickfix PUBLIC cxx_std_17)
+    target_include_directories(nimblefix-vendor-quickfix
         PUBLIC
-            "${FASTFIX_QUICKFIX_OVERRIDE_DIR}"
-            "${FASTFIX_QUICKFIX_ROOT}/src/C++"
+            "${NIMBLEFIX_QUICKFIX_OVERRIDE_DIR}"
+            "${NIMBLEFIX_QUICKFIX_ROOT}/src/C++"
         PRIVATE
-            "${FASTFIX_QUICKFIX_ROOT}"
-            "${FASTFIX_QUICKFIX_ROOT}/src"
+            "${NIMBLEFIX_QUICKFIX_ROOT}"
+            "${NIMBLEFIX_QUICKFIX_ROOT}/src"
     )
-    target_link_libraries(fastfix-vendor-quickfix PUBLIC Threads::Threads)
+    target_link_libraries(nimblefix-vendor-quickfix PUBLIC Threads::Threads)
 
-    add_executable(fastfix-quickfix-cpp-bench
+    add_executable(nimblefix-quickfix-cpp-bench
         "${PROJECT_SOURCE_DIR}/bench/quickfix_main.cpp"
     )
-    set_target_properties(fastfix-quickfix-cpp-bench PROPERTIES OUTPUT_NAME "quickfix-cpp-bench")
-    target_include_directories(fastfix-quickfix-cpp-bench
+    set_target_properties(nimblefix-quickfix-cpp-bench PROPERTIES OUTPUT_NAME "quickfix-cpp-bench")
+    target_include_directories(nimblefix-quickfix-cpp-bench
         PRIVATE
             "${PROJECT_SOURCE_DIR}/bench"
     )
-    target_link_libraries(fastfix-quickfix-cpp-bench PRIVATE fastfix-vendor-quickfix Threads::Threads)
+    target_link_libraries(nimblefix-quickfix-cpp-bench PRIVATE nimblefix-vendor-quickfix Threads::Threads)
 
-    # Two-process loopback benchmark: FastFix
-    add_executable(fastfix-loopback
-        "${PROJECT_SOURCE_DIR}/bench/fastfix_loopback.cpp"
+    # Two-process loopback benchmark: NimbleFIX
+    add_executable(nimblefix-loopback
+        "${PROJECT_SOURCE_DIR}/bench/nimblefix_loopback.cpp"
     )
-    target_link_libraries(fastfix-loopback PRIVATE fastfix)
-    target_include_directories(fastfix-loopback PRIVATE "${FASTFIX_GENERATED_DIR}")
-    add_dependencies(fastfix-loopback fastfix-fix44-assets)
+    target_link_libraries(nimblefix-loopback PRIVATE nimblefix)
+    target_include_directories(nimblefix-loopback PRIVATE "${NIMBLEFIX_GENERATED_DIR}")
+    add_dependencies(nimblefix-loopback nimblefix-fix44-assets)
 
     # Raw TCP RTT benchmark (no FIX protocol)
     add_executable(tcp-rtt
@@ -343,28 +343,28 @@ if(FASTFIX_BUILD_BENCHMARKS)
         PRIVATE
             "${PROJECT_SOURCE_DIR}/bench"
     )
-    target_link_libraries(quickfix-loopback PRIVATE fastfix-vendor-quickfix Threads::Threads)
+    target_link_libraries(quickfix-loopback PRIVATE nimblefix-vendor-quickfix Threads::Threads)
 endif()
 
-if(FASTFIX_BUILD_TESTS)
-    file(GLOB FASTFIX_TEST_SOURCES CONFIGURE_DEPENDS
+if(NIMBLEFIX_BUILD_TESTS)
+    file(GLOB NIMBLEFIX_TEST_SOURCES CONFIGURE_DEPENDS
         "${PROJECT_SOURCE_DIR}/tests/*.cpp"
     )
-    add_executable(fastfix-tests
-        ${FASTFIX_TEST_SOURCES}
+    add_executable(nimblefix-tests
+        ${NIMBLEFIX_TEST_SOURCES}
         "${PROJECT_SOURCE_DIR}/tools/xml2ffd/xml2ffd.cpp"
     )
-    target_include_directories(fastfix-tests
+    target_include_directories(nimblefix-tests
         PRIVATE
-            "${FASTFIX_GENERATED_DIR}"
+            "${NIMBLEFIX_GENERATED_DIR}"
             "${PROJECT_SOURCE_DIR}/tests/generated"
     )
-    target_link_libraries(fastfix-tests
+    target_link_libraries(nimblefix-tests
         PRIVATE
-            fastfix
-            fastfix-thirdparty-catch2-main
-            fastfix-thirdparty-pugixml
+            nimblefix
+            nimblefix-thirdparty-catch2-main
+            nimblefix-thirdparty-pugixml
     )
-    add_dependencies(fastfix-tests fastfix-generated-assets)
-    add_test(NAME fastfix-tests COMMAND fastfix-tests)
+    add_dependencies(nimblefix-tests nimblefix-generated-assets)
+    add_test(NAME nimblefix-tests COMMAND nimblefix-tests)
 endif()

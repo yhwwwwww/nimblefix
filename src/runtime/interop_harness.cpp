@@ -1,6 +1,6 @@
-#include "fastfix/runtime/interop_harness.h"
+#include "nimblefix/runtime/interop_harness.h"
 
-#include "fastfix/runtime/config_io.h"
+#include "nimblefix/runtime/config_io.h"
 
 #include <algorithm>
 #include <cctype>
@@ -10,13 +10,13 @@
 #include <string_view>
 #include <unordered_map>
 
-#include "fastfix/runtime/sharded_runtime.h"
-#include "fastfix/session/resend_recovery.h"
-#include "fastfix/store/durable_batch_store.h"
-#include "fastfix/store/memory_store.h"
-#include "fastfix/store/mmap_store.h"
+#include "nimblefix/runtime/sharded_runtime.h"
+#include "nimblefix/session/resend_recovery.h"
+#include "nimblefix/store/durable_batch_store.h"
+#include "nimblefix/store/memory_store.h"
+#include "nimblefix/store/mmap_store.h"
 
-namespace fastfix::runtime {
+namespace nimble::runtime {
 
 namespace {
 
@@ -708,4 +708,4 @@ RunInteropScenario(const InteropScenario& scenario) -> base::Result<InteropRepor
   return report;
 }
 
-} // namespace fastfix::runtime
+} // namespace nimble::runtime

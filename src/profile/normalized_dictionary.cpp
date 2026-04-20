@@ -1,9 +1,9 @@
-#include "fastfix/profile/normalized_dictionary.h"
+#include "nimblefix/profile/normalized_dictionary.h"
 
 #include <algorithm>
 #include <limits>
 
-namespace fastfix::profile {
+namespace nimble::profile {
 
 namespace {
 
@@ -321,4 +321,4 @@ NormalizedDictionaryView::group_field_rules(const GroupDefRecord& record) const 
   return group_field_rules_.entries().subspan(record.first_field_rule, record.field_rule_count);
 }
 
-} // namespace fastfix::profile
+} // namespace nimble::profile

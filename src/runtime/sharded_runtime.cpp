@@ -1,8 +1,8 @@
-#include "fastfix/runtime/sharded_runtime.h"
+#include "nimblefix/runtime/sharded_runtime.h"
 
 #include <algorithm>
 
-namespace fastfix::runtime {
+namespace nimble::runtime {
 
 ShardedRuntime::ShardedRuntime(std::uint32_t worker_count)
 {
@@ -92,4 +92,4 @@ ShardedRuntime::FindPendingConnectionShard(std::uint64_t connection_id) const ->
   return FindShard(it->second);
 }
 
-} // namespace fastfix::runtime
+} // namespace nimble::runtime

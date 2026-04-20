@@ -8,35 +8,35 @@
 #include <thread>
 #include <vector>
 
-#include "fastfix/runtime/application.h"
+#include "nimblefix/runtime/application.h"
 
 #include "test_support.h"
 
 namespace {
 
 auto
-MakeEvent(std::uint64_t session_id, std::uint32_t worker_id, std::string text) -> fastfix::runtime::RuntimeEvent
+MakeEvent(std::uint64_t session_id, std::uint32_t worker_id, std::string text) -> nimble::runtime::RuntimeEvent
 {
-  return fastfix::runtime::RuntimeEvent{
-    .kind = fastfix::runtime::RuntimeEventKind::kApplicationMessage,
-    .session_event = fastfix::runtime::SessionEventKind::kBound,
-    .handle = fastfix::session::SessionHandle(session_id, worker_id),
-    .session_key = fastfix::session::SessionKey{ "FIX.4.4", "BUY", "SELL" },
+  return nimble::runtime::RuntimeEvent{
+    .kind = nimble::runtime::RuntimeEventKind::kApplicationMessage,
+    .session_event = nimble::runtime::SessionEventKind::kBound,
+    .handle = nimble::session::SessionHandle(session_id, worker_id),
+    .session_key = nimble::session::SessionKey{ "FIX.4.4", "BUY", "SELL" },
     .message = {},
     .text = std::move(text),
     .timestamp_ns = session_id,
   };
 }
 
-class CapturingHandler final : public fastfix::runtime::QueueApplicationEventHandler
+class CapturingHandler final : public nimble::runtime::QueueApplicationEventHandler
 {
 public:
-  auto OnRuntimeEvent(const fastfix::runtime::RuntimeEvent& event) -> fastfix::base::Status override
+  auto OnRuntimeEvent(const nimble::runtime::RuntimeEvent& event) -> nimble::base::Status override
   {
     std::lock_guard lock(mutex_);
     seen_texts_.push_back(event.text);
     seen_workers_.push_back(event.handle.worker_id());
-    return fastfix::base::Status::Ok();
+    return nimble::base::Status::Ok();
   }
 
   [[nodiscard]] auto seen_texts() const -> std::vector<std::string>
@@ -64,7 +64,7 @@ struct SharedCaptureState
   std::vector<std::uint32_t> workers;
 };
 
-class SharedCapturingHandler final : public fastfix::runtime::QueueApplicationEventHandler
+class SharedCapturingHandler final : public nimble::runtime::QueueApplicationEventHandler
 {
 public:
   explicit SharedCapturingHandler(std::shared_ptr<SharedCaptureState> state)
@@ -72,19 +72,19 @@ public:
   {
   }
 
-  auto OnRuntimeEvent(const fastfix::runtime::RuntimeEvent& event) -> fastfix::base::Status override
+  auto OnRuntimeEvent(const nimble::runtime::RuntimeEvent& event) -> nimble::base::Status override
   {
     std::lock_guard lock(state_->mutex);
     state_->texts.push_back(event.text);
     state_->workers.push_back(event.handle.worker_id());
-    return fastfix::base::Status::Ok();
+    return nimble::base::Status::Ok();
   }
 
 private:
   std::shared_ptr<SharedCaptureState> state_;
 };
 
-class AffinityCapturingHandler final : public fastfix::runtime::QueueApplicationEventHandler
+class AffinityCapturingHandler final : public nimble::runtime::QueueApplicationEventHandler
 {
 public:
   explicit AffinityCapturingHandler(std::uint32_t expected_worker_id)
@@ -92,16 +92,16 @@ public:
   {
   }
 
-  auto OnRuntimeEvent(const fastfix::runtime::RuntimeEvent& event) -> fastfix::base::Status override
+  auto OnRuntimeEvent(const nimble::runtime::RuntimeEvent& event) -> nimble::base::Status override
   {
     std::lock_guard lock(mutex_);
     seen_workers_.push_back(event.handle.worker_id());
     seen_thread_ids_.push_back(std::this_thread::get_id());
     if (event.handle.worker_id() != expected_worker_id_) {
-      return fastfix::base::Status::InvalidArgument("queue application runner delivered an event to the wrong worker "
-                                                    "handler");
+      return nimble::base::Status::InvalidArgument("queue application runner delivered an event to the wrong worker "
+                                                   "handler");
     }
-    return fastfix::base::Status::Ok();
+    return nimble::base::Status::Ok();
   }
 
   [[nodiscard]] auto seen_workers() const -> std::vector<std::uint32_t>
@@ -133,14 +133,14 @@ private:
 
 TEST_CASE("application-poller", "[application-poller]")
 {
-  fastfix::runtime::QueueApplication queue(2U);
+  nimble::runtime::QueueApplication queue(2U);
   CapturingHandler handler;
-  fastfix::runtime::QueueApplicationPoller poller(&queue,
-                                                  &handler,
-                                                  fastfix::runtime::QueueApplicationPollerOptions{
-                                                    .max_events_per_poll = 1U,
-                                                    .yield_when_idle = false,
-                                                  });
+  nimble::runtime::QueueApplicationPoller poller(&queue,
+                                                 &handler,
+                                                 nimble::runtime::QueueApplicationPollerOptions{
+                                                   .max_events_per_poll = 1U,
+                                                   .yield_when_idle = false,
+                                                 });
 
   REQUIRE(queue.OnAppMessage(MakeEvent(1001U, 0U, "w0-first")).ok());
   REQUIRE(queue.OnAppMessage(MakeEvent(1002U, 0U, "w0-second")).ok());
@@ -156,7 +156,7 @@ TEST_CASE("application-poller", "[application-poller]")
 
   auto all_workers = poller.PollAllOnce();
   REQUIRE(!all_workers.ok());
-  REQUIRE(all_workers.status().code() == fastfix::base::ErrorCode::kInvalidArgument);
+  REQUIRE(all_workers.status().code() == nimble::base::ErrorCode::kInvalidArgument);
   REQUIRE(all_workers.status().message().find("single-worker applications") != std::string::npos);
 
   drained = poller.PollWorkerOnce(0U);
@@ -182,7 +182,7 @@ TEST_CASE("application-poller", "[application-poller]")
   std::atomic<bool> stop_requested{ false };
   auto run_all_status = poller.RunAll(stop_requested);
   REQUIRE(!run_all_status.ok());
-  REQUIRE(run_all_status.code() == fastfix::base::ErrorCode::kInvalidArgument);
+  REQUIRE(run_all_status.code() == nimble::base::ErrorCode::kInvalidArgument);
 
   drained = poller.PollWorkerOnce(1U);
   REQUIRE(drained.ok());
@@ -201,14 +201,14 @@ TEST_CASE("application-poller", "[application-poller]")
   REQUIRE(texts[3] == "run-all-denied");
   REQUIRE(texts[4] == "run-worker");
 
-  fastfix::runtime::QueueApplication single_worker_queue(1U);
+  nimble::runtime::QueueApplication single_worker_queue(1U);
   CapturingHandler single_worker_handler;
-  fastfix::runtime::QueueApplicationPoller single_worker_poller(&single_worker_queue,
-                                                                &single_worker_handler,
-                                                                fastfix::runtime::QueueApplicationPollerOptions{
-                                                                  .max_events_per_poll = 8U,
-                                                                  .yield_when_idle = false,
-                                                                });
+  nimble::runtime::QueueApplicationPoller single_worker_poller(&single_worker_queue,
+                                                               &single_worker_handler,
+                                                               nimble::runtime::QueueApplicationPollerOptions{
+                                                                 .max_events_per_poll = 8U,
+                                                                 .yield_when_idle = false,
+                                                               });
 
   REQUIRE(single_worker_queue.OnAppMessage(MakeEvent(3501U, 0U, "single-all-1")).ok());
   REQUIRE(single_worker_queue.OnAppMessage(MakeEvent(3502U, 0U, "single-all-2")).ok());
@@ -234,17 +234,17 @@ TEST_CASE("application-poller", "[application-poller]")
   REQUIRE(single_worker_texts[2] == "single-run-all");
 
   auto shared_state = std::make_shared<SharedCaptureState>();
-  std::vector<std::unique_ptr<fastfix::runtime::QueueApplicationEventHandler>> handlers;
+  std::vector<std::unique_ptr<nimble::runtime::QueueApplicationEventHandler>> handlers;
   handlers.push_back(std::make_unique<SharedCapturingHandler>(shared_state));
   handlers.push_back(std::make_unique<SharedCapturingHandler>(shared_state));
 
-  fastfix::runtime::QueueApplication runner_queue(2U);
-  fastfix::runtime::QueueApplicationRunner runner(&runner_queue,
-                                                  std::move(handlers),
-                                                  fastfix::runtime::QueueApplicationPollerOptions{
-                                                    .max_events_per_poll = 8U,
-                                                    .yield_when_idle = true,
-                                                  });
+  nimble::runtime::QueueApplication runner_queue(2U);
+  nimble::runtime::QueueApplicationRunner runner(&runner_queue,
+                                                 std::move(handlers),
+                                                 nimble::runtime::QueueApplicationPollerOptions{
+                                                   .max_events_per_poll = 8U,
+                                                   .yield_when_idle = true,
+                                                 });
   REQUIRE(runner.Start().ok());
   REQUIRE(runner.running());
 
@@ -273,7 +273,7 @@ TEST_CASE("application-poller", "[application-poller]")
   }
 
   std::vector<AffinityCapturingHandler*> affinity_handler_ptrs;
-  std::vector<std::unique_ptr<fastfix::runtime::QueueApplicationEventHandler>> affinity_handlers;
+  std::vector<std::unique_ptr<nimble::runtime::QueueApplicationEventHandler>> affinity_handlers;
   affinity_handlers.reserve(2U);
   for (std::uint32_t worker_id = 0U; worker_id < 2U; ++worker_id) {
     auto handler_ptr = std::make_unique<AffinityCapturingHandler>(worker_id);
@@ -281,17 +281,17 @@ TEST_CASE("application-poller", "[application-poller]")
     affinity_handlers.push_back(std::move(handler_ptr));
   }
 
-  fastfix::runtime::QueueApplication affinity_queue(2U);
-  fastfix::runtime::QueueApplicationRunner affinity_runner(&affinity_queue,
-                                                           std::move(affinity_handlers),
-                                                           fastfix::runtime::QueueApplicationPollerOptions{
-                                                             .max_events_per_poll = 8U,
-                                                             .yield_when_idle = true,
-                                                           },
-                                                           fastfix::runtime::QueueApplicationRunnerThreadOptions{
-                                                             .cpu_affinity = {},
-                                                             .thread_name_prefix = "ff-app-test-w",
-                                                           });
+  nimble::runtime::QueueApplication affinity_queue(2U);
+  nimble::runtime::QueueApplicationRunner affinity_runner(&affinity_queue,
+                                                          std::move(affinity_handlers),
+                                                          nimble::runtime::QueueApplicationPollerOptions{
+                                                            .max_events_per_poll = 8U,
+                                                            .yield_when_idle = true,
+                                                          },
+                                                          nimble::runtime::QueueApplicationRunnerThreadOptions{
+                                                            .cpu_affinity = {},
+                                                            .thread_name_prefix = "ff-app-test-w",
+                                                          });
   REQUIRE(affinity_runner.Start().ok());
 
   REQUIRE(affinity_queue.OnAppMessage(MakeEvent(5001U, 0U, "affinity-w0-first")).ok());

@@ -3,35 +3,35 @@
 #include <filesystem>
 #include <limits>
 
-#include "fastfix/profile/artifact_builder.h"
-#include "fastfix/profile/dictgen_input.h"
-#include "fastfix/runtime/soak.h"
+#include "nimblefix/profile/artifact_builder.h"
+#include "nimblefix/profile/dictgen_input.h"
+#include "nimblefix/runtime/soak.h"
 
 namespace {
 
 auto
-BuildSoakArtifact(const std::filesystem::path& artifact_path) -> fastfix::base::Status
+BuildSoakArtifact(const std::filesystem::path& artifact_path) -> nimble::base::Status
 {
-  const auto ffd_path = std::filesystem::path(FASTFIX_PROJECT_DIR) / "build" / "bench" / "quickfix_FIX44.ffd";
-  auto dictionary = fastfix::profile::LoadNormalizedDictionaryFile(ffd_path);
+  const auto ffd_path = std::filesystem::path(NIMBLEFIX_PROJECT_DIR) / "build" / "bench" / "quickfix_FIX44.ffd";
+  auto dictionary = nimble::profile::LoadNormalizedDictionaryFile(ffd_path);
   if (!dictionary.ok()) {
     return dictionary.status();
   }
-  auto artifact = fastfix::profile::BuildProfileArtifact(dictionary.value());
+  auto artifact = nimble::profile::BuildProfileArtifact(dictionary.value());
   if (!artifact.ok()) {
     return artifact.status();
   }
-  return fastfix::profile::WriteProfileArtifact(artifact_path, artifact.value());
+  return nimble::profile::WriteProfileArtifact(artifact_path, artifact.value());
 }
 
 auto
 RunSoakCase(const std::filesystem::path& artifact_path,
-            const fastfix::runtime::SoakConfig& config,
-            fastfix::runtime::SoakReport* out_report) -> void
+            const nimble::runtime::SoakConfig& config,
+            nimble::runtime::SoakReport* out_report) -> void
 {
   REQUIRE(BuildSoakArtifact(artifact_path).ok());
 
-  auto report = fastfix::runtime::RunSoak(config);
+  auto report = nimble::runtime::RunSoak(config);
   REQUIRE(report.ok());
   REQUIRE(report.value().iterations_completed == config.iterations);
   REQUIRE(report.value().metrics.sessions.size() == config.session_count);
@@ -62,9 +62,9 @@ RunSoakCase(const std::filesystem::path& artifact_path,
 
 TEST_CASE("soak-smoke", "[soak-smoke]")
 {
-  const auto artifact_path = std::filesystem::temp_directory_path() / "fastfix-soak-smoke.art";
+  const auto artifact_path = std::filesystem::temp_directory_path() / "nimblefix-soak-smoke.art";
 
-  fastfix::runtime::SoakConfig config;
+  nimble::runtime::SoakConfig config;
   config.profile_artifact = artifact_path;
   config.worker_count = 2U;
   config.session_count = 4U;
@@ -81,7 +81,7 @@ TEST_CASE("soak-smoke", "[soak-smoke]")
   config.timer_step_seconds = 31U;
   config.enable_trace = true;
 
-  fastfix::runtime::SoakReport report;
+  nimble::runtime::SoakReport report;
   RunSoakCase(artifact_path, config, &report);
   REQUIRE(report.total_inbound_messages > 256U);
   REQUIRE(report.total_outbound_messages > 256U);
@@ -92,9 +92,9 @@ TEST_CASE("soak-smoke", "[soak-smoke]")
 
 TEST_CASE("soak-long", "[soak-long]")
 {
-  const auto artifact_path = std::filesystem::temp_directory_path() / "fastfix-soak-long.art";
+  const auto artifact_path = std::filesystem::temp_directory_path() / "nimblefix-soak-long.art";
 
-  fastfix::runtime::SoakConfig config;
+  nimble::runtime::SoakConfig config;
   config.profile_artifact = artifact_path;
   config.worker_count = 2U;
   config.session_count = 6U;
@@ -111,7 +111,7 @@ TEST_CASE("soak-long", "[soak-long]")
   config.timer_step_seconds = 31U;
   config.enable_trace = false;
 
-  fastfix::runtime::SoakReport report;
+  nimble::runtime::SoakReport report;
   RunSoakCase(artifact_path, config, &report);
   REQUIRE(report.total_inbound_messages > 1500U);
   REQUIRE(report.total_outbound_messages > 1200U);
@@ -126,9 +126,9 @@ TEST_CASE("soak-long", "[soak-long]")
 
 TEST_CASE("soak-multihour", "[soak-multihour]")
 {
-  const auto artifact_path = std::filesystem::temp_directory_path() / "fastfix-soak-multihour.art";
+  const auto artifact_path = std::filesystem::temp_directory_path() / "nimblefix-soak-multihour.art";
 
-  fastfix::runtime::SoakConfig config;
+  nimble::runtime::SoakConfig config;
   config.profile_artifact = artifact_path;
   config.worker_count = 2U;
   config.session_count = 8U;
@@ -145,7 +145,7 @@ TEST_CASE("soak-multihour", "[soak-multihour]")
   config.timer_step_seconds = 31U;
   config.enable_trace = false;
 
-  fastfix::runtime::SoakReport report;
+  nimble::runtime::SoakReport report;
   RunSoakCase(artifact_path, config, &report);
   REQUIRE(report.total_inbound_messages > 20'000U);
   REQUIRE(report.total_outbound_messages > 20'000U);
@@ -161,9 +161,9 @@ TEST_CASE("soak-multihour", "[soak-multihour]")
 
 TEST_CASE("soak-multiworker", "[soak-multiworker]")
 {
-  const auto artifact_path = std::filesystem::temp_directory_path() / "fastfix-soak-multiworker.art";
+  const auto artifact_path = std::filesystem::temp_directory_path() / "nimblefix-soak-multiworker.art";
 
-  fastfix::runtime::SoakConfig config;
+  nimble::runtime::SoakConfig config;
   config.profile_artifact = artifact_path;
   config.worker_count = 4U;
   config.session_count = 16U;
@@ -180,7 +180,7 @@ TEST_CASE("soak-multiworker", "[soak-multiworker]")
   config.timer_step_seconds = 31U;
   config.enable_trace = false;
 
-  fastfix::runtime::SoakReport report;
+  nimble::runtime::SoakReport report;
   RunSoakCase(artifact_path, config, &report);
 
   REQUIRE(report.metrics.workers.size() == config.worker_count);

@@ -10,7 +10,7 @@
 #include <thread>
 #include <vector>
 
-#include "fastfix/transport/tcp_transport.h"
+#include "nimblefix/transport/tcp_transport.h"
 
 #include "test_support.h"
 
@@ -53,8 +53,8 @@ TEST_CASE("transport-fault", "[transport-fault]")
     REQUIRE((fds[0] >= 0 && fds[1] >= 0));
     REQUIRE(SetNonBlocking(fds[0]));
 
-    fastfix::transport::TcpConnection connection(fds[0]);
-    const auto frame = ::fastfix::tests::EncodeFixFrame("35=0|34=1|49=BUY|56=SELL|52=20260403-00:00:00.000|");
+    nimble::transport::TcpConnection connection(fds[0]);
+    const auto frame = ::nimble::tests::EncodeFixFrame("35=0|34=1|49=BUY|56=SELL|52=20260403-00:00:00.000|");
     REQUIRE(SendRaw(fds[1], frame, 0U, 12U));
 
     auto partial = connection.TryReceiveFrame();
@@ -74,9 +74,9 @@ TEST_CASE("transport-fault", "[transport-fault]")
     REQUIRE((fds[0] >= 0 && fds[1] >= 0));
     REQUIRE(SetNonBlocking(fds[0]));
 
-    fastfix::transport::TcpConnection connection(fds[0]);
-    const auto first = ::fastfix::tests::EncodeFixFrame("35=0|34=1|49=BUY|56=SELL|52=20260403-00:00:00.000|");
-    const auto second = ::fastfix::tests::EncodeFixFrame("35=5|34=2|49=BUY|56=SELL|52=20260403-00:00:01.000|");
+    nimble::transport::TcpConnection connection(fds[0]);
+    const auto first = ::nimble::tests::EncodeFixFrame("35=0|34=1|49=BUY|56=SELL|52=20260403-00:00:00.000|");
+    const auto second = ::nimble::tests::EncodeFixFrame("35=5|34=2|49=BUY|56=SELL|52=20260403-00:00:01.000|");
 
     std::vector<std::byte> combined;
     combined.reserve(first.size() + second.size());
@@ -101,10 +101,10 @@ TEST_CASE("transport-fault", "[transport-fault]")
     REQUIRE((fds[0] >= 0 && fds[1] >= 0));
     REQUIRE(SetNonBlocking(fds[0]));
 
-    fastfix::transport::TcpConnection connection(fds[0]);
-    const auto first = ::fastfix::tests::EncodeFixFrame("35=0|34=1|49=BUY|56=SELL|52=20260403-00:00:00.000|");
-    const auto second = ::fastfix::tests::EncodeFixFrame("35=1|34=2|49=BUY|56=SELL|52=20260403-00:00:01.000|112=PING|");
-    const auto third = ::fastfix::tests::EncodeFixFrame("35=5|34=3|49=BUY|56=SELL|52=20260403-00:00:02.000|");
+    nimble::transport::TcpConnection connection(fds[0]);
+    const auto first = ::nimble::tests::EncodeFixFrame("35=0|34=1|49=BUY|56=SELL|52=20260403-00:00:00.000|");
+    const auto second = ::nimble::tests::EncodeFixFrame("35=1|34=2|49=BUY|56=SELL|52=20260403-00:00:01.000|112=PING|");
+    const auto third = ::nimble::tests::EncodeFixFrame("35=5|34=3|49=BUY|56=SELL|52=20260403-00:00:02.000|");
 
     std::vector<std::byte> first_batch;
     first_batch.reserve(first.size() + (second.size() / 2U));
@@ -145,8 +145,8 @@ TEST_CASE("transport-fault", "[transport-fault]")
     REQUIRE((fds[0] >= 0 && fds[1] >= 0));
     REQUIRE(SetNonBlocking(fds[0]));
 
-    fastfix::transport::TcpConnection connection(fds[0]);
-    const auto frame = ::fastfix::tests::EncodeFixFrame("35=0|34=1|49=BUY|56=SELL|52=20260403-00:00:00.000|");
+    nimble::transport::TcpConnection connection(fds[0]);
+    const auto frame = ::nimble::tests::EncodeFixFrame("35=0|34=1|49=BUY|56=SELL|52=20260403-00:00:00.000|");
     REQUIRE(SendRaw(fds[1], frame, 0U, frame.size() / 2U));
     close(fds[1]);
 
@@ -160,8 +160,8 @@ TEST_CASE("transport-fault", "[transport-fault]")
     REQUIRE((fds[0] >= 0 && fds[1] >= 0));
     REQUIRE(SetNonBlocking(fds[0]));
 
-    fastfix::transport::TcpConnection connection(fds[0]);
-    auto invalid = ::fastfix::tests::EncodeFixFrame("35=0|34=1|49=BUY|56=SELL|52=20260403-00:00:00.000|");
+    nimble::transport::TcpConnection connection(fds[0]);
+    auto invalid = ::nimble::tests::EncodeFixFrame("35=0|34=1|49=BUY|56=SELL|52=20260403-00:00:00.000|");
 
     std::size_t body_length_digit = 0U;
     while (body_length_digit + 2U < invalid.size()) {
@@ -187,8 +187,8 @@ TEST_CASE("transport-fault", "[transport-fault]")
     REQUIRE((fds[0] >= 0 && fds[1] >= 0));
     REQUIRE(SetNonBlocking(fds[0]));
 
-    fastfix::transport::TcpConnection connection(fds[0]);
-    const auto invalid = ::fastfix::tests::Bytes("8=FIX.4.4\00135=0\001");
+    nimble::transport::TcpConnection connection(fds[0]);
+    const auto invalid = ::nimble::tests::Bytes("8=FIX.4.4\00135=0\001");
     REQUIRE(SendRaw(fds[1], invalid, 0U, invalid.size()));
 
     auto malformed = connection.ReceiveFrame(std::chrono::seconds(1));
@@ -202,9 +202,9 @@ TEST_CASE("transport-fault", "[transport-fault]")
     REQUIRE((fds[0] >= 0 && fds[1] >= 0));
     REQUIRE(SetNonBlocking(fds[0]));
 
-    fastfix::transport::TcpConnection connection(fds[0]);
-    const auto first = ::fastfix::tests::EncodeFixFrame("35=0|34=1|49=BUY|56=SELL|52=20260403-00:00:00.000|");
-    const auto second = ::fastfix::tests::EncodeFixFrame("35=1|34=2|49=BUY|56=SELL|52=20260403-00:00:01.000|112=PING|");
+    nimble::transport::TcpConnection connection(fds[0]);
+    const auto first = ::nimble::tests::EncodeFixFrame("35=0|34=1|49=BUY|56=SELL|52=20260403-00:00:00.000|");
+    const auto second = ::nimble::tests::EncodeFixFrame("35=1|34=2|49=BUY|56=SELL|52=20260403-00:00:01.000|112=PING|");
 
     std::vector<std::byte> partial;
     partial.reserve(first.size() + (second.size() / 2U));
@@ -227,13 +227,13 @@ TEST_CASE("transport-fault", "[transport-fault]")
     REQUIRE((fds[0] >= 0 && fds[1] >= 0));
     REQUIRE(SetNonBlocking(fds[0]));
 
-    fastfix::transport::TcpConnection connection(fds[0]);
+    nimble::transport::TcpConnection connection(fds[0]);
     close(fds[1]);
 
-    const auto payload = ::fastfix::tests::EncodeFixFrame("35=0|34=1|49=BUY|56=SELL|52=20260403-00:00:00.000|");
+    const auto payload = ::nimble::tests::EncodeFixFrame("35=0|34=1|49=BUY|56=SELL|52=20260403-00:00:00.000|");
     auto status = connection.Send(payload, std::chrono::seconds(1));
     REQUIRE(!status.ok());
-    REQUIRE(status.code() == fastfix::base::ErrorCode::kIoError);
+    REQUIRE(status.code() == nimble::base::ErrorCode::kIoError);
   }
 
   SECTION("write buffer backpressure")
@@ -247,7 +247,7 @@ TEST_CASE("transport-fault", "[transport-fault]")
     REQUIRE(setsockopt(fds[0], SOL_SOCKET, SO_SNDBUF, &buf_size, sizeof(buf_size)) == 0);
     REQUIRE(setsockopt(fds[1], SOL_SOCKET, SO_RCVBUF, &buf_size, sizeof(buf_size)) == 0);
 
-    fastfix::transport::TcpConnection connection(fds[0]);
+    nimble::transport::TcpConnection connection(fds[0]);
 
     // Payload deliberately larger than the combined kernel buffers.
     std::vector<std::byte> big_payload(256U * 1024U, static_cast<std::byte>(0xAB));
@@ -256,7 +256,7 @@ TEST_CASE("transport-fault", "[transport-fault]")
     // and the poll timeout fires.
     auto status = connection.Send(big_payload, std::chrono::milliseconds(200));
     REQUIRE(!status.ok());
-    REQUIRE(status.code() == fastfix::base::ErrorCode::kIoError);
+    REQUIRE(status.code() == nimble::base::ErrorCode::kIoError);
     close(fds[1]);
   }
 
@@ -271,7 +271,7 @@ TEST_CASE("transport-fault", "[transport-fault]")
     int buf_size = 2048;
     REQUIRE(setsockopt(fds[0], SOL_SOCKET, SO_SNDBUF, &buf_size, sizeof(buf_size)) == 0);
 
-    fastfix::transport::TcpConnection connection(fds[0]);
+    nimble::transport::TcpConnection connection(fds[0]);
 
     const std::size_t payload_size = 64U * 1024U;
     std::vector<std::byte> payload(payload_size);
@@ -312,9 +312,9 @@ TEST_CASE("transport-fault", "[transport-fault]")
   {
     // 10.255.255.1 is a non-routable address; connect will stall until
     // the poll timeout expires.
-    auto result = fastfix::transport::TcpConnection::Connect("10.255.255.1", 9999U, std::chrono::milliseconds(200));
+    auto result = nimble::transport::TcpConnection::Connect("10.255.255.1", 9999U, std::chrono::milliseconds(200));
     REQUIRE(!result.ok());
-    REQUIRE(result.status().code() == fastfix::base::ErrorCode::kIoError);
+    REQUIRE(result.status().code() == nimble::base::ErrorCode::kIoError);
   }
 
   SECTION("read timeout on idle connection")
@@ -323,12 +323,12 @@ TEST_CASE("transport-fault", "[transport-fault]")
     REQUIRE((fds[0] >= 0 && fds[1] >= 0));
     REQUIRE(SetNonBlocking(fds[0]));
 
-    fastfix::transport::TcpConnection connection(fds[0]);
+    nimble::transport::TcpConnection connection(fds[0]);
 
     // No data is sent on fds[1], so ReceiveFrame should time out.
     auto result = connection.ReceiveFrame(std::chrono::milliseconds(100));
     REQUIRE(!result.ok());
-    REQUIRE(result.status().code() == fastfix::base::ErrorCode::kIoError);
+    REQUIRE(result.status().code() == nimble::base::ErrorCode::kIoError);
     close(fds[1]);
   }
 }

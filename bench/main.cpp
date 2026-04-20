@@ -20,17 +20,17 @@
 #include <unistd.h>
 #endif
 
-#include "fastfix/codec/compiled_decoder.h"
-#include "fastfix/codec/fix_codec.h"
-#include "fastfix/codec/raw_passthrough.h"
-#include "fastfix/message/fixed_layout_writer.h"
-#include "fastfix/message/message.h"
-#include "fastfix/profile/normalized_dictionary.h"
-#include "fastfix/profile/profile_loader.h"
-#include "fastfix/session/admin_protocol.h"
-#include "fastfix/store/memory_store.h"
-#include "fastfix/transport/tcp_transport.h"
 #include "fix44_builders.h"
+#include "nimblefix/codec/compiled_decoder.h"
+#include "nimblefix/codec/fix_codec.h"
+#include "nimblefix/codec/raw_passthrough.h"
+#include "nimblefix/message/fixed_layout_writer.h"
+#include "nimblefix/message/message.h"
+#include "nimblefix/profile/normalized_dictionary.h"
+#include "nimblefix/profile/profile_loader.h"
+#include "nimblefix/session/admin_protocol.h"
+#include "nimblefix/store/memory_store.h"
+#include "nimblefix/transport/tcp_transport.h"
 
 #include "bench_support.h"
 
@@ -46,7 +46,7 @@ using bench_support::NowNs;
 auto
 PrintUsage() -> void
 {
-  std::cout << "usage: fastfix-bench [--artifact <profile.art> | --dictionary "
+  std::cout << "usage: nimblefix-bench [--artifact <profile.art> | --dictionary "
                "<profile.ffd> [--dictionary <overlay.ffd> ...]] [--iterations "
                "<count>] [--loopback <count>] [--replay <count>] [--replay-span "
                "<count>] [--begin-string <value>] [--default-appl-ver-id <value>]\n";
@@ -54,22 +54,22 @@ PrintUsage() -> void
 
 auto
 LoadDictionary(const std::filesystem::path& artifact_path, std::span<const std::filesystem::path> dictionary_paths)
-  -> fastfix::base::Result<fastfix::profile::NormalizedDictionaryView>
+  -> nimble::base::Result<nimble::profile::NormalizedDictionaryView>
 {
-  fastfix::base::Result<fastfix::profile::LoadedProfile> profile = [&]() {
+  nimble::base::Result<nimble::profile::LoadedProfile> profile = [&]() {
     if (!dictionary_paths.empty()) {
-      return fastfix::profile::LoadProfileFromDictionaryFiles(dictionary_paths);
+      return nimble::profile::LoadProfileFromDictionaryFiles(dictionary_paths);
     }
-    return fastfix::profile::LoadProfileArtifact(artifact_path);
+    return nimble::profile::LoadProfileArtifact(artifact_path);
   }();
   if (!profile.ok()) {
     return profile.status();
   }
-  return fastfix::profile::NormalizedDictionaryView::FromProfile(std::move(profile).value());
+  return nimble::profile::NormalizedDictionaryView::FromProfile(std::move(profile).value());
 }
 
 auto
-PopulateFix44MessageBuilder(fastfix::message::MessageBuilder& builder, const Fix44BusinessOrder& order) -> void
+PopulateFix44MessageBuilder(nimble::message::MessageBuilder& builder, const Fix44BusinessOrder& order) -> void
 {
   builder.set(35U, "D")
     .set(11U, order.cl_ord_id)
@@ -86,7 +86,7 @@ PopulateFix44MessageBuilder(fastfix::message::MessageBuilder& builder, const Fix
 }
 
 auto
-ExtractOrderFromMessageView(fastfix::message::MessageView view) -> bench_support::ParsedOrder
+ExtractOrderFromMessageView(nimble::message::MessageView view) -> bench_support::ParsedOrder
 {
   bench_support::ParsedOrder order;
   if (auto v = view.get_string(11U)) {
@@ -127,24 +127,24 @@ ExtractOrderFromMessageView(fastfix::message::MessageView view) -> bench_support
 }
 
 auto
-BuildFix44MessageFromBusinessOrder(const Fix44BusinessOrder& order) -> fastfix::message::Message
+BuildFix44MessageFromBusinessOrder(const Fix44BusinessOrder& order) -> nimble::message::Message
 {
-  fastfix::message::MessageBuilder builder{ "D" };
+  nimble::message::MessageBuilder builder{ "D" };
   builder.reserve_fields(order.price.has_value() ? 7U : 6U).reserve_groups(1U).reserve_group_entries(453U, 1U);
   PopulateFix44MessageBuilder(builder, order);
   return std::move(builder).build();
 }
 
 auto
-BuildSampleMessage(bool include_price = true) -> fastfix::message::Message
+BuildSampleMessage(bool include_price = true) -> nimble::message::Message
 {
   return BuildFix44MessageFromBusinessOrder(BuildFix44BusinessOrder(include_price));
 }
 
 auto
-BuildEncodedMixedExtras() -> fastfix::codec::EncodedOutboundExtras
+BuildEncodedMixedExtras() -> nimble::codec::EncodedOutboundExtras
 {
-  return fastfix::codec::EncodedOutboundExtras{
+  return nimble::codec::EncodedOutboundExtras{
     .header_fragment = "50=DESK-9\x01"
                        "57=ROUTE-7\x01"
                        "115=CLIENT-A\x01"
@@ -156,7 +156,7 @@ BuildEncodedMixedExtras() -> fastfix::codec::EncodedOutboundExtras
 }
 
 auto
-PopulateGeneratedWriter(fastfix::generated::profile_4400::NewOrderSingleWriter* writer,
+PopulateGeneratedWriter(nimble::generated::profile_4400::NewOrderSingleWriter* writer,
                         const Fix44BusinessOrder& business_order) -> void
 {
   if (writer == nullptr) {
@@ -181,7 +181,7 @@ PopulateGeneratedWriter(fastfix::generated::profile_4400::NewOrderSingleWriter* 
 }
 
 auto
-ExtractOrderQty(fastfix::message::MessageView order) -> std::optional<double>
+ExtractOrderQty(nimble::message::MessageView order) -> std::optional<double>
 {
   if (auto qty = order.get_float(38U); qty.has_value()) {
     return qty.value();
@@ -193,18 +193,18 @@ ExtractOrderQty(fastfix::message::MessageView order) -> std::optional<double>
 }
 
 auto
-BuildFix44OrderAckFromNewOrder(fastfix::message::MessageView order, std::uint32_t execution_id)
-  -> fastfix::base::Result<fastfix::message::Message>
+BuildFix44OrderAckFromNewOrder(nimble::message::MessageView order, std::uint32_t execution_id)
+  -> nimble::base::Result<nimble::message::Message>
 {
   if (order.msg_type() != "D") {
-    return fastfix::base::Status::InvalidArgument("loopback benchmark expected NewOrderSingle (35=D)");
+    return nimble::base::Status::InvalidArgument("loopback benchmark expected NewOrderSingle (35=D)");
   }
 
   const auto cl_ord_id = order.get_string(11U);
   const auto side = order.get_char(54U);
   const auto order_qty = ExtractOrderQty(order);
   if (!cl_ord_id.has_value() || !side.has_value() || !order_qty.has_value()) {
-    return fastfix::base::Status::InvalidArgument(
+    return nimble::base::Status::InvalidArgument(
       "loopback benchmark NewOrderSingle missing required ack source fields");
   }
 
@@ -212,7 +212,7 @@ BuildFix44OrderAckFromNewOrder(fastfix::message::MessageView order, std::uint32_
   const auto order_id = std::string("ORDER-") + std::to_string(execution_id);
   const auto exec_id = std::string("EXEC-") + std::to_string(execution_id);
 
-  fastfix::message::MessageBuilder ack{ "8" };
+  nimble::message::MessageBuilder ack{ "8" };
   ack.reserve_fields(10U)
     .set(35U, "8")
     .set(37U, order_id)
@@ -233,11 +233,11 @@ BuildFix44OrderAckFromNewOrder(fastfix::message::MessageView order, std::uint32_
 
 auto
 RunEncodeBenchmark(const Fix44BusinessOrder& business_order,
-                   const fastfix::profile::NormalizedDictionaryView& dictionary,
-                   const fastfix::codec::EncodeOptions& base_options,
-                   std::uint32_t iterations) -> fastfix::base::Result<BenchmarkResult>
+                   const nimble::profile::NormalizedDictionaryView& dictionary,
+                   const nimble::codec::EncodeOptions& base_options,
+                   std::uint32_t iterations) -> nimble::base::Result<BenchmarkResult>
 {
-  auto layout = fastfix::message::FixedLayout::Build(dictionary, "D");
+  auto layout = nimble::message::FixedLayout::Build(dictionary, "D");
   if (!layout.ok()) {
     return layout.status();
   }
@@ -245,8 +245,8 @@ RunEncodeBenchmark(const Fix44BusinessOrder& business_order,
   BenchmarkResult result;
   result.samples_ns.reserve(iterations);
   BenchmarkMeasurement measurement;
-  fastfix::codec::EncodeBuffer encode_buffer;
-  fastfix::generated::profile_4400::NewOrderSingleWriter writer(layout.value());
+  nimble::codec::EncodeBuffer encode_buffer;
+  nimble::generated::profile_4400::NewOrderSingleWriter writer(layout.value());
   writer.bind_session(base_options.begin_string, base_options.sender_comp_id, base_options.target_comp_id);
   auto options = base_options;
   for (std::uint32_t index = 0; index < iterations; ++index) {
@@ -264,35 +264,35 @@ RunEncodeBenchmark(const Fix44BusinessOrder& business_order,
 }
 
 auto
-BuildFrame(const fastfix::message::Message& message,
-           const fastfix::profile::NormalizedDictionaryView& dictionary,
+BuildFrame(const nimble::message::Message& message,
+           const nimble::profile::NormalizedDictionaryView& dictionary,
            std::string begin_string,
            std::string sender_comp_id,
            std::string target_comp_id,
            std::string default_appl_ver_id,
-           std::uint32_t msg_seq_num) -> fastfix::base::Result<std::vector<std::byte>>
+           std::uint32_t msg_seq_num) -> nimble::base::Result<std::vector<std::byte>>
 {
-  fastfix::codec::EncodeOptions options;
+  nimble::codec::EncodeOptions options;
   options.begin_string = std::move(begin_string);
   options.sender_comp_id = std::move(sender_comp_id);
   options.target_comp_id = std::move(target_comp_id);
   options.default_appl_ver_id = std::move(default_appl_ver_id);
   options.msg_seq_num = msg_seq_num;
-  return fastfix::codec::EncodeFixMessage(message, dictionary, options);
+  return nimble::codec::EncodeFixMessage(message, dictionary, options);
 }
 
 auto
-BuildPreEncodedApplicationMessage(const fastfix::message::Message& message,
-                                  const fastfix::profile::NormalizedDictionaryView& dictionary,
+BuildPreEncodedApplicationMessage(const nimble::message::Message& message,
+                                  const nimble::profile::NormalizedDictionaryView& dictionary,
                                   std::string begin_string,
                                   std::string sender_comp_id,
                                   std::string sender_sub_id,
                                   std::string target_comp_id,
                                   std::string target_sub_id,
                                   std::string default_appl_ver_id)
-  -> fastfix::base::Result<fastfix::session::EncodedApplicationMessage>
+  -> nimble::base::Result<nimble::session::EncodedApplicationMessage>
 {
-  fastfix::codec::EncodeOptions options;
+  nimble::codec::EncodeOptions options;
   options.begin_string = std::move(begin_string);
   options.sender_comp_id = std::move(sender_comp_id);
   options.sender_sub_id = std::move(sender_sub_id);
@@ -302,18 +302,18 @@ BuildPreEncodedApplicationMessage(const fastfix::message::Message& message,
   options.msg_seq_num = 2U;
   options.sending_time = "20260417-12:34:56.789";
 
-  auto frame = fastfix::codec::EncodeFixMessage(message, dictionary, options);
+  auto frame = nimble::codec::EncodeFixMessage(message, dictionary, options);
   if (!frame.ok()) {
     return frame.status();
   }
 
   auto decoded =
-    fastfix::codec::DecodeRawPassThrough(std::span<const std::byte>(frame.value().data(), frame.value().size()));
+    nimble::codec::DecodeRawPassThrough(std::span<const std::byte>(frame.value().data(), frame.value().size()));
   if (!decoded.ok()) {
     return decoded.status();
   }
 
-  return fastfix::session::EncodedApplicationMessage(decoded.value().msg_type, decoded.value().raw_body);
+  return nimble::session::EncodedApplicationMessage(decoded.value().msg_type, decoded.value().raw_body);
 }
 
 auto
@@ -327,8 +327,8 @@ TotalFrameBytes(const std::vector<std::vector<std::byte>>& frames) -> std::size_
 }
 
 auto
-ActivateProtocolPair(fastfix::session::AdminProtocol& initiator, fastfix::session::AdminProtocol& acceptor)
-  -> fastfix::base::Status
+ActivateProtocolPair(nimble::session::AdminProtocol& initiator, nimble::session::AdminProtocol& acceptor)
+  -> nimble::base::Status
 {
   auto acceptor_connected = acceptor.OnTransportConnected(NowNs());
   if (!acceptor_connected.ok()) {
@@ -353,23 +353,23 @@ ActivateProtocolPair(fastfix::session::AdminProtocol& initiator, fastfix::sessio
     }
   }
 
-  if (initiator.session().state() != fastfix::session::SessionState::kActive ||
-      acceptor.session().state() != fastfix::session::SessionState::kActive) {
-    return fastfix::base::Status::InvalidArgument("failed to activate benchmark FIX session pair");
+  if (initiator.session().state() != nimble::session::SessionState::kActive ||
+      acceptor.session().state() != nimble::session::SessionState::kActive) {
+    return nimble::base::Status::InvalidArgument("failed to activate benchmark FIX session pair");
   }
 
-  return fastfix::base::Status::Ok();
+  return nimble::base::Status::Ok();
 }
 
 using bench_support::LabeledResult;
 
 auto
-RunLoopbackBenchmark(const fastfix::profile::NormalizedDictionaryView& dictionary,
+RunLoopbackBenchmark(const nimble::profile::NormalizedDictionaryView& dictionary,
                      std::uint32_t iterations,
                      std::string begin_string,
-                     std::string default_appl_ver_id) -> fastfix::base::Result<BenchmarkResult>
+                     std::string default_appl_ver_id) -> nimble::base::Result<BenchmarkResult>
 {
-  auto acceptor = fastfix::transport::TcpAcceptor::Listen("127.0.0.1", 0U);
+  auto acceptor = nimble::transport::TcpAcceptor::Listen("127.0.0.1", 0U);
   if (!acceptor.ok()) {
     return acceptor.status();
   }
@@ -398,7 +398,7 @@ RunLoopbackBenchmark(const fastfix::profile::NormalizedDictionaryView& dictionar
   const auto per_session_payload_bytes =
     (message_count * (sample_frame_bytes + sample_ack_frame_bytes)) + kLoopbackAdminReserveBytes;
 
-  std::promise<fastfix::base::Status> acceptor_result;
+  std::promise<nimble::base::Status> acceptor_result;
   auto future = acceptor_result.get_future();
 
   std::jthread acceptor_thread([socket = std::move(acceptor).value(),
@@ -408,17 +408,17 @@ RunLoopbackBenchmark(const fastfix::profile::NormalizedDictionaryView& dictionar
                                 default_appl_ver_id,
                                 message_count,
                                 per_session_payload_bytes]() mutable {
-    fastfix::store::MemorySessionStore store;
+    nimble::store::MemorySessionStore store;
     store.ReserveAdditionalSessionStorage(42U,
                                           message_count + kLoopbackAdminReserveRecords,
                                           message_count + kLoopbackAdminReserveRecords,
                                           per_session_payload_bytes);
-    fastfix::session::AdminProtocol protocol(
-      fastfix::session::AdminProtocolConfig{
+    nimble::session::AdminProtocol protocol(
+      nimble::session::AdminProtocolConfig{
         .session =
-          fastfix::session::SessionConfig{
+          nimble::session::SessionConfig{
             .session_id = 42U,
-            .key = fastfix::session::SessionKey{ begin_string, "SELL", "BUY" },
+            .key = nimble::session::SessionKey{ begin_string, "SELL", "BUY" },
             .profile_id = dictionary.profile().header().profile_id,
             .default_appl_ver_id = default_appl_ver_id,
             .heartbeat_interval_seconds = 30U,
@@ -452,7 +452,7 @@ RunLoopbackBenchmark(const fastfix::profile::NormalizedDictionaryView& dictionar
         acceptor_result.set_value(frame.status());
         return;
       }
-      auto decoded = fastfix::codec::DecodeFixMessageView(frame.value(), dictionary);
+      auto decoded = nimble::codec::DecodeFixMessageView(frame.value(), dictionary);
       if (!decoded.ok()) {
         acceptor_result.set_value(decoded.status());
         return;
@@ -489,24 +489,24 @@ RunLoopbackBenchmark(const fastfix::profile::NormalizedDictionaryView& dictionar
       if (event.value().disconnect) {
         protocol.OnTransportClosed();
         connection.value().Close();
-        acceptor_result.set_value(fastfix::base::Status::Ok());
+        acceptor_result.set_value(nimble::base::Status::Ok());
         return;
       }
     }
   });
 
-  auto connection = fastfix::transport::TcpConnection::Connect("127.0.0.1", port, std::chrono::seconds(10));
+  auto connection = nimble::transport::TcpConnection::Connect("127.0.0.1", port, std::chrono::seconds(10));
   if (!connection.ok()) {
     return connection.status();
   }
 
-  fastfix::store::MemorySessionStore initiator_store;
-  fastfix::session::AdminProtocol initiator(
-    fastfix::session::AdminProtocolConfig{
+  nimble::store::MemorySessionStore initiator_store;
+  nimble::session::AdminProtocol initiator(
+    nimble::session::AdminProtocolConfig{
       .session =
-        fastfix::session::SessionConfig{
+        nimble::session::SessionConfig{
           .session_id = 24U,
-          .key = fastfix::session::SessionKey{ begin_string, "BUY", "SELL" },
+          .key = nimble::session::SessionKey{ begin_string, "BUY", "SELL" },
           .profile_id = dictionary.profile().header().profile_id,
           .default_appl_ver_id = default_appl_ver_id,
           .heartbeat_interval_seconds = 30U,
@@ -538,7 +538,7 @@ RunLoopbackBenchmark(const fastfix::profile::NormalizedDictionaryView& dictionar
     if (!frame.ok()) {
       return frame.status();
     }
-    auto decoded = fastfix::codec::DecodeFixMessageView(frame.value(), dictionary);
+    auto decoded = nimble::codec::DecodeFixMessageView(frame.value(), dictionary);
     if (!decoded.ok()) {
       return decoded.status();
     }
@@ -599,7 +599,7 @@ RunLoopbackBenchmark(const fastfix::profile::NormalizedDictionaryView& dictionar
       total_transport_recv_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count();
 
       t0 = std::chrono::steady_clock::now();
-      auto decoded = fastfix::codec::DecodeFixMessageView(frame.value(), dictionary);
+      auto decoded = nimble::codec::DecodeFixMessageView(frame.value(), dictionary);
       if (!decoded.ok()) {
         return decoded.status();
       }
@@ -621,7 +621,7 @@ RunLoopbackBenchmark(const fastfix::profile::NormalizedDictionaryView& dictionar
       }
       for (const auto& app : event.value().application_messages) {
         if (app.view().msg_type() != "8") {
-          return fastfix::base::Status::InvalidArgument("loopback benchmark expected ExecutionReport order ack");
+          return nimble::base::Status::InvalidArgument("loopback benchmark expected ExecutionReport order ack");
         }
         ++acknowledged;
       }
@@ -655,7 +655,7 @@ RunLoopbackBenchmark(const fastfix::profile::NormalizedDictionaryView& dictionar
   if (!logout_ack.ok()) {
     return logout_ack.status();
   }
-  auto decoded = fastfix::codec::DecodeFixMessageView(logout_ack.value(), dictionary);
+  auto decoded = nimble::codec::DecodeFixMessageView(logout_ack.value(), dictionary);
   if (!decoded.ok()) {
     return decoded.status();
   }
@@ -675,24 +675,24 @@ RunLoopbackBenchmark(const fastfix::profile::NormalizedDictionaryView& dictionar
 }
 
 auto
-RunReplayBenchmark(const fastfix::profile::NormalizedDictionaryView& dictionary,
+RunReplayBenchmark(const nimble::profile::NormalizedDictionaryView& dictionary,
                    std::uint32_t iterations,
                    std::uint32_t replay_span,
                    std::string begin_string,
-                   std::string default_appl_ver_id) -> fastfix::base::Result<BenchmarkResult>
+                   std::string default_appl_ver_id) -> nimble::base::Result<BenchmarkResult>
 {
   if (replay_span == 0U) {
-    return fastfix::base::Status::InvalidArgument("replay benchmark requires replay_span > 0");
+    return nimble::base::Status::InvalidArgument("replay benchmark requires replay_span > 0");
   }
 
-  fastfix::store::MemorySessionStore acceptor_store;
-  fastfix::store::MemorySessionStore initiator_store;
-  fastfix::session::AdminProtocol acceptor(
-    fastfix::session::AdminProtocolConfig{
+  nimble::store::MemorySessionStore acceptor_store;
+  nimble::store::MemorySessionStore initiator_store;
+  nimble::session::AdminProtocol acceptor(
+    nimble::session::AdminProtocolConfig{
       .session =
-        fastfix::session::SessionConfig{
+        nimble::session::SessionConfig{
           .session_id = 420U,
-          .key = fastfix::session::SessionKey{ begin_string, "SELL", "BUY" },
+          .key = nimble::session::SessionKey{ begin_string, "SELL", "BUY" },
           .profile_id = dictionary.profile().header().profile_id,
           .default_appl_ver_id = default_appl_ver_id,
           .heartbeat_interval_seconds = 30U,
@@ -706,12 +706,12 @@ RunReplayBenchmark(const fastfix::profile::NormalizedDictionaryView& dictionary,
     },
     dictionary,
     &acceptor_store);
-  fastfix::session::AdminProtocol initiator(
-    fastfix::session::AdminProtocolConfig{
+  nimble::session::AdminProtocol initiator(
+    nimble::session::AdminProtocolConfig{
       .session =
-        fastfix::session::SessionConfig{
+        nimble::session::SessionConfig{
           .session_id = 240U,
-          .key = fastfix::session::SessionKey{ begin_string, "BUY", "SELL" },
+          .key = nimble::session::SessionKey{ begin_string, "BUY", "SELL" },
           .profile_id = dictionary.profile().header().profile_id,
           .default_appl_ver_id = default_appl_ver_id,
           .heartbeat_interval_seconds = 30U,
@@ -739,7 +739,7 @@ RunReplayBenchmark(const fastfix::profile::NormalizedDictionaryView& dictionary,
     }
   }
 
-  fastfix::message::MessageBuilder resend_request_builder{ "2" };
+  nimble::message::MessageBuilder resend_request_builder{ "2" };
   resend_request_builder.set(35U, "2")
     .set(7U, static_cast<std::int64_t>(2))
     .set(16U, static_cast<std::int64_t>(replay_span + 1U));
@@ -777,19 +777,19 @@ RunReplayBenchmark(const fastfix::profile::NormalizedDictionaryView& dictionary,
 }
 
 auto
-RunSessionBenchmark(const fastfix::profile::NormalizedDictionaryView& dictionary,
+RunSessionBenchmark(const nimble::profile::NormalizedDictionaryView& dictionary,
                     std::uint32_t iterations,
                     std::string begin_string,
-                    std::string default_appl_ver_id) -> fastfix::base::Result<BenchmarkResult>
+                    std::string default_appl_ver_id) -> nimble::base::Result<BenchmarkResult>
 {
-  fastfix::store::MemorySessionStore acceptor_store;
-  fastfix::store::MemorySessionStore initiator_store;
-  fastfix::session::AdminProtocol acceptor(
-    fastfix::session::AdminProtocolConfig{
+  nimble::store::MemorySessionStore acceptor_store;
+  nimble::store::MemorySessionStore initiator_store;
+  nimble::session::AdminProtocol acceptor(
+    nimble::session::AdminProtocolConfig{
       .session =
-        fastfix::session::SessionConfig{
+        nimble::session::SessionConfig{
           .session_id = 421U,
-          .key = fastfix::session::SessionKey{ begin_string, "SELL", "BUY" },
+          .key = nimble::session::SessionKey{ begin_string, "SELL", "BUY" },
           .profile_id = dictionary.profile().header().profile_id,
           .default_appl_ver_id = default_appl_ver_id,
           .heartbeat_interval_seconds = 30U,
@@ -803,12 +803,12 @@ RunSessionBenchmark(const fastfix::profile::NormalizedDictionaryView& dictionary
     },
     dictionary,
     &acceptor_store);
-  fastfix::session::AdminProtocol initiator(
-    fastfix::session::AdminProtocolConfig{
+  nimble::session::AdminProtocol initiator(
+    nimble::session::AdminProtocolConfig{
       .session =
-        fastfix::session::SessionConfig{
+        nimble::session::SessionConfig{
           .session_id = 241U,
-          .key = fastfix::session::SessionKey{ begin_string, "BUY", "SELL" },
+          .key = nimble::session::SessionKey{ begin_string, "BUY", "SELL" },
           .profile_id = dictionary.profile().header().profile_id,
           .default_appl_ver_id = default_appl_ver_id,
           .heartbeat_interval_seconds = 30U,
@@ -829,10 +829,10 @@ RunSessionBenchmark(const fastfix::profile::NormalizedDictionaryView& dictionary
   }
 
   const auto sample = BuildSampleMessage();
-  fastfix::message::Message augmented_sample;
-  const auto& bench_message = [&]() -> const fastfix::message::Message& {
+  nimble::message::Message augmented_sample;
+  const auto& bench_message = [&]() -> const nimble::message::Message& {
     if (dictionary.find_field(5001U) != nullptr) {
-      fastfix::message::MessageBuilder builder{ "D" };
+      nimble::message::MessageBuilder builder{ "D" };
       PopulateFix44MessageBuilder(builder, BuildFix44BusinessOrder());
       builder.set(5001U, "L");
       augmented_sample = std::move(builder).build();
@@ -871,20 +871,20 @@ RunSessionBenchmark(const fastfix::profile::NormalizedDictionaryView& dictionary
 }
 
 auto
-RunSessionOutboundBenchmark(const fastfix::profile::NormalizedDictionaryView& dictionary,
+RunSessionOutboundBenchmark(const nimble::profile::NormalizedDictionaryView& dictionary,
                             std::uint32_t iterations,
                             std::string begin_string,
                             std::string default_appl_ver_id,
-                            bool pre_encoded) -> fastfix::base::Result<BenchmarkResult>
+                            bool pre_encoded) -> nimble::base::Result<BenchmarkResult>
 {
-  fastfix::store::MemorySessionStore acceptor_store;
-  fastfix::store::MemorySessionStore initiator_store;
-  fastfix::session::AdminProtocol acceptor(
-    fastfix::session::AdminProtocolConfig{
+  nimble::store::MemorySessionStore acceptor_store;
+  nimble::store::MemorySessionStore initiator_store;
+  nimble::session::AdminProtocol acceptor(
+    nimble::session::AdminProtocolConfig{
       .session =
-        fastfix::session::SessionConfig{
+        nimble::session::SessionConfig{
           .session_id = 422U,
-          .key = fastfix::session::SessionKey{ begin_string, "SELL", "BUY" },
+          .key = nimble::session::SessionKey{ begin_string, "SELL", "BUY" },
           .profile_id = dictionary.profile().header().profile_id,
           .default_appl_ver_id = default_appl_ver_id,
           .heartbeat_interval_seconds = 30U,
@@ -898,12 +898,12 @@ RunSessionOutboundBenchmark(const fastfix::profile::NormalizedDictionaryView& di
     },
     dictionary,
     &acceptor_store);
-  fastfix::session::AdminProtocol initiator(
-    fastfix::session::AdminProtocolConfig{
+  nimble::session::AdminProtocol initiator(
+    nimble::session::AdminProtocolConfig{
       .session =
-        fastfix::session::SessionConfig{
+        nimble::session::SessionConfig{
           .session_id = 242U,
-          .key = fastfix::session::SessionKey{ begin_string, "BUY", "SELL" },
+          .key = nimble::session::SessionKey{ begin_string, "BUY", "SELL" },
           .profile_id = dictionary.profile().header().profile_id,
           .default_appl_ver_id = default_appl_ver_id,
           .heartbeat_interval_seconds = 30U,
@@ -924,10 +924,10 @@ RunSessionOutboundBenchmark(const fastfix::profile::NormalizedDictionaryView& di
   }
 
   const auto sample = BuildSampleMessage();
-  fastfix::message::Message augmented_sample;
-  const auto& bench_message = [&]() -> const fastfix::message::Message& {
+  nimble::message::Message augmented_sample;
+  const auto& bench_message = [&]() -> const nimble::message::Message& {
     if (dictionary.find_field(5001U) != nullptr) {
-      fastfix::message::MessageBuilder builder{ "D" };
+      nimble::message::MessageBuilder builder{ "D" };
       PopulateFix44MessageBuilder(builder, BuildFix44BusinessOrder());
       builder.set(5001U, "L");
       augmented_sample = std::move(builder).build();
@@ -936,8 +936,8 @@ RunSessionOutboundBenchmark(const fastfix::profile::NormalizedDictionaryView& di
     return sample;
   }();
 
-  const fastfix::session::SessionSendEnvelope envelope{ "DESK-9", "ROUTE-7" };
-  fastfix::codec::EncodeOptions reserve_options;
+  const nimble::session::SessionSendEnvelope envelope{ "DESK-9", "ROUTE-7" };
+  nimble::codec::EncodeOptions reserve_options;
   reserve_options.begin_string = begin_string;
   reserve_options.sender_comp_id = "BUY";
   reserve_options.sender_sub_id = envelope.sender_sub_id;
@@ -946,14 +946,14 @@ RunSessionOutboundBenchmark(const fastfix::profile::NormalizedDictionaryView& di
   reserve_options.default_appl_ver_id = default_appl_ver_id;
   reserve_options.msg_seq_num = 2U;
   reserve_options.sending_time = "20260417-12:34:56.789";
-  auto reserved_frame = fastfix::codec::EncodeFixMessage(bench_message, dictionary, reserve_options);
+  auto reserved_frame = nimble::codec::EncodeFixMessage(bench_message, dictionary, reserve_options);
   if (!reserved_frame.ok()) {
     return reserved_frame.status();
   }
   initiator_store.ReserveAdditionalSessionStorage(
     242U, iterations, 0U, reserved_frame.value().size() * static_cast<std::size_t>(iterations));
 
-  fastfix::session::EncodedApplicationMessage encoded_message;
+  nimble::session::EncodedApplicationMessage encoded_message;
   if (pre_encoded) {
     auto prepared = BuildPreEncodedApplicationMessage(bench_message,
                                                       dictionary,
@@ -1190,14 +1190,14 @@ main(int argc, char** argv)
   }
 
   if (artifact_path.empty() && dictionary_paths.empty()) {
-    artifact_path = std::filesystem::path(FASTFIX_PROJECT_DIR) / "build/bench/quickfix_FIX44.art";
+    artifact_path = std::filesystem::path(NIMBLEFIX_PROJECT_DIR) / "build/bench/quickfix_FIX44.art";
   } else if (!artifact_path.is_absolute()) {
-    artifact_path = std::filesystem::path(FASTFIX_PROJECT_DIR) / artifact_path;
+    artifact_path = std::filesystem::path(NIMBLEFIX_PROJECT_DIR) / artifact_path;
   }
 
   for (auto& dictionary_path : dictionary_paths) {
     if (!dictionary_path.is_absolute()) {
-      dictionary_path = std::filesystem::path(FASTFIX_PROJECT_DIR) / dictionary_path;
+      dictionary_path = std::filesystem::path(NIMBLEFIX_PROJECT_DIR) / dictionary_path;
     }
   }
 
@@ -1209,14 +1209,14 @@ main(int argc, char** argv)
 
   const auto fix44_business_order = BuildFix44BusinessOrder();
   const auto sample = BuildFix44MessageFromBusinessOrder(fix44_business_order);
-  fastfix::codec::EncodeOptions options;
+  nimble::codec::EncodeOptions options;
   options.begin_string = begin_string;
   options.sender_comp_id = "BUY";
   options.target_comp_id = "SELL";
   options.default_appl_ver_id = default_appl_ver_id;
   options.sending_time = "20260406-12:34:56.789";
 
-  auto warmup = fastfix::codec::EncodeFixMessage(sample, dictionary.value(), options);
+  auto warmup = nimble::codec::EncodeFixMessage(sample, dictionary.value(), options);
   if (!warmup.ok()) {
     std::cerr << warmup.status().message() << '\n';
     return 1;
@@ -1228,17 +1228,17 @@ main(int argc, char** argv)
     return 1;
   }
 
-  auto compiled_decoders = fastfix::codec::CompiledDecoderTable::Build(dictionary.value());
+  auto compiled_decoders = nimble::codec::CompiledDecoderTable::Build(dictionary.value());
 
   BenchmarkResult parse_result;
   parse_result.samples_ns.reserve(iterations);
   BenchmarkMeasurement parse_measurement;
   double parse_sink = 0.0;
-  fastfix::codec::DecodedMessageView parse_decoded;
+  nimble::codec::DecodedMessageView parse_decoded;
   for (std::uint32_t index = 0; index < iterations; ++index) {
     const auto sample_started = std::chrono::steady_clock::now();
     auto decode_status =
-      fastfix::codec::DecodeFixMessageView(warmup.value(), dictionary.value(), compiled_decoders, &parse_decoded);
+      nimble::codec::DecodeFixMessageView(warmup.value(), dictionary.value(), compiled_decoders, &parse_decoded);
     if (!decode_status.ok()) {
       std::cerr << decode_status.message() << '\n';
       return 1;
@@ -1299,7 +1299,7 @@ main(int argc, char** argv)
     std::cout << "loopback skipped: --loopback 0\n";
   }
 
-  // --- FastFix-only benchmarks ---
+  // --- NimbleFIX-only benchmarks ---
   results.push_back({ "session-outbound", std::move(session_outbound).value() });
   results.push_back({ "session-outbound-pre-encoded", std::move(session_outbound_pre_encoded).value() });
 
@@ -1308,7 +1308,7 @@ main(int argc, char** argv)
   BenchmarkMeasurement peek_measurement;
   for (std::uint32_t index = 0; index < iterations; ++index) {
     const auto sample_started = std::chrono::steady_clock::now();
-    auto header = fastfix::codec::PeekSessionHeaderView(warmup.value());
+    auto header = nimble::codec::PeekSessionHeaderView(warmup.value());
     if (!header.ok()) {
       std::cerr << header.status().message() << '\n';
       return 1;

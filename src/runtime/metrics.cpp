@@ -1,11 +1,11 @@
-#include "fastfix/runtime/metrics.h"
+#include "nimblefix/runtime/metrics.h"
 
 #include <algorithm>
 #include <memory>
 #include <mutex>
 #include <shared_mutex>
 
-namespace fastfix::runtime {
+namespace nimble::runtime {
 
 auto
 MetricsRegistry::Reset(std::uint32_t worker_count) -> void
@@ -251,4 +251,4 @@ MetricsRegistry::FindWorker(std::uint32_t worker_id) -> WorkerMetrics*
   return FindMutableWorker(worker_id);
 }
 
-} // namespace fastfix::runtime
+} // namespace nimble::runtime

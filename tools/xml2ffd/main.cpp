@@ -8,9 +8,9 @@
 #include <string_view>
 #include <vector>
 
-#include "fastfix/profile/builder_codegen.h"
-#include "fastfix/profile/dictgen_input.h"
-#include "fastfix/profile/overlay.h"
+#include "nimblefix/profile/builder_codegen.h"
+#include "nimblefix/profile/dictgen_input.h"
+#include "nimblefix/profile/overlay.h"
 #include "xml2ffd.h"
 
 namespace {
@@ -19,10 +19,10 @@ auto
 PrintUsage() -> void
 {
   std::cerr << "usage:\n"
-            << "  fastfix-xml2ffd --xml <FIX44.xml> --output <output.ffd> "
+            << "  nimblefix-xml2ffd --xml <FIX44.xml> --output <output.ffd> "
                "--profile-id <uint64> [--cpp-builders <output.h>] [--cpp-readers "
                "<output.h>]\n"
-            << "  fastfix-xml2ffd --input <baseline.ffd> [--input <overlay.ffd> ...] "
+            << "  nimblefix-xml2ffd --input <baseline.ffd> [--input <overlay.ffd> ...] "
                "--cpp-builders <output.h> [--cpp-readers <output.h>]\n";
 }
 
@@ -32,7 +32,7 @@ ResolveProjectPath(const std::filesystem::path& path) -> std::filesystem::path
   if (path.is_absolute()) {
     return path;
   }
-  return std::filesystem::path(FASTFIX_PROJECT_DIR) / path;
+  return std::filesystem::path(NIMBLEFIX_PROJECT_DIR) / path;
 }
 
 auto
@@ -123,7 +123,7 @@ main(int argc, char** argv)
 
     const auto xml_content = ReadFile(xml_path);
     try {
-      ffd_text = fastfix::tools::ConvertXmlToFfd(xml_content, profile_id);
+      ffd_text = nimble::tools::ConvertXmlToFfd(xml_content, profile_id);
     } catch (const std::exception& e) {
       std::cerr << "error: " << e.what() << '\n';
       return 1;
@@ -143,13 +143,13 @@ main(int argc, char** argv)
   }
 
   // Phase 2: Build normalized dictionary (if codegen is requested)
-  fastfix::profile::NormalizedDictionary dictionary;
+  nimble::profile::NormalizedDictionary dictionary;
   const bool need_dictionary = !builder_output_path.empty() || !reader_output_path.empty();
 
   if (need_dictionary) {
     if (xml_mode) {
       // Use the .ffd text we just generated
-      auto parsed = fastfix::profile::LoadNormalizedDictionaryText(ffd_text);
+      auto parsed = nimble::profile::LoadNormalizedDictionaryText(ffd_text);
       if (!parsed.ok()) {
         std::cerr << "error: " << parsed.status().message() << '\n';
         return 1;
@@ -161,7 +161,7 @@ main(int argc, char** argv)
         p = ResolveProjectPath(p);
       }
 
-      auto baseline = fastfix::profile::LoadNormalizedDictionaryFile(input_paths[0]);
+      auto baseline = nimble::profile::LoadNormalizedDictionaryFile(input_paths[0]);
       if (!baseline.ok()) {
         std::cerr << "error: " << baseline.status().message() << '\n';
         return 1;
@@ -169,12 +169,12 @@ main(int argc, char** argv)
       dictionary = std::move(baseline).value();
 
       for (std::size_t i = 1; i < input_paths.size(); ++i) {
-        auto additional = fastfix::profile::LoadNormalizedDictionaryFile(input_paths[i]);
+        auto additional = nimble::profile::LoadNormalizedDictionaryFile(input_paths[i]);
         if (!additional.ok()) {
           std::cerr << "error: " << additional.status().message() << '\n';
           return 1;
         }
-        auto merged = fastfix::profile::ApplyOverlay(dictionary, additional.value());
+        auto merged = nimble::profile::ApplyOverlay(dictionary, additional.value());
         if (!merged.ok()) {
           std::cerr << "error: " << merged.status().message() << '\n';
           return 1;
@@ -192,7 +192,7 @@ main(int argc, char** argv)
       std::filesystem::create_directories(parent);
     }
 
-    const auto status = fastfix::profile::WriteCppBuildersHeader(builder_output_path, dictionary);
+    const auto status = nimble::profile::WriteCppBuildersHeader(builder_output_path, dictionary);
     if (!status.ok()) {
       std::cerr << "error: " << status.message() << '\n';
       return 1;
@@ -208,7 +208,7 @@ main(int argc, char** argv)
       std::filesystem::create_directories(parent);
     }
 
-    const auto status = fastfix::profile::WriteCppReadersHeader(reader_output_path, dictionary);
+    const auto status = nimble::profile::WriteCppReadersHeader(reader_output_path, dictionary);
     if (!status.ok()) {
       std::cerr << "error: " << status.message() << '\n';
       return 1;

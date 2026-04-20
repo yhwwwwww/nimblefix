@@ -3,22 +3,22 @@
 #include <limits>
 #include <string>
 
-#include "fastfix/codec/fix_codec.h"
-#include "fastfix/codec/fix_tags.h"
-#include "fastfix/message/fixed_layout_writer.h"
-#include "fastfix/message/message.h"
 #include "fix44_builders.h"
+#include "nimblefix/codec/fix_codec.h"
+#include "nimblefix/codec/fix_tags.h"
+#include "nimblefix/message/fixed_layout_writer.h"
+#include "nimblefix/message/message.h"
 
 #include "test_support.h"
 
-using namespace fastfix::codec::tags;
+using namespace nimble::codec::tags;
 
 TEST_CASE("message-api", "[message-api]")
 {
-  auto dictionary_view = fastfix::tests::LoadFix44DictionaryViewOrSkip();
-  auto dictionary = fastfix::base::Result<fastfix::profile::NormalizedDictionaryView>(std::move(dictionary_view));
+  auto dictionary_view = nimble::tests::LoadFix44DictionaryViewOrSkip();
+  auto dictionary = nimble::base::Result<nimble::profile::NormalizedDictionaryView>(std::move(dictionary_view));
 
-  fastfix::message::MessageBuilder builder("D");
+  nimble::message::MessageBuilder builder("D");
   builder.set_string(kMsgType, "D")
     .set_string(kSenderCompID, "BUY")
     .set_string(kTargetCompID, "SELL")
@@ -26,14 +26,14 @@ TEST_CASE("message-api", "[message-api]")
   auto parties = builder.add_group_entry(kNoPartyIDs);
   parties.set_string(kPartyID, "PTY1").set_char(kPartyIDSource, 'D').set_int(kPartyRole, 1);
 
-  fastfix::codec::EncodeOptions options;
+  nimble::codec::EncodeOptions options;
   options.begin_string = "FIX.4.4";
   options.sender_comp_id = "BUY";
   options.target_comp_id = "SELL";
   options.msg_seq_num = 1U;
   options.sending_time = "20260403-13:00:00.000";
 
-  fastfix::codec::EncodeBuffer buffer;
+  nimble::codec::EncodeBuffer buffer;
   REQUIRE(builder.encode_to_buffer(dictionary.value(), options, &buffer).ok());
   auto encoded = builder.encode(dictionary.value(), options);
   REQUIRE(encoded.ok());
@@ -43,7 +43,7 @@ TEST_CASE("message-api", "[message-api]")
   const auto message = std::move(builder).build();
   const auto view = message.view();
 
-  auto encoded_owned = fastfix::codec::EncodeFixMessage(message, dictionary.value(), options);
+  auto encoded_owned = nimble::codec::EncodeFixMessage(message, dictionary.value(), options);
   REQUIRE(encoded_owned.ok());
   REQUIRE(encoded_owned.value() == encoded.value());
 
@@ -63,7 +63,7 @@ TEST_CASE("message-api", "[message-api]")
 
 TEST_CASE("group-entry-builder survives sibling growth", "[message-api]")
 {
-  fastfix::message::MessageBuilder builder("D");
+  nimble::message::MessageBuilder builder("D");
   builder.set_string(kMsgType, "D");
 
   auto first_party = builder.add_group_entry(kNoPartyIDs);
@@ -93,10 +93,10 @@ TEST_CASE("group-entry-builder survives sibling growth", "[message-api]")
 
 TEST_CASE("fixed-layout-build", "[message-api][fixed-layout]")
 {
-  auto dictionary_view = fastfix::tests::LoadFix44DictionaryViewOrSkip();
-  auto dictionary = fastfix::base::Result<fastfix::profile::NormalizedDictionaryView>(std::move(dictionary_view));
+  auto dictionary_view = nimble::tests::LoadFix44DictionaryViewOrSkip();
+  auto dictionary = nimble::base::Result<nimble::profile::NormalizedDictionaryView>(std::move(dictionary_view));
 
-  auto layout = fastfix::message::FixedLayout::Build(dictionary.value(), "D");
+  auto layout = nimble::message::FixedLayout::Build(dictionary.value(), "D");
   REQUIRE(layout.ok());
 
   CHECK(layout.value().msg_type() == "D");
@@ -114,22 +114,22 @@ TEST_CASE("fixed-layout-build", "[message-api][fixed-layout]")
 
 TEST_CASE("fixed-layout-build-unknown-type", "[message-api][fixed-layout]")
 {
-  auto dictionary_view = fastfix::tests::LoadFix44DictionaryViewOrSkip();
-  auto dictionary = fastfix::base::Result<fastfix::profile::NormalizedDictionaryView>(std::move(dictionary_view));
+  auto dictionary_view = nimble::tests::LoadFix44DictionaryViewOrSkip();
+  auto dictionary = nimble::base::Result<nimble::profile::NormalizedDictionaryView>(std::move(dictionary_view));
 
-  auto layout = fastfix::message::FixedLayout::Build(dictionary.value(), "ZZ_NONEXIST");
+  auto layout = nimble::message::FixedLayout::Build(dictionary.value(), "ZZ_NONEXIST");
   REQUIRE_FALSE(layout.ok());
 }
 
 TEST_CASE("fixed-layout-writer-scalar-fields", "[message-api][fixed-layout]")
 {
-  auto dictionary_view = fastfix::tests::LoadFix44DictionaryViewOrSkip();
-  auto dictionary = fastfix::base::Result<fastfix::profile::NormalizedDictionaryView>(std::move(dictionary_view));
+  auto dictionary_view = nimble::tests::LoadFix44DictionaryViewOrSkip();
+  auto dictionary = nimble::base::Result<nimble::profile::NormalizedDictionaryView>(std::move(dictionary_view));
 
-  auto layout = fastfix::message::FixedLayout::Build(dictionary.value(), "D");
+  auto layout = nimble::message::FixedLayout::Build(dictionary.value(), "D");
   REQUIRE(layout.ok());
 
-  fastfix::message::FixedLayoutWriter writer(layout.value());
+  nimble::message::FixedLayoutWriter writer(layout.value());
   writer.set_string(kSenderCompID, "BUY");
   writer.set_string(kTargetCompID, "SELL");
   writer.set_string(kAccount, "ACC-1");
@@ -138,17 +138,17 @@ TEST_CASE("fixed-layout-writer-scalar-fields", "[message-api][fixed-layout]")
   writer.set_string(99999U, "NOPE");
 
   // Encode + decode roundtrip to verify fields.
-  fastfix::codec::EncodeOptions options;
+  nimble::codec::EncodeOptions options;
   options.begin_string = "FIX.4.4";
   options.sender_comp_id = "BUY";
   options.target_comp_id = "SELL";
   options.msg_seq_num = 1U;
   options.sending_time = "20260406-12:00:00.000";
 
-  fastfix::codec::EncodeBuffer buf;
+  nimble::codec::EncodeBuffer buf;
   REQUIRE(writer.encode_to_buffer(dictionary.value(), options, &buf).ok());
 
-  auto decoded = fastfix::codec::DecodeFixMessageView(buf.bytes(), dictionary.value());
+  auto decoded = nimble::codec::DecodeFixMessageView(buf.bytes(), dictionary.value());
   REQUIRE(decoded.ok());
   auto view = decoded.value().message.view();
 
@@ -163,13 +163,13 @@ TEST_CASE("fixed-layout-writer-scalar-fields", "[message-api][fixed-layout]")
 
 TEST_CASE("fixed-layout-writer-with-groups", "[message-api][fixed-layout]")
 {
-  auto dictionary_view = fastfix::tests::LoadFix44DictionaryViewOrSkip();
-  auto dictionary = fastfix::base::Result<fastfix::profile::NormalizedDictionaryView>(std::move(dictionary_view));
+  auto dictionary_view = nimble::tests::LoadFix44DictionaryViewOrSkip();
+  auto dictionary = nimble::base::Result<nimble::profile::NormalizedDictionaryView>(std::move(dictionary_view));
 
-  auto layout = fastfix::message::FixedLayout::Build(dictionary.value(), "D");
+  auto layout = nimble::message::FixedLayout::Build(dictionary.value(), "D");
   REQUIRE(layout.ok());
 
-  fastfix::message::FixedLayoutWriter writer(layout.value());
+  nimble::message::FixedLayoutWriter writer(layout.value());
   writer.set_string(kSenderCompID, "BUY");
   writer.set_string(kTargetCompID, "SELL");
   writer.set_string(kAccount, "ACC-1");
@@ -177,17 +177,17 @@ TEST_CASE("fixed-layout-writer-with-groups", "[message-api][fixed-layout]")
   party.set_string(kPartyID, "PTY1").set_char(kPartyIDSource, 'D').set_int(kPartyRole, 1);
 
   // Encode + decode roundtrip to verify group fields.
-  fastfix::codec::EncodeOptions options;
+  nimble::codec::EncodeOptions options;
   options.begin_string = "FIX.4.4";
   options.sender_comp_id = "BUY";
   options.target_comp_id = "SELL";
   options.msg_seq_num = 1U;
   options.sending_time = "20260406-12:00:00.000";
 
-  fastfix::codec::EncodeBuffer buf;
+  nimble::codec::EncodeBuffer buf;
   REQUIRE(writer.encode_to_buffer(dictionary.value(), options, &buf).ok());
 
-  auto decoded = fastfix::codec::DecodeFixMessageView(buf.bytes(), dictionary.value());
+  auto decoded = nimble::codec::DecodeFixMessageView(buf.bytes(), dictionary.value());
   REQUIRE(decoded.ok());
   auto view = decoded.value().message.view();
 
@@ -201,44 +201,44 @@ TEST_CASE("fixed-layout-writer-with-groups", "[message-api][fixed-layout]")
 
 TEST_CASE("fixed-layout-writer-matches-message-builder", "[message-api][fixed-layout]")
 {
-  auto dictionary_view = fastfix::tests::LoadFix44DictionaryViewOrSkip();
-  auto dictionary = fastfix::base::Result<fastfix::profile::NormalizedDictionaryView>(std::move(dictionary_view));
+  auto dictionary_view = nimble::tests::LoadFix44DictionaryViewOrSkip();
+  auto dictionary = nimble::base::Result<nimble::profile::NormalizedDictionaryView>(std::move(dictionary_view));
 
   // Build via MessageBuilder (same tags as FixedLayoutWriter below).
-  fastfix::message::MessageBuilder mb("D");
+  nimble::message::MessageBuilder mb("D");
   mb.set_string(kSenderCompID, "BUY").set_string(kTargetCompID, "SELL").set_string(kAccount, "ACC-1");
   auto mb_party = mb.add_group_entry(kNoPartyIDs);
   mb_party.set_string(kPartyID, "PTY1").set_char(kPartyIDSource, 'D').set_int(kPartyRole, 1);
 
-  fastfix::codec::EncodeOptions options;
+  nimble::codec::EncodeOptions options;
   options.begin_string = "FIX.4.4";
   options.sender_comp_id = "BUY";
   options.target_comp_id = "SELL";
   options.msg_seq_num = 1U;
   options.sending_time = "20260406-12:34:56.789";
 
-  fastfix::codec::EncodeBuffer mb_buffer;
+  nimble::codec::EncodeBuffer mb_buffer;
   REQUIRE(mb.encode_to_buffer(dictionary.value(), options, &mb_buffer).ok());
 
   // Build via FixedLayoutWriter.
-  auto layout = fastfix::message::FixedLayout::Build(dictionary.value(), "D");
+  auto layout = nimble::message::FixedLayout::Build(dictionary.value(), "D");
   REQUIRE(layout.ok());
 
-  fastfix::message::FixedLayoutWriter writer(layout.value());
+  nimble::message::FixedLayoutWriter writer(layout.value());
   writer.set_string(kSenderCompID, "BUY");
   writer.set_string(kTargetCompID, "SELL");
   writer.set_string(kAccount, "ACC-1");
   auto fw_party = writer.add_group_entry(kNoPartyIDs);
   fw_party.set_string(kPartyID, "PTY1").set_char(kPartyIDSource, 'D').set_int(kPartyRole, 1);
 
-  fastfix::codec::EncodeBuffer fw_buffer;
+  nimble::codec::EncodeBuffer fw_buffer;
   REQUIRE(writer.encode_to_buffer(dictionary.value(), options, &fw_buffer).ok());
 
   // MB uses insertion-order-then-groups; FLW uses dictionary rule order.
   // Both are valid encodings — compare decoded logical content, not raw bytes.
-  auto mb_decoded = fastfix::codec::DecodeFixMessageView(mb_buffer.bytes(), dictionary.value());
+  auto mb_decoded = nimble::codec::DecodeFixMessageView(mb_buffer.bytes(), dictionary.value());
   REQUIRE(mb_decoded.ok());
-  auto fw_decoded = fastfix::codec::DecodeFixMessageView(fw_buffer.bytes(), dictionary.value());
+  auto fw_decoded = nimble::codec::DecodeFixMessageView(fw_buffer.bytes(), dictionary.value());
   REQUIRE(fw_decoded.ok());
 
   auto mb_view = mb_decoded.value().message.view();
@@ -261,13 +261,13 @@ TEST_CASE("fixed-layout-writer-matches-message-builder", "[message-api][fixed-la
 
 TEST_CASE("fixed-layout-writer-all-value-types", "[message-api][fixed-layout]")
 {
-  auto dictionary_view = fastfix::tests::LoadFix44DictionaryViewOrSkip();
-  auto dictionary = fastfix::base::Result<fastfix::profile::NormalizedDictionaryView>(std::move(dictionary_view));
+  auto dictionary_view = nimble::tests::LoadFix44DictionaryViewOrSkip();
+  auto dictionary = nimble::base::Result<nimble::profile::NormalizedDictionaryView>(std::move(dictionary_view));
 
-  auto layout = fastfix::message::FixedLayout::Build(dictionary.value(), "D");
+  auto layout = nimble::message::FixedLayout::Build(dictionary.value(), "D");
   REQUIRE(layout.ok());
 
-  fastfix::message::FixedLayoutWriter writer(layout.value());
+  nimble::message::FixedLayoutWriter writer(layout.value());
 
   writer.set_string(kSenderCompID, "BUY");
   writer.set_string(kTargetCompID, "SELL");
@@ -275,17 +275,17 @@ TEST_CASE("fixed-layout-writer-all-value-types", "[message-api][fixed-layout]")
   writer.set_string(kClOrdID, "ORD-001");
 
   // Encode + decode roundtrip to verify all value types.
-  fastfix::codec::EncodeOptions options;
+  nimble::codec::EncodeOptions options;
   options.begin_string = "FIX.4.4";
   options.sender_comp_id = "BUY";
   options.target_comp_id = "SELL";
   options.msg_seq_num = 1U;
   options.sending_time = "20260406-12:00:00.000";
 
-  fastfix::codec::EncodeBuffer buf;
+  nimble::codec::EncodeBuffer buf;
   REQUIRE(writer.encode_to_buffer(dictionary.value(), options, &buf).ok());
 
-  auto decoded = fastfix::codec::DecodeFixMessageView(buf.bytes(), dictionary.value());
+  auto decoded = nimble::codec::DecodeFixMessageView(buf.bytes(), dictionary.value());
   REQUIRE(decoded.ok());
   auto view = decoded.value().message.view();
   REQUIRE(view.get_string(kSenderCompID).has_value());
@@ -300,26 +300,26 @@ TEST_CASE("fixed-layout-writer-all-value-types", "[message-api][fixed-layout]")
 
 TEST_CASE("fixed-layout group builder skips non-finite floats", "[message-api][fixed-layout]")
 {
-  auto dictionary_view = fastfix::tests::LoadFix44DictionaryViewOrSkip();
-  auto dictionary = fastfix::base::Result<fastfix::profile::NormalizedDictionaryView>(std::move(dictionary_view));
+  auto dictionary_view = nimble::tests::LoadFix44DictionaryViewOrSkip();
+  auto dictionary = nimble::base::Result<nimble::profile::NormalizedDictionaryView>(std::move(dictionary_view));
 
-  auto layout = fastfix::message::FixedLayout::Build(dictionary.value(), "D");
+  auto layout = nimble::message::FixedLayout::Build(dictionary.value(), "D");
   REQUIRE(layout.ok());
 
-  fastfix::message::FixedLayoutWriter writer(layout.value());
+  nimble::message::FixedLayoutWriter writer(layout.value());
   writer.set_string(kSenderCompID, "BUY");
   writer.set_string(kTargetCompID, "SELL");
   auto party = writer.add_group_entry(kNoPartyIDs);
   party.set_string(kPartyID, "PTY1").set_float(44U, std::numeric_limits<double>::infinity()).set_int(kPartyRole, 1);
 
-  fastfix::codec::EncodeOptions options;
+  nimble::codec::EncodeOptions options;
   options.begin_string = "FIX.4.4";
   options.sender_comp_id = "BUY";
   options.target_comp_id = "SELL";
   options.msg_seq_num = 1U;
   options.sending_time = "20260406-12:00:00.000";
 
-  fastfix::codec::EncodeBuffer buf;
+  nimble::codec::EncodeBuffer buf;
   REQUIRE(writer.encode_to_buffer(dictionary.value(), options, &buf).ok());
 
   const auto wire = std::string(reinterpret_cast<const char*>(buf.bytes().data()), buf.bytes().size());
@@ -328,13 +328,13 @@ TEST_CASE("fixed-layout group builder skips non-finite floats", "[message-api][f
 
 TEST_CASE("fixed-layout-writer-encode-roundtrip", "[message-api][fixed-layout]")
 {
-  auto dictionary_view = fastfix::tests::LoadFix44DictionaryViewOrSkip();
-  auto dictionary = fastfix::base::Result<fastfix::profile::NormalizedDictionaryView>(std::move(dictionary_view));
+  auto dictionary_view = nimble::tests::LoadFix44DictionaryViewOrSkip();
+  auto dictionary = nimble::base::Result<nimble::profile::NormalizedDictionaryView>(std::move(dictionary_view));
 
-  auto layout = fastfix::message::FixedLayout::Build(dictionary.value(), "D");
+  auto layout = nimble::message::FixedLayout::Build(dictionary.value(), "D");
   REQUIRE(layout.ok());
 
-  fastfix::message::FixedLayoutWriter writer(layout.value());
+  nimble::message::FixedLayoutWriter writer(layout.value());
   writer.set_string(kSenderCompID, "SENDER");
   writer.set_string(kTargetCompID, "TARGET");
   writer.set_string(kAccount, "ACC-1");
@@ -342,7 +342,7 @@ TEST_CASE("fixed-layout-writer-encode-roundtrip", "[message-api][fixed-layout]")
   auto party = writer.add_group_entry(kNoPartyIDs);
   party.set_string(kPartyID, "PTY1").set_char(kPartyIDSource, 'D').set_int(kPartyRole, 3);
 
-  fastfix::codec::EncodeOptions options;
+  nimble::codec::EncodeOptions options;
   options.begin_string = "FIX.4.4";
   options.sender_comp_id = "SENDER";
   options.target_comp_id = "TARGET";
@@ -354,7 +354,7 @@ TEST_CASE("fixed-layout-writer-encode-roundtrip", "[message-api][fixed-layout]")
   REQUIRE(!encoded.value().empty());
 
   // Decode and verify.
-  auto decoded = fastfix::codec::DecodeFixMessageView(encoded.value(), dictionary.value());
+  auto decoded = nimble::codec::DecodeFixMessageView(encoded.value(), dictionary.value());
   REQUIRE(decoded.ok());
   auto view = decoded.value().message.view();
   CHECK(view.msg_type() == "D");
@@ -372,30 +372,30 @@ TEST_CASE("fixed-layout-writer-encode-roundtrip", "[message-api][fixed-layout]")
 // Generated typed writer tests
 // ---------------------------------------------------------------------------
 
-using namespace fastfix::generated::profile_4400;
+using namespace nimble::generated::profile_4400;
 
 TEST_CASE("generated-writer-scalar-fields", "[message-api][generated-writer]")
 {
-  auto dictionary_view = fastfix::tests::LoadFix44DictionaryViewOrSkip();
-  auto dictionary = fastfix::base::Result<fastfix::profile::NormalizedDictionaryView>(std::move(dictionary_view));
+  auto dictionary_view = nimble::tests::LoadFix44DictionaryViewOrSkip();
+  auto dictionary = nimble::base::Result<nimble::profile::NormalizedDictionaryView>(std::move(dictionary_view));
 
-  auto layout = fastfix::message::FixedLayout::Build(dictionary.value(), "D");
+  auto layout = nimble::message::FixedLayout::Build(dictionary.value(), "D");
   REQUIRE(layout.ok());
 
   NewOrderSingleWriter writer(layout.value());
   writer.set_account("ACC-1").set_cl_ord_id("ORD-001");
 
-  fastfix::codec::EncodeOptions options;
+  nimble::codec::EncodeOptions options;
   options.begin_string = "FIX.4.4";
   options.sender_comp_id = "BUY";
   options.target_comp_id = "SELL";
   options.msg_seq_num = 1U;
   options.sending_time = "20260406-12:00:00.000";
 
-  fastfix::codec::EncodeBuffer buf;
+  nimble::codec::EncodeBuffer buf;
   REQUIRE(writer.encode_to_buffer(dictionary.value(), options, &buf).ok());
 
-  auto decoded = fastfix::codec::DecodeFixMessageView(buf.bytes(), dictionary.value());
+  auto decoded = nimble::codec::DecodeFixMessageView(buf.bytes(), dictionary.value());
   REQUIRE(decoded.ok());
   auto view = decoded.value().message.view();
 
@@ -408,10 +408,10 @@ TEST_CASE("generated-writer-scalar-fields", "[message-api][generated-writer]")
 
 TEST_CASE("generated-writer-with-groups", "[message-api][generated-writer]")
 {
-  auto dictionary_view = fastfix::tests::LoadFix44DictionaryViewOrSkip();
-  auto dictionary = fastfix::base::Result<fastfix::profile::NormalizedDictionaryView>(std::move(dictionary_view));
+  auto dictionary_view = nimble::tests::LoadFix44DictionaryViewOrSkip();
+  auto dictionary = nimble::base::Result<nimble::profile::NormalizedDictionaryView>(std::move(dictionary_view));
 
-  auto layout = fastfix::message::FixedLayout::Build(dictionary.value(), "D");
+  auto layout = nimble::message::FixedLayout::Build(dictionary.value(), "D");
   REQUIRE(layout.ok());
 
   NewOrderSingleWriter writer(layout.value());
@@ -419,17 +419,17 @@ TEST_CASE("generated-writer-with-groups", "[message-api][generated-writer]")
   writer.add_no_party_i_ds().set_party_id("PTY1").set_party_id_source('D').set_party_role(1);
   writer.add_no_party_i_ds().set_party_id("PTY2").set_party_id_source('G').set_party_role(4);
 
-  fastfix::codec::EncodeOptions options;
+  nimble::codec::EncodeOptions options;
   options.begin_string = "FIX.4.4";
   options.sender_comp_id = "BUY";
   options.target_comp_id = "SELL";
   options.msg_seq_num = 2U;
   options.sending_time = "20260406-12:00:00.000";
 
-  fastfix::codec::EncodeBuffer buf;
+  nimble::codec::EncodeBuffer buf;
   REQUIRE(writer.encode_to_buffer(dictionary.value(), options, &buf).ok());
 
-  auto decoded = fastfix::codec::DecodeFixMessageView(buf.bytes(), dictionary.value());
+  auto decoded = nimble::codec::DecodeFixMessageView(buf.bytes(), dictionary.value());
   REQUIRE(decoded.ok());
   auto view = decoded.value().message.view();
 
@@ -446,13 +446,13 @@ TEST_CASE("generated-writer-with-groups", "[message-api][generated-writer]")
 
 TEST_CASE("generated-writer-matches-raw-fixed-layout-writer", "[message-api][generated-writer]")
 {
-  auto dictionary_view = fastfix::tests::LoadFix44DictionaryViewOrSkip();
-  auto dictionary = fastfix::base::Result<fastfix::profile::NormalizedDictionaryView>(std::move(dictionary_view));
+  auto dictionary_view = nimble::tests::LoadFix44DictionaryViewOrSkip();
+  auto dictionary = nimble::base::Result<nimble::profile::NormalizedDictionaryView>(std::move(dictionary_view));
 
-  auto layout = fastfix::message::FixedLayout::Build(dictionary.value(), "D");
+  auto layout = nimble::message::FixedLayout::Build(dictionary.value(), "D");
   REQUIRE(layout.ok());
 
-  fastfix::codec::EncodeOptions options;
+  nimble::codec::EncodeOptions options;
   options.begin_string = "FIX.4.4";
   options.sender_comp_id = "BUY";
   options.target_comp_id = "SELL";
@@ -460,13 +460,13 @@ TEST_CASE("generated-writer-matches-raw-fixed-layout-writer", "[message-api][gen
   options.sending_time = "20260406-12:34:56.789";
 
   // Build via raw FixedLayoutWriter.
-  fastfix::message::FixedLayoutWriter raw(layout.value());
+  nimble::message::FixedLayoutWriter raw(layout.value());
   raw.set_string(kAccount, "ACC-1");
   raw.set_string(kClOrdID, "ORD-001");
   auto raw_party = raw.add_group_entry(kNoPartyIDs);
   raw_party.set_string(kPartyID, "PTY1").set_char(kPartyIDSource, 'D').set_int(kPartyRole, 1);
 
-  fastfix::codec::EncodeBuffer raw_buf;
+  nimble::codec::EncodeBuffer raw_buf;
   REQUIRE(raw.encode_to_buffer(dictionary.value(), options, &raw_buf).ok());
 
   // Build via generated NewOrderSingleWriter.
@@ -474,7 +474,7 @@ TEST_CASE("generated-writer-matches-raw-fixed-layout-writer", "[message-api][gen
   typed.set_account("ACC-1").set_cl_ord_id("ORD-001");
   typed.add_no_party_i_ds().set_party_id("PTY1").set_party_id_source('D').set_party_role(1);
 
-  fastfix::codec::EncodeBuffer typed_buf;
+  nimble::codec::EncodeBuffer typed_buf;
   REQUIRE(typed.encode_to_buffer(dictionary.value(), options, &typed_buf).ok());
 
   // Wire output should be identical.
@@ -483,16 +483,16 @@ TEST_CASE("generated-writer-matches-raw-fixed-layout-writer", "[message-api][gen
 
 TEST_CASE("generated-writer-clear-and-reuse", "[message-api][generated-writer]")
 {
-  auto dictionary_view = fastfix::tests::LoadFix44DictionaryViewOrSkip();
-  auto dictionary = fastfix::base::Result<fastfix::profile::NormalizedDictionaryView>(std::move(dictionary_view));
+  auto dictionary_view = nimble::tests::LoadFix44DictionaryViewOrSkip();
+  auto dictionary = nimble::base::Result<nimble::profile::NormalizedDictionaryView>(std::move(dictionary_view));
 
-  auto layout = fastfix::message::FixedLayout::Build(dictionary.value(), "D");
+  auto layout = nimble::message::FixedLayout::Build(dictionary.value(), "D");
   REQUIRE(layout.ok());
 
   NewOrderSingleWriter writer(layout.value());
   writer.bind_session("FIX.4.4", "BUY", "SELL");
 
-  fastfix::codec::EncodeOptions options;
+  nimble::codec::EncodeOptions options;
   options.begin_string = "FIX.4.4";
   options.sender_comp_id = "BUY";
   options.target_comp_id = "SELL";
@@ -501,7 +501,7 @@ TEST_CASE("generated-writer-clear-and-reuse", "[message-api][generated-writer]")
   // First encode.
   writer.set_account("ACC-1");
   options.msg_seq_num = 1U;
-  fastfix::codec::EncodeBuffer buf1;
+  nimble::codec::EncodeBuffer buf1;
   REQUIRE(writer.encode_to_buffer(dictionary.value(), options, &buf1).ok());
 
   // Clear and reuse.
@@ -509,10 +509,10 @@ TEST_CASE("generated-writer-clear-and-reuse", "[message-api][generated-writer]")
   writer.set_account("ACC-2");
   writer.set_cl_ord_id("ORD-002");
   options.msg_seq_num = 2U;
-  fastfix::codec::EncodeBuffer buf2;
+  nimble::codec::EncodeBuffer buf2;
   REQUIRE(writer.encode_to_buffer(dictionary.value(), options, &buf2).ok());
 
-  auto decoded = fastfix::codec::DecodeFixMessageView(buf2.bytes(), dictionary.value());
+  auto decoded = nimble::codec::DecodeFixMessageView(buf2.bytes(), dictionary.value());
   REQUIRE(decoded.ok());
   auto view = decoded.value().message.view();
 

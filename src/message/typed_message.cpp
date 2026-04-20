@@ -1,8 +1,8 @@
-#include "fastfix/message/typed_message.h"
+#include "nimblefix/message/typed_message.h"
 
 #include <bit>
 
-namespace fastfix::message {
+namespace nimble::message {
 
 namespace {
 
@@ -309,4 +309,4 @@ TypedGroupView::end() const -> Iterator
   return Iterator(dictionary_, group_, group_def_, group_.size());
 }
 
-} // namespace fastfix::message
+} // namespace nimble::message

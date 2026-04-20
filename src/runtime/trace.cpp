@@ -1,9 +1,9 @@
-#include "fastfix/runtime/trace.h"
+#include "nimblefix/runtime/trace.h"
 
 #include <algorithm>
 #include <cstring>
 
-namespace fastfix::runtime {
+namespace nimble::runtime {
 
 auto
 TraceRecorder::Configure(TraceMode mode, std::uint32_t capacity, std::uint32_t worker_count) -> void
@@ -120,4 +120,4 @@ TraceRecorder::ResolveBufferIndex(std::uint32_t worker_id) const -> std::size_t
   return static_cast<std::size_t>(worker_id) % buffers_.size();
 }
 
-} // namespace fastfix::runtime
+} // namespace nimble::runtime

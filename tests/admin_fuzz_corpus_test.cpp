@@ -7,13 +7,13 @@
 #include <string_view>
 #include <vector>
 
-#include "fastfix/codec/fix_codec.h"
-#include "fastfix/profile/artifact_builder.h"
-#include "fastfix/profile/dictgen_input.h"
-#include "fastfix/profile/normalized_dictionary.h"
-#include "fastfix/profile/profile_loader.h"
-#include "fastfix/session/admin_protocol.h"
-#include "fastfix/store/memory_store.h"
+#include "nimblefix/codec/fix_codec.h"
+#include "nimblefix/profile/artifact_builder.h"
+#include "nimblefix/profile/dictgen_input.h"
+#include "nimblefix/profile/normalized_dictionary.h"
+#include "nimblefix/profile/profile_loader.h"
+#include "nimblefix/session/admin_protocol.h"
+#include "nimblefix/store/memory_store.h"
 
 #include "test_support.h"
 
@@ -120,16 +120,16 @@ TrimLine(std::string_view line) -> std::string_view
 }
 
 auto
-RunAdminCorpus(std::string text, const fastfix::profile::NormalizedDictionaryView& dictionary, AdminCorpusStats* stats)
-  -> fastfix::base::Status
+RunAdminCorpus(std::string text, const nimble::profile::NormalizedDictionaryView& dictionary, AdminCorpusStats* stats)
+  -> nimble::base::Status
 {
-  fastfix::store::MemorySessionStore store;
-  fastfix::session::AdminProtocol protocol(
-    fastfix::session::AdminProtocolConfig{
+  nimble::store::MemorySessionStore store;
+  nimble::session::AdminProtocol protocol(
+    nimble::session::AdminProtocolConfig{
       .session =
-        fastfix::session::SessionConfig{
+        nimble::session::SessionConfig{
           .session_id = 90'001U,
-          .key = fastfix::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
+          .key = nimble::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
           .profile_id = dictionary.profile().header().profile_id,
           .heartbeat_interval_seconds = 30U,
           .is_initiator = false,
@@ -202,11 +202,11 @@ RunAdminCorpus(std::string text, const fastfix::profile::NormalizedDictionaryVie
     }
 
     const auto bytes = NormalizeFrame(std::string(line));
-    if (fastfix::codec::PeekSessionHeader(bytes).ok()) {
+    if (nimble::codec::PeekSessionHeader(bytes).ok()) {
       ++stats->peeked;
     }
 
-    auto decoded = fastfix::codec::DecodeFixMessage(bytes, dictionary);
+    auto decoded = nimble::codec::DecodeFixMessage(bytes, dictionary);
     if (decoded.ok()) {
       ++stats->decoded;
       if (decoded.value().validation_issue.present()) {
@@ -228,24 +228,24 @@ RunAdminCorpus(std::string text, const fastfix::profile::NormalizedDictionaryVie
     stats->application_messages += event.value().application_messages.size();
     stats->outbound_frames += event.value().outbound_frames.size();
     for (const auto& outbound : event.value().outbound_frames) {
-      auto outbound_decoded = fastfix::codec::DecodeFixMessage(outbound.bytes, dictionary);
+      auto outbound_decoded = nimble::codec::DecodeFixMessage(outbound.bytes, dictionary);
       if (!outbound_decoded.ok()) {
         return outbound_decoded.status();
       }
     }
   }
 
-  return fastfix::base::Status::Ok();
+  return nimble::base::Status::Ok();
 }
 
 } // namespace
 
 TEST_CASE("admin-fuzz-corpus", "[admin-fuzz-corpus]")
 {
-  auto dictionary_view = fastfix::tests::LoadFix44DictionaryViewOrSkip();
+  auto dictionary_view = nimble::tests::LoadFix44DictionaryViewOrSkip();
   auto& dictionary = dictionary_view;
 
-  const auto root = std::filesystem::path(FASTFIX_PROJECT_DIR) / "tests" / "data" / "fuzz" / "admin_protocol";
+  const auto root = std::filesystem::path(NIMBLEFIX_PROJECT_DIR) / "tests" / "data" / "fuzz" / "admin_protocol";
   std::vector<std::filesystem::path> corpora;
   for (const auto& entry : std::filesystem::directory_iterator(root)) {
     if (entry.is_regular_file()) {

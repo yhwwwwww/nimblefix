@@ -1,4 +1,4 @@
-#include "fastfix/runtime/poll_wakeup.h"
+#include "nimblefix/runtime/poll_wakeup.h"
 
 #include <cerrno>
 #include <cstdint>
@@ -7,7 +7,7 @@
 #include <sys/eventfd.h>
 #include <unistd.h>
 
-namespace fastfix::runtime {
+namespace nimble::runtime {
 
 PollWakeup::PollWakeup(PollWakeup&& other) noexcept
   : efd_(other.efd_)
@@ -96,4 +96,4 @@ PollWakeup::Drain() -> void
   }
 }
 
-} // namespace fastfix::runtime
+} // namespace nimble::runtime

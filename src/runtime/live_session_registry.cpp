@@ -1,12 +1,12 @@
-#include "fastfix/runtime/live_session_registry.h"
+#include "nimblefix/runtime/live_session_registry.h"
 
 #include <memory>
 #include <optional>
 #include <utility>
 
-#include "fastfix/base/spsc_queue.h"
+#include "nimblefix/base/spsc_queue.h"
 
-namespace fastfix::runtime {
+namespace nimble::runtime {
 
 namespace {
 
@@ -169,4 +169,4 @@ LiveSessionRegistry::PublishNotification(const session::SessionNotification& not
   }
 }
 
-} // namespace fastfix::runtime
+} // namespace nimble::runtime

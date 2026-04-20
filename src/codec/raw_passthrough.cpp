@@ -1,18 +1,18 @@
-#include "fastfix/codec/raw_passthrough.h"
-#include "fastfix/codec/fast_int_format.h"
-#include "fastfix/codec/fix_tags.h"
-#include "fastfix/codec/simd_scan.h"
+#include "nimblefix/codec/raw_passthrough.h"
+#include "nimblefix/codec/fast_int_format.h"
+#include "nimblefix/codec/fix_tags.h"
+#include "nimblefix/codec/simd_scan.h"
 
 #include <array>
 #include <charconv>
 #include <cstring>
 #include <limits>
 
-namespace fastfix::codec {
+namespace nimble::codec {
 
 namespace {
 
-using namespace fastfix::codec::tags;
+using namespace nimble::codec::tags;
 
 inline constexpr std::size_t kBodyLengthPlaceholderWidth = 7U;
 
@@ -493,7 +493,7 @@ EncodeReplay(const RawPassThroughView& stored, const ReplayOptions& options, Enc
   return base::Status::Ok();
 }
 
-// ComputeChecksumSIMD is now in simd_scan.h (fastfix::codec namespace).
+// ComputeChecksumSIMD is now in simd_scan.h (nimble::codec namespace).
 
 auto
 EncodeReplayInto(const RawPassThroughView& stored, const ReplayOptions& options, session::EncodedFrameBytes* out)
@@ -682,4 +682,4 @@ EncodeReplayInto(const RawPassThroughView& stored, const ReplayOptions& options,
   return base::Status::Ok();
 }
 
-} // namespace fastfix::codec
+} // namespace nimble::codec

@@ -1,4 +1,4 @@
-#include "fastfix/profile/profile_loader.h"
+#include "nimblefix/profile/profile_loader.h"
 
 #include <algorithm>
 #include <bit>
@@ -12,11 +12,11 @@
 #include <unistd.h>
 #include <vector>
 
-#include "fastfix/profile/artifact_builder.h"
-#include "fastfix/profile/dictgen_input.h"
-#include "fastfix/profile/overlay.h"
+#include "nimblefix/profile/artifact_builder.h"
+#include "nimblefix/profile/dictgen_input.h"
+#include "nimblefix/profile/overlay.h"
 
-namespace fastfix::profile {
+namespace nimble::profile {
 
 namespace {
 
@@ -179,13 +179,14 @@ LoadProfileArtifact(const std::filesystem::path& path, const ProfileLoadOptions&
 
   if (options.madvise) {
     if (::madvise(mapping, size, MADV_WILLNEED) != 0) {
-      std::fprintf(stderr, "fastfix: madvise(MADV_WILLNEED) failed for '%s': %s\n", path.c_str(), std::strerror(errno));
+      std::fprintf(
+        stderr, "nimblefix: madvise(MADV_WILLNEED) failed for '%s': %s\n", path.c_str(), std::strerror(errno));
     }
   }
 
   if (options.mlock) {
     if (::mlock(mapping, size) != 0) {
-      std::fprintf(stderr, "fastfix: mlock failed for '%s': %s\n", path.c_str(), std::strerror(errno));
+      std::fprintf(stderr, "nimblefix: mlock failed for '%s': %s\n", path.c_str(), std::strerror(errno));
     }
   }
 
@@ -273,4 +274,4 @@ ValidateSchemaHash(const LoadedProfile& profile, std::uint64_t expected_hash) ->
   return base::Status::Ok();
 }
 
-} // namespace fastfix::profile
+} // namespace nimble::profile

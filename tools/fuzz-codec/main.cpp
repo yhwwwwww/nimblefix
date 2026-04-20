@@ -6,12 +6,12 @@
 #include <string_view>
 #include <vector>
 
-#include "fastfix/codec/fix_codec.h"
-#include "fastfix/codec/fix_tags.h"
-#include "fastfix/profile/normalized_dictionary.h"
-#include "fastfix/profile/profile_loader.h"
-#include "fastfix/session/admin_protocol.h"
-#include "fastfix/store/memory_store.h"
+#include "nimblefix/codec/fix_codec.h"
+#include "nimblefix/codec/fix_tags.h"
+#include "nimblefix/profile/normalized_dictionary.h"
+#include "nimblefix/profile/profile_loader.h"
+#include "nimblefix/session/admin_protocol.h"
+#include "nimblefix/store/memory_store.h"
 
 namespace {
 
@@ -44,7 +44,7 @@ IsApplicationMsgType(std::string_view msg_type) -> bool
 auto
 PrintUsage() -> void
 {
-  std::cout << "usage: fastfix-fuzz-codec --artifact <profile.art> --input "
+  std::cout << "usage: nimblefix-fuzz-codec --artifact <profile.art> --input "
                "<file-or-directory>"
                " [--mode codec|admin]\n";
 }
@@ -94,10 +94,10 @@ WrapBodyFields(std::string_view body_fields) -> std::vector<std::byte>
   }
 
   std::string full;
-  full.append(fastfix::codec::tags::kBeginStringPrefix);
+  full.append(nimble::codec::tags::kBeginStringPrefix);
   full.append("FIX.4.4");
   full.push_back('\x01');
-  full.append(fastfix::codec::tags::kBodyLengthPrefix);
+  full.append(nimble::codec::tags::kBodyLengthPrefix);
   full.append(std::to_string(body.size()));
   full.push_back('\x01');
   full.append(body);
@@ -112,7 +112,7 @@ WrapBodyFields(std::string_view body_fields) -> std::vector<std::byte>
   digits[0] = static_cast<char>('0' + ((checksum / 100U) % 10U));
   digits[1] = static_cast<char>('0' + ((checksum / 10U) % 10U));
   digits[2] = static_cast<char>('0' + (checksum % 10U));
-  full.append(fastfix::codec::tags::kCheckSumPrefix);
+  full.append(nimble::codec::tags::kCheckSumPrefix);
   full.append(digits.data(), 3U);
   full.push_back('\x01');
   return ToBytes(full);
@@ -124,7 +124,7 @@ NormalizeFrame(std::string text) -> std::vector<std::byte>
   while (!text.empty() && (text.back() == '\n' || text.back() == '\r')) {
     text.pop_back();
   }
-  if (text.rfind(fastfix::codec::tags::kBeginStringPrefix, 0) == 0) {
+  if (text.rfind(nimble::codec::tags::kBeginStringPrefix, 0) == 0) {
     for (auto& ch : text) {
       if (ch == '|') {
         ch = '\x01';
@@ -148,14 +148,14 @@ TrimLine(std::string_view line) -> std::string_view
 }
 
 auto
-ProcessCodecInput(std::string text, const fastfix::profile::NormalizedDictionaryView& dictionary, FuzzStats* stats)
+ProcessCodecInput(std::string text, const nimble::profile::NormalizedDictionaryView& dictionary, FuzzStats* stats)
   -> void
 {
   const auto bytes = NormalizeFrame(std::move(text));
-  if (fastfix::codec::PeekSessionHeader(bytes).ok()) {
+  if (nimble::codec::PeekSessionHeader(bytes).ok()) {
     ++stats->peeked;
   }
-  auto result = fastfix::codec::DecodeFixMessage(bytes, dictionary);
+  auto result = nimble::codec::DecodeFixMessage(bytes, dictionary);
   if (!result.ok()) {
     return;
   }
@@ -169,16 +169,16 @@ ProcessCodecInput(std::string text, const fastfix::profile::NormalizedDictionary
 }
 
 auto
-ProcessAdminInput(std::string text, const fastfix::profile::NormalizedDictionaryView& dictionary, FuzzStats* stats)
-  -> fastfix::base::Status
+ProcessAdminInput(std::string text, const nimble::profile::NormalizedDictionaryView& dictionary, FuzzStats* stats)
+  -> nimble::base::Status
 {
-  fastfix::store::MemorySessionStore store;
-  fastfix::session::AdminProtocol protocol(
-    fastfix::session::AdminProtocolConfig{
+  nimble::store::MemorySessionStore store;
+  nimble::session::AdminProtocol protocol(
+    nimble::session::AdminProtocolConfig{
       .session =
-        fastfix::session::SessionConfig{
+        nimble::session::SessionConfig{
           .session_id = 90'001U,
-          .key = fastfix::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
+          .key = nimble::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
           .profile_id = dictionary.profile().header().profile_id,
           .heartbeat_interval_seconds = 30U,
           .is_initiator = false,
@@ -248,7 +248,7 @@ ProcessAdminInput(std::string text, const fastfix::profile::NormalizedDictionary
       ++stats->admin_events;
       stats->outbound_frames += event.value().outbound_frames.size();
       for (const auto& outbound : event.value().outbound_frames) {
-        auto decoded = fastfix::codec::DecodeFixMessage(outbound.bytes, dictionary);
+        auto decoded = nimble::codec::DecodeFixMessage(outbound.bytes, dictionary);
         if (!decoded.ok()) {
           return decoded.status();
         }
@@ -257,11 +257,11 @@ ProcessAdminInput(std::string text, const fastfix::profile::NormalizedDictionary
     }
 
     const auto bytes = NormalizeFrame(std::string(line));
-    if (fastfix::codec::PeekSessionHeader(bytes).ok()) {
+    if (nimble::codec::PeekSessionHeader(bytes).ok()) {
       ++stats->peeked;
     }
 
-    auto decoded = fastfix::codec::DecodeFixMessage(bytes, dictionary);
+    auto decoded = nimble::codec::DecodeFixMessage(bytes, dictionary);
     if (decoded.ok()) {
       ++stats->decoded;
       if (IsApplicationMsgType(decoded.value().header.msg_type)) {
@@ -283,14 +283,14 @@ ProcessAdminInput(std::string text, const fastfix::profile::NormalizedDictionary
     stats->application_messages += event.value().application_messages.size();
     stats->outbound_frames += event.value().outbound_frames.size();
     for (const auto& outbound : event.value().outbound_frames) {
-      auto outbound_decoded = fastfix::codec::DecodeFixMessage(outbound.bytes, dictionary);
+      auto outbound_decoded = nimble::codec::DecodeFixMessage(outbound.bytes, dictionary);
       if (!outbound_decoded.ok()) {
         return outbound_decoded.status();
       }
     }
   }
 
-  return fastfix::base::Status::Ok();
+  return nimble::base::Status::Ok();
 }
 
 } // namespace
@@ -333,12 +333,12 @@ main(int argc, char** argv)
     return 1;
   }
 
-  auto profile = fastfix::profile::LoadProfileArtifact(artifact);
+  auto profile = nimble::profile::LoadProfileArtifact(artifact);
   if (!profile.ok()) {
     std::cerr << profile.status().message() << '\n';
     return 1;
   }
-  auto dictionary = fastfix::profile::NormalizedDictionaryView::FromProfile(std::move(profile).value());
+  auto dictionary = nimble::profile::NormalizedDictionaryView::FromProfile(std::move(profile).value());
   if (!dictionary.ok()) {
     std::cerr << dictionary.status().message() << '\n';
     return 1;

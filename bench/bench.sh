@@ -5,12 +5,27 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILD_DIR="$ROOT_DIR/build"
 BENCH_DIR="$BUILD_DIR/bench"
-BUILD_SYSTEM="${FASTFIX_BUILD_SYSTEM:-auto}"
-XMAKE_MODE="${FASTFIX_XMAKE_MODE:-release}"
-XMAKE_CCACHE="${FASTFIX_XMAKE_CCACHE:-n}"
-XMAKE_BIN_DIR="${FASTFIX_XMAKE_BIN_DIR:-$ROOT_DIR/build/linux/x86_64/$XMAKE_MODE}"
-CMAKE_PRESET="${FASTFIX_CMAKE_PRESET:-dev-release}"
-CMAKE_GENERATOR_KIND="${FASTFIX_CMAKE_GENERATOR:-auto}"
+env_or_default() {
+    local default_value="$1"
+    shift
+
+    local variable_name
+    for variable_name in "$@"; do
+        if [ -n "${!variable_name:-}" ]; then
+            printf '%s\n' "${!variable_name}"
+            return
+        fi
+    done
+
+    printf '%s\n' "$default_value"
+}
+
+BUILD_SYSTEM="$(env_or_default auto NIMBLEFIX_BUILD_SYSTEM)"
+XMAKE_MODE="$(env_or_default release NIMBLEFIX_XMAKE_MODE)"
+XMAKE_CCACHE="$(env_or_default n NIMBLEFIX_XMAKE_CCACHE)"
+XMAKE_BIN_DIR="$(env_or_default "$ROOT_DIR/build/linux/x86_64/$XMAKE_MODE" NIMBLEFIX_XMAKE_BIN_DIR)"
+CMAKE_PRESET="$(env_or_default dev-release NIMBLEFIX_CMAKE_PRESET)"
+CMAKE_GENERATOR_KIND="$(env_or_default auto NIMBLEFIX_CMAKE_GENERATOR)"
 CMAKE_BUILD_DIR=""
 CMAKE_BIN_DIR=""
 BIN_DIR=""
@@ -26,7 +41,7 @@ QUICKFIX_BUILD_DIR="$BENCH_DIR/quickfix-build"
 QUICKFIX_XML="$QUICKFIX_SRC_DIR/spec/FIX44.xml"
 QUICKFIX_FFD="$BENCH_DIR/quickfix_FIX44.ffd"
 QUICKFIX_ART="$BENCH_DIR/quickfix_FIX44.art"
-FASTFIX_BENCH_BIN=""
+NIMBLEFIX_BENCH_BIN=""
 XML2FFD_BIN=""
 DICTGEN_BIN=""
 QUICKFIX_BENCH_BIN=""
@@ -38,20 +53,20 @@ usage: ./bench/bench.sh <command> [args...]
 
 commands:
   build         Build all benchmark binaries and benchmark input artifacts
-  fastfix       Run FastFix benchmark against build/bench/quickfix_FIX44.art
-  fastfix-ffd   Run FastFix benchmark against build/bench/quickfix_FIX44.ffd
+    nimblefix     Run NimbleFIX benchmark against build/bench/quickfix_FIX44.art
+    nimblefix-ffd Run NimbleFIX benchmark against build/bench/quickfix_FIX44.ffd
   quickfix      Run QuickFIX comparison benchmark (parse, encode, session-inbound, replay, loopback)
-  builder       Run the FIX44 encode-focused FastFix benchmark variant
-  compare       Run the default FastFix and QuickFIX comparison suites side by side
+  builder       Run the FIX44 encode-focused NimbleFIX benchmark variant
+  compare       Run the default NimbleFIX and QuickFIX comparison suites side by side
 
 environment overrides:
-    FASTFIX_BUILD_SYSTEM=auto|xmake|cmake  Build system selector (default: auto)
-    FASTFIX_XMAKE_MODE=<mode>              xmake build mode (default: release)
-    FASTFIX_XMAKE_CCACHE=y|n               xmake compiler cache toggle (default: n)
-    FASTFIX_XMAKE_BIN_DIR=<path>           Explicit xmake binary directory override
-    FASTFIX_CMAKE_GENERATOR=auto|ninja|make
-                                          CMake generator selector (default: auto)
-    FASTFIX_CMAKE_PRESET=<name>            CMake preset base name or resolved preset (default: dev-release)
+    NIMBLEFIX_BUILD_SYSTEM=auto|xmake|cmake  Preferred build system selector
+    NIMBLEFIX_XMAKE_MODE=<mode>              Preferred xmake build mode override
+    NIMBLEFIX_XMAKE_CCACHE=y|n               Preferred xmake compiler cache toggle
+    NIMBLEFIX_XMAKE_BIN_DIR=<path>           Preferred xmake binary directory override
+    NIMBLEFIX_CMAKE_GENERATOR=auto|ninja|make
+                                            Preferred CMake generator selector
+    NIMBLEFIX_CMAKE_PRESET=<name>            Preferred CMake preset override
 EOF
 }
 
@@ -119,7 +134,7 @@ validate_xmake_ccache() {
         y|n)
             ;;
         *)
-            echo "error: FASTFIX_XMAKE_CCACHE must be 'y' or 'n' (got '$XMAKE_CCACHE')" >&2
+            echo "error: NIMBLEFIX_XMAKE_CCACHE must be 'y' or 'n' (got '$XMAKE_CCACHE')" >&2
             exit 1
             ;;
     esac
@@ -239,11 +254,11 @@ resolve_build_system() {
         xmake)
             if ! command_exists xmake; then
                 echo "error: xmake is not available" >&2
-                echo "hint: install xmake or rerun with FASTFIX_BUILD_SYSTEM=cmake" >&2
+                echo "hint: install xmake or rerun with NIMBLEFIX_BUILD_SYSTEM=cmake" >&2
                 exit 1
             fi
             if ! xmake_is_supported; then
-                echo "error: xmake $(detect_xmake_version) is too old for this project; install xmake >= 3.0.0 or rerun with FASTFIX_BUILD_SYSTEM=cmake" >&2
+                echo "error: xmake $(detect_xmake_version) is too old for this project; install xmake >= 3.0.0 or rerun with NIMBLEFIX_BUILD_SYSTEM=cmake" >&2
                 exit 1
             fi
             RESOLVED_BUILD_SYSTEM="xmake"
@@ -325,9 +340,9 @@ resolve_paths() {
         BIN_DIR="$CMAKE_BIN_DIR"
     fi
 
-    FASTFIX_BENCH_BIN="$BIN_DIR/fastfix-bench"
-    XML2FFD_BIN="$BIN_DIR/fastfix-xml2ffd"
-    DICTGEN_BIN="$BIN_DIR/fastfix-dictgen"
+    NIMBLEFIX_BENCH_BIN="$BIN_DIR/nimblefix-bench"
+    XML2FFD_BIN="$BIN_DIR/nimblefix-xml2ffd"
+    DICTGEN_BIN="$BIN_DIR/nimblefix-dictgen"
     QUICKFIX_BENCH_BIN="$BIN_DIR/quickfix-cpp-bench"
 }
 
@@ -358,7 +373,7 @@ fallback_to_cmake() {
     RESOLVED_BUILD_SYSTEM="cmake"
     XMAKE_CONFIGURED=0
     BIN_DIR=""
-    FASTFIX_BENCH_BIN=""
+    NIMBLEFIX_BENCH_BIN=""
     XML2FFD_BIN=""
     DICTGEN_BIN=""
     QUICKFIX_BENCH_BIN=""
@@ -441,12 +456,12 @@ xmake_build() {
     done
 }
 
-build_fastfix_tools() {
+build_nimblefix_tools() {
     resolve_paths
     if [ "$RESOLVED_BUILD_SYSTEM" = "xmake" ]; then
-        xmake_build fastfix-bench fastfix-xml2ffd fastfix-dictgen
+        xmake_build nimblefix-bench nimblefix-xml2ffd nimblefix-dictgen
     else
-        cmake_build fastfix-bench fastfix-xml2ffd fastfix-dictgen
+        cmake_build nimblefix-bench nimblefix-xml2ffd nimblefix-dictgen
     fi
 }
 
@@ -454,9 +469,9 @@ prepare_quickfix_dictionary() {
     ensure_quickfix_source
     resolve_paths
     if [ "$RESOLVED_BUILD_SYSTEM" = "xmake" ]; then
-        xmake_build fastfix-fix44-assets
+        xmake_build nimblefix-fix44-assets
     else
-        cmake_build fastfix-fix44-assets
+        cmake_build nimblefix-fix44-assets
     fi
 }
 
@@ -464,38 +479,38 @@ build_quickfix_bench() {
     ensure_quickfix_source
     resolve_paths
     if [ "$RESOLVED_BUILD_SYSTEM" = "xmake" ]; then
-        xmake_build fastfix-quickfix-cpp-bench fastfix-fix44-assets
+        xmake_build nimblefix-quickfix-cpp-bench nimblefix-fix44-assets
     else
-        cmake_build fastfix-quickfix-cpp-bench fastfix-fix44-assets
+        cmake_build nimblefix-quickfix-cpp-bench nimblefix-fix44-assets
     fi
 }
 
 build_all() {
     resolve_paths
-    build_fastfix_tools
+    build_nimblefix_tools
     prepare_quickfix_dictionary
     build_quickfix_bench
 }
 
-run_fastfix_artifact() {
+run_nimblefix_artifact() {
     resolve_paths
-    build_fastfix_tools
+    build_nimblefix_tools
     prepare_quickfix_dictionary
-    "$FASTFIX_BENCH_BIN" --artifact "$QUICKFIX_ART" "$@"
+    "$NIMBLEFIX_BENCH_BIN" --artifact "$QUICKFIX_ART" "$@"
 }
 
-run_fastfix_ffd() {
+run_nimblefix_ffd() {
     resolve_paths
-    build_fastfix_tools
+    build_nimblefix_tools
     prepare_quickfix_dictionary
-    "$FASTFIX_BENCH_BIN" --dictionary "$QUICKFIX_FFD" "$@"
+    "$NIMBLEFIX_BENCH_BIN" --dictionary "$QUICKFIX_FFD" "$@"
 }
 
 run_builder() {
     resolve_paths
-    build_fastfix_tools
+    build_nimblefix_tools
     prepare_quickfix_dictionary
-    "$FASTFIX_BENCH_BIN" --artifact "$QUICKFIX_ART" "$@"
+    "$NIMBLEFIX_BENCH_BIN" --artifact "$QUICKFIX_ART" "$@"
 }
 
 run_quickfix() {
@@ -518,17 +533,17 @@ case "$command_name" in
     build)
         build_all
         ;;
-    fastfix)
+    nimblefix)
         if [ "$#" -eq 0 ]; then
             set -- --iterations 100000 --loopback 1000 --replay 1000
         fi
-        run_fastfix_artifact "$@"
+        run_nimblefix_artifact "$@"
         ;;
-    fastfix-ffd)
+    nimblefix-ffd)
         if [ "$#" -eq 0 ]; then
             set -- --iterations 30000 --loopback 200 --replay 200
         fi
-        run_fastfix_ffd "$@"
+        run_nimblefix_ffd "$@"
         ;;
     quickfix)
         if [ "$#" -eq 0 ]; then
@@ -554,7 +569,7 @@ case "$command_name" in
             usage
             exit 1
         fi
-        run_fastfix_artifact --iterations 100000 --loopback 1000 --replay 1000
+        run_nimblefix_artifact --iterations 100000 --loopback 1000 --replay 1000
         run_quickfix --iterations 100000 --replay 1000 --replay-span 128 --loopback 1000
         ;;
     *)

@@ -1,22 +1,22 @@
-# FastFix
+# NimbleFIX
 
-**A low-latency FIX protocol engine for high-frequency trading systems.**
+**A lean, low-latency FIX engine for latency-sensitive trading systems.**
 
 [中文文档](README_CN.md)
 
 ---
 
-## What is FastFix?
+## What is NimbleFIX?
 
-FastFix is a C++20 FIX (Financial Information eXchange) protocol engine built from scratch for latency-sensitive trading infrastructure. It handles the full FIX session lifecycle — connection management, Logon/Logout handshake, sequence number tracking, heartbeat monitoring, gap detection, resend recovery — while keeping the hot path allocation-free and lock-free.
+NimbleFIX is a C++20 FIX (Financial Information eXchange) protocol engine built from scratch for latency-sensitive trading infrastructure. It handles the full FIX session lifecycle — connection management, Logon/Logout handshake, sequence number tracking, heartbeat monitoring, gap detection, resend recovery — while keeping the hot path allocation-free and lock-free.
 
-FastFix operates as both **initiator** (client) and **acceptor** (server) using the same internal engine. It supports FIX 4.2, 4.3, 4.4, and FIXT.1.1 transport sessions.
+NimbleFIX operates as both **initiator** (client) and **acceptor** (server) using the same internal engine. It supports FIX 4.2, 4.3, 4.4, and FIXT.1.1 transport sessions.
 
-## Why FastFix?
+## Why NimbleFIX?
 
 Existing open-source FIX engines (QuickFIX, QuickFIX/J, Fix8) are designed for correctness and broad compatibility, not for raw speed. They parse messages into dynamic maps, allocate on every message, and lock shared state across threads. This is fine for 99% of use cases — but not for firms where single-digit microsecond latency matters.
 
-FastFix was designed to answer: *what if every design decision optimized for the hot path?*
+NimbleFIX was designed to answer: *what if every design decision optimized for the hot path?*
 
 - **Dictionary-backed codec**: FIX metadata is normalized once at startup, either from `.ffd` dictionaries or precompiled `.art` artifacts. The hot path uses the same in-memory dictionary representation either way.
 - **Zero-copy message views**: Parsed messages are lightweight views over the original byte buffer. No copies until you explicitly request one.
@@ -42,11 +42,11 @@ FastFix was designed to answer: *what if every design decision optimized for the
 | **Soak testing** | Fault injection harness (gaps, duplicates, reorders, disconnects) |
 | **Fuzz testing** | libFuzzer harnesses for codec, config, and dictionary inputs |
 
-## How FastFix Differs from QuickFIX
+## How NimbleFIX Differs from QuickFIX
 
-[QuickFIX](http://www.quickfixengine.org/) is the de facto open-source FIX engine. It's mature, broadly used, and correct. FastFix differs in philosophy:
+[QuickFIX](http://www.quickfixengine.org/) is the de facto open-source FIX engine. It's mature, broadly used, and correct. NimbleFIX differs in philosophy:
 
-| Aspect | QuickFIX | FastFix |
+| Aspect | QuickFIX | NimbleFIX |
 |--------|----------|---------|
 | **Parsing** | XML data dictionary loaded at runtime; fields stored in `std::map` | Normalized dictionary loaded from `.art` or parsed from `.ffd` at startup; hot path uses contiguous lookup sections |
 | **Message representation** | `FieldMap` with heap-allocated strings | Zero-copy `MessageView` over original bytes |
@@ -68,7 +68,7 @@ FastFix was designed to answer: *what if every design decision optimized for the
 
 ### Offline Dependency Layout
 
-FastFix now keeps the required third-party sources as pinned Git submodules for offline builds:
+NimbleFIX now keeps the required third-party sources as pinned Git submodules for offline builds:
 
 - `deps/src/Catch2` — Catch2 v3.13.0
 - `deps/src/pugixml` — pugixml v1.15
@@ -93,8 +93,8 @@ bash ./scripts/offline_build.sh --bench full
 
 # Direct xmake path
 xmake f -m release --ccache=n -y
-xmake build fastfix-tests
-xmake build fastfix-bench
+xmake build nimblefix-tests
+xmake build nimblefix-bench
 
 # Alternative CMake path
 bash ./scripts/offline_build.sh --build-system cmake --preset dev-release --bench smoke
@@ -123,55 +123,55 @@ ctest --test-dir build/cmake/dev-release-manual-make --output-on-failure
 
 # Direct xmake target build, using the pinned Catch2/pugixml submodules instead of package downloads
 xmake f -m release --ccache=n -y
-xmake build fastfix-tests
+xmake build nimblefix-tests
 ```
 
-The helper scripts auto-select `xmake >= 3.0.0`, then `cmake + Ninja`, then `cmake + make`. On Ubuntu 24.04 the distro xmake package is currently `2.8.7`, so the helper intentionally logs a fallback to CMake there unless you install a newer upstream xmake. Both helper scripts also default `FASTFIX_XMAKE_CCACHE=n` on the xmake path to avoid Linux `.build_cache/... file busy` failures seen on large targets.
+The helper scripts auto-select `xmake >= 3.0.0`, then `cmake + Ninja`, then `cmake + make`. On Ubuntu 24.04 the distro xmake package is currently `2.8.7`, so the helper intentionally logs a fallback to CMake there unless you install a newer upstream xmake. Both helper scripts also default `NIMBLEFIX_XMAKE_CCACHE=n` on the xmake path to avoid Linux `.build_cache/... file busy` failures seen on large targets.
 
 GitHub Actions CI uses that same auto-selection logic on Ubuntu and still exercises the named RHEL CMake presets via `ubi8/ubi:8.10` + `gcc-toolset-12` and `ubi9/ubi:9.7` + `gcc-toolset-14` container jobs on every push and pull request.
 
-When `build/generated/`, `build/bench/`, or `build/sample-basic.art` have been removed, `xmake build fastfix-tests` and `xmake build fastfix-bench` now regenerate the required shared assets automatically.
+When `build/generated/`, `build/bench/`, or `build/sample-basic.art` have been removed, `xmake build nimblefix-tests` and `xmake build nimblefix-bench` now regenerate the required shared assets automatically.
 
 The helper scripts auto-select `xmake`, then `cmake + Ninja`, then `cmake + make`. Default xmake builds write executables under `build/linux/x86_64/release/`. Ninja-based CMake presets write to `build/cmake/<preset>/bin/`, and make-based fallback presets write to `build/cmake/<preset>-make/bin/`. The helper scripts keep using the shared repository-local assets under `build/generated/` and `build/bench/` so tests and benchmarks resolve the same files regardless of build system.
 
 ### Run Tests
 
 ```bash
-./build/linux/x86_64/release/fastfix-tests
+./build/linux/x86_64/release/nimblefix-tests
 # Alternative one-shot flow: bash ./scripts/offline_build.sh --bench skip
-# Alternative CMake binary: ./build/cmake/dev-release/bin/fastfix-tests
-# Make fallback binary: ./build/cmake/dev-release-make/bin/fastfix-tests
+# Alternative CMake binary: ./build/cmake/dev-release/bin/nimblefix-tests
+# Make fallback binary: ./build/cmake/dev-release-make/bin/nimblefix-tests
 ```
 
 ### Integration
 
-FastFix compiles into a single static library `libfastfix.a`. To use it in your own program:
+NimbleFIX currently compiles into a single static library `libnimblefix.a`. To use it in your own program:
 
-1. **Build the library**: `xmake f -m release -y && xmake build fastfix` or, if you need the alternative path, `cmake --build build/cmake/dev-release --target fastfix` (or `build/cmake/dev-release-make` when forcing the make fallback)
-2. **Compile a protocol profile**: Run `fastfix-dictgen` to produce a `.art` binary artifact from your dictionary (optional — `.ffd` files can also be loaded directly at runtime)
-3. **Link and include**: Point your compiler at `include/` for headers and link against `libfastfix.a`
+1. **Build the library**: `xmake f -m release -y && xmake build nimblefix` or, if you need the alternative path, `cmake --build build/cmake/dev-release --target nimblefix` (or `build/cmake/dev-release-make` when forcing the make fallback)
+2. **Compile a protocol profile**: Run `nimblefix-dictgen` to produce a `.art` binary artifact from your dictionary (optional — `.ffd` files can also be loaded directly at runtime)
+3. **Link and include**: Point your compiler at `include/` for headers and link against `libnimblefix.a`
 
 **xmake (as a subdependency):**
 
 ```lua
 -- xmake.lua
-includes("path/to/fastfix")   -- path to the fastfix source tree
+includes("path/to/nimblefix")   -- path to the nimblefix source tree
 
 target("my-trading-app")
     set_kind("binary")
-    add_deps("fastfix")        -- links libfastfix.a + adds include path
+    add_deps("nimblefix")        -- links libnimblefix.a + adds include path
     add_files("src/*.cpp")
 ```
 
 **CMake / Makefile / other (alternative):**
 
 ```bash
-# 1. Build fastfix first
-cd path/to/fastfix && cmake -S . -B build/cmake/dev-release -DCMAKE_BUILD_TYPE=Release && cmake --build build/cmake/dev-release --target fastfix
+# 1. Build nimblefix first
+cd path/to/nimblefix && cmake -S . -B build/cmake/dev-release -DCMAKE_BUILD_TYPE=Release && cmake --build build/cmake/dev-release --target nimblefix
 
 # 2. In your build system, add:
-#    Include path:  path/to/fastfix/include
-#    Link library:  path/to/fastfix/build/cmake/dev-release/lib/libfastfix.a
+#    Include path:  path/to/nimblefix/include
+#    Link library:  path/to/nimblefix/build/cmake/dev-release/lib/libnimblefix.a
 #    Standard:      C++20
 ```
 
@@ -183,9 +183,9 @@ cd path/to/fastfix && cmake -S . -B build/cmake/dev-release -DCMAKE_BUILD_TYPE=R
 
 A **profile** is a compiled binary description of one FIX protocol variant — which fields exist, which messages are defined, what groups they contain. Each profile carries a `profile_id` (uint64) that you choose when writing the dictionary. Sessions reference profiles by this ID, and one engine can load multiple profiles simultaneously (e.g., FIX 4.2 and FIX 4.4).
 
-### `.ffd` — FastFix Dictionary
+### `.ffd` — NimbleFIX Dictionary
 
-A text file defining all fields, messages, and groups for one FIX protocol variant. Contains a `profile_id` you assign (any unique number, e.g. `1001` for FIX 4.4). Multiple `.ffd` files can be passed to `fastfix-dictgen` or `Engine` — the first provides the baseline, additional files serve as incremental overlays (adding fields, extending messages, overriding field rules).
+A text file defining all fields, messages, and groups for one FIX protocol variant. Contains a `profile_id` you assign (any unique number, e.g. `1001` for FIX 4.4). Multiple `.ffd` files can be passed to `nimblefix-dictgen` or `Engine` — the first provides the baseline, additional files serve as incremental overlays (adding fields, extending messages, overriding field rules).
 
 ```
 profile_id=1001
@@ -204,7 +204,7 @@ Format: line-based, pipe-delimited. Lines starting with `#` are comments. Header
 
 ### `.art` — Artifact
 
-The compiled binary output of `fastfix-dictgen`. It's a flat, mmap-loadable file containing string tables, field/message/group definitions, validation rules, and lookup tables. The `profile_id` from your `.ffd` is embedded in it. Loading an `.art` file avoids text parsing at startup — useful for production deployments or when startup time matters.
+The compiled binary output of `nimblefix-dictgen`. It's a flat, mmap-loadable file containing string tables, field/message/group definitions, validation rules, and lookup tables. The `profile_id` from your `.ffd` is embedded in it. Loading an `.art` file avoids text parsing at startup — useful for production deployments or when startup time matters.
 
 ### Overlay
 
@@ -219,7 +219,7 @@ message|D|NewOrderSingle|0|5001:r,5002:o
 
 ### MessageBuilder vs FixedLayoutWriter
 
-FastFix provides two ways to construct outbound messages:
+NimbleFIX provides two ways to construct outbound messages:
 
 - **`MessageBuilder`** — Generic, flexible API. Works with any message type. No upfront setup. Good for infrequent messages or prototyping.
 - **`FixedLayoutWriter`** — Hot-path optimized. Requires a `FixedLayout` built once from the dictionary. Pre-computes tag-to-slot mapping for O(1) writes. Significantly faster for high-frequency message types.
@@ -245,21 +245,21 @@ Controls how strict the codec is during decode:
 
 | Tool | Purpose |
 |------|---------|
-| `fastfix-dictgen` | Compile `.ffd` dictionaries into binary `.art` profiles (supports merging multiple `.ffd` files and generating C++ builder headers) |
-| `fastfix-xml2ffd` | Convert QuickFIX XML data dictionaries to `.ffd` format; also generates C++ builder headers from `.ffd` |
-| `fastfix-initiator` | CLI FIX initiator for testing and interop |
-| `fastfix-acceptor` | CLI FIX acceptor (echo server) |
-| `fastfix-soak` | Stress test with fault injection (gaps, duplicates, reorders, disconnects) |
-| `fastfix-bench` | Latency/throughput benchmark with allocation and CPU counter tracking |
-| `fastfix-fuzz-codec` | libFuzzer harness for codec and admin protocol |
-| `fastfix-fuzz-config` | libFuzzer harness for `.ffcfg` config parser |
-| `fastfix-fuzz-dictgen` | libFuzzer harness for `.ffd` dictionary parser |
-| `fastfix-interop-runner` | Bidirectional interoperability scenario runner |
+| `nimblefix-dictgen` | Compile `.ffd` dictionaries into binary `.art` profiles (supports merging multiple `.ffd` files and generating C++ builder headers) |
+| `nimblefix-xml2ffd` | Convert QuickFIX XML data dictionaries to `.ffd` format; also generates C++ builder headers from `.ffd` |
+| `nimblefix-initiator` | CLI FIX initiator for testing and interop |
+| `nimblefix-acceptor` | CLI FIX acceptor (echo server) |
+| `nimblefix-soak` | Stress test with fault injection (gaps, duplicates, reorders, disconnects) |
+| `nimblefix-bench` | Latency/throughput benchmark with allocation and CPU counter tracking |
+| `nimblefix-fuzz-codec` | libFuzzer harness for codec and admin protocol |
+| `nimblefix-fuzz-config` | libFuzzer harness for `.ffcfg` config parser |
+| `nimblefix-fuzz-dictgen` | libFuzzer harness for `.ffd` dictionary parser |
+| `nimblefix-interop-runner` | Bidirectional interoperability scenario runner |
 
 ### Compile a Profile
 
 ```bash
-./build/linux/x86_64/release/fastfix-dictgen \
+./build/linux/x86_64/release/nimblefix-dictgen \
     --input samples/basic_profile.ffd \
     --merge samples/basic_overlay.ffd \
     --output build/sample-basic.art \
@@ -276,14 +276,14 @@ Controls how strict the codec is during decode:
 ### Convert from QuickFIX XML
 
 ```bash
-./build/linux/x86_64/release/fastfix-xml2ffd \
+./build/linux/x86_64/release/nimblefix-xml2ffd \
     --xml FIX44.xml \
     --output my_profile.ffd \
     --profile-id 1001 \
     --cpp-builders generated_builders.h
 ```
 
-Components are inlined, groups are extracted, XML types are mapped to FastFix types, and `schema_hash` is auto-computed.
+Components are inlined, groups are extracted, XML types are mapped to NimbleFIX types, and `schema_hash` is auto-computed.
 
 ---
 
@@ -292,17 +292,17 @@ Components are inlined, groups are extracted, XML types are mapped to FastFix ty
 ### Standard Initiator
 
 ```cpp
-#include "fastfix/runtime/engine.h"
-#include "fastfix/runtime/live_initiator.h"
-#include "fastfix/runtime/config.h"
-#include "fastfix/runtime/application.h"
+#include "nimblefix/runtime/engine.h"
+#include "nimblefix/runtime/live_initiator.h"
+#include "nimblefix/runtime/config.h"
+#include "nimblefix/runtime/application.h"
 
-class MyApp : public fastfix::runtime::ApplicationCallbacks {
-    auto OnSessionEvent(const fastfix::runtime::RuntimeEvent& event)
-        -> fastfix::base::Status override {
-        if (event.session_event == fastfix::runtime::SessionEventKind::kActive) {
+class MyApp : public nimble::runtime::ApplicationCallbacks {
+    auto OnSessionEvent(const nimble::runtime::RuntimeEvent& event)
+        -> nimble::base::Status override {
+        if (event.session_event == nimble::runtime::SessionEventKind::kActive) {
             // Session is live — start sending orders
-            auto msg = fastfix::message::MessageBuilder{"D"}
+            auto msg = nimble::message::MessageBuilder{"D"}
                 .set_string(11, "ORD-001")
                 .set_char(54, '1')       // Side=Buy
                 .set_float(44, 150.25)   // Price
@@ -310,20 +310,20 @@ class MyApp : public fastfix::runtime::ApplicationCallbacks {
                 .build();
             event.handle.Send(std::move(msg));
         }
-        return fastfix::base::Status::Ok();
+        return nimble::base::Status::Ok();
     }
 
-    auto OnAppMessage(const fastfix::runtime::RuntimeEvent& event)
-        -> fastfix::base::Status override {
+    auto OnAppMessage(const nimble::runtime::RuntimeEvent& event)
+        -> nimble::base::Status override {
         auto view = event.message_view();
         auto msg_type = view.msg_type();      // "8" for ExecutionReport
         auto exec_id = view.get_string(17);   // ExecID
-        return fastfix::base::Status::Ok();
+        return nimble::base::Status::Ok();
     }
 };
 
 int main() {
-    fastfix::runtime::EngineConfig config;
+    nimble::runtime::EngineConfig config;
     config.worker_count = 1;
     config.profile_artifacts = {"build/sample-basic.art"};
     // Or load .ffd directly:
@@ -342,12 +342,12 @@ int main() {
         .reconnect_max_ms = 30000,
     }};
 
-    fastfix::runtime::Engine engine;
+    nimble::runtime::Engine engine;
     engine.LoadProfiles(config);
     engine.Boot(config);
 
     auto app = std::make_shared<MyApp>();
-    fastfix::runtime::LiveInitiator initiator(&engine, {
+    nimble::runtime::LiveInitiator initiator(&engine, {
         .application = app,
     });
 
@@ -361,30 +361,30 @@ int main() {
 For latency-critical order submission, use `FixedLayoutWriter` with a pre-built `FixedLayout`:
 
 ```cpp
-#include "fastfix/message/fixed_layout_writer.h"
-#include "fastfix/codec/fix_codec.h"
+#include "nimblefix/message/fixed_layout_writer.h"
+#include "nimblefix/codec/fix_codec.h"
 
 // Build once at startup:
-auto layout = fastfix::message::FixedLayout::Build(dictionary, "D").value();
-auto templates = fastfix::codec::PrecompiledTemplateTable{};
+auto layout = nimble::message::FixedLayout::Build(dictionary, "D").value();
+auto templates = nimble::codec::PrecompiledTemplateTable{};
 
 // ... inside OnSessionEvent when session becomes active:
 
-class HotPathApp : public fastfix::runtime::ApplicationCallbacks {
-    fastfix::message::FixedLayout layout_;
-    fastfix::codec::EncodeBuffer encode_buffer_;   // reuse across calls
-    fastfix::codec::EncodeOptions encode_options_;
+class HotPathApp : public nimble::runtime::ApplicationCallbacks {
+    nimble::message::FixedLayout layout_;
+    nimble::codec::EncodeBuffer encode_buffer_;   // reuse across calls
+    nimble::codec::EncodeOptions encode_options_;
 
-    auto OnSessionEvent(const fastfix::runtime::RuntimeEvent& event)
-        -> fastfix::base::Status override {
-        if (event.session_event == fastfix::runtime::SessionEventKind::kActive) {
+    auto OnSessionEvent(const nimble::runtime::RuntimeEvent& event)
+        -> nimble::base::Status override {
+        if (event.session_event == nimble::runtime::SessionEventKind::kActive) {
             SendOrder(event.handle);
         }
-        return fastfix::base::Status::Ok();
+        return nimble::base::Status::Ok();
     }
 
-    void SendOrder(fastfix::session::SessionHandle handle) {
-        fastfix::message::FixedLayoutWriter writer(layout_);
+    void SendOrder(nimble::session::SessionHandle handle) {
+        nimble::message::FixedLayoutWriter writer(layout_);
         writer.set_string(11, "ORD-001");    // ClOrdID
         writer.set_char(54, '1');             // Side=Buy
         writer.set_int(38, 100);             // OrderQty
@@ -411,7 +411,7 @@ The `FixedLayoutWriter` path is the lowest-allocation encode path in the library
 When most fields are known at compile time but some are dynamic (e.g., venue-specific extensions):
 
 ```cpp
-fastfix::message::FixedLayoutWriter writer(layout_);
+nimble::message::FixedLayoutWriter writer(layout_);
 // Known fields via O(1) slot writes
 writer.set_string(11, "ORD-001");
 writer.set_char(54, '1');
@@ -431,11 +431,11 @@ auto status = writer.encode_to_buffer(dictionary, options, &buffer);
 ### Standard Acceptor with Dynamic Session Factory
 
 ```cpp
-#include "fastfix/runtime/engine.h"
-#include "fastfix/runtime/live_acceptor.h"
-#include "fastfix/runtime/config.h"
+#include "nimblefix/runtime/engine.h"
+#include "nimblefix/runtime/live_acceptor.h"
+#include "nimblefix/runtime/config.h"
 
-fastfix::runtime::EngineConfig config;
+nimble::runtime::EngineConfig config;
 config.worker_count = 2;
 config.profile_artifacts = {"build/sample-basic.art"};
 config.listeners = {{
@@ -445,14 +445,14 @@ config.listeners = {{
 }};
 config.accept_unknown_sessions = true;
 
-fastfix::runtime::Engine engine;
+nimble::runtime::Engine engine;
 engine.LoadProfiles(config);
 engine.Boot(config);
 
 // Accept sessions dynamically based on inbound Logon:
-engine.SetSessionFactory([](const fastfix::session::SessionKey& key)
-    -> fastfix::base::Result<fastfix::runtime::CounterpartyConfig> {
-    return fastfix::runtime::CounterpartyConfig{
+engine.SetSessionFactory([](const nimble::session::SessionKey& key)
+    -> nimble::base::Result<nimble::runtime::CounterpartyConfig> {
+    return nimble::runtime::CounterpartyConfig{
         .name = key.sender_comp_id,
         .session = {
             .profile_id = 1001,
@@ -463,7 +463,7 @@ engine.SetSessionFactory([](const fastfix::session::SessionKey& key)
 });
 
 auto app = std::make_shared<MyApp>();
-fastfix::runtime::LiveAcceptor acceptor(&engine, {
+nimble::runtime::LiveAcceptor acceptor(&engine, {
     .application = app,
 });
 acceptor.OpenListeners("main");
@@ -473,7 +473,7 @@ acceptor.Run();
 ### Acceptor with Pre-Configured Counterparties
 
 ```cpp
-fastfix::runtime::EngineConfig config;
+nimble::runtime::EngineConfig config;
 config.worker_count = 1;
 config.profile_artifacts = {"build/sample-basic.art"};
 config.listeners = {{
@@ -490,16 +490,16 @@ config.counterparties = {{
         .heartbeat_interval_seconds = 30,
         .is_initiator = false,
     },
-    .store_mode = fastfix::runtime::StoreMode::kDurableBatch,
-    .store_path = "/var/lib/fastfix/client-a",
+    .store_mode = nimble::runtime::StoreMode::kDurableBatch,
+    .store_path = "/var/lib/nimblefix/client-a",
 }};
 
-fastfix::runtime::Engine engine;
+nimble::runtime::Engine engine;
 engine.LoadProfiles(config);
 engine.Boot(config);
 
 auto app = std::make_shared<MyApp>();
-fastfix::runtime::LiveAcceptor acceptor(&engine, {
+nimble::runtime::LiveAcceptor acceptor(&engine, {
     .application = app,
 });
 acceptor.OpenListeners("main");
@@ -511,8 +511,8 @@ acceptor.Run();
 In the `OnAppMessage` callback, use zero-copy `MessageView` for minimal overhead:
 
 ```cpp
-auto OnAppMessage(const fastfix::runtime::RuntimeEvent& event)
-    -> fastfix::base::Status override {
+auto OnAppMessage(const nimble::runtime::RuntimeEvent& event)
+    -> nimble::base::Status override {
     auto view = event.message_view();
 
     // Zero-copy field access — no allocations
@@ -530,7 +530,7 @@ auto OnAppMessage(const fastfix::runtime::RuntimeEvent& event)
     }
 
     // Build and send a response
-    auto response = fastfix::message::MessageBuilder{"8"}
+    auto response = nimble::message::MessageBuilder{"8"}
         .set_string(17, "EXEC-001")        // ExecID
         .set_string(11, cl_ord_id.value_or(""))
         .set_char(150, '0')                // ExecType=New
@@ -538,7 +538,7 @@ auto OnAppMessage(const fastfix::runtime::RuntimeEvent& event)
         .build();
     event.handle.Send(std::move(response));
 
-    return fastfix::base::Status::Ok();
+    return nimble::base::Status::Ok();
 }
 ```
 
@@ -612,7 +612,7 @@ auto OnAppMessage(const fastfix::runtime::RuntimeEvent& event)
 
 ### Tool Runtime Config (`.ffcfg`)
 
-The built-in binaries (`fastfix-acceptor`, `fastfix-interop-runner`, and tests) also accept an internal `.ffcfg` format. It is a convenience layer over `EngineConfig`, not a stable public library API.
+The built-in binaries (`nimblefix-acceptor`, `nimblefix-interop-runner`, and tests) also accept an internal `.ffcfg` format. It is a convenience layer over `EngineConfig`, not a stable public library API.
 
 ```text
 engine.worker_count=1
@@ -631,7 +631,7 @@ For ready-to-run examples, see `tests/data/interop/loopback-runtime.ffcfg` and `
 
 ## Threading Model
 
-FastFix does not create threads behind your back. Every thread is explicitly configured, explicitly started, and pinnable to a specific CPU core.
+NimbleFIX does not create threads behind your back. Every thread is explicitly configured, explicitly started, and pinnable to a specific CPU core.
 
 ### Thread Topology
 
@@ -697,8 +697,8 @@ config.worker_count = 3;
 config.front_door_cpu = 0;
 config.worker_cpu_affinity = {1, 2, 3};
 config.app_cpu_affinity = {4, 5, 6};
-config.poll_mode = fastfix::runtime::PollMode::kBusy;
-config.queue_app_mode = fastfix::runtime::QueueAppThreadingMode::kThreaded;
+config.poll_mode = nimble::runtime::PollMode::kBusy;
+config.queue_app_mode = nimble::runtime::QueueAppThreadingMode::kThreaded;
 ```
 
 ---
@@ -707,13 +707,13 @@ config.queue_app_mode = fastfix::runtime::QueueAppThreadingMode::kThreaded;
 
 ### Why Compare with QuickFIX?
 
-QuickFIX is still the reference implementation most teams already know and already run. FastFix therefore keeps an in-tree, pinned QuickFIX side-by-side suite so the comparison stays on the same FIX44 business-order fixture, the same dictionary lineage, and the same command wrapper.
+QuickFIX is still the reference implementation most teams already know and already run. NimbleFIX therefore keeps an in-tree, pinned QuickFIX side-by-side suite so the comparison stays on the same FIX44 business-order fixture, the same dictionary lineage, and the same command wrapper.
 
 ### Test Methodology
 
 - Command: `./bench/bench.sh compare`
 - Default compare args: `--iterations 100000 --loopback 1000 --replay 1000 --replay-span 128`
-- Dictionary lineage: QuickFIX `bench/vendor/quickfix/spec/FIX44.xml` → `fastfix-xml2ffd` → `build/bench/quickfix_FIX44.ffd` → `fastfix-dictgen` → `build/bench/quickfix_FIX44.art`
+- Dictionary lineage: QuickFIX `bench/vendor/quickfix/spec/FIX44.xml` → `nimblefix-xml2ffd` → `build/bench/quickfix_FIX44.ffd` → `nimblefix-dictgen` → `build/bench/quickfix_FIX44.art`
 - Business fixture: one neutral FIX44 `NewOrderSingle` with a single `NoPartyIDs=1` group entry
 - Encode fairness: both engines pin `SendingTime` to the fixture timestamp so the encode tiers measure object-to-wire work, not per-iteration clock formatting
 - Allocation tracking: global `operator new` interception counts heap allocations per iteration
@@ -730,7 +730,7 @@ QuickFIX is still the reference implementation most teams already know and alrea
 
 #### Cross-Engine Shared Boundaries
 
-| Boundary | FastFix metric | QuickFIX metric | FastFix p50 | FastFix p95 | QuickFIX p50 | QuickFIX p95 | FastFix alloc/op | QuickFIX alloc/op |
+| Boundary | NimbleFIX metric | QuickFIX metric | NimbleFIX p50 | NimbleFIX p95 | QuickFIX p50 | QuickFIX p95 | NimbleFIX alloc/op | QuickFIX alloc/op |
 |----------|----------------|-----------------|-------------|-------------|--------------|--------------|------------------|-------------------|
 | object → wire (reused buffer) | `encode` | `quickfix-encode-buffer` | 371 ns | 401 ns | 1.24 us | 1.43 us | 0 | 29 |
 | wire → object | `parse` | `quickfix-parse` | 511 ns | 521 ns | 1.29 us | 1.33 us | 0 | 20 |
@@ -738,7 +738,7 @@ QuickFIX is still the reference implementation most teams already know and alrea
 | replay (`replay_span=128`) | `replay` | `quickfix-replay` | 15.66 us | 16.81 us | 231.20 us | 269.07 us | 0 | 4117 |
 | TCP loopback round-trip | `loopback-roundtrip` | `quickfix-loopback` | 17.58 us | 20.75 us | 20.55 us | 24.68 us | 3 | 77 |
 
-#### FastFix-Only Tier
+#### NimbleFIX-Only Tier
 
 | Metric | p50 | p95 | p99 | alloc/op | ops/sec |
 |--------|-----|-----|-----|----------|---------|
@@ -746,17 +746,17 @@ QuickFIX is still the reference implementation most teams already know and alrea
 
 Key observations:
 
-- FastFix currently leads every shared tier in the checked-in side-by-side run: about 3.3x on object-to-wire encode, 2.5x on parse, 1.4x on session-inbound, 14.8x on replay, and 1.2x on loopback RTT.
-- The replay gap is the largest structural difference: FastFix re-encodes from store state with 0 alloc/op, while QuickFIX replay allocates about 4,117 times per measured iteration.
+- NimbleFIX currently leads every shared tier in the checked-in side-by-side run: about 3.3x on object-to-wire encode, 2.5x on parse, 1.4x on session-inbound, 14.8x on replay, and 1.2x on loopback RTT.
+- The replay gap is the largest structural difference: NimbleFIX re-encodes from store state with 0 alloc/op, while QuickFIX replay allocates about 4,117 times per measured iteration.
 - Loopback remains the closest tier because both engines are partly bounded by the same Linux TCP floor once the message leaves userspace.
-- `quickfix-encode` (fresh string) is still printed by the benchmark, but `quickfix-encode-buffer` is the tighter apples-to-apples comparison with FastFix's reused `EncodeBuffer` path.
+- `quickfix-encode` (fresh string) is still printed by the benchmark, but `quickfix-encode-buffer` is the tighter apples-to-apples comparison with NimbleFIX's reused `EncodeBuffer` path.
 
 ### Run Benchmarks Yourself
 
 ```bash
 ./bench/bench.sh build
-./bench/bench.sh fastfix        # FastFix main suite (artifact)
-./bench/bench.sh fastfix-ffd    # FastFix suite (direct .ffd loading)
+./bench/bench.sh nimblefix        # NimbleFIX main suite (artifact)
+./bench/bench.sh nimblefix-ffd    # NimbleFIX suite (direct .ffd loading)
 ./bench/bench.sh quickfix       # QuickFIX comparison
 ./bench/bench.sh builder        # Object-to-wire compare only
 ./bench/bench.sh compare        # Full cross-engine comparison
@@ -776,7 +776,7 @@ For exact measurement boundaries, per-metric start/end points, and flow diagrams
 
 ## Project Status
 
-FastFix is under active development. The core engine, session management, codec, and persistence layers are implemented and tested (206 test cases, 2760+ assertions). The hot-path encode pipeline continues to be optimized toward the design targets.
+NimbleFIX is under active development. The core engine, session management, codec, and persistence layers are implemented and tested (206 test cases, 2760+ assertions). The hot-path encode pipeline continues to be optimized toward the design targets.
 
 ## License
 

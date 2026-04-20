@@ -11,7 +11,7 @@
 
 #include <pugixml.hpp>
 
-namespace fastfix::tools {
+namespace nimble::tools {
 
 namespace {
 
@@ -289,4 +289,4 @@ ConvertXmlToFfd(const std::string& xml_content, std::uint64_t profile_id) -> std
   return out.str();
 }
 
-} // namespace fastfix::tools
+} // namespace nimble::tools

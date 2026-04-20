@@ -1,7 +1,7 @@
-#include "fastfix/transport/tcp_transport.h"
+#include "nimblefix/transport/tcp_transport.h"
 
-#include "fastfix/codec/fix_tags.h"
-#include "fastfix/codec/simd_scan.h"
+#include "nimblefix/codec/fix_tags.h"
+#include "nimblefix/codec/simd_scan.h"
 
 #include <arpa/inet.h>
 #include <fcntl.h>
@@ -11,7 +11,7 @@
 #include <sys/socket.h>
 #include <sys/uio.h>
 #include <unistd.h>
-#ifndef FASTFIX_DISABLE_LIBURING
+#ifndef NIMBLEFIX_DISABLE_LIBURING
 #include <liburing.h>
 #endif
 
@@ -19,7 +19,7 @@
 #include <cstring>
 #include <limits>
 
-namespace fastfix::transport {
+namespace nimble::transport {
 
 namespace {
 
@@ -421,7 +421,7 @@ TcpConnection::SendGather(std::span<const std::span<const std::byte>> segments, 
   return base::Status::Ok();
 }
 
-#ifndef FASTFIX_DISABLE_LIBURING
+#ifndef NIMBLEFIX_DISABLE_LIBURING
 auto
 TcpConnection::SendZeroCopyGather(std::span<const std::span<const std::byte>> segments,
                                   std::chrono::milliseconds timeout) -> base::Status
@@ -928,4 +928,4 @@ TcpAcceptor::Close() -> void
   port_ = 0;
 }
 
-} // namespace fastfix::transport
+} // namespace nimble::transport

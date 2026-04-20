@@ -1,9 +1,9 @@
-#include "fastfix/session/session_core.h"
+#include "nimblefix/session/session_core.h"
 
 #include <functional>
 #include <limits>
 
-namespace fastfix::session {
+namespace nimble::session {
 
 namespace {
 
@@ -353,4 +353,4 @@ SessionCore::TriggerDayCut() -> base::Status
   return base::Status::Ok();
 }
 
-} // namespace fastfix::session
+} // namespace nimble::session

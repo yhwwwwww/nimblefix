@@ -3,15 +3,15 @@
 #include <iostream>
 #include <vector>
 
-#include "fastfix/runtime/config.h"
-#include "fastfix/runtime/config_io.h"
+#include "nimblefix/runtime/config.h"
+#include "nimblefix/runtime/config_io.h"
 
 namespace {
 
 auto
 PrintUsage() -> void
 {
-  std::cout << "usage: fastfix-fuzz-config --input <file-or-directory>\n";
+  std::cout << "usage: nimblefix-fuzz-config --input <file-or-directory>\n";
 }
 
 auto
@@ -62,7 +62,7 @@ main(int argc, char** argv)
   std::size_t accepted = 0;
   for (const auto& file : files) {
     const auto text = ReadText(file);
-    auto result = fastfix::runtime::LoadEngineConfigText(text, file.parent_path());
+    auto result = nimble::runtime::LoadEngineConfigText(text, file.parent_path());
     if (result.ok()) {
       ++accepted;
     }

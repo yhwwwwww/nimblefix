@@ -1,4 +1,4 @@
-#include "fastfix/message/fixed_layout_writer.h"
+#include "nimblefix/message/fixed_layout_writer.h"
 
 #include <algorithm>
 #include <array>
@@ -11,19 +11,19 @@
 #include <utility>
 #include <vector>
 
-#include "fastfix/codec/fast_int_format.h"
-#include "fastfix/codec/fix_codec.h"
-#include "fastfix/codec/fix_tags.h"
-#include "fastfix/codec/simd_scan.h"
+#include "nimblefix/codec/fast_int_format.h"
+#include "nimblefix/codec/fix_codec.h"
+#include "nimblefix/codec/fix_tags.h"
+#include "nimblefix/codec/simd_scan.h"
 
-namespace fastfix::message {
+namespace nimble::message {
 
 namespace {
 
 auto
 IsEncodeManagedTag(std::uint32_t tag) -> bool
 {
-  return fastfix::codec::tags::IsEncodeManagedTag(tag);
+  return nimble::codec::tags::IsEncodeManagedTag(tag);
 }
 
 void
@@ -864,4 +864,4 @@ FixedLayoutWriter::encode(const profile::NormalizedDictionaryView& dictionary,
   return bytes;
 }
 
-} // namespace fastfix::message
+} // namespace nimble::message

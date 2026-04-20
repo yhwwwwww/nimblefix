@@ -1,12 +1,12 @@
-# FastFix Development Guide
+# NimbleFIX Development Guide
 
-This guide covers everything you need to contribute to or extend FastFix: building, testing, profiling, adding protocol support, and using the toolchain.
+This guide covers everything you need to contribute to or extend NimbleFIX: building, testing, profiling, adding protocol support, and using the toolchain.
 
 ---
 
 ## Build System
 
-FastFix supports both offline xmake and offline CMake flows. xmake is the primary path for local Linux work when you have a recent upstream xmake; CMake is the portability and CI fallback and remains the canonical path for the named RHEL presets.
+NimbleFIX supports both offline xmake and offline CMake flows. xmake is the primary path for local Linux work when you have a recent upstream xmake; CMake is the portability and CI fallback and remains the canonical path for the named RHEL presets.
 
 ### Prerequisites
 
@@ -19,25 +19,25 @@ FastFix supports both offline xmake and offline CMake flows. xmake is the primar
 
 | Target | Kind | Description |
 |--------|------|-------------|
-| `fastfix` | static library | Core engine library |
-| `fastfix-tests` | binary | Catch2 test suite |
-| `fastfix-bench` | binary | Performance benchmarks |
-| `fastfix-dictgen` | binary | Dictionary → artifact compiler |
-| `fastfix-xml2ffd` | binary | QuickFIX XML → `.ffd` converter |
-| `fastfix-initiator` | binary | CLI FIX client |
-| `fastfix-acceptor` | binary | CLI FIX server (echo) |
-| `fastfix-soak` | binary | Stress tester with fault injection |
-| `fastfix-interop-runner` | binary | Interop scenario runner |
-| `fastfix-fuzz-codec` | binary | Codec/admin fuzzer |
-| `fastfix-fuzz-config` | binary | Config parser fuzzer |
-| `fastfix-fuzz-dictgen` | binary | Dictionary parser fuzzer |
+| `nimblefix` | static library | Core engine library |
+| `nimblefix-tests` | binary | Catch2 test suite |
+| `nimblefix-bench` | binary | Performance benchmarks |
+| `nimblefix-dictgen` | binary | Dictionary → artifact compiler |
+| `nimblefix-xml2ffd` | binary | QuickFIX XML → `.ffd` converter |
+| `nimblefix-initiator` | binary | CLI FIX client |
+| `nimblefix-acceptor` | binary | CLI FIX server (echo) |
+| `nimblefix-soak` | binary | Stress tester with fault injection |
+| `nimblefix-interop-runner` | binary | Interop scenario runner |
+| `nimblefix-fuzz-codec` | binary | Codec/admin fuzzer |
+| `nimblefix-fuzz-config` | binary | Config parser fuzzer |
+| `nimblefix-fuzz-dictgen` | binary | Dictionary parser fuzzer |
 
 ### Common Commands
 
 ```bash
 xmake f -c -m release --ccache=n -y
-xmake build fastfix-tests
-xmake build fastfix-bench
+xmake build nimblefix-tests
+xmake build nimblefix-bench
 xmake clean
 
 bash ./scripts/offline_build.sh --bench smoke   # Auto: xmake >= 3.0.0 -> cmake + Ninja -> cmake + make
@@ -52,7 +52,7 @@ ctest --preset dev-release
 
 The helper scripts auto-select `xmake >= 3.0.0`, then `cmake + Ninja`, then `cmake + make`. Default xmake builds write executables to `./build/linux/x86_64/release/`. Ninja-based CMake presets remain available at `./build/cmake/<preset>/bin/`, and make-based fallback presets live at `./build/cmake/<preset>-make/bin/`. The examples below assume `BIN_DIR=./build/linux/x86_64/release` for the default path and invoke binaries directly for reproducibility and predictable argument handling.
 
-Both `offline_build.sh` and `bench.sh` default `FASTFIX_XMAKE_CCACHE=n` on the xmake path. That mirrors the CI-safe setting and avoids Linux `.build_cache/... file busy` failures seen on the larger benchmark and QuickFIX targets.
+Both `offline_build.sh` and `bench.sh` default `NIMBLEFIX_XMAKE_CCACHE=n` on the xmake path. That mirrors the CI-safe setting and avoids Linux `.build_cache/... file busy` failures seen on the larger benchmark and QuickFIX targets.
 
 GitHub Actions CI now uses the same helper logic on Ubuntu. On Ubuntu 24.04 the distro xmake package is currently `2.8.7`, so the helper intentionally falls back to CMake there unless a newer upstream xmake is installed. The named RHEL coverage still runs through `ubi8/ubi:8.10` + `gcc-toolset-12` and `ubi9/ubi:9.7` + `gcc-toolset-14` container jobs.
 
@@ -87,14 +87,14 @@ Initialize them with `git submodule update --init --recursive` before the first 
 
 | Define | Purpose |
 |--------|---------|
-| `FASTFIX_PROJECT_DIR` | Set to `$(projectdir)` for test data path resolution |
+| `NIMBLEFIX_PROJECT_DIR` | Set to `$(projectdir)` for test data path resolution |
 
 ---
 
 ## Source Layout
 
 ```
-include/fastfix/
+include/nimblefix/
 ├── base/       Status, Result, SpscQueue, InlineSplitVector
 ├── codec/      DecodeFixMessageView, EncodeFixMessage, SIMD scan, FrameEncodeTemplate
 ├── message/    Message, MessageView, MessageBuilder, TypedMessageView, FixedLayoutWriter, GroupView
@@ -106,7 +106,7 @@ include/fastfix/
                 TimerWheel, Metrics, Trace, ShardPoller
 ```
 
-Each module has a corresponding source directory under `src/` and tests under `tests/`.
+The canonical public headers live under `include/nimblefix/`. Each module has a corresponding source directory under `src/` and tests under `tests/`.
 
 ---
 
@@ -114,24 +114,24 @@ Each module has a corresponding source directory under `src/` and tests under `t
 
 ### Framework
 
-Tests use **Catch2 v3**. The test binary is `fastfix-tests`.
+Tests use **Catch2 v3**. The test binary is `nimblefix-tests`.
 
 ```bash
 BIN_DIR=./build/linux/x86_64/release
 
 # Run all tests
-$BIN_DIR/fastfix-tests
+$BIN_DIR/nimblefix-tests
 
 # Run by tag
-$BIN_DIR/fastfix-tests "[fix-codec]"
-$BIN_DIR/fastfix-tests "[session-core]"
-$BIN_DIR/fastfix-tests "[negative]"
+$BIN_DIR/nimblefix-tests "[fix-codec]"
+$BIN_DIR/nimblefix-tests "[session-core]"
+$BIN_DIR/nimblefix-tests "[negative]"
 
 # Run by name
-$BIN_DIR/fastfix-tests "Heartbeat round-trip"
+$BIN_DIR/nimblefix-tests "Heartbeat round-trip"
 
 # List all tags
-$BIN_DIR/fastfix-tests --list-tags
+$BIN_DIR/nimblefix-tests --list-tags
 ```
 
 ### Available Tags
@@ -215,7 +215,7 @@ auto EncodeFixFrame(std::string_view body_fields,
 
 - **Profile**: A normalized description of a FIX protocol variant. Each profile has a unique `profile_id` (uint64). Profiles are loaded at engine startup and referenced by sessions. One engine can load multiple profiles simultaneously (e.g., FIX 4.2 and FIX 4.4). A profile can be loaded from a precompiled `.art` file or built in memory from `.ffd` files at startup.
 
-- **`.ffd` (FastFix Dictionary)**: A text file defining baseline or incremental dictionary content for one FIX protocol variant — fields, messages, and groups. The first `.ffd` establishes the profile, and additional `.ffd` files can extend it when multiple files are passed to dictgen or Engine.
+- **`.ffd` (NimbleFIX Dictionary)**: A text file defining baseline or incremental dictionary content for one FIX protocol variant — fields, messages, and groups. The first `.ffd` establishes the profile, and additional `.ffd` files can extend it when multiple files are passed to dictgen or Engine.
 
 - **`.art` (Artifact)**: The compiled binary output of dictgen (optional precompilation step). It's a flat, mmap-loadable file containing string tables, field/message/group definitions, validation rules, and lookup tables. The engine can load `.art` files at runtime, or load `.ffd` files directly.
 
@@ -311,7 +311,7 @@ message|D|NewOrderSingle|0|5001:r,5002:o
 ### Compiling Profiles
 
 ```bash
-$BIN_DIR/fastfix-dictgen \
+$BIN_DIR/nimblefix-dictgen \
     --input samples/basic_profile.ffd \
     --merge samples/basic_overlay.ffd \
     --output build/sample-basic.art \
@@ -339,14 +339,14 @@ $BIN_DIR/fastfix-dictgen \
 1. Obtain the QuickFIX XML data dictionary for your FIX version (e.g. `FIX44.xml` from the [QuickFIX repository](https://github.com/quickfix/quickfix/tree/master/spec)).
 2. Convert it to `.ffd` format:
    ```bash
-    $BIN_DIR/fastfix-xml2ffd \
+    $BIN_DIR/nimblefix-xml2ffd \
        --xml FIX44.xml \
        --output my_fix44.ffd \
        --profile-id 1001 \
        --cpp-builders generated_builders.h
    ```
 3. (Optional) Write additional `.ffd` files for venue-specific custom fields and pass them with `--merge`.
-4. Compile with `fastfix-dictgen`.
+4. Compile with `nimblefix-dictgen`.
 5. Reference the `.art` in `EngineConfig.profile_artifacts`. Or skip `.art` and reference `.ffd` directly in `EngineConfig.profile_dictionaries`.
 
 You can also write `.ffd` files by hand for full control.
@@ -358,7 +358,7 @@ The `--cpp-builders` flag produces a header with typed writer classes and profil
 ```cpp
 #include "build/generated/sample_basic_builders.h"
 
-using namespace fastfix::generated::profile_1001;
+using namespace nimble::generated::profile_1001;
 
 // Build a FixedLayout for the message type, then use the generated writer.
 auto layout = message::FixedLayout::Build(dictionary_view, NewOrderSingleWriter::kMsgType);
@@ -384,8 +384,8 @@ writer.encode_to_buffer(dictionary_view, options, &buf);
 
 ```bash
 ./bench/bench.sh build
-./bench/bench.sh fastfix
-./bench/bench.sh fastfix-ffd
+./bench/bench.sh nimblefix
+./bench/bench.sh nimblefix-ffd
 ./bench/bench.sh quickfix
 ./bench/bench.sh builder
 ./bench/bench.sh compare
@@ -397,9 +397,9 @@ All benchmark entrypoints intentionally consume the pinned QuickFIX 4.4 inputs, 
 
 ### What Gets Measured
 
-| Boundary | FastFix metric | QuickFIX metric | What it means |
+| Boundary | NimbleFIX metric | QuickFIX metric | What it means |
 |----------|----------------|-----------------|---------------|
-| header sniff | `peek` | — | FastFix-only header extraction before full decode |
+| header sniff | `peek` | — | NimbleFIX-only header extraction before full decode |
 | object → wire | `encode` | `quickfix-encode-buffer` | closest shared encode boundary; both sides reuse an output buffer |
 | object → wire (fresh string) | — | `quickfix-encode` | QuickFIX-only serializer path that returns a fresh string |
 | wire → object | `parse` | `quickfix-parse` | full frame parse back into each engine's object/view model |
@@ -422,7 +422,7 @@ All benchmark entrypoints intentionally consume the pinned QuickFIX 4.4 inputs, 
 The soak tool runs multiple sessions with configurable fault injection:
 
 ```bash
-$BIN_DIR/fastfix-soak --profile build/sample-basic.art \
+$BIN_DIR/nimblefix-soak --profile build/sample-basic.art \
     --workers 4 --sessions 10 --iterations 10000 \
     --gap-every 100 \
     --duplicate-every 200 \
@@ -458,7 +458,7 @@ Three fuzzing harnesses target different input surfaces:
 ### Codec Fuzzer
 
 ```bash
-$BIN_DIR/fastfix-fuzz-codec \
+$BIN_DIR/nimblefix-fuzz-codec \
     --artifact build/sample-basic.art \
     --input tests/data/fuzz/wire_codec \
     --mode codec     # or: admin
@@ -470,7 +470,7 @@ $BIN_DIR/fastfix-fuzz-codec \
 ### Config Fuzzer
 
 ```bash
-$BIN_DIR/fastfix-fuzz-config --input tests/data/fuzz/
+$BIN_DIR/nimblefix-fuzz-config --input tests/data/fuzz/
 ```
 
 Fuzzes the `.ffcfg` engine configuration file parser.
@@ -478,7 +478,7 @@ Fuzzes the `.ffcfg` engine configuration file parser.
 ### Dictionary Fuzzer
 
 ```bash
-$BIN_DIR/fastfix-fuzz-dictgen \
+$BIN_DIR/nimblefix-fuzz-dictgen \
     --input tests/data/fuzz/
 ```
 
@@ -503,7 +503,7 @@ runtime_config_*.ffcfg  Config corpus
 ### Initiator (Client)
 
 ```bash
-$BIN_DIR/fastfix-initiator \
+$BIN_DIR/nimblefix-initiator \
     --artifact build/sample-basic.art \
     --host exchange.example.com --port 9876 \
     --sender MY_FIRM --target VENUE_A \
@@ -518,26 +518,26 @@ $BIN_DIR/fastfix-initiator \
 
 ```bash
 # Direct mode
-$BIN_DIR/fastfix-acceptor \
+$BIN_DIR/nimblefix-acceptor \
     --artifact build/sample-basic.art \
     --bind 0.0.0.0 --port 9876 \
     --sender VENUE_A --target MY_FIRM
 
 # Config file mode
-$BIN_DIR/fastfix-acceptor --config engine.ffcfg --listener main
+$BIN_DIR/nimblefix-acceptor --config engine.ffcfg --listener main
 ```
 
 ### Local Testing
 
 ```bash
 # Terminal 1: start acceptor
-$BIN_DIR/fastfix-acceptor \
+$BIN_DIR/nimblefix-acceptor \
     --artifact build/sample-basic.art \
     --bind 127.0.0.1 --port 9001 \
     --sender SERVER --target CLIENT
 
 # Terminal 2: connect initiator
-$BIN_DIR/fastfix-initiator \
+$BIN_DIR/nimblefix-initiator \
     --artifact build/sample-basic.art \
     --host 127.0.0.1 --port 9001 \
     --sender CLIENT --target SERVER
@@ -547,7 +547,7 @@ $BIN_DIR/fastfix-initiator \
 
 ## Configuration File Format (`.ffcfg`) — Internal
 
-The `.ffcfg` format is used by FastFix's built-in tools (`fastfix-acceptor`, `fastfix-interop-runner`) and tests. It is **not** part of the library's public API. Applications should populate `EngineConfig` directly from their own configuration source (TOML, YAML, JSON, database, etc.) and call `Engine::Boot(config)`.
+The `.ffcfg` format is used by NimbleFIX's built-in tools (`nimblefix-acceptor`, `nimblefix-interop-runner`) and tests. It is **not** part of the library's public API. Applications should populate `EngineConfig` directly from their own configuration source (TOML, YAML, JSON, database, etc.) and call `Engine::Boot(config)`.
 
 ```
 engine.worker_count=2
@@ -600,8 +600,8 @@ Time fields use `HH:MM:SS`. Day fields accept `sun`..`sat` (or full names). Empt
 Load in code:
 
 ```cpp
-// Internal tool use only — #include "fastfix/runtime/config_io.h"
-auto config = fastfix::runtime::LoadEngineConfigFile("engine.ffcfg");
+// Internal tool use only — #include "nimblefix/runtime/config_io.h"
+auto config = nimble::runtime::LoadEngineConfigFile("engine.ffcfg");
 ```
 
 ---
@@ -611,7 +611,7 @@ auto config = fastfix::runtime::LoadEngineConfigFile("engine.ffcfg");
 ### Internal Interop
 
 ```bash
-$BIN_DIR/fastfix-interop-runner --scenario tests/data/interop/loopback.ffscenario
+$BIN_DIR/nimblefix-interop-runner --scenario tests/data/interop/loopback.ffscenario
 ```
 
 Runs scripted FIX message exchange scenarios and validates behavior.
@@ -620,7 +620,7 @@ Runs scripted FIX message exchange scenarios and validates behavior.
 
 The `tools/external-interop/` directory contains Docker-based scripts for cross-testing against QuickFIX:
 
-- `run_quickfix_python_matrix.py` — Runs a matrix of QuickFIX Python acceptor/initiator scenarios against FastFix endpoints
+- `run_quickfix_python_matrix.py` — Runs a matrix of QuickFIX Python acceptor/initiator scenarios against NimbleFIX endpoints
 - `build/external-interop/quickfix-acceptor/` and `quickfix-initiator/` — Docker build contexts
 
 ---
@@ -632,7 +632,7 @@ The `tools/external-interop/` directory contains Docker-based scripts for cross-
 Implement `SessionStore`:
 
 ```cpp
-class MyStore : public fastfix::store::SessionStore {
+class MyStore : public nimble::store::SessionStore {
     auto SaveOutbound(const MessageRecord& record) -> Status override;
     auto SaveInbound(const MessageRecord& record) -> Status override;
     auto LoadOutboundRange(uint64_t session_id, uint32_t begin, uint32_t end)
@@ -652,7 +652,7 @@ class MyStore : public fastfix::store::SessionStore {
 Implement `ApplicationCallbacks`:
 
 ```cpp
-class MyApp : public fastfix::runtime::ApplicationCallbacks {
+class MyApp : public nimble::runtime::ApplicationCallbacks {
     auto OnSessionEvent(const RuntimeEvent& event) -> Status override;
     auto OnAdminMessage(const RuntimeEvent& event) -> Status override;
     auto OnAppMessage(const RuntimeEvent& event) -> Status override;
@@ -678,4 +678,4 @@ Set `ValidationPolicy` on session config:
 - **Memory**: Zero-copy views on the hot path. Owned `Message` only when mutation is needed.
 - **Threading**: Single-writer per session. Cross-thread via `SpscQueue`. Mutexes only for cold-path operations.
 - **Naming**: `snake_case` for functions and variables, `PascalCase` for types, `kPascalCase` for enum values.
-- **Headers**: Each module has a public include directory under `include/fastfix/`. Internal helpers stay in `src/`.
+- **Headers**: Public headers live under `include/nimblefix/`. Internal helpers stay in `src/`.

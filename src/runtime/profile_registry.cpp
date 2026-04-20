@@ -1,6 +1,6 @@
-#include "fastfix/runtime/profile_registry.h"
+#include "nimblefix/runtime/profile_registry.h"
 
-namespace fastfix::runtime {
+namespace nimble::runtime {
 
 auto
 ProfileRegistry::Clear() -> void
@@ -34,4 +34,4 @@ ProfileRegistry::Find(std::uint64_t profile_id) const -> const profile::LoadedPr
   return &it->second;
 }
 
-} // namespace fastfix::runtime
+} // namespace nimble::runtime

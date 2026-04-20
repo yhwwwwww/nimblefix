@@ -1,4 +1,4 @@
-#include "fastfix/runtime/thread_affinity.h"
+#include "nimblefix/runtime/thread_affinity.h"
 
 #include <algorithm>
 #include <string>
@@ -10,7 +10,7 @@
 #include <sched.h>
 #endif
 
-namespace fastfix::runtime {
+namespace nimble::runtime {
 
 auto
 ApplyCurrentThreadAffinity(std::uint32_t cpu_id, std::string_view role) -> base::Status
@@ -53,4 +53,4 @@ SetCurrentThreadName(std::string_view name) -> void
 #endif
 }
 
-} // namespace fastfix::runtime
+} // namespace nimble::runtime
