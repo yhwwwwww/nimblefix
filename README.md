@@ -470,7 +470,6 @@ config.listeners = {{
 config.accept_unknown_sessions = true;
 
 nimble::runtime::Engine engine;
-engine.LoadProfiles(config);
 engine.Boot(config);
 
 // Accept sessions dynamically based on inbound Logon:
@@ -588,7 +587,7 @@ auto OnAppMessage(const nimble::runtime::RuntimeEvent& event)
 | `queue_app_mode` | enum | `kCoScheduled` | `kCoScheduled` (drain on worker thread) or `kThreaded` (dedicated app thread per worker) |
 | `app_cpu_affinity` | uint32[] | — | Pin app threads to CPU cores (when `kThreaded`) |
 | `io_backend` | enum | `kEpoll` | `kEpoll` or `kIoUring` (Linux I/O backend) |
-| `accept_unknown_sessions` | bool | false | Allow dynamic session factory for unknown inbound CompIDs |
+| `accept_unknown_sessions` | bool | false | Allow `SessionFactory` to handle unknown inbound Logons after static counterparties fail to match |
 | `listeners` | list | — | TCP listener configurations (acceptor only) |
 | `counterparties` | list | — | Pre-configured session counterparties |
 

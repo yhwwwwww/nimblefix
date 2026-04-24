@@ -72,8 +72,21 @@ class ApplicationCallbacks
 public:
   virtual ~ApplicationCallbacks() = default;
 
+  // Session event ordering and send boundaries:
+  // - kBound: Logon matched and the session is attached to a runtime worker,
+  //   but replay/recovery may still be in progress. Use this for snapshot or
+  //   subscription setup. SendInlineBorrowed() is valid only when this callback
+  //   is delivered inline on the runtime worker.
+  // - kActive: Recovery is complete and application traffic may flow. This is
+  //   the normal "ready to send first business message" event.
+  // - kClosed: Transport is closed; do not send from this event.
   virtual auto OnSessionEvent(const RuntimeEvent& event) -> base::Status;
+  // Inline admin callbacks may use SendInlineBorrowed() only while executing on
+  // the runtime worker. Queue-drained handlers must use owned send variants.
   virtual auto OnAdminMessage(const RuntimeEvent& event) -> base::Status;
+  // Inline application callbacks follow the same rule: SendInlineBorrowed() is
+  // valid only from the direct runtime callback, never from a queue-drained
+  // application thread.
   virtual auto OnAppMessage(const RuntimeEvent& event) -> base::Status;
 };
 

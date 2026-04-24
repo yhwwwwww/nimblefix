@@ -142,6 +142,14 @@ public:
 class SessionHandle
 {
 public:
+  // SessionHandle send methods share a single-producer command path. Use one
+  // producer thread per handle. Cross-thread send attempts fast-fail instead of
+  // silently violating the runtime's SPSC queue contract.
+  //
+  // SendInlineBorrowed()/SendEncodedInlineBorrowed() are stricter: they are
+  // valid only from direct runtime inline callbacks such as
+  // ApplicationCallbacks::OnSessionEvent/OnAdminMessage/OnAppMessage. Queue
+  // handlers and arbitrary application threads must use owned send variants.
   SessionHandle() = default;
 
   SessionHandle(std::uint64_t session_id, std::uint32_t worker_id)
@@ -188,8 +196,6 @@ public:
   }
 
 public:
-  // All send methods share a single-producer command path per session handle.
-  // Calls from different producer threads fast-fail with kInvalidArgument.
   auto SendCopy(message::MessageView message, SessionSendEnvelopeView envelope = {}) const -> base::Status
   {
     return SubmitOwnedMessage(message::MessageRef::Copy(message), SessionSendEnvelopeRef::Own(envelope));
@@ -200,7 +206,6 @@ public:
     return SubmitOwnedMessage(message::MessageRef::Take(std::move(message)), SessionSendEnvelopeRef::Own(envelope));
   }
 
-  // Inline-borrowed send is only valid from runtime inline callback context.
   auto SendInlineBorrowed(message::MessageView message, SessionSendEnvelopeView envelope = {}) const -> base::Status
   {
     return SubmitInlineBorrowedMessage(message::MessageRef::Borrow(message), envelope);

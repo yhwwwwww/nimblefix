@@ -221,3 +221,21 @@ IsEncodeManagedTag(std::uint32_t tag) -> bool
 }
 
 } // namespace nimble::codec::tags
+
+namespace nimble::codec::msg_types {
+
+// Common admin MsgType values.
+inline constexpr char kHeartbeat[] = "0";
+inline constexpr char kTestRequest[] = "1";
+inline constexpr char kResendRequest[] = "2";
+inline constexpr char kReject[] = "3";
+inline constexpr char kSequenceReset[] = "4";
+inline constexpr char kLogout[] = "5";
+inline constexpr char kLogon[] = "A";
+
+// Common application MsgType values used in examples and tests.
+inline constexpr char kExecutionReport[] = "8";
+inline constexpr char kNewOrderSingle[] = "D";
+inline constexpr char kOrderCancelRequest[] = "F";
+
+} // namespace nimble::codec::msg_types

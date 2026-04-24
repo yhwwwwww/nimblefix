@@ -1,5 +1,6 @@
 #include <catch2/catch_test_macros.hpp>
 
+#include <atomic>
 #include <ctime>
 #include <filesystem>
 #include <fstream>
@@ -118,6 +119,7 @@ TEST_CASE("runtime-config", "[runtime-config]")
   REQUIRE(config.value().counterparties[4].reconnect_max_retries == 0U);
   REQUIRE(config.value().counterparties[4].durable_local_utc_offset_seconds == 3600);
   REQUIRE(!config.value().counterparties[4].durable_use_system_timezone);
+  config.value().accept_unknown_sessions = true;
 
   nimble::runtime::Engine engine;
   REQUIRE(engine.Boot(config.value()).ok());
@@ -169,6 +171,34 @@ TEST_CASE("runtime-config", "[runtime-config]")
   REQUIRE(resolved.value().counterparty.session.session_id == 2003U);
   REQUIRE(resolved.value().counterparty.default_appl_ver_id == "9");
   REQUIRE(resolved.value().dictionary.profile().header().profile_id == 4401U);
+
+  std::atomic<std::uint32_t> factory_calls{ 0U };
+  engine.SetSessionFactory(
+    [&](const nimble::session::SessionKey& key) -> nimble::base::Result<nimble::runtime::CounterpartyConfig> {
+      ++factory_calls;
+      return nimble::runtime::CounterpartyConfigBuilder::Acceptor(
+               "dynamic-" + key.target_comp_id, 0U, key, 4400U, nimble::session::TransportVersion::kFix44)
+        .validation_policy(nimble::session::ValidationPolicy::Permissive())
+        .build();
+    });
+
+  auto static_resolved = engine.ResolveInboundSession(peeked.value());
+  REQUIRE(static_resolved.ok());
+  REQUIRE(static_resolved.value().counterparty.session.session_id == 2003U);
+  REQUIRE(factory_calls.load() == 0U);
+
+  nimble::codec::SessionHeader dynamic_header;
+  dynamic_header.begin_string = "FIX.4.4";
+  dynamic_header.msg_type = "A";
+  dynamic_header.sender_comp_id = "UNKNOWN-BUYER";
+  dynamic_header.target_comp_id = "SELL1";
+  dynamic_header.msg_seq_num = 1U;
+  auto dynamic_resolved = engine.ResolveInboundSession(dynamic_header);
+  REQUIRE(dynamic_resolved.ok());
+  REQUIRE(dynamic_resolved.value().counterparty.session.session_id >= nimble::runtime::kFirstDynamicSessionId);
+  REQUIRE(dynamic_resolved.value().counterparty.session.key.sender_comp_id == "SELL1");
+  REQUIRE(dynamic_resolved.value().counterparty.session.key.target_comp_id == "UNKNOWN-BUYER");
+  REQUIRE(factory_calls.load() == 1U);
 
   const auto metrics = engine.metrics().Snapshot();
   REQUIRE(metrics.sessions.size() == 5U);
@@ -234,6 +264,50 @@ TEST_CASE("runtime-config", "[runtime-config]")
   const auto next_logon = nimble::runtime::NextLogonWindowStart(session_schedule, MakeUtcNs(2026, 4, 6, 8, 0, 0));
   REQUIRE(next_logon.has_value());
   REQUIRE(next_logon.value() == MakeUtcNs(2026, 4, 6, 9, 0, 0));
+
+  auto builder_listener =
+    nimble::runtime::ListenerConfigBuilder::Named("builder-main").bind("127.0.0.1", 9001U).worker_hint(1U).build();
+  REQUIRE(builder_listener.name == "builder-main");
+  REQUIRE(builder_listener.host == "127.0.0.1");
+  REQUIRE(builder_listener.port == 9001U);
+  REQUIRE(builder_listener.worker_hint == 1U);
+
+  auto initiator = nimble::runtime::CounterpartyConfigBuilder::Initiator(
+                     "builder-initiator",
+                     3001U,
+                     nimble::session::SessionKey{ .sender_comp_id = "BUY", .target_comp_id = "SELL" },
+                     4400U,
+                     nimble::session::TransportVersion::kFixT11)
+                     .default_appl_ver_id("9")
+                     .heartbeat_interval_seconds(45U)
+                     .store(nimble::runtime::StoreMode::kDurableBatch, temp_root / "builder-initiator.store")
+                     .recovery_mode(nimble::session::RecoveryMode::kWarmRestart)
+                     .reconnect(250U, 2000U, 7U)
+                     .build();
+  REQUIRE(initiator.session.is_initiator);
+  REQUIRE(initiator.transport_profile.version == nimble::session::TransportVersion::kFixT11);
+  REQUIRE(initiator.session.key.begin_string == "FIXT.1.1");
+  REQUIRE(initiator.default_appl_ver_id == "9");
+  REQUIRE(initiator.session.default_appl_ver_id == "9");
+  REQUIRE(initiator.reconnect_enabled);
+  REQUIRE(initiator.reconnect_initial_ms == 250U);
+  REQUIRE(initiator.recovery_mode == nimble::session::RecoveryMode::kWarmRestart);
+
+  auto acceptor = nimble::runtime::CounterpartyConfigBuilder::Acceptor(
+                    "builder-acceptor",
+                    3002U,
+                    nimble::session::SessionKey{ .sender_comp_id = "SELL", .target_comp_id = "BUY" },
+                    4400U)
+                    .dispatch_mode(nimble::runtime::AppDispatchMode::kQueueDecoupled)
+                    .validation_policy(nimble::session::ValidationPolicy::Compatible())
+                    .store(nimble::runtime::StoreMode::kMemory)
+                    .build();
+  REQUIRE(!acceptor.session.is_initiator);
+  REQUIRE(acceptor.transport_profile.version == nimble::session::TransportVersion::kFix44);
+  REQUIRE(acceptor.session.key.begin_string == "FIX.4.4");
+  REQUIRE(acceptor.dispatch_mode == nimble::runtime::AppDispatchMode::kQueueDecoupled);
+  REQUIRE(acceptor.validation_policy.mode == nimble::session::ValidationMode::kCompatible);
+  REQUIRE(!acceptor.reconnect_enabled);
 
   std::filesystem::remove(config_path);
   std::filesystem::remove(artifact_path);

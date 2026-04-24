@@ -85,19 +85,31 @@ struct SessionScheduleConfig
 
 struct ListenerConfig
 {
+  // Required. Unique listener name referenced by LiveAcceptor::OpenListeners().
   std::string name;
+  // Optional bind address. Use 0.0.0.0 to listen on all interfaces.
   std::string host{ "0.0.0.0" };
+  // Required for a real listener. Use 0 to request an ephemeral test port.
   std::uint16_t port{ 0 };
+  // Optional accept-side routing hint. After Logon, the bound session worker
+  // owns steady-state protocol and application work.
   std::uint32_t worker_hint{ 0 };
 };
 
 struct CounterpartyConfig
 {
+  // Required. Human-readable counterparty label used in logs and metrics.
   std::string name;
+  // Required. Session identity is always expressed from the local engine's
+  // perspective, even when matching inbound acceptor Logons.
   session::SessionConfig session;
+  // Required. Keep this aligned with session.key.begin_string.
   session::TransportSessionProfile transport_profile;
+  // Conditionally required. Persistent store modes require a non-empty path.
   std::filesystem::path store_path;
+  // Conditionally required for FIXT.1.1 transport sessions.
   std::string default_appl_ver_id;
+  // Memory is the simplest default. Mmap and durable batch require store_path.
   StoreMode store_mode{ StoreMode::kMemory };
   std::uint32_t durable_flush_threshold{ 0 };
   store::DurableStoreRolloverMode durable_rollover_mode{ store::DurableStoreRolloverMode::kUtcDay };
@@ -113,6 +125,7 @@ struct CounterpartyConfig
   bool refresh_on_logon{ false };
   bool send_next_expected_msg_seq_num{ false };
   SessionScheduleConfig session_schedule;
+  // Initiator reconnect defaults. Leave disabled for acceptors.
   bool reconnect_enabled = false;
   std::uint32_t reconnect_initial_ms = kDefaultReconnectInitialMs;
   std::uint32_t reconnect_max_ms = kDefaultReconnectMaxMs;
@@ -122,6 +135,7 @@ struct CounterpartyConfig
 
 struct EngineConfig
 {
+  // Recommended default until you need multi-session parallelism.
   std::uint32_t worker_count{ 1 };
   bool enable_metrics{ true };
   TraceMode trace_mode{ TraceMode::kDisabled };
@@ -136,17 +150,79 @@ struct EngineConfig
   std::vector<std::vector<std::filesystem::path>> profile_dictionaries;
   bool profile_madvise{ false };
   bool profile_mlock{ false };
+  // Acceptor-only. At least one listener is required before OpenListeners().
   std::vector<ListenerConfig> listeners;
+  // Static session inventory. Initiators usually configure one entry per
+  // outbound session.
   std::vector<CounterpartyConfig> counterparties;
+  // Unknown inbound Logons consult SessionFactory only when this flag is true.
+  // Static counterparties still win first. If true but no factory is
+  // installed, unknown Logons are rejected.
   bool accept_unknown_sessions{ false };
 };
 
-[[nodiscard]] auto ValidateSessionSchedule(const SessionScheduleConfig& schedule) -> base::Status;
-[[nodiscard]] auto IsWithinSessionWindow(const SessionScheduleConfig& schedule, std::uint64_t unix_time_ns) -> bool;
-[[nodiscard]] auto IsWithinLogonWindow(const SessionScheduleConfig& schedule, std::uint64_t unix_time_ns) -> bool;
-[[nodiscard]] auto NextLogonWindowStart(const SessionScheduleConfig& schedule, std::uint64_t unix_time_ns)
-  -> std::optional<std::uint64_t>;
+class ListenerConfigBuilder
+{
+public:
+  static auto Named(std::string name) -> ListenerConfigBuilder;
 
-auto ValidateEngineConfig(const EngineConfig& config) -> base::Status;
+  auto bind(std::string host, std::uint16_t port) -> ListenerConfigBuilder&;
+  auto worker_hint(std::uint32_t worker_id) -> ListenerConfigBuilder&;
+  [[nodiscard]] auto build() const -> ListenerConfig;
+
+private:
+  explicit ListenerConfigBuilder(ListenerConfig config);
+
+  ListenerConfig config_{};
+};
+
+class CounterpartyConfigBuilder
+{
+public:
+  static auto Initiator(std::string name,
+                        std::uint64_t session_id,
+                        session::SessionKey key,
+                        std::uint64_t profile_id,
+                        session::TransportVersion transport_version = session::TransportVersion::kFix44)
+    -> CounterpartyConfigBuilder;
+
+  static auto Acceptor(std::string name,
+                       std::uint64_t session_id,
+                       session::SessionKey key,
+                       std::uint64_t profile_id,
+                       session::TransportVersion transport_version = session::TransportVersion::kFix44)
+    -> CounterpartyConfigBuilder;
+
+  // Re-normalizes session.key.begin_string to the selected transport version.
+  auto transport_version(session::TransportVersion version) -> CounterpartyConfigBuilder&;
+  auto default_appl_ver_id(std::string value) -> CounterpartyConfigBuilder&;
+  auto heartbeat_interval_seconds(std::uint32_t seconds) -> CounterpartyConfigBuilder&;
+  auto store(StoreMode mode, std::filesystem::path path = {}) -> CounterpartyConfigBuilder&;
+  auto recovery_mode(session::RecoveryMode mode) -> CounterpartyConfigBuilder&;
+  auto dispatch_mode(AppDispatchMode mode) -> CounterpartyConfigBuilder&;
+  auto validation_policy(session::ValidationPolicy policy) -> CounterpartyConfigBuilder&;
+  auto reconnect(std::uint32_t initial_ms = kDefaultReconnectInitialMs,
+                 std::uint32_t max_ms = kDefaultReconnectMaxMs,
+                 std::uint32_t max_retries = kUnlimitedReconnectRetries) -> CounterpartyConfigBuilder&;
+  auto disable_reconnect() -> CounterpartyConfigBuilder&;
+  [[nodiscard]] auto build() const -> CounterpartyConfig;
+
+private:
+  explicit CounterpartyConfigBuilder(CounterpartyConfig config);
+
+  CounterpartyConfig config_{};
+};
+
+[[nodiscard]] auto
+ValidateSessionSchedule(const SessionScheduleConfig& schedule) -> base::Status;
+[[nodiscard]] auto
+IsWithinSessionWindow(const SessionScheduleConfig& schedule, std::uint64_t unix_time_ns) -> bool;
+[[nodiscard]] auto
+IsWithinLogonWindow(const SessionScheduleConfig& schedule, std::uint64_t unix_time_ns) -> bool;
+[[nodiscard]] auto
+NextLogonWindowStart(const SessionScheduleConfig& schedule, std::uint64_t unix_time_ns) -> std::optional<std::uint64_t>;
+
+auto
+ValidateEngineConfig(const EngineConfig& config) -> base::Status;
 
 } // namespace nimble::runtime

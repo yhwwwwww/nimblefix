@@ -269,6 +269,27 @@ ParseStoreMode(std::string_view token) -> base::Result<StoreMode>
 }
 
 auto
+TransportProfileForVersion(session::TransportVersion version) -> session::TransportSessionProfile
+{
+  switch (version) {
+    case session::TransportVersion::kFix40:
+      return session::TransportSessionProfile::Fix40();
+    case session::TransportVersion::kFix41:
+      return session::TransportSessionProfile::Fix41();
+    case session::TransportVersion::kFix42:
+      return session::TransportSessionProfile::Fix42();
+    case session::TransportVersion::kFix43:
+      return session::TransportSessionProfile::Fix43();
+    case session::TransportVersion::kFix44:
+      return session::TransportSessionProfile::Fix44();
+    case session::TransportVersion::kFixT11:
+      return session::TransportSessionProfile::FixT11();
+  }
+
+  return session::TransportSessionProfile::Fix44();
+}
+
+auto
 ParseDurableRolloverMode(std::string_view token) -> base::Result<store::DurableStoreRolloverMode>
 {
   const auto value = Trim(token);
@@ -809,6 +830,158 @@ ValidateEngineConfig(const EngineConfig& config) -> base::Status
   }
 
   return base::Status::Ok();
+}
+
+ListenerConfigBuilder::ListenerConfigBuilder(ListenerConfig config)
+  : config_(std::move(config))
+{
+}
+
+auto
+ListenerConfigBuilder::Named(std::string name) -> ListenerConfigBuilder
+{
+  return ListenerConfigBuilder(ListenerConfig{ .name = std::move(name) });
+}
+
+auto
+ListenerConfigBuilder::bind(std::string host, std::uint16_t port) -> ListenerConfigBuilder&
+{
+  config_.host = std::move(host);
+  config_.port = port;
+  return *this;
+}
+
+auto
+ListenerConfigBuilder::worker_hint(std::uint32_t worker_id) -> ListenerConfigBuilder&
+{
+  config_.worker_hint = worker_id;
+  return *this;
+}
+
+auto
+ListenerConfigBuilder::build() const -> ListenerConfig
+{
+  return config_;
+}
+
+CounterpartyConfigBuilder::CounterpartyConfigBuilder(CounterpartyConfig config)
+  : config_(std::move(config))
+{
+}
+
+auto
+CounterpartyConfigBuilder::Initiator(std::string name,
+                                     std::uint64_t session_id,
+                                     session::SessionKey key,
+                                     std::uint64_t profile_id,
+                                     session::TransportVersion transport_version) -> CounterpartyConfigBuilder
+{
+  CounterpartyConfig config;
+  config.name = std::move(name);
+  config.session.session_id = session_id;
+  config.session.key = std::move(key);
+  config.session.profile_id = profile_id;
+  config.session.heartbeat_interval_seconds =
+    TransportProfileForVersion(transport_version).default_heartbeat_interval_seconds;
+  config.session.is_initiator = true;
+  return CounterpartyConfigBuilder(std::move(config)).transport_version(transport_version).disable_reconnect();
+}
+
+auto
+CounterpartyConfigBuilder::Acceptor(std::string name,
+                                    std::uint64_t session_id,
+                                    session::SessionKey key,
+                                    std::uint64_t profile_id,
+                                    session::TransportVersion transport_version) -> CounterpartyConfigBuilder
+{
+  CounterpartyConfig config;
+  config.name = std::move(name);
+  config.session.session_id = session_id;
+  config.session.key = std::move(key);
+  config.session.profile_id = profile_id;
+  config.session.heartbeat_interval_seconds =
+    TransportProfileForVersion(transport_version).default_heartbeat_interval_seconds;
+  config.session.is_initiator = false;
+  return CounterpartyConfigBuilder(std::move(config)).transport_version(transport_version).disable_reconnect();
+}
+
+auto
+CounterpartyConfigBuilder::transport_version(session::TransportVersion version) -> CounterpartyConfigBuilder&
+{
+  config_.transport_profile = TransportProfileForVersion(version);
+  config_.session.key.begin_string = config_.transport_profile.begin_string;
+  return *this;
+}
+
+auto
+CounterpartyConfigBuilder::default_appl_ver_id(std::string value) -> CounterpartyConfigBuilder&
+{
+  config_.default_appl_ver_id = value;
+  config_.session.default_appl_ver_id = std::move(value);
+  return *this;
+}
+
+auto
+CounterpartyConfigBuilder::heartbeat_interval_seconds(std::uint32_t seconds) -> CounterpartyConfigBuilder&
+{
+  config_.session.heartbeat_interval_seconds = seconds;
+  return *this;
+}
+
+auto
+CounterpartyConfigBuilder::store(StoreMode mode, std::filesystem::path path) -> CounterpartyConfigBuilder&
+{
+  config_.store_mode = mode;
+  config_.store_path = std::move(path);
+  return *this;
+}
+
+auto
+CounterpartyConfigBuilder::recovery_mode(session::RecoveryMode mode) -> CounterpartyConfigBuilder&
+{
+  config_.recovery_mode = mode;
+  return *this;
+}
+
+auto
+CounterpartyConfigBuilder::dispatch_mode(AppDispatchMode mode) -> CounterpartyConfigBuilder&
+{
+  config_.dispatch_mode = mode;
+  return *this;
+}
+
+auto
+CounterpartyConfigBuilder::validation_policy(session::ValidationPolicy policy) -> CounterpartyConfigBuilder&
+{
+  config_.validation_policy = std::move(policy);
+  return *this;
+}
+
+auto
+CounterpartyConfigBuilder::reconnect(std::uint32_t initial_ms, std::uint32_t max_ms, std::uint32_t max_retries)
+  -> CounterpartyConfigBuilder&
+{
+  config_.reconnect_enabled = true;
+  config_.reconnect_initial_ms = initial_ms;
+  config_.reconnect_max_ms = max_ms;
+  config_.reconnect_max_retries = max_retries;
+  return *this;
+}
+
+auto
+CounterpartyConfigBuilder::disable_reconnect() -> CounterpartyConfigBuilder&
+{
+  config_.reconnect_enabled = false;
+  config_.reconnect_initial_ms = kDefaultReconnectInitialMs;
+  config_.reconnect_max_ms = kDefaultReconnectMaxMs;
+  config_.reconnect_max_retries = kUnlimitedReconnectRetries;
+  return *this;
+}
+
+auto
+CounterpartyConfigBuilder::build() const -> CounterpartyConfig
+{
+  return config_;
 }
 
 auto

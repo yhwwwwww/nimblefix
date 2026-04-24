@@ -14,7 +14,6 @@
 #include "nimblefix/message/message_builder.h"
 #include "nimblefix/runtime/application.h"
 #include "nimblefix/runtime/engine.h"
-#include "nimblefix/runtime/io_poller.h"
 #include "nimblefix/runtime/live_acceptor.h"
 #include "nimblefix/session/admin_protocol.h"
 #include "nimblefix/store/memory_store.h"
@@ -1189,6 +1188,7 @@ TEST_CASE("dynamic session factory accepts unknown CompID", "[live-session-facto
   config.worker_count = 1U;
   config.enable_metrics = false;
   config.trace_mode = nimble::runtime::TraceMode::kDisabled;
+  config.accept_unknown_sessions = true;
   config.profile_artifacts.push_back(artifact_path);
   config.listeners.push_back(nimble::runtime::ListenerConfig{
     .name = "factory-main",
@@ -1260,6 +1260,7 @@ TEST_CASE("dynamic session factory rejects unknown CompID", "[live-session-facto
   config.worker_count = 1U;
   config.enable_metrics = false;
   config.trace_mode = nimble::runtime::TraceMode::kDisabled;
+  config.accept_unknown_sessions = true;
   config.profile_artifacts.push_back(artifact_path);
   config.listeners.push_back(nimble::runtime::ListenerConfig{
     .name = "factory-reject-main",
@@ -1345,6 +1346,7 @@ TEST_CASE("whitelist factory accepts listed CompID", "[live-session-factory]")
   config.worker_count = 1U;
   config.enable_metrics = false;
   config.trace_mode = nimble::runtime::TraceMode::kDisabled;
+  config.accept_unknown_sessions = true;
   config.profile_artifacts.push_back(artifact_path);
   config.listeners.push_back(nimble::runtime::ListenerConfig{
     .name = "whitelist-accept-main",
@@ -1409,6 +1411,7 @@ TEST_CASE("whitelist factory rejects unlisted CompID", "[live-session-factory]")
   config.worker_count = 1U;
   config.enable_metrics = false;
   config.trace_mode = nimble::runtime::TraceMode::kDisabled;
+  config.accept_unknown_sessions = true;
   config.profile_artifacts.push_back(artifact_path);
   config.listeners.push_back(nimble::runtime::ListenerConfig{
     .name = "whitelist-reject-main",
@@ -1487,6 +1490,103 @@ TEST_CASE("whitelist factory rejects unlisted CompID", "[live-session-factory]")
 
   runtime.Stop();
   (void)runtime_future.get();
+  REQUIRE(runtime.completed_session_count() == 0U);
+}
+
+TEST_CASE("dynamic session factory is ignored when accept_unknown_sessions is disabled", "[live-session-factory]")
+{
+  auto dictionary = nimble::tests::LoadFix44DictionaryView();
+  if (!dictionary.ok()) {
+    SKIP("FIX44 artifact not available: " << dictionary.status().message());
+  }
+  const auto artifact_path = std::filesystem::path(NIMBLEFIX_PROJECT_DIR) / "build" / "bench" / "quickfix_FIX44.art";
+  const auto profile_id = dictionary.value().profile().header().profile_id;
+
+  nimble::runtime::EngineConfig config;
+  config.worker_count = 1U;
+  config.enable_metrics = false;
+  config.trace_mode = nimble::runtime::TraceMode::kDisabled;
+  config.profile_artifacts.push_back(artifact_path);
+  config.listeners.push_back(nimble::runtime::ListenerConfig{
+    .name = "factory-disabled-main",
+    .host = "127.0.0.1",
+    .port = 0U,
+    .worker_hint = 0U,
+  });
+
+  nimble::runtime::Engine engine;
+  REQUIRE(engine.Boot(config).ok());
+
+  std::atomic<std::uint32_t> factory_calls{ 0U };
+  engine.SetSessionFactory(
+    [&](const nimble::session::SessionKey& key) -> nimble::base::Result<nimble::runtime::CounterpartyConfig> {
+      ++factory_calls;
+      return nimble::runtime::CounterpartyConfig{
+        .name = "dynamic-" + key.target_comp_id,
+        .session =
+          nimble::session::SessionConfig{
+            .session_id = 7301U,
+            .key = key,
+            .profile_id = profile_id,
+            .heartbeat_interval_seconds = 1U,
+            .is_initiator = false,
+          },
+        .dispatch_mode = nimble::runtime::AppDispatchMode::kInline,
+        .validation_policy = nimble::session::ValidationPolicy::Permissive(),
+      };
+    });
+
+  nimble::runtime::LiveAcceptor runtime(&engine,
+                                        nimble::runtime::LiveAcceptor::Options{
+                                          .poll_timeout = std::chrono::milliseconds(25),
+                                          .io_timeout = std::chrono::seconds(5),
+                                        });
+  REQUIRE(runtime.OpenListeners("factory-disabled-main").ok());
+
+  auto port = runtime.listener_port("factory-disabled-main");
+  REQUIRE(port.ok());
+
+  std::promise<nimble::base::Status> runtime_result;
+  auto runtime_future = runtime_result.get_future();
+  std::jthread runtime_thread(
+    [&runtime, &runtime_result]() { runtime_result.set_value(runtime.Run(0U, std::chrono::seconds(3))); });
+
+  auto connection = nimble::transport::TcpConnection::Connect("127.0.0.1", port.value(), std::chrono::seconds(5));
+  REQUIRE(connection.ok());
+
+  nimble::store::MemorySessionStore store;
+  nimble::session::AdminProtocol initiator(
+    nimble::session::AdminProtocolConfig{
+      .session =
+        nimble::session::SessionConfig{
+          .session_id = 9902U,
+          .key = nimble::session::SessionKey{ "FIX.4.2", "DISABLED-BUYER", "SELL" },
+          .profile_id = profile_id,
+          .heartbeat_interval_seconds = 1U,
+          .is_initiator = true,
+        },
+      .begin_string = "FIX.4.2",
+      .sender_comp_id = "DISABLED-BUYER",
+      .target_comp_id = "SELL",
+      .heartbeat_interval_seconds = 1U,
+      .validation_policy = nimble::session::ValidationPolicy::Permissive(),
+    },
+    dictionary.value(),
+    &store);
+
+  auto start = initiator.OnTransportConnected(NowNs());
+  REQUIRE(start.ok());
+  for (const auto& outbound : start.value().outbound_frames) {
+    auto send_status = connection.value().Send(outbound.bytes, std::chrono::seconds(5));
+    REQUIRE(send_status.ok());
+  }
+
+  auto frame = connection.value().ReceiveFrame(std::chrono::seconds(3));
+  connection.value().Close();
+
+  runtime.Stop();
+  (void)runtime_future.get();
+  REQUIRE(factory_calls.load() == 0U);
   REQUIRE(runtime.completed_session_count() == 0U);
 }
 

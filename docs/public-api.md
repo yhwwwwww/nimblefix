@@ -1,107 +1,289 @@
 # NimbleFIX Public API Guide
 
-NimbleFIX now keeps exported headers and repository-private headers in separate trees:
+NimbleFIX exports two header trees:
 
-- `include/public/nimblefix/`: headers intended for library consumers
-- `include/internal/nimblefix/`: implementation-only headers used by NimbleFIX itself, tests, and internal tools
+- `include/public/nimblefix/`: supported external API
+- `include/internal/nimblefix/`: repository-private implementation headers
 
-External applications should add only `include/public/` to the compiler include path.
+External applications should add only `include/public/` to the include path.
 
-The important change is that the heavy runtime/session entry points now expose standalone public declarations and hide their private state in implementation files. In particular, these headers no longer publish internal worker, poller, store, or protocol state layouts:
+## First Includes
 
-- `nimblefix/runtime/engine.h`
-- `nimblefix/runtime/live_acceptor.h`
-- `nimblefix/runtime/live_initiator.h`
-- `nimblefix/session/admin_protocol.h`
-
-The earlier `_api.h` compatibility names are gone. The canonical header names above are now the real exported API surface.
-
-## What External Users Should Include
-
-### Primary Runtime API
-
-Use these headers for normal application bring-up:
+Most applications start with these headers:
 
 - `nimblefix/runtime/application.h`
 - `nimblefix/runtime/config.h`
-- `nimblefix/runtime/io_backend.h`
 - `nimblefix/runtime/engine.h`
-- `nimblefix/runtime/live_acceptor.h`
 - `nimblefix/runtime/live_initiator.h`
+- `nimblefix/runtime/live_acceptor.h`
 
-### Session And Message API
+Bring in these additional headers only when you need them:
 
-Use these when integrating custom session flows, building messages, or consuming decoded messages:
-
-- `nimblefix/session/admin_protocol.h`
-- `nimblefix/session/session_core.h`
 - `nimblefix/session/session_handle.h`
-- `nimblefix/session/session_key.h`
 - `nimblefix/session/session_send_envelope.h`
-- `nimblefix/session/encoded_frame.h`
-- `nimblefix/session/resend_recovery.h`
 - `nimblefix/message/message_builder.h`
 - `nimblefix/message/message_view.h`
-- `nimblefix/message/typed_message_view.h`
-- `nimblefix/codec/fix_codec.h`
-- `nimblefix/codec/fix_tags.h`
-- `nimblefix/codec/raw_passthrough.h`
-
-### Profiles, Stores, And Transport Configuration
-
-Use these when loading dictionaries or selecting persistence/transport policies:
-
 - `nimblefix/profile/profile_loader.h`
-- `nimblefix/profile/normalized_dictionary.h`
-- `nimblefix/store/session_store.h`
 - `nimblefix/store/memory_store.h`
 - `nimblefix/store/mmap_store.h`
 - `nimblefix/store/durable_batch_store.h`
-- `nimblefix/transport/tcp_transport.h`
 
-### Metrics And Advanced Runtime Introspection
+## Lifecycle Contract
 
-These remain public because application code and tests legitimately use them:
+`Engine::Boot()` is the normal entry point. It validates `EngineConfig`, loads profiles from `profile_artifacts` and `profile_dictionaries`, registers static counterparties, and makes `config()`, `profiles()`, `runtime()`, `FindCounterpartyConfig()`, and `FindListenerConfig()` available on success.
 
+`Engine::LoadProfiles()` exists for tooling and tests that need profile loading without a booted runtime. Typical applications do not need to call it directly because `Boot()` already does.
+
+The expected startup order is:
+
+1. Fill `EngineConfig`.
+2. Call `ValidateEngineConfig()` if you want an explicit preflight step.
+3. Call `Engine::Boot()`.
+4. Construct `LiveInitiator` or `LiveAcceptor` with the booted `Engine`.
+5. Open sessions or listeners.
+6. Call `Run()`.
+
+## Minimal Initiator Walkthrough
+
+This is the shortest normal path from config to a running initiator:
+
+```cpp
+#include "nimblefix/codec/fix_tags.h"
+#include "nimblefix/message/message_builder.h"
+#include "nimblefix/runtime/application.h"
+#include "nimblefix/runtime/config.h"
+#include "nimblefix/runtime/engine.h"
+#include "nimblefix/runtime/live_initiator.h"
+
+class BuySideApp final : public nimble::runtime::ApplicationCallbacks {
+public:
+	auto OnSessionEvent(const nimble::runtime::RuntimeEvent& event) -> nimble::base::Status override {
+		if (event.session_event != nimble::runtime::SessionEventKind::kActive) {
+			return nimble::base::Status::Ok();
+		}
+
+		auto startup_probe = nimble::message::MessageBuilder{nimble::codec::msg_types::kTestRequest}
+										 .set_string(nimble::codec::tags::kTestReqID, "startup-probe")
+										 .build();
+		return event.handle.SendTake(std::move(startup_probe));
+	}
+};
+
+nimble::runtime::EngineConfig config;
+config.profile_artifacts.push_back("fix44.art");
+config.counterparties.push_back(
+	nimble::runtime::CounterpartyConfigBuilder::Initiator(
+		"buy-side",
+		1001U,
+		nimble::session::SessionKey{ .sender_comp_id = "BUY1", .target_comp_id = "SELL1" },
+		4400U,
+		nimble::session::TransportVersion::kFix44)
+		.reconnect()
+		.build());
+
+auto validation = nimble::runtime::ValidateEngineConfig(config);
+if (!validation.ok()) {
+	return validation;
+}
+
+nimble::runtime::Engine engine;
+auto boot = engine.Boot(config);
+if (!boot.ok()) {
+	return boot;
+}
+
+auto app = std::make_shared<BuySideApp>();
+nimble::runtime::LiveInitiator initiator(&engine, { .application = app });
+
+auto open = initiator.OpenSession(1001U, "127.0.0.1", 9876);
+if (!open.ok()) {
+	return open;
+}
+
+return initiator.Run();
+```
+
+Notes:
+
+- `OpenSession()` may block until the TCP dial succeeds or times out.
+- `OpenSessionAsync()` defers the dial onto the runtime worker loop if the caller cannot block.
+- `SessionKey` is always written from the local engine's perspective. For initiators, `sender_comp_id` is your local `49` and `target_comp_id` is the remote `56`.
+- `nimblefix/codec/fix_tags.h` exposes named FIX tag constants and common `MsgType` constants; public examples should prefer those names over raw values such as `35`, `112`, or `"1"`.
+
+## Session Events And Send Boundaries
+
+`ApplicationCallbacks` uses three session lifecycle events:
+
+- `kBound`: Logon matched and the session is attached to a runtime worker, but replay or recovery may still be in progress.
+- `kActive`: Recovery is complete and business traffic may start.
+- `kClosed`: Transport is closed. Do not send from this event.
+
+For first-time integrations, treat `kActive` as the safe point to send the first application message.
+
+Send API rules:
+
+- `SessionHandle::SendCopy()` / `SendTake()` / encoded owned variants use the session command queue and require a single producer thread per handle.
+- `SessionHandle::SendInlineBorrowed()` / encoded inline-borrowed variants are valid only from direct runtime inline callbacks such as `OnSessionEvent`, `OnAdminMessage`, and `OnAppMessage`.
+- Queue-drained application threads must use owned send variants, not inline-borrowed sends.
+
+## Minimum Required Config
+
+For a static initiator counterparty, the minimum meaningful fields are:
+
+- `CounterpartyConfig::name`
+- `session.session_id`
+- `session.key.sender_comp_id`
+- `session.key.target_comp_id`
+- `session.profile_id`
+- `transport_profile` / builder transport version
+- `session.is_initiator = true`
+
+For a static acceptor counterparty, the minimum meaningful fields are:
+
+- `CounterpartyConfig::name`
+- `session.session_id`
+- `session.key.sender_comp_id` as the local acceptor CompID
+- `session.key.target_comp_id` as the expected remote initiator CompID
+- `session.profile_id`
+- `session.is_initiator = false`
+
+Additional conditional requirements:
+
+- FIXT.1.1 sessions require `default_appl_ver_id`.
+- `StoreMode::kMmap` and `StoreMode::kDurableBatch` require `store_path`.
+- `RecoveryMode::kWarmRestart` requires a persistent store mode.
+- `EngineConfig::listeners` is required before `LiveAcceptor::OpenListeners()`.
+
+`CounterpartyConfigBuilder` and `ListenerConfigBuilder` exist to reduce boilerplate for the common cases above.
+
+## Minimal Static Acceptor Walkthrough
+
+```cpp
+#include "nimblefix/runtime/application.h"
+#include "nimblefix/runtime/config.h"
+#include "nimblefix/runtime/engine.h"
+#include "nimblefix/runtime/live_acceptor.h"
+
+class SellSideApp final : public nimble::runtime::ApplicationCallbacks {
+public:
+	auto OnSessionEvent(const nimble::runtime::RuntimeEvent& event) -> nimble::base::Status override {
+		if (event.session_event == nimble::runtime::SessionEventKind::kActive) {
+			// Session is live; start any business-level initialization here.
+		}
+		return nimble::base::Status::Ok();
+	}
+};
+
+nimble::runtime::EngineConfig config;
+config.profile_artifacts.push_back("fix44.art");
+config.listeners.push_back(
+	nimble::runtime::ListenerConfigBuilder::Named("main").bind("0.0.0.0", 9876).build());
+config.counterparties.push_back(
+	nimble::runtime::CounterpartyConfigBuilder::Acceptor(
+		"sell-side",
+		2001U,
+		nimble::session::SessionKey{ .sender_comp_id = "SELL1", .target_comp_id = "BUY1" },
+		4400U,
+		nimble::session::TransportVersion::kFix44)
+		.store(nimble::runtime::StoreMode::kDurableBatch, "/var/lib/nimblefix/sell-side")
+		.build());
+
+nimble::runtime::Engine engine;
+auto boot = engine.Boot(config);
+if (!boot.ok()) {
+	return boot;
+}
+
+auto app = std::make_shared<SellSideApp>();
+nimble::runtime::LiveAcceptor acceptor(&engine, { .application = app });
+
+auto open = acceptor.OpenListeners("main");
+if (!open.ok()) {
+	return open;
+}
+
+return acceptor.Run();
+```
+
+## Dynamic Acceptor Walkthrough
+
+Unknown inbound Logons are not dynamic by default. The rules are:
+
+- `accept_unknown_sessions = false`: unknown Logons are rejected and `SessionFactory` is ignored.
+- `accept_unknown_sessions = true` and no factory installed: unknown Logons are still rejected.
+- `accept_unknown_sessions = true` and a factory installed: static counterparties match first, then the factory is called for unknown Logons.
+
+Example:
+
+```cpp
+nimble::runtime::EngineConfig config;
+config.profile_artifacts.push_back("fix44.art");
+config.listeners.push_back(
+	nimble::runtime::ListenerConfigBuilder::Named("main").bind("0.0.0.0", 9876).build());
+config.accept_unknown_sessions = true;
+
+nimble::runtime::Engine engine;
+auto boot = engine.Boot(config);
+if (!boot.ok()) {
+	return boot;
+}
+
+engine.SetSessionFactory(
+	[](const nimble::session::SessionKey& key) -> nimble::base::Result<nimble::runtime::CounterpartyConfig> {
+		return nimble::runtime::CounterpartyConfigBuilder::Acceptor(
+						 "dynamic-" + key.target_comp_id,
+						 0U,
+						 key,
+						 4400U,
+						 nimble::session::TransportVersion::kFix44)
+			.validation_policy(nimble::session::ValidationPolicy::Permissive())
+			.build();
+	});
+```
+
+Dynamic onboarding contract:
+
+- The factory input `SessionKey` is normalized to the local engine's perspective.
+- `key.sender_comp_id` is the local acceptor CompID from inbound `TargetCompID(56)`.
+- `key.target_comp_id` is the remote initiator CompID from inbound `SenderCompID(49)`.
+- `listener` name, local port, and remote address are not part of the callback.
+- Returning `session.session_id == 0` asks `Engine` to auto-assign a dynamic id from `kFirstDynamicSessionId` upward.
+- `WhitelistSessionFactory::Allow(begin_string, local_sender_comp_id, template)` matches the same local-perspective key.
+
+If you need routing decisions based on listener name, bound port, or remote address, the current public `SessionFactory` API does not expose that context. Use static counterparties or an external routing layer.
+
+## SessionSendEnvelope And Header Tags
+
+`SessionSendEnvelope` carries per-message session-managed header fields:
+
+- `sender_sub_id` -> `SenderSubID(50)`
+- `target_sub_id` -> `TargetSubID(57)`
+
+Use the envelope when those values belong in the FIX session header. Do not rely on message body fields to populate `50/57` in the session header path.
+
+## Support Headers
+
+These headers remain public because public signatures depend on them or advanced integrations use them directly:
+
+- `nimblefix/base/result.h`
+- `nimblefix/base/status.h`
 - `nimblefix/runtime/metrics.h`
-- `nimblefix/runtime/trace.h`
 - `nimblefix/runtime/profile_registry.h`
 - `nimblefix/runtime/sharded_runtime.h`
-- `nimblefix/base/status.h`
-- `nimblefix/base/result.h`
-
-## Exported But Not Recommended As Direct User Surface
-
-Not every header under `include/public/` is a first include for downstream code. Most applications only need the primary runtime headers plus the specific session, message, profile, or store types they actively use. The remaining public headers stay exported because public signatures depend on them or because they are legitimate low-level extension points.
-
-Treat these as support headers rather than the primary integration surface:
-
-- `nimblefix/base/inline_split_vector.h`
-- `nimblefix/codec/compiled_decoder.h`
-- `nimblefix/message/fixed_layout_writer.h`
-- `nimblefix/message/message_ref.h`
-- `nimblefix/message/message_structs.h`
-- `nimblefix/profile/artifact.h`
+- `nimblefix/runtime/trace.h`
+- `nimblefix/session/encoded_application_message.h`
+- `nimblefix/session/session_snapshot.h`
 - `nimblefix/session/transport_profile.h`
 - `nimblefix/session/validation_policy.h`
-- `nimblefix/session/session_snapshot.h`
-- `nimblefix/session/encoded_application_message.h`
 
-The old runtime support headers `config_io.h`, `io_poller.h`, `live_session_registry.h`, `shard_poller.h`, `poll_wakeup.h`, and `timer_wheel.h` are no longer part of the installed public surface.
+Everything under `include/internal/nimblefix/` remains repository-private.
 
-## Not For External Consumers
+## Do Not Do This
 
-Anything that exists only under `include/internal/nimblefix/` is repository-private and should not be included by downstream code. Examples:
-
-- `nimblefix/base/spsc_queue.h`
-- `nimblefix/codec/fast_int_format.h`
-- `nimblefix/codec/simd_scan.h`
-- `nimblefix/profile/builder_codegen.h`
-- `nimblefix/profile/dictgen_input.h`
-- `nimblefix/profile/overlay.h`
-- `nimblefix/profile/artifact_builder.h`
-- `nimblefix/runtime/live_session_worker.h`
-- `nimblefix/runtime/interop_harness.h`
-- `nimblefix/runtime/soak.h`
-
-If a future external API really needs one of those types, it should be promoted deliberately into the public tree instead of being included from `include/internal/`.
+- Do not share one `SessionHandle` across multiple producer threads for sends. The runtime send path is single-producer.
+- Do not default to `SendInlineBorrowed()` unless you are in a direct runtime inline callback and the borrowed payload lifetime is unquestionably safe.
+- Do not assume `kBound` means the session is ready for business traffic. Wait for `kActive` unless you intentionally need pre-activation behavior.
+- Do not call `Engine::LoadProfiles()` and then treat `Boot()` as a no-op. `Boot()` reloads profiles and resets runtime state.
+- Do not assume `accept_unknown_sessions = true` is enough by itself. Unknown Logons still need a `SessionFactory`.
+- Do not assume queue-decoupled handlers can use inline-borrowed sends. They cannot.
+- Do not assume multi-listener dynamic routing can branch on listener name or port from `SessionFactory`; that context is not exposed today.

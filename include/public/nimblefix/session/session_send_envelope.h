@@ -8,7 +8,9 @@ namespace nimble::session {
 
 struct SessionSendEnvelopeView
 {
+  // SenderSubID(50) written into the session-managed FIX header when present.
   std::string_view sender_sub_id;
+  // TargetSubID(57) written into the session-managed FIX header when present.
   std::string_view target_sub_id;
 
   [[nodiscard]] auto empty() const -> bool { return sender_sub_id.empty() && target_sub_id.empty(); }
@@ -16,6 +18,9 @@ struct SessionSendEnvelopeView
 
 struct SessionSendEnvelope
 {
+  // Use envelope fields for session-managed header tags 50/57. Do not place
+  // them in the message body unless the body schema independently requires the
+  // same tag numbers.
   std::string sender_sub_id;
   std::string target_sub_id;
 

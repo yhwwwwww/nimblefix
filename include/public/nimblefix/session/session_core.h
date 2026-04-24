@@ -31,11 +31,18 @@ struct DayCutConfig
 
 struct SessionConfig
 {
+  // Stable runtime/store identity. Static configs must provide a positive id;
+  // dynamic acceptor factories may return 0 and let Engine assign one.
   std::uint64_t session_id{ 0 };
+  // Session identity from the local engine's perspective.
   SessionKey key;
+  // Dictionary/profile id used to encode and decode application messages.
   std::uint64_t profile_id{ 0 };
+  // FIXT-only application version. Leave empty for FIX 4.x transport sessions.
   std::string default_appl_ver_id;
+  // HeartBtInt(108) for logon and liveness timers.
   std::uint32_t heartbeat_interval_seconds{ 30 };
+  // true for outbound initiator sessions, false for inbound acceptor sessions.
   bool is_initiator{ false };
 };
 

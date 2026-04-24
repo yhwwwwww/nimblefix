@@ -496,6 +496,10 @@ Engine::ResolveInboundSession(const codec::SessionHeaderView& header) const -> b
     };
   }
 
+  if (!config_->accept_unknown_sessions) {
+    return base::Status::NotFound("no counterparty matched inbound FIX session header");
+  }
+
   if (session_factory_.has_value()) {
     session::SessionKey key{
       std::string(header.begin_string),
@@ -522,7 +526,8 @@ Engine::ResolveInboundSession(const codec::SessionHeaderView& header) const -> b
     };
   }
 
-  return base::Status::NotFound("no counterparty matched inbound FIX session header");
+  return base::Status::NotFound("accept_unknown_sessions is enabled but no session factory matched the inbound FIX "
+                                "session header");
 }
 
 void

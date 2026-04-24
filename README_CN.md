@@ -462,7 +462,6 @@ config.listeners = {{
 config.accept_unknown_sessions = true;
 
 nimble::runtime::Engine engine;
-engine.LoadProfiles(config);
 engine.Boot(config);
 
 // 根据入站 Logon 动态接受 session：
@@ -580,7 +579,7 @@ auto OnAppMessage(const nimble::runtime::RuntimeEvent& event)
 | `queue_app_mode` | enum | `kCoScheduled` | `kCoScheduled`（在 worker 线程上 drain）或 `kThreaded`（每 worker 一个专用 app 线程） |
 | `app_cpu_affinity` | uint32[] | — | 绑定 app 线程到 CPU 核（`kThreaded` 时） |
 | `io_backend` | enum | `kEpoll` | `kEpoll` 或 `kIoUring`（Linux I/O 后端） |
-| `accept_unknown_sessions` | bool | false | 允许动态 session factory 接纳未知入站 CompID |
+| `accept_unknown_sessions` | bool | false | 在静态 `counterparties` 未命中后，允许 `SessionFactory` 处理未知入站 Logon |
 | `listeners` | list | — | TCP 侦听配置（仅 acceptor） |
 | `counterparties` | list | — | 预配置的 session 对端 |
 
