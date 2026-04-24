@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <array>
 #include <cstddef>
-#include <cstdint>
 #include <span>
 #include <string>
 #include <vector>
@@ -12,6 +11,14 @@ namespace nimble::session {
 
 inline constexpr std::size_t kEncodedFrameInlineCapacity = 768U;
 
+/// Storage for one fully finalized outbound FIX frame.
+///
+/// Design intent: keep the common case inline and allow replay paths to splice
+/// a separately stored application body between a copied header and trailer.
+///
+/// Boundary condition: when `external_body` is non-empty, `view()` returns only
+/// the owned contiguous prefix/suffix buffer. The full wire payload is the
+/// splice described by `body_splice_offset`.
 struct EncodedFrameBytes
 {
   std::array<std::byte, kEncodedFrameInlineCapacity> inline_storage{};
@@ -25,6 +32,11 @@ struct EncodedFrameBytes
   std::span<const std::byte> external_body;
   std::size_t body_splice_offset{ 0U };
 
+  /// Copy a contiguous finalized frame into local storage.
+  ///
+  /// Any prior replay splice state is cleared.
+  ///
+  /// \param bytes Contiguous frame bytes.
   auto assign(std::span<const std::byte> bytes) -> void
   {
     external_body = {};
@@ -40,6 +52,11 @@ struct EncodedFrameBytes
     overflow_storage.assign(bytes.begin(), bytes.end());
   }
 
+  /// Return the contiguous owned portion of the frame.
+  ///
+  /// When `external_body` is set, this omits the spliced body bytes.
+  ///
+  /// \return Borrowed span over inline or overflow storage.
   [[nodiscard]] auto view() const -> std::span<const std::byte>
   {
     if (!overflow_storage.empty()) {
@@ -48,6 +65,7 @@ struct EncodedFrameBytes
     return std::span<const std::byte>(inline_storage.data(), inline_size);
   }
 
+  /// Return the full wire size including any spliced external body.
   [[nodiscard]] auto size() const -> std::size_t
   {
     return (overflow_storage.empty() ? inline_size : overflow_storage.size()) + external_body.size();
@@ -58,6 +76,7 @@ struct EncodedFrameBytes
   operator std::span<const std::byte>() const { return view(); }
 };
 
+/// One finalized outbound FIX frame plus lightweight routing metadata.
 struct EncodedFrame
 {
   EncodedFrameBytes bytes;

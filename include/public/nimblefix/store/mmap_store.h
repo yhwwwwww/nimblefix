@@ -14,14 +14,33 @@ enum class SyncPolicy
   kBatchFlush, // Caller-initiated flush via Flush().
 };
 
+/// File-backed session store that keeps an mmap'd replay index in process.
+///
+/// Design intent: trade a small amount of filesystem complexity for faster
+/// warm restart and lower copy cost than fully materialized durable logs.
+///
+/// Performance: explicit `LoadOutboundRangeViews()` can pin the current mapping
+/// and expose borrowed payload spans without copying them. `LoadOutboundRange()`
+/// always materializes owned payloads.
+///
+/// Lifetime: view ranges pin the mapping they were created from via
+/// `borrowed_payload_owner`, so their payload spans remain valid until the range
+/// is destroyed even if the store later refreshes or remaps.
 class MmapSessionStore : public SessionStore
 {
 public:
   struct Impl;
 
+  /// \param path Backing mmap store file.
+  /// \param sync_policy Durability policy for appended writes.
   explicit MmapSessionStore(std::filesystem::path path, SyncPolicy sync_policy = SyncPolicy::kEveryWrite);
   ~MmapSessionStore() override;
 
+  /// Open the backing file and build in-memory indexes.
+  ///
+  /// Safe to call eagerly or let other APIs open lazily on first use.
+  ///
+  /// \return `Ok()` on success, otherwise an error status.
   auto Open() -> base::Status;
 
   auto SaveOutbound(const MessageRecord& record) -> base::Status override;
@@ -34,9 +53,12 @@ public:
     -> base::Result<MessageRecordViewRange> override;
   auto SaveRecoveryState(const SessionRecoveryState& state) -> base::Status override;
   auto LoadRecoveryState(std::uint64_t session_id) const -> base::Result<SessionRecoveryState> override;
+
+  /// Reload indexes from the current file contents.
   auto Refresh() -> base::Status override;
   auto ResetSession(std::uint64_t session_id) -> base::Status override;
 
+  /// Flush pending mapped/file writes according to `sync_policy_`.
   auto Flush() -> base::Status override;
 
 private:

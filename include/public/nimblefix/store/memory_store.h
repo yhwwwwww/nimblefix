@@ -8,6 +8,17 @@
 
 namespace nimble::store {
 
+/// In-memory session store optimized for low-latency tests and ephemeral runs.
+///
+/// Design intent: keep replay payloads in a per-session arena and upsert by
+/// sequence number with minimal overhead.
+///
+/// Performance: `Save*` is in-memory only and `LoadOutboundRangeViews()` can
+/// return borrowed spans without copying payload bytes.
+///
+/// Lifetime warning: payload views returned from `LoadOutboundRangeViews()`
+/// borrow the internal arena and may be invalidated by later writes,
+/// `Rollover()`, `ResetSession()`, or store destruction.
 class MemorySessionStore : public SessionStore
 {
 public:
@@ -33,6 +44,13 @@ public:
                               std::uint32_t begin_seq,
                               std::uint32_t end_seq,
                               MessageRecordViewRange* range) const -> base::Status override;
+
+  /// Pre-reserve storage for one session.
+  ///
+  /// \param session_id Runtime session id.
+  /// \param inbound_records Additional inbound-record capacity to reserve.
+  /// \param outbound_records Additional outbound-record capacity to reserve.
+  /// \param payload_bytes Additional payload-arena bytes to reserve.
   auto ReserveAdditionalSessionStorage(std::uint64_t session_id,
                                        std::size_t inbound_records,
                                        std::size_t outbound_records,

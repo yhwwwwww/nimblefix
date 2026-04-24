@@ -14,6 +14,7 @@ namespace nimble::store {
 
 struct MessageRecordView;
 
+/// Per-record FIX persistence flags used for replay decisions.
 enum class MessageRecordFlags : std::uint16_t
 {
   kNone = 0,
@@ -22,6 +23,13 @@ enum class MessageRecordFlags : std::uint16_t
   kGapFill = 1U << 2,
 };
 
+/// Owned persisted FIX frame plus replay metadata.
+///
+/// Design intent: stores keep the full wire payload for resend/replay while the
+/// runtime keeps higher-level sequence state separately.
+///
+/// `body_start_offset` is an optimization hint for replay encoders. It marks
+/// the first byte of the application body inside `payload`; `0` means unknown.
 struct MessageRecord
 {
   std::uint64_t session_id{ 0 };
@@ -41,6 +49,11 @@ struct MessageRecord
   [[nodiscard]] auto view() const -> MessageRecordView;
 };
 
+/// Borrowed view over a persisted FIX frame.
+///
+/// Performance: avoids copying payload bytes when a concrete store can expose a
+/// stable backing span. Use `ToOwned()` when the caller must keep the data past
+/// the returned range's lifetime.
 struct MessageRecordView
 {
   std::uint64_t session_id{ 0 };
@@ -72,6 +85,15 @@ struct MessageRecordView
 
 inline constexpr std::size_t kMessageRecordViewRangeInlineCapacity = 4U;
 
+/// Batch of borrowed or owned message-record views.
+///
+/// Exactly one storage strategy is active at a time:
+/// - `owned_storage` holds deep-copied records
+/// - `payload_storage` holds copied payload bytes for views in `records`
+/// - `borrowed_payload_owner` pins a concrete store's shared backing storage
+///
+/// Lifetime: `records[i].payload` is valid only while this range object stays
+/// alive and any additional concrete-store caveats remain satisfied.
 struct MessageRecordViewRange
 {
   std::vector<MessageRecord> owned_storage;
@@ -117,31 +139,93 @@ struct SessionRecoveryState
   bool active{ false };
 };
 
+/// Abstract persistence contract for one or more FIX sessions.
+///
+/// Design intent: all concrete stores must support two jobs:
+/// - outbound replay by inclusive sequence range
+/// - recovery of next inbound/outbound sequence state
+///
+/// Performance/lifecycle contract:
+/// - `Save*View()` may avoid payload copies when the store can consume the span
+///   immediately
+/// - `LoadOutboundRangeViews()` may either borrow store-backed payloads or copy
+///   them into the returned range; callers must treat the returned range as the
+///   payload owner
+/// - `begin_seq`/`end_seq` parameters are inclusive and must be non-zero
+///
+/// Boundary condition: `ResetSession(session_id)` must only affect the target
+/// session, never unrelated sessions.
 class SessionStore
 {
 public:
   virtual ~SessionStore() = default;
 
+  /// Force any pending writes to durable media when the backend supports it.
+  ///
+  /// \return `Ok()` on success, otherwise an error status.
   virtual auto Flush() -> base::Status { return base::Status::Ok(); }
 
+  /// Rotate/compact backing storage according to the concrete store policy.
+  ///
+  /// \return `Ok()` on success, otherwise an error status.
   virtual auto Rollover() -> base::Status { return base::Status::Ok(); }
 
+  /// Refresh any on-disk or shared backing state.
+  ///
+  /// \return `Ok()` on success, otherwise an error status.
   virtual auto Refresh() -> base::Status { return base::Status::Ok(); }
 
+  /// Remove persisted data for one session.
+  ///
+  /// \param session_id Runtime session id to clear.
+  /// \return `Ok()` on success, otherwise an error status.
   virtual auto ResetSession(std::uint64_t session_id) -> base::Status = 0;
 
+  /// Persist one outbound frame.
+  ///
+  /// \param record Owned message record.
+  /// \return `Ok()` on success, otherwise an error status.
   virtual auto SaveOutbound(const MessageRecord& record) -> base::Status = 0;
+
+  /// Persist one inbound frame.
+  ///
+  /// \param record Owned message record.
+  /// \return `Ok()` on success, otherwise an error status.
   virtual auto SaveInbound(const MessageRecord& record) -> base::Status = 0;
+
+  /// Persist one outbound frame from a borrowed payload view.
+  ///
+  /// \param record Borrowed message record.
+  /// \return `Ok()` on success, otherwise an error status.
   virtual auto SaveOutboundView(const MessageRecordView& record) -> base::Status
   {
     return SaveOutbound(record.ToOwned());
   }
+
+  /// Persist one inbound frame from a borrowed payload view.
+  ///
+  /// \param record Borrowed message record.
+  /// \return `Ok()` on success, otherwise an error status.
   virtual auto SaveInboundView(const MessageRecordView& record) -> base::Status
   {
     return SaveInbound(record.ToOwned());
   }
+
+  /// Load owned outbound frames for an inclusive replay range.
+  ///
+  /// \param session_id Runtime session id.
+  /// \param begin_seq First outbound sequence number to load, inclusive.
+  /// \param end_seq Last outbound sequence number to load, inclusive.
+  /// \return Owned records in sequence order, or an error status.
   virtual auto LoadOutboundRange(std::uint64_t session_id, std::uint32_t begin_seq, std::uint32_t end_seq) const
     -> base::Result<std::vector<MessageRecord>> = 0;
+
+  /// Load outbound frames as borrowed or range-owned views.
+  ///
+  /// \param session_id Runtime session id.
+  /// \param begin_seq First outbound sequence number to load, inclusive.
+  /// \param end_seq Last outbound sequence number to load, inclusive.
+  /// \return Range that owns or pins the payload bytes behind `records`.
   virtual auto LoadOutboundRangeViews(std::uint64_t session_id, std::uint32_t begin_seq, std::uint32_t end_seq) const
     -> base::Result<MessageRecordViewRange>
   {
@@ -158,6 +242,14 @@ public:
     }
     return range;
   }
+
+  /// Populate an existing range object with outbound frame views.
+  ///
+  /// \param session_id Runtime session id.
+  /// \param begin_seq First outbound sequence number to load, inclusive.
+  /// \param end_seq Last outbound sequence number to load, inclusive.
+  /// \param range Output object that becomes the owner/pinner of payload bytes.
+  /// \return `Ok()` on success, otherwise an error status.
   virtual auto LoadOutboundRangeViews(std::uint64_t session_id,
                                       std::uint32_t begin_seq,
                                       std::uint32_t end_seq,
@@ -175,7 +267,18 @@ public:
     *range = std::move(loaded).value();
     return base::Status::Ok();
   }
+
+  /// Persist recovery state for one session.
+  ///
+  /// \param state Recovery snapshot to store.
+  /// \return `Ok()` on success, otherwise an error status.
   virtual auto SaveRecoveryState(const SessionRecoveryState& state) -> base::Status = 0;
+
+  /// Persist one inbound frame and the updated recovery state together.
+  ///
+  /// \param record Borrowed inbound record.
+  /// \param state Recovery snapshot to store.
+  /// \return `Ok()` on success, otherwise an error status.
   virtual auto SaveInboundViewAndRecoveryState(const MessageRecordView& record, const SessionRecoveryState& state)
     -> base::Status
   {
@@ -185,6 +288,12 @@ public:
     }
     return SaveRecoveryState(state);
   }
+
+  /// Persist one outbound frame and the updated recovery state together.
+  ///
+  /// \param record Borrowed outbound record.
+  /// \param state Recovery snapshot to store.
+  /// \return `Ok()` on success, otherwise an error status.
   virtual auto SaveOutboundViewAndRecoveryState(const MessageRecordView& record, const SessionRecoveryState& state)
     -> base::Status
   {
@@ -194,6 +303,11 @@ public:
     }
     return SaveRecoveryState(state);
   }
+
+  /// Load the latest recovery state for one session.
+  ///
+  /// \param session_id Runtime session id.
+  /// \return Recovery state on success, otherwise an error status.
   virtual auto LoadRecoveryState(std::uint64_t session_id) const -> base::Result<SessionRecoveryState> = 0;
 };
 
