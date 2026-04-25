@@ -602,7 +602,7 @@ Time fields use `HH:MM:SS`. Day fields accept `sun`..`sat` (or full names). Empt
 Load in code:
 
 ```cpp
-// Internal tool use only — #include "nimblefix/runtime/config_io.h"
+// Internal tool use only — #include "nimblefix/runtime/internal_config_parser.h"
 auto config = nimble::runtime::LoadEngineConfigFile("engine.ffcfg");
 ```
 

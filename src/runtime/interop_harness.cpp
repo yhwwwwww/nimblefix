@@ -1,6 +1,6 @@
 #include "nimblefix/runtime/interop_harness.h"
 
-#include "nimblefix/runtime/config_io.h"
+#include "nimblefix/runtime/internal_config_parser.h"
 
 #include <algorithm>
 #include <cctype>

@@ -4,10 +4,7 @@
 #include <fstream>
 
 #include "nimblefix/profile/dictgen_input.h"
-#include "nimblefix/runtime/config.h"
-#include "nimblefix/runtime/config_io.h"
-
-#include "test_support.h"
+#include "nimblefix/runtime/internal_config_parser.h"
 
 namespace {
 

@@ -3,8 +3,7 @@
 #include <iostream>
 #include <vector>
 
-#include "nimblefix/runtime/config.h"
-#include "nimblefix/runtime/config_io.h"
+#include "nimblefix/runtime/internal_config_parser.h"
 
 namespace {
 

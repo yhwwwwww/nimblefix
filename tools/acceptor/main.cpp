@@ -9,8 +9,8 @@
 #include "nimblefix/profile/profile_loader.h"
 #include "nimblefix/runtime/application.h"
 #include "nimblefix/runtime/config.h"
-#include "nimblefix/runtime/config_io.h"
 #include "nimblefix/runtime/engine.h"
+#include "nimblefix/runtime/internal_config_parser.h"
 #include "nimblefix/runtime/live_acceptor.h"
 
 namespace {

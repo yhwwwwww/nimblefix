@@ -11,8 +11,8 @@
 #include "nimblefix/profile/artifact_builder.h"
 #include "nimblefix/profile/dictgen_input.h"
 #include "nimblefix/runtime/config.h"
-#include "nimblefix/runtime/config_io.h"
 #include "nimblefix/runtime/engine.h"
+#include "nimblefix/runtime/internal_config_parser.h"
 #include "nimblefix/transport/transport_connection.h"
 
 namespace {
