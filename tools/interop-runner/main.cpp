@@ -7,7 +7,7 @@ namespace {
 auto
 PrintUsage() -> void
 {
-  std::cout << "usage: nimblefix-interop-runner --scenario <scenario.ffscenario> [--dump-report]\n";
+  std::cout << "usage: nimblefix-interop-runner --scenario <scenario.nfscenario> [--dump-report]\n";
 }
 
 } // namespace

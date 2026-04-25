@@ -7,7 +7,7 @@ namespace {
 auto
 PrintUsage() -> void
 {
-  std::cout << "usage: nimblefix-soak --profile <profile.art> [--workers N] "
+  std::cout << "usage: nimblefix-soak --profile <profile.nfa> [--workers N] "
                "[--sessions N] [--iterations N]"
                " [--gap-every N] [--duplicate-every N] [--replay-every N] "
                "[--reorder-every N]"

@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<fixr:repository xmlns:fixr="http://fixprotocol.io/2020/orchestra/repository" name="BadOrchestra">
+  <fixr:fields>
+    <fixr:field id="35" name="MsgType" type="String"/>
+  </fixr:fields>
+  <fixr:messages>
+    <fixr:message id="Broken" name="Broken" msgType="Z" category="app">
+      <fixr:fieldRef id="999" presence="required"/>
+    </fixr:message>
+  </fixr:messages>
+</fixr:repository>

@@ -237,6 +237,11 @@ struct CounterpartyConfig
   // Conditionally required for FIXT.1.1 transport sessions.
   std::string default_appl_ver_id;
   std::vector<std::string> supported_app_msg_types;
+  // Optional contract-sidecar service subsets selected for this deployment.
+  // When present, cold-path validation and boot derive the allowed inbound
+  // application message subset from the bound contract instead of interpreting
+  // Orchestra rules on the hot path.
+  std::vector<std::string> contract_service_subsets;
   std::uint32_t sending_time_threshold_seconds{ 0 };
   bool application_messages_available{ true };
   // Memory is the simplest default. Mmap and durable batch require store_path.
@@ -308,6 +313,9 @@ struct EngineConfig
   // Artifacts and dictionaries loaded before runtime boot completes.
   std::vector<std::filesystem::path> profile_artifacts;
   std::vector<std::vector<std::filesystem::path>> profile_dictionaries;
+  // Optional behavior sidecars keyed by profile_id. These are loaded only on
+  // cold paths and remain separate from structural .nfa artifacts.
+  std::vector<std::filesystem::path> profile_contracts;
   // Profile loading memory hints.
   bool profile_madvise{ false };
   bool profile_mlock{ false };
@@ -442,6 +450,15 @@ public:
   /// \param values Supported application MsgType values.
   /// \return This builder.
   auto supported_app_msg_types(std::vector<std::string> values) -> CounterpartyConfigBuilder&;
+
+  /// Select contract service subsets for this deployed session binding.
+  ///
+  /// When a contract sidecar is loaded for the profile, the cold path derives
+  /// the effective inbound application subset from these service names.
+  ///
+  /// \param values Selected service subset names.
+  /// \return This builder.
+  auto contract_service_subsets(std::vector<std::string> values) -> CounterpartyConfigBuilder&;
 
   /// Toggle whether application handling is currently available for the session.
   ///

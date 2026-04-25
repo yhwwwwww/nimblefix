@@ -24,6 +24,7 @@ constexpr char kConfigFieldSeparator = '|';
 constexpr char kConfigListSeparator = ',';
 
 constexpr std::string_view kProfileRecordPrefix = "profile=";
+constexpr std::string_view kContractRecordPrefix = "contract=";
 constexpr std::string_view kDictionaryRecordPrefix = "dictionary=";
 constexpr std::string_view kListenerRecordKind = "listener";
 constexpr std::string_view kCounterpartyRecordKind = "counterparty";
@@ -82,8 +83,9 @@ constexpr std::size_t kLogoutDay = 42U;
 constexpr std::size_t kSendingTimeThresholdSeconds = 43U;
 constexpr std::size_t kSupportedAppMsgTypes = 44U;
 constexpr std::size_t kApplicationMessagesAvailable = 45U;
+constexpr std::size_t kContractServiceSubsets = 46U;
 constexpr std::size_t kMinFieldCount = kIsInitiator + 1U;
-constexpr std::size_t kMaxFieldCount = kApplicationMessagesAvailable + 1U;
+constexpr std::size_t kMaxFieldCount = kContractServiceSubsets + 1U;
 } // namespace counterparty_columns
 
 auto
@@ -520,6 +522,11 @@ LoadEngineConfigText(std::string_view text, const std::filesystem::path& base_di
       continue;
     }
 
+    if (trimmed.starts_with(kContractRecordPrefix)) {
+      config.profile_contracts.push_back(ResolvePath(base_dir, Trim(trimmed.substr(kContractRecordPrefix.size()))));
+      continue;
+    }
+
     if (trimmed.starts_with(kDictionaryRecordPrefix)) {
       const auto raw = Trim(trimmed.substr(kDictionaryRecordPrefix.size()));
       std::vector<std::filesystem::path> paths;
@@ -878,6 +885,9 @@ LoadEngineConfigText(std::string_view text, const std::filesystem::path& base_di
       if (!application_messages_available.ok()) {
         return application_messages_available.status();
       }
+      const auto contract_service_subsets = parts.size() > counterparty_columns::kContractServiceSubsets
+                                              ? SplitCsvList(parts[counterparty_columns::kContractServiceSubsets])
+                                              : std::vector<std::string>{};
       auto heartbeat = ParseInteger<std::uint32_t>(parts[counterparty_columns::kHeartbeatIntervalSeconds],
                                                    "heartbeat_interval_seconds");
       if (!heartbeat.ok()) {
@@ -910,6 +920,7 @@ LoadEngineConfigText(std::string_view text, const std::filesystem::path& base_di
                                  ? parts[counterparty_columns::kDefaultApplVerId]
                                  : std::string{},
         .supported_app_msg_types = supported_app_msg_types,
+        .contract_service_subsets = contract_service_subsets,
         .sending_time_threshold_seconds = sending_time_threshold_seconds,
         .application_messages_available = application_messages_available.value(),
         .store_mode = store_mode.value(),

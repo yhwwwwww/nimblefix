@@ -49,7 +49,7 @@ namespace nimble::runtime {
 //
 //   auto app = std::make_shared<MyApp>();
 //   EngineConfig config;
-//   config.profile_artifacts.push_back("fix44.art");
+//   config.profile_artifacts.push_back("fix44.nfa");
 //   config.listeners.push_back(
 //     ListenerConfigBuilder::Named("main").bind("0.0.0.0", 9876).build());
 //   config.counterparties.push_back(

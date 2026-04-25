@@ -111,15 +111,15 @@ local function any_output_is_stale(output_paths, input_paths)
 end
 
 local function enqueue_fix44_assets(batchcmds)
-    local xml2ffd_bin = generated_tool_path("nimblefix-xml2ffd")
+    local xml2nfd_bin = generated_tool_path("nimblefix-xml2nfd")
     local dictgen_bin = generated_tool_path("nimblefix-dictgen")
     local fix44_xml = path.join(quickfix_root, "spec", "FIX44.xml")
-    local fix44_ffd = path.join("build", "bench", "quickfix_FIX44.ffd")
-    local fix44_art = path.join("build", "bench", "quickfix_FIX44.art")
+    local fix44_nfd = path.join("build", "bench", "quickfix_FIX44.nfd")
+    local fix44_nfa = path.join("build", "bench", "quickfix_FIX44.nfa")
     local fix44_builders = path.join("build", "generated", "fix44_builders.h")
 
-    if not os.isfile(xml2ffd_bin) then
-        xmake_raise("missing build tool: %s", xml2ffd_bin)
+    if not os.isfile(xml2nfd_bin) then
+        xmake_raise("missing build tool: %s", xml2nfd_bin)
     end
     if not os.isfile(dictgen_bin) then
         xmake_raise("missing build tool: %s", dictgen_bin)
@@ -131,21 +131,21 @@ local function enqueue_fix44_assets(batchcmds)
     batchcmds:mkdir(path.join("build", "bench"))
     batchcmds:mkdir(path.join("build", "generated"))
 
-    local needs_fix44_ffd = output_is_stale(fix44_ffd, {fix44_xml, xml2ffd_bin})
-    if needs_fix44_ffd then
-        batchcmds_show(batchcmds, "[nimblefix] regenerating %s", fix44_ffd)
-        batchcmds:vrunv(xml2ffd_bin, {
+    local needs_fix44_nfd = output_is_stale(fix44_nfd, {fix44_xml, xml2nfd_bin})
+    if needs_fix44_nfd then
+        batchcmds_show(batchcmds, "[nimblefix] regenerating %s", fix44_nfd)
+        batchcmds:vrunv(xml2nfd_bin, {
             "--xml", fix44_xml,
-            "--output", fix44_ffd,
+            "--output", fix44_nfd,
             "--profile-id", "4400"
         })
     end
 
-    if needs_fix44_ffd or any_output_is_stale({fix44_art, fix44_builders}, {fix44_ffd, dictgen_bin}) then
-        batchcmds_show(batchcmds, "[nimblefix] regenerating %s and %s", fix44_art, fix44_builders)
+    if needs_fix44_nfd or any_output_is_stale({fix44_nfa, fix44_builders}, {fix44_nfd, dictgen_bin}) then
+        batchcmds_show(batchcmds, "[nimblefix] regenerating %s and %s", fix44_nfa, fix44_builders)
         batchcmds:vrunv(dictgen_bin, {
-            "--input", fix44_ffd,
-            "--output", fix44_art,
+            "--input", fix44_nfd,
+            "--output", fix44_nfa,
             "--cpp-builders", fix44_builders
         })
     end
@@ -202,9 +202,9 @@ local quickfix_vendor_sources = {
 
 local function enqueue_sample_assets(batchcmds)
     local dictgen_bin = generated_tool_path("nimblefix-dictgen")
-    local sample_profile = path.join("samples", "basic_profile.ffd")
-    local sample_overlay = path.join("samples", "basic_overlay.ffd")
-    local sample_art = path.join("build", "sample-basic.art")
+    local sample_profile = path.join("samples", "basic_profile.nfd")
+    local sample_overlay = path.join("samples", "basic_overlay.nfd")
+    local sample_nfa = path.join("build", "sample-basic.nfa")
     local sample_builders = path.join("build", "generated", "sample_basic_builders.h")
 
     if not os.isfile(dictgen_bin) then
@@ -220,12 +220,12 @@ local function enqueue_sample_assets(batchcmds)
     batchcmds:mkdir("build")
     batchcmds:mkdir(path.join("build", "generated"))
 
-    if any_output_is_stale({sample_art, sample_builders}, {sample_profile, sample_overlay, dictgen_bin}) then
-        batchcmds_show(batchcmds, "[nimblefix] regenerating %s and %s", sample_art, sample_builders)
+    if any_output_is_stale({sample_nfa, sample_builders}, {sample_profile, sample_overlay, dictgen_bin}) then
+        batchcmds_show(batchcmds, "[nimblefix] regenerating %s and %s", sample_nfa, sample_builders)
         batchcmds:vrunv(dictgen_bin, {
             "--input", sample_profile,
             "--merge", sample_overlay,
-            "--output", sample_art,
+            "--output", sample_nfa,
             "--cpp-builders", sample_builders
         })
     end
@@ -289,6 +289,11 @@ target("nimblefix-fix-session-testcases")
     add_deps("nimblefix")
     add_files("tools/fix-session-testcases/*.cpp")
 
+target("nimblefix-orchestra-import")
+    set_kind("binary")
+    add_deps("nimblefix", "nimblefix-thirdparty-pugixml")
+    add_files("tools/orchestra-import/*.cpp")
+
 target("nimblefix-soak")
     set_kind("binary")
     add_deps("nimblefix")
@@ -327,17 +332,17 @@ target("nimblefix-acceptor")
     add_deps("nimblefix")
     add_files("tools/acceptor/*.cpp")
 
-target("nimblefix-xml2ffd")
+target("nimblefix-xml2nfd")
     set_kind("binary")
     set_policy("build.fence", true)
     add_deps("nimblefix", "nimblefix-thirdparty-pugixml")
-    add_files("tools/xml2ffd/*.cpp")
+    add_files("tools/xml2nfd/*.cpp")
 
 target("nimblefix-fix44-assets")
     set_kind("phony")
     set_default(false)
     set_policy("build.fence", true)
-    add_deps("nimblefix-xml2ffd", "nimblefix-dictgen")
+    add_deps("nimblefix-xml2nfd", "nimblefix-dictgen")
     add_rules("nimblefix.fix44_assets")
 
 target("nimblefix-sample-assets")
@@ -393,12 +398,13 @@ target("nimblefix-quickfix-cpp-bench")
 target("nimblefix-tests")
     set_kind("binary")
     add_deps("nimblefix", "nimblefix-thirdparty-catch2-main", "nimblefix-thirdparty-pugixml", "nimblefix-generated-assets")
-    add_includedirs("build/generated")
-    add_files("tests/*.cpp", "tools/xml2ffd/xml2ffd.cpp")
+    add_includedirs("build/generated", "tools/orchestra-import")
+    add_files("tests/*.cpp", "tools/xml2nfd/xml2nfd.cpp", "tools/orchestra-import/orchestra_import.cpp")
     remove_files("tests/test_main.cpp")
 
 add_internal_repo_includedirs("nimblefix-dictgen")
 add_internal_repo_includedirs("nimblefix-fix-session-testcases")
+add_internal_repo_includedirs("nimblefix-orchestra-import")
 add_internal_repo_includedirs("nimblefix-interop-runner")
 add_internal_repo_includedirs("nimblefix-soak")
 add_internal_repo_includedirs("nimblefix-fuzz-config")
@@ -407,7 +413,7 @@ add_internal_repo_includedirs("nimblefix-fuzz-codec")
 add_internal_repo_includedirs("nimblefix-fuzz-codec-libfuzzer")
 add_internal_repo_includedirs("nimblefix-initiator")
 add_internal_repo_includedirs("nimblefix-acceptor")
-add_internal_repo_includedirs("nimblefix-xml2ffd")
+add_internal_repo_includedirs("nimblefix-xml2nfd")
 add_internal_repo_includedirs("nimblefix-bench")
 add_internal_repo_includedirs("nimblefix-tls-transport-bench")
 add_internal_repo_includedirs("nimblefix-tests")
@@ -415,6 +421,7 @@ add_internal_repo_includedirs("nimblefix-tests")
 apply_local_dep("nimblefix", "nimblefix")
 apply_local_dep("nimblefix-dictgen", "nimblefix-dictgen")
 apply_local_dep("nimblefix-fix-session-testcases", "nimblefix-fix-session-testcases")
+apply_local_dep("nimblefix-orchestra-import", "nimblefix-orchestra-import")
 apply_local_dep("nimblefix-interop-runner", "nimblefix-interop-runner")
 apply_local_dep("nimblefix-soak", "nimblefix-soak")
 apply_local_dep("nimblefix-fuzz-config", "nimblefix-fuzz-config")

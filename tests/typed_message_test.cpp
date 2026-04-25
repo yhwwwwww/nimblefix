@@ -32,7 +32,7 @@ LoadDictionaryViewFromText(std::string_view text, std::string_view file_stub)
   }
 
   const auto artifact_path =
-    std::filesystem::temp_directory_path() / (std::string("nimblefix-") + std::string(file_stub) + ".art");
+    std::filesystem::temp_directory_path() / (std::string("nimblefix-") + std::string(file_stub) + ".nfa");
   const auto write_status = nimble::profile::WriteProfileArtifact(artifact_path, artifact.value());
   if (!write_status.ok()) {
     return write_status;

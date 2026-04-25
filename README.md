@@ -21,9 +21,9 @@ NimbleFIX is intentionally focused on the classic low-latency FIX stack, not the
 | **Classic FIX session layer** | **Implemented** | FIX 4.x / FIXT.1.1 initiator and acceptor runtime with Logon/Logout, heartbeat, sequence tracking, gap detection, resend recovery, reconnect, and persistence |
 | **FIX tagvalue encoding** | **Implemented** | Core codec, message builders, fixed-layout writers, raw pass-through, SIMD-assisted tag/value parsing |
 | **FIX over TLS (FIXS)** | **Implemented** | Optional OpenSSL-backed TLS transport, enabled at runtime per initiator counterparty or acceptor listener |
-| **FIX application-layer dictionaries** | **Partial** | Dictionary-driven `.ffd` / `.art` model with QuickFIX XML import tooling; not native FIX Orchestra schema support |
-| **FIX official session test cases** | **Partial** | Offline FIX Trading session-case manifest plus executable `.ffscenario` baseline; 73 of 85 official cases currently map to in-tree passing scenarios, and the remaining 12 optional cases are explicitly tracked as unsupported |
-| **FIX Orchestra** | **Absent** | No native Orchestra import, rules-of-engagement model, or Orchestra-driven code/test generation yet |
+| **FIX application-layer dictionaries** | **Partial** | Dictionary-driven `.nfd` / `.nfa` model with QuickFIX XML and FIX Orchestra XML import tooling; Orchestra behavior rules stay in separate `.nfct` sidecars |
+| **FIX official session test cases** | **Partial** | Offline FIX Trading session-case manifest plus executable `.nfscenario` baseline; 73 of 85 official cases currently map to in-tree passing scenarios, and the remaining 12 optional cases are explicitly tracked as unsupported |
+| **FIX Orchestra** | **Partial** | Offline `nimblefix-orchestra-import` generates structural `.nfd` plus `.nfct` contract sidecars, dump/markdown/interop augmentations, and cold-path runtime binding with explicit unsupported warnings |
 | **FIXP / SOFH** | **Absent** | No FIX Performance Session Layer or Simple Open Framing Header support |
 | **FIXML / SBE / FAST** | **Absent** | No alternate wire encodings beyond classic tag=value FIX |
 | **JSON / GPB / ASN.1 FIX encodings** | **Absent** | No alternate serialized FIX encodings currently implemented |
@@ -35,7 +35,7 @@ Existing open-source FIX engines (QuickFIX, QuickFIX/J, Fix8) are designed for c
 
 NimbleFIX was designed to answer: *what if every design decision optimized for the hot path?*
 
-- **Dictionary-backed codec**: FIX metadata is normalized once at startup, either from `.ffd` dictionaries or precompiled `.art` artifacts. The hot path uses the same in-memory dictionary representation either way.
+- **Dictionary-backed codec**: FIX metadata is normalized once at startup, either from `.nfd` dictionaries or precompiled `.nfa` artifacts. The hot path uses the same in-memory dictionary representation either way.
 - **Zero-copy message views**: Parsed messages are lightweight views over the original byte buffer. No copies until you explicitly request one.
 - **Single-writer session model**: Each session is owned by exactly one worker thread. No locks, no contention, no false sharing on the critical path.
 - **Pre-compiled frame templates**: For high-frequency message types, header/trailer fragments are pre-built. Only variable fields, BodyLength, and Checksum are filled per message.
@@ -66,7 +66,7 @@ NimbleFIX was designed to answer: *what if every design decision optimized for t
 
 | Aspect | QuickFIX | NimbleFIX |
 |--------|----------|---------|
-| **Parsing** | XML data dictionary loaded at runtime; fields stored in `std::map` | Normalized dictionary loaded from `.art` or parsed from `.ffd` at startup; hot path uses contiguous lookup sections |
+| **Parsing** | XML data dictionary loaded at runtime; fields stored in `std::map` | Normalized dictionary loaded from `.nfa` or parsed from `.nfd` at startup; hot path uses contiguous lookup sections |
 | **Message representation** | `FieldMap` with heap-allocated strings | Zero-copy `MessageView` over original bytes |
 | **Allocations per message** | Multiple (map insertions, string copies) | Zero in buffer-reuse encode path; minimal in parse path |
 | **Threading** | Global session lock, thread-per-session | Lock-free single-writer per session, sharded workers |
@@ -160,7 +160,7 @@ The helper scripts auto-select `xmake >= 3.0.0`, then `cmake + Ninja`, then `cma
 
 GitHub Actions CI uses that same auto-selection logic on Ubuntu and still exercises the named RHEL CMake presets via `ubi8/ubi:8.10` + `gcc-toolset-12` and `ubi9/ubi:9.7` + `gcc-toolset-14` container jobs on every push and pull request.
 
-When `build/generated/`, `build/bench/`, or `build/sample-basic.art` have been removed, `xmake build nimblefix-tests` and `xmake build nimblefix-bench` now regenerate the required shared assets automatically.
+When `build/generated/`, `build/bench/`, or `build/sample-basic.nfa` have been removed, `xmake build nimblefix-tests` and `xmake build nimblefix-bench` now regenerate the required shared assets automatically.
 
 The helper scripts auto-select `xmake`, then `cmake + Ninja`, then `cmake + make`. Default xmake builds write executables under `build/linux/x86_64/release/`. Ninja-based CMake presets write to `build/cmake/<preset>/bin/`, and make-based fallback presets write to `build/cmake/<preset>-make/bin/`. The helper scripts keep using the shared repository-local assets under `build/generated/` and `build/bench/` so tests and benchmarks resolve the same files regardless of build system.
 
@@ -178,7 +178,7 @@ The helper scripts auto-select `xmake`, then `cmake + Ninja`, then `cmake + make
 NimbleFIX currently compiles into a single static library `libnimblefix.a`. To use it in your own program:
 
 1. **Build the library**: `xmake f -m release -y && xmake build nimblefix` or, if you need the alternative path, `cmake --build build/cmake/dev-release --target nimblefix` (or `build/cmake/dev-release-make` when forcing the make fallback)
-2. **Compile a protocol profile**: Run `nimblefix-dictgen` to produce a `.art` binary artifact from your dictionary (optional — `.ffd` files can also be loaded directly at runtime)
+2. **Compile a protocol profile**: Run `nimblefix-dictgen` to produce a `.nfa` binary artifact from your dictionary (optional — `.nfd` files can also be loaded directly at runtime)
 3. **Link and include**: Point your compiler at `include/public/` for headers and link against `libnimblefix.a`
 
 **xmake (as a subdependency):**
@@ -237,9 +237,9 @@ Advanced consumers can add `nimblefix/session/admin_protocol.h`, `nimblefix/sess
 
 A **profile** is a compiled binary description of one FIX protocol variant — which fields exist, which messages are defined, what groups they contain. Each profile carries a `profile_id` (uint64) that you choose when writing the dictionary. Sessions reference profiles by this ID, and one engine can load multiple profiles simultaneously (e.g., FIX 4.2 and FIX 4.4).
 
-### `.ffd` — NimbleFIX Dictionary
+### `.nfd` — NimbleFIX Dictionary
 
-A text file defining all fields, messages, and groups for one FIX protocol variant. Contains a `profile_id` you assign (any unique number, e.g. `1001` for FIX 4.4). Multiple `.ffd` files can be passed to `nimblefix-dictgen` or `Engine` — the first provides the baseline, additional files serve as incremental overlays (adding fields, extending messages, overriding field rules).
+A text file defining all fields, messages, and groups for one FIX protocol variant. Contains a `profile_id` you assign (any unique number, e.g. `1001` for FIX 4.4). Multiple `.nfd` files can be passed to `nimblefix-dictgen` or `Engine` — the first provides the baseline, additional files serve as incremental overlays (adding fields, extending messages, overriding field rules).
 
 ```
 profile_id=1001
@@ -256,16 +256,20 @@ group|453|448|Parties|0|448:r,447:r,452:r
 
 Format: line-based, pipe-delimited. Lines starting with `#` are comments. Header lines are `key=value`. Field definition: `field|tag|name|type|flags`. Message definition: `message|msg_type|name|admin_flag|field_rules`. Group definition: `group|count_tag|delimiter_tag|name|flags|field_rules`. Field rules use `tag:r` (required) or `tag:o` (optional).
 
-### `.art` — Artifact
+### `.nfa` — Artifact
 
-The compiled binary output of `nimblefix-dictgen`. It's a flat, mmap-loadable file containing string tables, field/message/group definitions, validation rules, and lookup tables. The `profile_id` from your `.ffd` is embedded in it. Loading an `.art` file avoids text parsing at startup — useful for production deployments or when startup time matters.
+The compiled binary output of `nimblefix-dictgen`. It's a flat, mmap-loadable file containing string tables, field/message/group definitions, validation rules, and lookup tables. The `profile_id` from your `.nfd` is embedded in it. Loading an `.nfa` file avoids text parsing at startup — useful for production deployments or when startup time matters.
+
+### `.nfct` — Contract Sidecar
+
+The behavior companion generated by `nimblefix-orchestra-import`. `.nfct` stays separate from `.nfa` on purpose: `.nfa` remains the structural, mmap-friendly hot-path dictionary artifact, while `.nfct` stores cold-path-only behavior such as conditional required/forbidden fields, enum/code constraints, role and direction limits, service subsets, flow edges, source rule IDs, and importer warnings. Runtime code loads `.nfct` through `EngineConfig::profile_contracts` and applies deployment-selected service subsets through `CounterpartyConfig::contract_service_subsets`. Unsupported Orchestra semantics are emitted as importer warnings and are not interpreted on the steady-state codec/session hot path.
 
 ### Overlay
 
-Multiple `.ffd` files can be merged to extend a base profile with venue-specific custom fields. The first `.ffd` provides the baseline; additional files add fields, extend messages, or override field rules:
+Multiple `.nfd` files can be merged to extend a base profile with venue-specific custom fields. The first `.nfd` provides the baseline; additional files add fields, extend messages, or override field rules:
 
 ```
-# venue_extensions.ffd — overlay with custom fields
+# venue_extensions.nfd — overlay with custom fields
 field|5001|VenueOrderType|string|1
 field|5002|VenueAccount|string|1
 message|D|NewOrderSingle|0|5001:r,5002:o
@@ -299,45 +303,62 @@ Controls how strict the codec is during decode:
 
 | Tool | Purpose |
 |------|---------|
-| `nimblefix-dictgen` | Compile `.ffd` dictionaries into binary `.art` profiles (supports merging multiple `.ffd` files and generating C++ builder headers) |
-| `nimblefix-xml2ffd` | Convert QuickFIX XML data dictionaries to `.ffd` format; also generates C++ builder headers from `.ffd` |
+| `nimblefix-dictgen` | Compile `.nfd` dictionaries into binary `.nfa` profiles (supports merging multiple `.nfd` files and generating C++ builder headers) |
+| `nimblefix-xml2nfd` | Convert QuickFIX XML data dictionaries to `.nfd` format; also generates C++ builder headers from `.nfd` |
+| `nimblefix-orchestra-import` | Convert FIX Orchestra XML into structural `.nfd` input plus `.nfct` contract sidecars; can also dump, render markdown, and emit interop augmentations from an existing sidecar |
 | `nimblefix-initiator` | CLI FIX initiator for testing and interop |
 | `nimblefix-acceptor` | CLI FIX acceptor (echo server) |
 | `nimblefix-soak` | Stress test with fault injection (gaps, duplicates, reorders, disconnects) |
 | `nimblefix-bench` | Latency/throughput benchmark with allocation and CPU counter tracking |
 | `nimblefix-fuzz-codec` | libFuzzer harness for codec and admin protocol |
-| `nimblefix-fuzz-config` | libFuzzer harness for `.ffcfg` config parser |
-| `nimblefix-fuzz-dictgen` | libFuzzer harness for `.ffd` dictionary parser |
+| `nimblefix-fuzz-config` | libFuzzer harness for `.nfcfg` config parser |
+| `nimblefix-fuzz-dictgen` | libFuzzer harness for `.nfd` dictionary parser |
 | `nimblefix-interop-runner` | Bidirectional interoperability scenario runner |
 
 ### Compile a Profile
 
 ```bash
 ./build/linux/x86_64/release/nimblefix-dictgen \
-    --input samples/basic_profile.ffd \
-    --merge samples/basic_overlay.ffd \
-    --output build/sample-basic.art \
+    --input samples/basic_profile.nfd \
+    --merge samples/basic_overlay.nfd \
+    --output build/sample-basic.nfa \
     --cpp-builders build/generated/sample_basic_builders.h
 ```
 
 | Flag | Required | Description |
 |------|----------|-------------|
-| `--input` | yes | Base dictionary file (`.ffd`) |
-| `--merge` | no | Additional `.ffd` file(s) to merge (repeatable) |
-| `--output` | yes | Output artifact path (`.art`) |
+| `--input` | yes | Base dictionary file (`.nfd`) |
+| `--merge` | no | Additional `.nfd` file(s) to merge (repeatable) |
+| `--output` | yes | Output artifact path (`.nfa`) |
 | `--cpp-builders` | no | Generate C++ header with profile constants |
 
 ### Convert from QuickFIX XML
 
 ```bash
-./build/linux/x86_64/release/nimblefix-xml2ffd \
+./build/linux/x86_64/release/nimblefix-xml2nfd \
     --xml FIX44.xml \
-    --output my_profile.ffd \
+    --output my_profile.nfd \
     --profile-id 1001 \
     --cpp-builders generated_builders.h
 ```
 
 Components are inlined, groups are extracted, XML types are mapped to NimbleFIX types, and `schema_hash` is auto-computed.
+
+### Import from FIX Orchestra XML
+
+```bash
+./build/linux/x86_64/release/nimblefix-orchestra-import \
+    --xml FIXOrchestra.xml \
+    --profile-id 4400 \
+    --output-nfd build/fix44-orchestra.nfd \
+    --output-contract build/fix44-orchestra.nfct
+
+./build/linux/x86_64/release/nimblefix-dictgen \
+    --input build/fix44-orchestra.nfd \
+    --output build/fix44-orchestra.nfa
+```
+
+Use `--contract <file> --dump`, `--markdown <file>`, or `--interop-dir <dir>` to inspect the generated sidecar and emit contract-driven `.nfscenario` augmentations. Unsupported Orchestra rules are retained as warnings in the sidecar instead of being interpreted on the runtime hot path.
 
 ---
 
@@ -379,9 +400,9 @@ class MyApp : public nimble::runtime::ApplicationCallbacks {
 int main() {
     nimble::runtime::EngineConfig config;
     config.worker_count = 1;
-    config.profile_artifacts = {"build/sample-basic.art"};
-    // Or load .ffd directly:
-    // config.profile_dictionaries = {{"samples/basic_profile.ffd"}};
+    config.profile_artifacts = {"build/sample-basic.nfa"};
+    // Or load .nfd directly:
+    // config.profile_dictionaries = {{"samples/basic_profile.nfd"}};
     config.counterparties = {{
         .name = "venue-a",
         .session = {
@@ -491,7 +512,7 @@ auto status = writer.encode_to_buffer(dictionary, options, &buffer);
 
 nimble::runtime::EngineConfig config;
 config.worker_count = 2;
-config.profile_artifacts = {"build/sample-basic.art"};
+config.profile_artifacts = {"build/sample-basic.nfa"};
 config.listeners = {{
     .name = "main",
     .host = "0.0.0.0",
@@ -528,7 +549,7 @@ acceptor.Run();
 ```cpp
 nimble::runtime::EngineConfig config;
 config.worker_count = 1;
-config.profile_artifacts = {"build/sample-basic.art"};
+config.profile_artifacts = {"build/sample-basic.nfa"};
 config.listeners = {{
     .name = "main",
     .host = "0.0.0.0",
@@ -608,8 +629,9 @@ auto OnAppMessage(const nimble::runtime::RuntimeEvent& event)
 | `enable_metrics` | bool | true | Enable built-in metrics collection |
 | `trace_mode` | enum | `kDisabled` | `kDisabled` or `kRing` (ring-buffer trace) |
 | `trace_capacity` | uint32 | 0 | Ring trace buffer size |
-| `profile_artifacts` | paths | — | Paths to compiled `.art` profile files |
-| `profile_dictionaries` | path[][] | — | Paths to `.ffd` dictionary file groups to load directly at runtime (each inner vector is merged as base + overlays) |
+| `profile_artifacts` | paths | — | Paths to compiled `.nfa` profile files |
+| `profile_dictionaries` | path[][] | — | Paths to `.nfd` dictionary file groups to load directly at runtime (each inner vector is merged as base + overlays) |
+| `profile_contracts` | paths | — | Paths to `.nfct` contract sidecars loaded on cold paths and matched by `profile_id` |
 | `profile_madvise` | bool | false | Call `madvise(MADV_WILLNEED)` on loaded artifacts |
 | `profile_mlock` | bool | false | Call `mlock()` on loaded artifacts (requires sufficient RLIMIT) |
 | `front_door_cpu` | uint32? | — | Pin acceptor front-door thread to CPU core |
@@ -642,6 +664,9 @@ auto OnAppMessage(const nimble::runtime::RuntimeEvent& event)
 | `session.heartbeat_interval_seconds` | uint32 | 30 | FIX heartbeat interval |
 | `session.is_initiator` | bool | false | true = initiator, false = acceptor |
 | `session.default_appl_ver_id` | string | — | Default ApplVerID for FIXT.1.1 sessions |
+| `supported_app_msg_types` | string[] | empty | Optional inbound application MsgType allowlist; if a bound contract sidecar is present this set must stay within the contract receive subset |
+| `contract_service_subsets` | string[] | empty | Optional deployment-selected Orchestra service subsets; valid only when a matching `.nfct` sidecar is loaded |
+| `application_messages_available` | bool | true | When false, known application messages are answered with `BusinessMessageReject(380=4)` |
 | `store_mode` | enum | `kMemory` | `kMemory`, `kMmap`, or `kDurableBatch` |
 | `store_path` | path | — | Directory for mmap/durable store files |
 | `recovery_mode` | enum | `kMemoryOnly` | `kMemoryOnly`, `kWarmRestart`, or `kColdStart` |
@@ -703,22 +728,22 @@ config.counterparties.push_back(
 
 For acceptors, use `acceptor_transport_security(kTlsOnly)` when a sensitive session must not bind on a plain listener. `verify_peer=false` is intended only for controlled tests; production deployments should keep peer verification enabled and provide CA files or paths.
 
-### Tool Runtime Config (`.ffcfg`)
+### Tool Runtime Config (`.nfcfg`)
 
-The built-in binaries (`nimblefix-acceptor`, `nimblefix-interop-runner`, and tests) also accept an internal `.ffcfg` format. It is a convenience layer over `EngineConfig`, not a stable public library API.
+The built-in binaries (`nimblefix-acceptor`, `nimblefix-interop-runner`, and tests) also accept an internal `.nfcfg` format. It is a convenience layer over `EngineConfig`, not a stable public library API.
 
 ```text
 engine.worker_count=1
 engine.enable_metrics=true
 engine.trace_mode=disabled
-profile=build/sample-basic.art
+profile=build/sample-basic.nfa
 listener|main|127.0.0.1|9921|0
 counterparty|fix44-demo|4201|1001|FIX.4.4|SELL|BUY|memory||memory|inline|30|false
 ```
 
-`profile=` may be repeated. `dictionary=` may also be repeated, and each `dictionary=` line accepts a comma-separated base-plus-overlay `.ffd` set that is loaded as one merged dictionary group.
+`profile=` may be repeated. `dictionary=` may also be repeated, and each `dictionary=` line accepts a comma-separated base-plus-overlay `.nfd` set that is loaded as one merged dictionary group.
 
-For ready-to-run examples, see `tests/data/interop/loopback-runtime.ffcfg` and `tests/data/interop/runtime-multiversion.ffcfg`. `dispatch_mode` selects inline vs queue-decoupled delivery per counterparty. `queue_app_mode` is an engine-level knob and only matters when at least one counterparty uses `dispatch_mode=queue`. The full record order and advanced columns are documented in `docs/development.md`.
+For ready-to-run examples, see `tests/data/interop/loopback-runtime.nfcfg` and `tests/data/interop/runtime-multiversion.nfcfg`. `dispatch_mode` selects inline vs queue-decoupled delivery per counterparty. `queue_app_mode` is an engine-level knob and only matters when at least one counterparty uses `dispatch_mode=queue`. The full record order and advanced columns are documented in `docs/development.md`.
 
 ---
 
@@ -806,7 +831,7 @@ QuickFIX is still the reference implementation most teams already know and alrea
 
 - Command: `./bench/bench.sh compare`
 - Default compare args: `--iterations 100000 --loopback 1000 --replay 1000 --replay-span 128`
-- Dictionary lineage: QuickFIX `bench/vendor/quickfix/spec/FIX44.xml` → `nimblefix-xml2ffd` → `build/bench/quickfix_FIX44.ffd` → `nimblefix-dictgen` → `build/bench/quickfix_FIX44.art`
+- Dictionary lineage: QuickFIX `bench/vendor/quickfix/spec/FIX44.xml` → `nimblefix-xml2nfd` → `build/bench/quickfix_FIX44.nfd` → `nimblefix-dictgen` → `build/bench/quickfix_FIX44.nfa`
 - Business fixture: one neutral FIX44 `NewOrderSingle` with a single `NoPartyIDs=1` group entry
 - Encode fairness: both engines pin `SendingTime` to the fixture timestamp so the encode tiers measure object-to-wire work, not per-iteration clock formatting
 - Allocation tracking: global `operator new` interception counts heap allocations per iteration
@@ -849,13 +874,13 @@ Key observations:
 ```bash
 ./bench/bench.sh build
 ./bench/bench.sh nimblefix        # NimbleFIX main suite (artifact)
-./bench/bench.sh nimblefix-ffd    # NimbleFIX suite (direct .ffd loading)
+./bench/bench.sh nimblefix-nfd    # NimbleFIX suite (direct .nfd loading)
 ./bench/bench.sh quickfix       # QuickFIX comparison
 ./bench/bench.sh builder        # Object-to-wire compare only
 ./bench/bench.sh compare        # Full cross-engine comparison
 ```
 
-Every benchmark command above intentionally uses the pinned QuickFIX 4.4 inputs: `bench/vendor/quickfix/spec/FIX44.xml`, `build/bench/quickfix_FIX44.ffd`, or `build/bench/quickfix_FIX44.art`.
+Every benchmark command above intentionally uses the pinned QuickFIX 4.4 inputs: `bench/vendor/quickfix/spec/FIX44.xml`, `build/bench/quickfix_FIX44.nfd`, or `build/bench/quickfix_FIX44.nfa`.
 
 For exact measurement boundaries, per-metric start/end points, and flow diagrams that mark where each metric sits in the pipeline, see [bench/README.md](bench/README.md).
 
@@ -864,7 +889,7 @@ For exact measurement boundaries, per-metric start/end points, and flow diagrams
 ## Further Documentation
 
 - [docs/architecture.md](docs/architecture.md) — Internal architecture, module dependency graph, data flow diagrams, threading model details
-- [docs/development.md](docs/development.md) — Development guide, testing, `.ffd` format specification, profiling, stress/fuzz testing, extending the engine
+- [docs/development.md](docs/development.md) — Development guide, testing, `.nfd` format specification, profiling, stress/fuzz testing, extending the engine
 - [bench/README.md](bench/README.md) — Benchmark infrastructure, measurement boundaries, full result tables
 
 ## Project Status

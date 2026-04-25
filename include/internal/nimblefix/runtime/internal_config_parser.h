@@ -8,7 +8,7 @@
 
 namespace nimble::runtime {
 
-// Internal .ffcfg format parser used by tools and tests.
+// Internal .nfcfg format parser used by tools and tests.
 // Applications should populate EngineConfig directly from their own
 // configuration source.
 auto

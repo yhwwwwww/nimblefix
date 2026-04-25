@@ -12,7 +12,7 @@ namespace {
 auto
 BuildSoakArtifact(const std::filesystem::path& artifact_path) -> nimble::base::Status
 {
-  const auto ffd_path = std::filesystem::path(NIMBLEFIX_PROJECT_DIR) / "build" / "bench" / "quickfix_FIX44.ffd";
+  const auto ffd_path = std::filesystem::path(NIMBLEFIX_PROJECT_DIR) / "build" / "bench" / "quickfix_FIX44.nfd";
   auto dictionary = nimble::profile::LoadNormalizedDictionaryFile(ffd_path);
   if (!dictionary.ok()) {
     return dictionary.status();
@@ -62,7 +62,7 @@ RunSoakCase(const std::filesystem::path& artifact_path,
 
 TEST_CASE("soak-smoke", "[soak-smoke]")
 {
-  const auto artifact_path = std::filesystem::temp_directory_path() / "nimblefix-soak-smoke.art";
+  const auto artifact_path = std::filesystem::temp_directory_path() / "nimblefix-soak-smoke.nfa";
 
   nimble::runtime::SoakConfig config;
   config.profile_artifact = artifact_path;
@@ -92,7 +92,7 @@ TEST_CASE("soak-smoke", "[soak-smoke]")
 
 TEST_CASE("soak-long", "[soak-long]")
 {
-  const auto artifact_path = std::filesystem::temp_directory_path() / "nimblefix-soak-long.art";
+  const auto artifact_path = std::filesystem::temp_directory_path() / "nimblefix-soak-long.nfa";
 
   nimble::runtime::SoakConfig config;
   config.profile_artifact = artifact_path;
@@ -126,7 +126,7 @@ TEST_CASE("soak-long", "[soak-long]")
 
 TEST_CASE("soak-multihour", "[soak-multihour]")
 {
-  const auto artifact_path = std::filesystem::temp_directory_path() / "nimblefix-soak-multihour.art";
+  const auto artifact_path = std::filesystem::temp_directory_path() / "nimblefix-soak-multihour.nfa";
 
   nimble::runtime::SoakConfig config;
   config.profile_artifact = artifact_path;
@@ -161,7 +161,7 @@ TEST_CASE("soak-multihour", "[soak-multihour]")
 
 TEST_CASE("soak-multiworker", "[soak-multiworker]")
 {
-  const auto artifact_path = std::filesystem::temp_directory_path() / "nimblefix-soak-multiworker.art";
+  const auto artifact_path = std::filesystem::temp_directory_path() / "nimblefix-soak-multiworker.nfa";
 
   nimble::runtime::SoakConfig config;
   config.profile_artifact = artifact_path;

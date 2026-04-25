@@ -4,6 +4,7 @@
 #include "nimblefix/codec/fix_tags.h"
 #include "nimblefix/profile/normalized_dictionary.h"
 #include "nimblefix/profile/profile_loader.h"
+#include "nimblefix/runtime/contract_binding.h"
 #include "nimblefix/runtime/internal_config_parser.h"
 #include "nimblefix/session/admin_protocol.h"
 
@@ -1390,6 +1391,11 @@ RunInteropScenario(const InteropScenario& scenario) -> base::Result<InteropRepor
     return validation;
   }
 
+  auto loaded_contracts = LoadContractMap(scenario.engine_config.profile_contracts);
+  if (!loaded_contracts.ok()) {
+    return loaded_contracts.status();
+  }
+
   ScenarioRuntimeContext context;
   context.metrics.Reset(scenario.engine_config.worker_count);
   context.trace.Configure(
@@ -1412,11 +1418,16 @@ RunInteropScenario(const InteropScenario& scenario) -> base::Result<InteropRepor
 
   const ShardedRuntime routing(scenario.engine_config.worker_count);
   for (const auto& counterparty : scenario.engine_config.counterparties) {
-    auto store = MakeStore(counterparty);
+    auto effective_counterparty = ResolveEffectiveCounterpartyConfig(counterparty, loaded_contracts.value());
+    if (!effective_counterparty.ok()) {
+      return effective_counterparty.status();
+    }
+
+    auto store = MakeStore(effective_counterparty.value());
     if (!store.ok()) {
       return store.status();
     }
-    session::SessionCore session(counterparty.session);
+    session::SessionCore session(effective_counterparty.value().session);
     const auto worker_id = routing.RouteSession(session.key());
     auto status = context.metrics.RegisterSession(session.session_id(), worker_id);
     if (!status.ok()) {
@@ -1428,17 +1439,18 @@ RunInteropScenario(const InteropScenario& scenario) -> base::Result<InteropRepor
                          0U,
                          session.profile_id(),
                          0U,
-                         counterparty.name);
-    context.counterparties.emplace(session.session_id(), counterparty);
+                         effective_counterparty.value().name);
+    context.counterparties.emplace(session.session_id(), effective_counterparty.value());
     context.workers.emplace(session.session_id(), worker_id);
     context.stores.emplace(session.session_id(), std::move(store).value());
     context.sessions.emplace(session.session_id(), std::move(session));
 
-    const auto dictionary_it = context.dictionaries_by_profile_id.find(counterparty.session.profile_id);
+    const auto dictionary_it =
+      context.dictionaries_by_profile_id.find(effective_counterparty.value().session.profile_id);
     if (dictionary_it == context.dictionaries_by_profile_id.end()) {
       return base::Status::NotFound("interop scenario missing profile artifact for protocol session");
     }
-    auto protocol = std::make_unique<session::AdminProtocol>(MakeProtocolConfig(counterparty),
+    auto protocol = std::make_unique<session::AdminProtocol>(MakeProtocolConfig(effective_counterparty.value()),
                                                              *dictionary_it->second,
                                                              context.stores.at(counterparty.session.session_id).get());
     context.protocols.emplace(counterparty.session.session_id,

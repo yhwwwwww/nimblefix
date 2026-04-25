@@ -10,7 +10,7 @@
 
 TEST_CASE("profile-loader", "[profile-loader]")
 {
-  const auto artifact_path = std::filesystem::path(NIMBLEFIX_PROJECT_DIR) / "build" / "bench" / "quickfix_FIX44.art";
+  const auto artifact_path = std::filesystem::path(NIMBLEFIX_PROJECT_DIR) / "build" / "bench" / "quickfix_FIX44.nfa";
   if (!std::filesystem::exists(artifact_path)) {
     SKIP("FIX44 artifact not available at: " << artifact_path.string());
   }
@@ -37,7 +37,7 @@ TEST_CASE("profile-loader", "[profile-loader]")
 
 TEST_CASE("profile madvise warming", "[profile-loader]")
 {
-  const auto artifact_path = std::filesystem::path(NIMBLEFIX_PROJECT_DIR) / "build" / "bench" / "quickfix_FIX44.art";
+  const auto artifact_path = std::filesystem::path(NIMBLEFIX_PROJECT_DIR) / "build" / "bench" / "quickfix_FIX44.nfa";
   if (!std::filesystem::exists(artifact_path)) {
     SKIP("FIX44 artifact not available at: " << artifact_path.string());
   }
@@ -53,7 +53,7 @@ TEST_CASE("profile madvise warming", "[profile-loader]")
 
 TEST_CASE("profile mlock warming", "[profile-loader]")
 {
-  const auto artifact_path = std::filesystem::path(NIMBLEFIX_PROJECT_DIR) / "build" / "bench" / "quickfix_FIX44.art";
+  const auto artifact_path = std::filesystem::path(NIMBLEFIX_PROJECT_DIR) / "build" / "bench" / "quickfix_FIX44.nfa";
   if (!std::filesystem::exists(artifact_path)) {
     SKIP("FIX44 artifact not available at: " << artifact_path.string());
   }
@@ -81,7 +81,7 @@ TEST_CASE("profile warming disabled by default", "[profile-loader]")
 
 TEST_CASE("schema_hash validation match", "[profile-loader]")
 {
-  const auto artifact_path = std::filesystem::path(NIMBLEFIX_PROJECT_DIR) / "build" / "bench" / "quickfix_FIX44.art";
+  const auto artifact_path = std::filesystem::path(NIMBLEFIX_PROJECT_DIR) / "build" / "bench" / "quickfix_FIX44.nfa";
   if (!std::filesystem::exists(artifact_path)) {
     SKIP("FIX44 artifact not available at: " << artifact_path.string());
   }
@@ -96,7 +96,7 @@ TEST_CASE("schema_hash validation match", "[profile-loader]")
 
 TEST_CASE("schema_hash validation mismatch", "[profile-loader]")
 {
-  const auto artifact_path = std::filesystem::path(NIMBLEFIX_PROJECT_DIR) / "build" / "bench" / "quickfix_FIX44.art";
+  const auto artifact_path = std::filesystem::path(NIMBLEFIX_PROJECT_DIR) / "build" / "bench" / "quickfix_FIX44.nfa";
   if (!std::filesystem::exists(artifact_path)) {
     SKIP("FIX44 artifact not available at: " << artifact_path.string());
   }

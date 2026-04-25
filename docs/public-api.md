@@ -30,7 +30,7 @@ Bring in these additional headers only when you need them:
 
 ## Lifecycle Contract
 
-`Engine::Boot()` is the normal entry point. It validates `EngineConfig`, loads profiles from `profile_artifacts` and `profile_dictionaries`, registers static counterparties, and makes `config()`, `profiles()`, `runtime()`, `FindCounterpartyConfig()`, and `FindListenerConfig()` available on success.
+`Engine::Boot()` is the normal entry point. It validates `EngineConfig`, loads profiles from `profile_artifacts` and `profile_dictionaries`, optionally loads matching contract sidecars from `profile_contracts`, registers static counterparties, and makes `config()`, `profiles()`, `runtime()`, `FindCounterpartyConfig()`, and `FindListenerConfig()` available on success.
 
 `Engine::LoadProfiles()` exists for tooling and tests that need profile loading without a booted runtime. Typical applications do not need to call it directly because `Boot()` already does.
 
@@ -70,7 +70,8 @@ public:
 };
 
 nimble::runtime::EngineConfig config;
-config.profile_artifacts.push_back("fix44.art");
+config.profile_artifacts.push_back("fix44.nfa");
+config.profile_contracts.push_back("fix44-contract.nfct");
 config.counterparties.push_back(
 	nimble::runtime::CounterpartyConfigBuilder::Initiator(
 		"buy-side",
@@ -78,6 +79,7 @@ config.counterparties.push_back(
 		nimble::session::SessionKey{ .sender_comp_id = "BUY1", .target_comp_id = "SELL1" },
 		4400U,
 		nimble::session::TransportVersion::kFix44)
+		.contract_service_subsets({"order-entry"})
 		.reconnect()
 		.build());
 
@@ -108,6 +110,8 @@ Notes:
 - `OpenSession()` may block until the TCP dial succeeds or times out.
 - `OpenSessionAsync()` defers the dial onto the runtime worker loop if the caller cannot block.
 - `SessionKey` is always written from the local engine's perspective. For initiators, `sender_comp_id` is your local `49` and `target_comp_id` is the remote `56`.
+- `profile_contracts` is optional. Use it only for Orchestra-derived `.nfct` sidecars; `.nfa` remains the structural dictionary artifact and `.nfct` remains cold-path behavior metadata.
+- `contract_service_subsets` is also optional. If you set it, the named subsets must exist in the loaded contract sidecar for the selected `profile_id`.
 - `nimblefix/codec/fix_tags.h` exposes named FIX tag constants and common `MsgType` constants; public examples should prefer those names over raw values such as `35`, `112`, or `"1"`.
 
 ## Session Events And Send Boundaries
@@ -155,6 +159,17 @@ Additional conditional requirements:
 - `EngineConfig::listeners` is required before `LiveAcceptor::OpenListeners()`.
 
 `CounterpartyConfigBuilder` and `ListenerConfigBuilder` exist to reduce boilerplate for the common cases above.
+
+## Orchestra Contract Sidecars
+
+When you import FIX Orchestra, keep the layering explicit:
+
+- `.nfa` or `.nfd` still define only structure: fields, messages, groups, and validation tables used by the codec.
+- `.nfct` sidecars define only behavior: conditional field rules, enum/code constraints, role-direction restrictions, service subsets, flow edges, and importer warnings.
+- `EngineConfig::profile_contracts` loads sidecars on cold paths.
+- `CounterpartyConfig::contract_service_subsets` selects which sidecar service subsets apply to one deployed session.
+
+Unsupported Orchestra semantics are surfaced as importer warnings and contract introspection output. NimbleFIX does not parse Orchestra XML or interpret unsupported rules on the steady-state per-message hot path.
 
 ## Optional TLS Transport
 
@@ -237,7 +252,7 @@ public:
 };
 
 nimble::runtime::EngineConfig config;
-config.profile_artifacts.push_back("fix44.art");
+config.profile_artifacts.push_back("fix44.nfa");
 config.listeners.push_back(
 	nimble::runtime::ListenerConfigBuilder::Named("main").bind("0.0.0.0", 9876).build());
 config.counterparties.push_back(
@@ -279,7 +294,7 @@ Example:
 
 ```cpp
 nimble::runtime::EngineConfig config;
-config.profile_artifacts.push_back("fix44.art");
+config.profile_artifacts.push_back("fix44.nfa");
 config.listeners.push_back(
 	nimble::runtime::ListenerConfigBuilder::Named("main").bind("0.0.0.0", 9876).build());
 config.accept_unknown_sessions = true;

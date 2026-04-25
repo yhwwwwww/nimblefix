@@ -44,11 +44,11 @@ set(NIMBLEFIX_GENERATED_DIR "${NIMBLEFIX_PROJECT_ROOT}/build/generated")
 set(NIMBLEFIX_OUTPUT_ROOT "${NIMBLEFIX_PROJECT_ROOT}/build")
 set(NIMBLEFIX_BENCH_OUTPUT_DIR "${NIMBLEFIX_OUTPUT_ROOT}/bench")
 set(NIMBLEFIX_FIX44_XML "${NIMBLEFIX_QUICKFIX_ROOT}/spec/FIX44.xml")
-set(NIMBLEFIX_FIX44_FFD "${NIMBLEFIX_BENCH_OUTPUT_DIR}/quickfix_FIX44.ffd")
-set(NIMBLEFIX_FIX44_ART "${NIMBLEFIX_BENCH_OUTPUT_DIR}/quickfix_FIX44.art")
+set(NIMBLEFIX_FIX44_NFD "${NIMBLEFIX_BENCH_OUTPUT_DIR}/quickfix_FIX44.nfd")
+set(NIMBLEFIX_FIX44_NFA "${NIMBLEFIX_BENCH_OUTPUT_DIR}/quickfix_FIX44.nfa")
 set(NIMBLEFIX_FIX44_BUILDERS "${NIMBLEFIX_GENERATED_DIR}/fix44_builders.h")
 set(NIMBLEFIX_FIX44_READERS "${NIMBLEFIX_GENERATED_DIR}/fix44_readers.h")
-set(NIMBLEFIX_SAMPLE_ART "${NIMBLEFIX_OUTPUT_ROOT}/sample-basic.art")
+set(NIMBLEFIX_SAMPLE_NFA "${NIMBLEFIX_OUTPUT_ROOT}/sample-basic.nfa")
 set(NIMBLEFIX_SAMPLE_BUILDERS "${NIMBLEFIX_GENERATED_DIR}/sample_basic_builders.h")
 set(NIMBLEFIX_SAMPLE_READERS "${NIMBLEFIX_GENERATED_DIR}/sample_basic_readers.h")
 
@@ -164,14 +164,21 @@ file(GLOB NIMBLEFIX_DICTGEN_SOURCES CONFIGURE_DEPENDS
 )
 nimblefix_add_binary(nimblefix-dictgen ${NIMBLEFIX_DICTGEN_SOURCES})
 
-file(GLOB NIMBLEFIX_XML2FFD_SOURCES CONFIGURE_DEPENDS
-    "${PROJECT_SOURCE_DIR}/tools/xml2ffd/*.cpp"
+file(GLOB NIMBLEFIX_XML2NFD_SOURCES CONFIGURE_DEPENDS
+    "${PROJECT_SOURCE_DIR}/tools/xml2nfd/*.cpp"
 )
-add_executable(nimblefix-xml2ffd ${NIMBLEFIX_XML2FFD_SOURCES})
-target_link_libraries(nimblefix-xml2ffd PRIVATE nimblefix nimblefix-thirdparty-pugixml)
-nimblefix_add_internal_headers(nimblefix-xml2ffd)
+add_executable(nimblefix-xml2nfd ${NIMBLEFIX_XML2NFD_SOURCES})
+target_link_libraries(nimblefix-xml2nfd PRIVATE nimblefix nimblefix-thirdparty-pugixml)
+nimblefix_add_internal_headers(nimblefix-xml2nfd)
 
 if(NIMBLEFIX_BUILD_TOOLS)
+    file(GLOB NIMBLEFIX_ORCHESTRA_IMPORT_SOURCES CONFIGURE_DEPENDS
+        "${PROJECT_SOURCE_DIR}/tools/orchestra-import/*.cpp"
+    )
+    add_executable(nimblefix-orchestra-import ${NIMBLEFIX_ORCHESTRA_IMPORT_SOURCES})
+    target_link_libraries(nimblefix-orchestra-import PRIVATE nimblefix nimblefix-thirdparty-pugixml)
+    nimblefix_add_internal_headers(nimblefix-orchestra-import)
+
     file(GLOB NIMBLEFIX_FIX_SESSION_TESTCASE_SOURCES CONFIGURE_DEPENDS
         "${PROJECT_SOURCE_DIR}/tools/fix-session-testcases/*.cpp"
     )
@@ -228,57 +235,57 @@ endif()
 
 add_custom_command(
     OUTPUT
-        "${NIMBLEFIX_FIX44_FFD}"
-        "${NIMBLEFIX_FIX44_ART}"
+        "${NIMBLEFIX_FIX44_NFD}"
+        "${NIMBLEFIX_FIX44_NFA}"
         "${NIMBLEFIX_FIX44_BUILDERS}"
         "${NIMBLEFIX_FIX44_READERS}"
     COMMAND "${CMAKE_COMMAND}" -E make_directory "${NIMBLEFIX_BENCH_OUTPUT_DIR}"
     COMMAND "${CMAKE_COMMAND}" -E make_directory "${NIMBLEFIX_GENERATED_DIR}"
-    COMMAND $<TARGET_FILE:nimblefix-xml2ffd>
+    COMMAND $<TARGET_FILE:nimblefix-xml2nfd>
         --xml "${NIMBLEFIX_FIX44_XML}"
-        --output "${NIMBLEFIX_FIX44_FFD}"
+        --output "${NIMBLEFIX_FIX44_NFD}"
         --profile-id 4400
     COMMAND $<TARGET_FILE:nimblefix-dictgen>
-        --input "${NIMBLEFIX_FIX44_FFD}"
-        --output "${NIMBLEFIX_FIX44_ART}"
+        --input "${NIMBLEFIX_FIX44_NFD}"
+        --output "${NIMBLEFIX_FIX44_NFA}"
         --cpp-builders "${NIMBLEFIX_FIX44_BUILDERS}"
         --cpp-readers "${NIMBLEFIX_FIX44_READERS}"
     DEPENDS
-        nimblefix-xml2ffd
+        nimblefix-xml2nfd
         nimblefix-dictgen
         "${NIMBLEFIX_FIX44_XML}"
     VERBATIM
 )
 add_custom_target(nimblefix-fix44-assets
     DEPENDS
-        "${NIMBLEFIX_FIX44_FFD}"
-        "${NIMBLEFIX_FIX44_ART}"
+        "${NIMBLEFIX_FIX44_NFD}"
+        "${NIMBLEFIX_FIX44_NFA}"
         "${NIMBLEFIX_FIX44_BUILDERS}"
         "${NIMBLEFIX_FIX44_READERS}"
 )
 
 add_custom_command(
     OUTPUT
-        "${NIMBLEFIX_SAMPLE_ART}"
+        "${NIMBLEFIX_SAMPLE_NFA}"
         "${NIMBLEFIX_SAMPLE_BUILDERS}"
         "${NIMBLEFIX_SAMPLE_READERS}"
     COMMAND "${CMAKE_COMMAND}" -E make_directory "${NIMBLEFIX_OUTPUT_ROOT}"
     COMMAND "${CMAKE_COMMAND}" -E make_directory "${NIMBLEFIX_GENERATED_DIR}"
     COMMAND $<TARGET_FILE:nimblefix-dictgen>
-        --input "${PROJECT_SOURCE_DIR}/samples/basic_profile.ffd"
-        --merge "${PROJECT_SOURCE_DIR}/samples/basic_overlay.ffd"
-        --output "${NIMBLEFIX_SAMPLE_ART}"
+        --input "${PROJECT_SOURCE_DIR}/samples/basic_profile.nfd"
+        --merge "${PROJECT_SOURCE_DIR}/samples/basic_overlay.nfd"
+        --output "${NIMBLEFIX_SAMPLE_NFA}"
         --cpp-builders "${NIMBLEFIX_SAMPLE_BUILDERS}"
         --cpp-readers "${NIMBLEFIX_SAMPLE_READERS}"
     DEPENDS
         nimblefix-dictgen
-        "${PROJECT_SOURCE_DIR}/samples/basic_profile.ffd"
-        "${PROJECT_SOURCE_DIR}/samples/basic_overlay.ffd"
+        "${PROJECT_SOURCE_DIR}/samples/basic_profile.nfd"
+        "${PROJECT_SOURCE_DIR}/samples/basic_overlay.nfd"
     VERBATIM
 )
 add_custom_target(nimblefix-sample-assets
     DEPENDS
-        "${NIMBLEFIX_SAMPLE_ART}"
+        "${NIMBLEFIX_SAMPLE_NFA}"
         "${NIMBLEFIX_SAMPLE_BUILDERS}"
         "${NIMBLEFIX_SAMPLE_READERS}"
 )
@@ -408,12 +415,14 @@ if(NIMBLEFIX_BUILD_TESTS)
     )
     add_executable(nimblefix-tests
         ${NIMBLEFIX_TEST_SOURCES}
-        "${PROJECT_SOURCE_DIR}/tools/xml2ffd/xml2ffd.cpp"
+        "${PROJECT_SOURCE_DIR}/tools/xml2nfd/xml2nfd.cpp"
+        "${PROJECT_SOURCE_DIR}/tools/orchestra-import/orchestra_import.cpp"
     )
     target_include_directories(nimblefix-tests
         PRIVATE
             "${NIMBLEFIX_GENERATED_DIR}"
             "${PROJECT_SOURCE_DIR}/tests/generated"
+            "${PROJECT_SOURCE_DIR}/tools/orchestra-import"
     )
     target_link_libraries(nimblefix-tests
         PRIVATE

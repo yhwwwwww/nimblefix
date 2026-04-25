@@ -23,7 +23,7 @@ NimbleFIX supports both offline xmake and offline CMake flows. xmake is the prim
 | `nimblefix-tests` | binary | Catch2 test suite |
 | `nimblefix-bench` | binary | Performance benchmarks |
 | `nimblefix-dictgen` | binary | Dictionary → artifact compiler |
-| `nimblefix-xml2ffd` | binary | QuickFIX XML → `.ffd` converter |
+| `nimblefix-xml2nfd` | binary | QuickFIX XML → `.nfd` converter |
 | `nimblefix-initiator` | binary | CLI FIX client |
 | `nimblefix-acceptor` | binary | CLI FIX server (echo) |
 | `nimblefix-soak` | binary | Stress tester with fault injection |
@@ -54,7 +54,7 @@ ctest --preset dev-release
 
 The helper scripts auto-select `xmake >= 3.0.0`, then `cmake + Ninja`, then `cmake + make`. Default xmake builds write executables to `./build/linux/x86_64/release/`. Ninja-based CMake presets remain available at `./build/cmake/<preset>/bin/`, and make-based fallback presets live at `./build/cmake/<preset>-make/bin/`. The examples below assume `BIN_DIR=./build/linux/x86_64/release` for the default path and invoke binaries directly for reproducibility and predictable argument handling.
 
-`offline_build.sh` now gates the repository's official FIX session baseline after the Catch2 or CTest pass. The default local and CI regression path therefore covers both the core unit/integration suite and `tests/data/fix-session/official-session-cases.ffcases`.
+`offline_build.sh` now gates the repository's official FIX session baseline after the Catch2 or CTest pass. The default local and CI regression path therefore covers both the core unit/integration suite and `tests/data/fix-session/official-session-cases.nfcases`.
 
 Both `offline_build.sh` and `bench.sh` default `NIMBLEFIX_XMAKE_CCACHE=n` on the xmake path. That mirrors the CI-safe setting and avoids Linux `.build_cache/... file busy` failures seen on the larger benchmark and QuickFIX targets.
 
@@ -185,7 +185,7 @@ $BIN_DIR/nimblefix-tests --list-tags
 | `[outbound-fragment]` | Outbound fragment encoding |
 | `[raw-passthrough]` | Raw pass-through mode |
 | `[precompiled-table]` | Precompiled template table |
-| `[xml2ffd]` | QuickFIX XML to FFD conversion |
+| `[xml2nfd]` | QuickFIX XML to NFD conversion |
 | `[wraparound]` | Sequence number wraparound |
 | `[soak-smoke]` | Basic soak test |
 | `[soak-long]` | Extended soak test |
@@ -220,15 +220,24 @@ auto EncodeFixFrame(std::string_view body_fields,
 
 ### Key Concepts
 
-- **Profile**: A normalized description of a FIX protocol variant. Each profile has a unique `profile_id` (uint64). Profiles are loaded at engine startup and referenced by sessions. One engine can load multiple profiles simultaneously (e.g., FIX 4.2 and FIX 4.4). A profile can be loaded from a precompiled `.art` file or built in memory from `.ffd` files at startup.
+- **Profile**: A normalized description of a FIX protocol variant. Each profile has a unique `profile_id` (uint64). Profiles are loaded at engine startup and referenced by sessions. One engine can load multiple profiles simultaneously (e.g., FIX 4.2 and FIX 4.4). A profile can be loaded from a precompiled `.nfa` file or built in memory from `.nfd` files at startup.
 
-- **`.ffd` (NimbleFIX Dictionary)**: A text file defining baseline or incremental dictionary content for one FIX protocol variant — fields, messages, and groups. The first `.ffd` establishes the profile, and additional `.ffd` files can extend it when multiple files are passed to dictgen or Engine.
+- **`.nfd` (NimbleFIX Dictionary)**: A text file defining baseline or incremental dictionary content for one FIX protocol variant — fields, messages, and groups. The first `.nfd` establishes the profile, and additional `.nfd` files can extend it when multiple files are passed to dictgen or Engine.
 
-- **`.art` (Artifact)**: The compiled binary output of dictgen (optional precompilation step). It's a flat, mmap-loadable file containing string tables, field/message/group definitions, validation rules, and lookup tables. The engine can load `.art` files at runtime, or load `.ffd` files directly.
+- **`.nfa` (Artifact)**: The compiled binary output of dictgen (optional precompilation step). It's a flat, mmap-loadable file containing string tables, field/message/group definitions, validation rules, and lookup tables. The engine can load `.nfa` files at runtime, or load `.nfd` files directly.
 
-- **`schema_hash`**: A 64-bit hash of the dictionary content, embedded in the `.art` header. Used internally as part of the codec template cache key to ensure cached templates are invalidated when the dictionary changes. Auto-computed by dictgen from the dictionary content — users don't need to set it manually.
+- **`.nfct` (Contract Sidecar)**: The cold-path behavior companion generated from FIX Orchestra input. It stores conditional required/forbidden rules, enum/code constraints, role and direction limits, service subsets, flow edges, source rule/case trace, and importer warnings. `.nfct` is loaded separately from `.nfa` through `EngineConfig::profile_contracts`; it is never consulted from the steady-state codec/session hot path.
 
-### `.ffd` Format Specification
+- **`schema_hash`**: A 64-bit hash of the dictionary content, embedded in the `.nfa` header. Used internally as part of the codec template cache key to ensure cached templates are invalidated when the dictionary changes. Auto-computed by dictgen from the dictionary content — users don't need to set it manually.
+
+### Artifact Layering
+
+- `.nfd` / `.nfa` remain purely structural: fields, messages, groups, and lookup tables.
+- `.nfct` carries behavior and contract metadata only: conditional field rules, role-direction restrictions, service subsets, flow edges, trace IDs, and importer warnings.
+- `EngineConfig` is deployment glue: `profile_artifacts` / `profile_dictionaries` choose structure, `profile_contracts` chooses optional behavior sidecars, and `CounterpartyConfig::contract_service_subsets` selects which contract service subsets apply to one deployed session.
+- Unsupported Orchestra features are downgraded during import into explicit warnings. Runtime hot paths do not parse XML or interpret Orchestra rules per message.
+
+### `.nfd` Format Specification
 
 The file format is line-based, pipe-delimited text. Lines starting with `#` are comments. Blank lines are ignored.
 
@@ -300,11 +309,11 @@ message|D|NewOrderSingle|0|35:r,49:r,56:r,11:r,54:r,38:r,44:o,453:o
 group|453|448|Parties|0|448:r,447:r,452:r
 ```
 
-### `.ffo` Overlay Format — Removed
+### `.nfo` Overlay Format — Removed
 
-The separate `.ffo` overlay format has been removed. Multiple `.ffd` files can be merged instead. The first `.ffd` provides the baseline (`profile_id` required), additional `.ffd` files extend it (adding fields, extending messages, overriding field rules). No separate overlay format needed.
+The separate `.nfo` overlay format has been removed. Multiple `.nfd` files can be merged instead. The first `.nfd` provides the baseline (`profile_id` required), additional `.nfd` files extend it (adding fields, extending messages, overriding field rules). No separate overlay format needed.
 
-Example of an incremental `.ffd` overlay (no header lines needed — `profile_id` comes from the base `.ffd`):
+Example of an incremental `.nfd` overlay (no header lines needed — `profile_id` comes from the base `.nfd`):
 
 ```
 # Add venue-specific custom fields
@@ -319,9 +328,9 @@ message|D|NewOrderSingle|0|5001:r,5002:o
 
 ```bash
 $BIN_DIR/nimblefix-dictgen \
-    --input samples/basic_profile.ffd \
-    --merge samples/basic_overlay.ffd \
-    --output build/sample-basic.art \
+    --input samples/basic_profile.nfd \
+    --merge samples/basic_overlay.nfd \
+    --output build/sample-basic.nfa \
     --cpp-builders build/generated/sample_basic_builders.h
 ```
 
@@ -329,34 +338,50 @@ $BIN_DIR/nimblefix-dictgen \
 
 | Flag | Required | Description |
 |------|----------|-------------|
-| `--input` | yes | Base dictionary file (`.ffd`) |
-| `--merge` | no | Additional `.ffd` file(s) to merge, can specify multiple (also accepts `--overlay` for backwards compatibility) |
-| `--output` | yes | Output artifact path (`.art`) |
+| `--input` | yes | Base dictionary file (`.nfd`) |
+| `--merge` | no | Additional `.nfd` file(s) to merge, can specify multiple (also accepts `--overlay` for backwards compatibility) |
+| `--output` | yes | Output artifact path (`.nfa`) |
 | `--cpp-builders` | no | Generate C++ header with typed writer classes and profile constants |
 
-**Note:** `.art` precompilation is optional. The Engine can load `.ffd` files directly at runtime via the `dictionary=` config line or `config.profile_dictionaries`.
+**Note:** `.nfa` precompilation is optional. The Engine can load `.nfd` files directly at runtime via the `dictionary=` config line or `config.profile_dictionaries`.
 
 **Output:**
 
-- `.art` — Binary artifact (mmap-loadable). Contains string table, field/message/group definitions, validation rules, lookup tables.
+- `.nfa` — Binary artifact (mmap-loadable). Contains string table, field/message/group definitions, validation rules, lookup tables.
 - C++ header (optional) — Typed writer classes backed by `FixedLayoutWriter` (compile-time type-safe, O(1) slot writes), Tag constants, profile ID and schema hash.
+
+### Importing FIX Orchestra
+
+```bash
+$BIN_DIR/nimblefix-orchestra-import \
+    --xml FIXOrchestra.xml \
+    --profile-id 4400 \
+    --output-nfd build/fix44-orchestra.nfd \
+    --output-contract build/fix44-orchestra.nfct
+
+$BIN_DIR/nimblefix-dictgen \
+    --input build/fix44-orchestra.nfd \
+    --output build/fix44-orchestra.nfa
+```
+
+Use `--contract <file> --dump`, `--markdown <file>`, or `--interop-dir <dir>` to inspect the sidecar and emit contract-driven `.nfscenario` augmentations. The importer currently supports structural mappings, conditional required/forbidden field rules, enum/code constraints, service subsets, and basic flow edges. Unsupported Orchestra semantics are preserved as sidecar warnings.
 
 ### Adding a New FIX Version
 
 1. Obtain the QuickFIX XML data dictionary for your FIX version (e.g. `FIX44.xml` from the [QuickFIX repository](https://github.com/quickfix/quickfix/tree/master/spec)).
-2. Convert it to `.ffd` format:
+2. Convert it to `.nfd` format:
    ```bash
-    $BIN_DIR/nimblefix-xml2ffd \
+    $BIN_DIR/nimblefix-xml2nfd \
        --xml FIX44.xml \
-       --output my_fix44.ffd \
+       --output my_fix44.nfd \
        --profile-id 1001 \
        --cpp-builders generated_builders.h
    ```
-3. (Optional) Write additional `.ffd` files for venue-specific custom fields and pass them with `--merge`.
+3. (Optional) Write additional `.nfd` files for venue-specific custom fields and pass them with `--merge`.
 4. Compile with `nimblefix-dictgen`.
-5. Reference the `.art` in `EngineConfig.profile_artifacts`. Or skip `.art` and reference `.ffd` directly in `EngineConfig.profile_dictionaries`.
+5. Reference the `.nfa` in `EngineConfig.profile_artifacts`. Or skip `.nfa` and reference `.nfd` directly in `EngineConfig.profile_dictionaries`.
 
-You can also write `.ffd` files by hand for full control.
+You can also write `.nfd` files by hand for full control.
 
 ### Generated Profile Header
 
@@ -392,7 +417,7 @@ writer.encode_to_buffer(dictionary_view, options, &buf);
 ```bash
 ./bench/bench.sh build
 ./bench/bench.sh nimblefix
-./bench/bench.sh nimblefix-ffd
+./bench/bench.sh nimblefix-nfd
 ./bench/bench.sh quickfix
 ./bench/bench.sh builder
 ./bench/bench.sh compare
@@ -400,7 +425,7 @@ writer.encode_to_buffer(dictionary_view, options, &buf);
 
 `compare` is the command used for the published side-by-side README numbers. Its default args are `--iterations 100000 --loopback 1000 --replay 1000 --replay-span 128`.
 
-All benchmark entrypoints intentionally consume the pinned QuickFIX 4.4 inputs, either through `bench/vendor/quickfix/spec/FIX44.xml` or the generated `build/bench/quickfix_FIX44.ffd` / `build/bench/quickfix_FIX44.art` outputs. The canonical benchmark-local breakdown now lives in [bench/README.md](../bench/README.md), including exact timing boundaries, diagrams, and the meaning of every printed metric.
+All benchmark entrypoints intentionally consume the pinned QuickFIX 4.4 inputs, either through `bench/vendor/quickfix/spec/FIX44.xml` or the generated `build/bench/quickfix_FIX44.nfd` / `build/bench/quickfix_FIX44.nfa` outputs. The canonical benchmark-local breakdown now lives in [bench/README.md](../bench/README.md), including exact timing boundaries, diagrams, and the meaning of every printed metric.
 
 ### What Gets Measured
 
@@ -429,7 +454,7 @@ All benchmark entrypoints intentionally consume the pinned QuickFIX 4.4 inputs, 
 The soak tool runs multiple sessions with configurable fault injection:
 
 ```bash
-$BIN_DIR/nimblefix-soak --profile build/sample-basic.art \
+$BIN_DIR/nimblefix-soak --profile build/sample-basic.nfa \
     --workers 4 --sessions 10 --iterations 10000 \
     --gap-every 100 \
     --duplicate-every 200 \
@@ -466,7 +491,7 @@ Three fuzzing harnesses target different input surfaces:
 
 ```bash
 $BIN_DIR/nimblefix-fuzz-codec \
-    --artifact build/sample-basic.art \
+    --artifact build/sample-basic.nfa \
     --input tests/data/fuzz/wire_codec \
     --mode codec     # or: admin
 ```
@@ -480,7 +505,7 @@ $BIN_DIR/nimblefix-fuzz-codec \
 $BIN_DIR/nimblefix-fuzz-config --input tests/data/fuzz/
 ```
 
-Fuzzes the `.ffcfg` engine configuration file parser.
+Fuzzes the `.nfcfg` engine configuration file parser.
 
 ### Dictionary Fuzzer
 
@@ -489,7 +514,7 @@ $BIN_DIR/nimblefix-fuzz-dictgen \
     --input tests/data/fuzz/
 ```
 
-Fuzzes `.ffd` file parsing.
+Fuzzes `.nfd` file parsing.
 
 ### Corpus
 
@@ -498,9 +523,9 @@ Test data lives in `tests/data/fuzz/`:
 ```
 wire_codec/          FIX frame corpus (valid + malformed)
 admin_protocol/      Admin message sequence corpus (.fixseq)
-dictgen_*.ffd        Dictionary corpus
-overlay_*.ffd        Overlay corpus
-runtime_config_*.ffcfg  Config corpus
+dictgen_*.nfd        Dictionary corpus
+overlay_*.nfd        Overlay corpus
+runtime_config_*.nfcfg  Config corpus
 ```
 
 ---
@@ -511,7 +536,7 @@ runtime_config_*.ffcfg  Config corpus
 
 ```bash
 $BIN_DIR/nimblefix-initiator \
-    --artifact build/sample-basic.art \
+    --artifact build/sample-basic.nfa \
     --host exchange.example.com --port 9876 \
     --sender MY_FIRM --target VENUE_A \
     --begin-string FIX.4.4 \
@@ -526,12 +551,12 @@ $BIN_DIR/nimblefix-initiator \
 ```bash
 # Direct mode
 $BIN_DIR/nimblefix-acceptor \
-    --artifact build/sample-basic.art \
+    --artifact build/sample-basic.nfa \
     --bind 0.0.0.0 --port 9876 \
     --sender VENUE_A --target MY_FIRM
 
 # Config file mode
-$BIN_DIR/nimblefix-acceptor --config engine.ffcfg --listener main
+$BIN_DIR/nimblefix-acceptor --config engine.nfcfg --listener main
 ```
 
 ### Local Testing
@@ -539,29 +564,30 @@ $BIN_DIR/nimblefix-acceptor --config engine.ffcfg --listener main
 ```bash
 # Terminal 1: start acceptor
 $BIN_DIR/nimblefix-acceptor \
-    --artifact build/sample-basic.art \
+    --artifact build/sample-basic.nfa \
     --bind 127.0.0.1 --port 9001 \
     --sender SERVER --target CLIENT
 
 # Terminal 2: connect initiator
 $BIN_DIR/nimblefix-initiator \
-    --artifact build/sample-basic.art \
+    --artifact build/sample-basic.nfa \
     --host 127.0.0.1 --port 9001 \
     --sender CLIENT --target SERVER
 ```
 
 ---
 
-## Configuration File Format (`.ffcfg`) — Internal
+## Configuration File Format (`.nfcfg`) — Internal
 
-The `.ffcfg` format is used by NimbleFIX's built-in tools (`nimblefix-acceptor`, `nimblefix-interop-runner`, `nimblefix-fix-session-testcases`) and tests. It is **not** part of the library's public API. Applications should populate `EngineConfig` directly from their own configuration source (TOML, YAML, JSON, database, etc.) and call `Engine::Boot(config)`.
+The `.nfcfg` format is used by NimbleFIX's built-in tools (`nimblefix-acceptor`, `nimblefix-interop-runner`, `nimblefix-fix-session-testcases`) and tests. It is **not** part of the library's public API. Applications should populate `EngineConfig` directly from their own configuration source (TOML, YAML, JSON, database, etc.) and call `Engine::Boot(config)`.
 
 ```
 engine.worker_count=2
 engine.enable_metrics=true
 engine.trace_mode=ring
 engine.trace_capacity=8
-profile=path/to/profile.art
+profile=path/to/profile.nfa
+contract=path/to/profile.nfct
 listener|main|127.0.0.1|9921|0
 counterparty|fix44-demo|4201|1001|FIX.4.4|SELL|BUY|memory||memory|inline|30|false
 
@@ -575,7 +601,7 @@ Minimal counterparty record order (13 fields):
 counterparty|name|session_id|profile_id|begin_string|sender|target|store_mode|store_path|recovery_mode|dispatch_mode|heartbeat_sec|is_initiator
 ```
 
-`profile=` may be repeated. `dictionary=` may also be repeated, and each `dictionary=` line accepts a comma-separated base-plus-overlay `.ffd` group that is loaded as one merged dictionary set.
+`profile=` may be repeated. `dictionary=` may also be repeated, and each `dictionary=` line accepts a comma-separated base-plus-overlay `.nfd` group that is loaded as one merged dictionary set. `contract=` may also be repeated; each line points to one `.nfct` sidecar keyed by `profile_id`.
 
 `dispatch_mode` is per-counterparty (`inline` or `queue`). `engine.queue_app_mode` is engine-wide (`co-scheduled` or `threaded`) and only affects counterparties that use queue dispatch. When every counterparty uses `inline`, `engine.queue_app_mode` has no effect.
 
@@ -583,13 +609,13 @@ counterparty|name|session_id|profile_id|begin_string|sender|target|store_mode|st
 
 Ready-to-run examples live in:
 
-- `tests/data/interop/loopback-runtime.ffcfg`
-- `tests/data/interop/runtime-multiversion.ffcfg`
+- `tests/data/interop/loopback-runtime.nfcfg`
+- `tests/data/interop/runtime-multiversion.nfcfg`
 
 Full counterparty record order used by current tools/tests:
 
 ```text
-counterparty|name|session_id|profile_id|begin_string|sender|target|store_mode|store_path|recovery_mode|dispatch_mode|heartbeat_sec|is_initiator|default_appl_ver_id|validation_mode|durable_flush_threshold|durable_rollover_mode|durable_archive_limit|reconnect_enabled|reconnect_initial_ms|reconnect_max_ms|reconnect_max_retries|durable_local_utc_offset_seconds|durable_use_system_timezone|day_cut_mode|day_cut_hour|day_cut_minute|day_cut_utc_offset|reset_seq_num_on_logon|reset_seq_num_on_logout|reset_seq_num_on_disconnect|refresh_on_logon|send_next_expected_msg_seq_num|use_local_time|non_stop_session|start_time|end_time|start_day|end_day|logon_time|logout_time|logon_day|logout_day
+counterparty|name|session_id|profile_id|begin_string|sender|target|store_mode|store_path|recovery_mode|dispatch_mode|heartbeat_sec|is_initiator|default_appl_ver_id|validation_mode|durable_flush_threshold|durable_rollover_mode|durable_archive_limit|reconnect_enabled|reconnect_initial_ms|reconnect_max_ms|reconnect_max_retries|durable_local_utc_offset_seconds|durable_use_system_timezone|day_cut_mode|day_cut_hour|day_cut_minute|day_cut_utc_offset|reset_seq_num_on_logon|reset_seq_num_on_logout|reset_seq_num_on_disconnect|refresh_on_logon|send_next_expected_msg_seq_num|use_local_time|non_stop_session|start_time|end_time|start_day|end_day|logon_time|logout_time|logon_day|logout_day|sending_time_threshold_seconds|supported_app_msg_types|application_messages_available|contract_service_subsets
 ```
 
 The newer FIX-behavior columns expose the QuickFIX-style session controls now wired through runtime config and `CounterpartyConfig`:
@@ -601,6 +627,9 @@ The newer FIX-behavior columns expose the QuickFIX-style session controls now wi
 - `logon_time`, `logout_time`, `logon_day`, `logout_day`: optional narrower logon window.
 - `use_local_time`: interpret the schedule in local wall clock time; otherwise UTC is used.
 - `non_stop_session`: disable schedule gating entirely. It must not be combined with explicit session/logon window fields.
+- `supported_app_msg_types`: optional inbound app-message allowlist. When a matching `.nfct` sidecar is loaded, this list must remain within the contract receive subset.
+- `application_messages_available`: explicit maintenance flag. When false, known application messages are rejected with `BusinessMessageReject(380=4)`.
+- `contract_service_subsets`: deployment-selected Orchestra service subsets for the bound profile. These are resolved only on cold paths and never trigger per-message Orchestra interpretation.
 
 Time fields use `HH:MM:SS`. Day fields accept `sun`..`sat` (or full names). Empty trailing columns keep the default behavior.
 
@@ -608,7 +637,7 @@ Load in code:
 
 ```cpp
 // Internal tool use only — #include "nimblefix/runtime/internal_config_parser.h"
-auto config = nimble::runtime::LoadEngineConfigFile("engine.ffcfg");
+auto config = nimble::runtime::LoadEngineConfigFile("engine.nfcfg");
 ```
 
 ---
@@ -618,7 +647,7 @@ auto config = nimble::runtime::LoadEngineConfigFile("engine.ffcfg");
 ### Internal Interop
 
 ```bash
-$BIN_DIR/nimblefix-interop-runner --scenario tests/data/interop/loopback.ffscenario
+$BIN_DIR/nimblefix-interop-runner --scenario tests/data/interop/loopback.nfscenario
 ```
 
 Runs scripted FIX message exchange scenarios and validates behavior.
@@ -626,19 +655,19 @@ Runs scripted FIX message exchange scenarios and validates behavior.
 For scenario authoring or mismatch debugging, `nimblefix-interop-runner` also supports `--dump-report`:
 
 ```bash
-$BIN_DIR/nimblefix-interop-runner --scenario tests/data/fix-session/cases/2s-first-message-not-logon.ffscenario --dump-report
+$BIN_DIR/nimblefix-interop-runner --scenario tests/data/fix-session/cases/2s-first-message-not-logon.nfscenario --dump-report
 ```
 
 ### Official FIX Session Cases
 
 ```bash
-$BIN_DIR/nimblefix-fix-session-testcases --manifest tests/data/fix-session/official-session-cases.ffcases
-$BIN_DIR/nimblefix-fix-session-testcases --manifest tests/data/fix-session/official-session-cases.ffcases --filter 1S
-$BIN_DIR/nimblefix-fix-session-testcases --manifest tests/data/fix-session/official-session-cases.ffcases --report audits/20260425-fix-session-coverage.md
-$BIN_DIR/nimblefix-fix-session-testcases --import-html /path/to/session-cases.html --output /tmp/official-session-cases.ffcases
+$BIN_DIR/nimblefix-fix-session-testcases --manifest tests/data/fix-session/official-session-cases.nfcases
+$BIN_DIR/nimblefix-fix-session-testcases --manifest tests/data/fix-session/official-session-cases.nfcases --filter 1S
+$BIN_DIR/nimblefix-fix-session-testcases --manifest tests/data/fix-session/official-session-cases.nfcases --report audits/20260425-fix-session-coverage.md
+$BIN_DIR/nimblefix-fix-session-testcases --import-html /path/to/session-cases.html --output /tmp/official-session-cases.nfcases
 ```
 
-The repository keeps the canonical Phase 11 baseline as `tests/data/fix-session/official-session-cases.ffcases` plus mapped `.ffscenario` files under `tests/data/fix-session/cases/`. Raw FIX Trading HTML is not required at build or test time; if you obtain an updated official page offline, use `--import-html` to bootstrap a local manifest and then map cases onto the existing interop harness.
+The repository keeps the canonical Phase 11 baseline as `tests/data/fix-session/official-session-cases.nfcases` plus mapped `.nfscenario` files under `tests/data/fix-session/cases/`. Raw FIX Trading HTML is not required at build or test time; if you obtain an updated official page offline, use `--import-html` to bootstrap a local manifest and then map cases onto the existing interop harness.
 
 ### External Interop (QuickFIX)
 

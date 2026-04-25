@@ -8,7 +8,7 @@
 TEST_CASE("official FIX session manifest runner", "[fix-session-testcases]")
 {
   const auto manifest_path =
-    std::filesystem::path(NIMBLEFIX_PROJECT_DIR) / "tests" / "data" / "fix-session" / "official-session-cases.ffcases";
+    std::filesystem::path(NIMBLEFIX_PROJECT_DIR) / "tests" / "data" / "fix-session" / "official-session-cases.nfcases";
 
   auto manifest = nimble::runtime::LoadOfficialCaseManifestFile(manifest_path);
   REQUIRE(manifest.ok());

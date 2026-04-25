@@ -1,4 +1,0 @@
-config=../configs/fix44-acceptor.ffcfg
-action|acceptor-logon-attempt|4402|ts=10|sender=OTHER|body=35=A^98=0^108=30
-expect-action|1|outbound=0|active=0|disconnect=1
-expect-session|4401|disconnected|1|1|0

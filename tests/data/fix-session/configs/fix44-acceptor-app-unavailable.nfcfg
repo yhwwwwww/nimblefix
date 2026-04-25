@@ -1,0 +1,6 @@
+engine.worker_count=1
+engine.enable_metrics=true
+engine.trace_mode=ring
+engine.trace_capacity=64
+profile=../../../../build/bench/quickfix_FIX44.nfa
+counterparty|fix44-acceptor-app-unavailable|4401|4400|FIX.4.4|SELL|BUY|memory||memory|inline|30|false|||0||0||||||||||||||||||||||||||||false

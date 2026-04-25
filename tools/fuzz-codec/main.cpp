@@ -44,7 +44,7 @@ IsApplicationMsgType(std::string_view msg_type) -> bool
 auto
 PrintUsage() -> void
 {
-  std::cout << "usage: nimblefix-fuzz-codec --artifact <profile.art> --input "
+  std::cout << "usage: nimblefix-fuzz-codec --artifact <profile.nfa> --input "
                "<file-or-directory>"
                " [--mode codec|admin]\n";
 }

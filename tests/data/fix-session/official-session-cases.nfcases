@@ -1,0 +1,86 @@
+source|FIX Session Layer Test Cases|1.0|https://dev.fixtrading.org/standards/fix-session-testcases-online/
+case|1B.a|initiator|mandatory|FIX.4.4|mapped|cases/1b-logon-initiator.nfscenario|FIX.4.4 initiator connect baseline
+case|1B.b|initiator|mandatory|FIX.4.4|mapped|cases/1b-logon-initiator.nfscenario|FIX.4.4 initiator outbound Logon baseline
+case|1B.c|initiator|mandatory|FIX.4.4|mapped|cases/1b-logon-initiator.nfscenario|FIX.4.4 initiator Logon acknowledgement baseline
+case|1B.d|initiator|mandatory|FIX.4.4|mapped|cases/1bd-invalid-logon-ack-logout.nfscenario|initiator invalid Logon acknowledgement logs out and disconnects
+case|1B.e|initiator|mandatory|FIX.4.4|mapped|cases/1be-first-response-not-logon.nfscenario|initiator non-Logon first response logs out and disconnects
+case|1S.a|acceptor|mandatory|FIX.4.2,FIX.4.4,FIXT.1.1|mapped|cases/1s-logon-acceptor-multiversion.nfscenario|acceptor Logon baseline across FIX.4.2 FIX.4.4 and FIXT.1.1
+case|1S.b|acceptor|mandatory|FIX.4.4|mapped|cases/1sb-duplicate-identity.nfscenario|duplicate inbound identity disconnects without sending a FIX message
+case|1S.c|acceptor|mandatory|FIX.4.4|mapped|cases/1sc-unknown-identity.nfscenario|unknown inbound identity disconnects without sending a FIX message
+case|1S.d|acceptor|mandatory|FIXT.1.1|mapped|cases/1s-fixt11-missing-default-appl-ver.nfscenario|FIXT invalid Logon subset using missing DefaultApplVerID
+case|2S|acceptor|mandatory|FIX.4.4|mapped|cases/2s-first-message-not-logon.nfscenario|acceptor rejects non-Logon first message
+case|2.a|all|mandatory|FIX.4.4|mapped|cases/2a-5-heartbeat-accept.nfscenario|valid MsgSeqNum acceptance baseline
+case|2.b|all|mandatory|FIX.4.4|mapped|cases/2b-msgseq-high-resend.nfscenario|high inbound MsgSeqNum triggers ResendRequest
+case|2.c|all|mandatory|FIX.4.4|mapped|cases/2c-msgseq-low-logout.nfscenario|low inbound MsgSeqNum logout baseline
+case|2.d|all|mandatory|FIX.4.2,FIX.4.4,FIXT.1.1|mapped|cases/2d-garbled-message-warning.nfscenario|garbled raw frame ignored without advancing inbound sequence
+case|2.e|all|mandatory|FIX.4.4|mapped|cases/2e-possdup-duplicate-accept.nfscenario|PossDup duplicate heartbeat acceptance baseline
+case|2.f|all|mandatory|FIX.4.4|mapped|cases/2f-possdup-origsendingtime-late-reject.nfscenario|late OrigSendingTime on PossDup rejected with accuracy problem
+case|2.g|all|mandatory|FIX.4.4|mapped|cases/2g-possdup-missing-origsendingtime.nfscenario|PossDup without OrigSendingTime reject baseline
+case|2.h|all|mandatory|FIX.4.2,FIX.4.4,FIXT.1.1|mapped|cases/2h-2j-2l-2n-header-accept-multiversion.nfscenario|header acceptance baseline across BeginString variants
+case|2.i|all|mandatory|FIX.4.4|mapped|cases/2i-beginstring-mismatch-logout.nfscenario|BeginString mismatch logs out and disconnects
+case|2.j|all|mandatory|FIX.4.2,FIX.4.4,FIXT.1.1|mapped|cases/2h-2j-2l-2n-header-accept-multiversion.nfscenario|header acceptance baseline across matching CompIDs
+case|2.k|all|mandatory|FIX.4.4|mapped|cases/2k-compid-mismatch-logout.nfscenario|SenderCompID mismatch logout baseline
+case|2.l|all|mandatory|FIX.4.2,FIX.4.4,FIXT.1.1|mapped|cases/2h-2j-2l-2n-header-accept-multiversion.nfscenario|header acceptance baseline with valid BodyLength
+case|2.m|all|mandatory|FIX.4.2,FIX.4.4,FIXT.1.1|mapped|cases/2m-invalid-bodylength-warning.nfscenario|invalid BodyLength raw frame ignored without advancing inbound sequence
+case|2.n|all|mandatory|FIX.4.2,FIX.4.4,FIXT.1.1|mapped|cases/2h-2j-2l-2n-header-accept-multiversion.nfscenario|header acceptance baseline with valid SendingTime
+case|2.o|all|mandatory|FIX.4.2,FIX.4.4,FIXT.1.1|mapped|cases/2o-sendingtime-threshold-reject-logout.nfscenario|SendingTime outside configured tolerance rejected then logged out
+case|2.p|all|mandatory|FIX.4.4|mapped|cases/2p-valid-apptype-accept.nfscenario|valid application MsgType accepted and processed normally
+case|2.q|all|mandatory|FIX.4.4|mapped|cases/2q-invalid-msgtype.nfscenario|invalid MsgType reject baseline
+case|2.r|all|mandatory|FIX.4.2,FIX.4.4,FIXT.1.1|mapped|cases/2r-business-reject-unsupported-valid-msgtype.nfscenario|known but unsupported application MsgType returns BusinessMessageReject reason 3
+case|2.s|all|mandatory|FIX.4.4|mapped|cases/2a-5-heartbeat-accept.nfscenario|correct standard-header field ordering accepted
+case|2.t|all|mandatory|FIX.4.2,FIX.4.4,FIXT.1.1|mapped|cases/2t-header-order-warning.nfscenario|out-of-order standard header raw frame ignored without advancing inbound sequence
+case|3.a|all|mandatory|FIX.4.4|mapped|cases/2a-5-heartbeat-accept.nfscenario|valid checksum accepted
+case|3.b|all|mandatory|FIX.4.2,FIX.4.4,FIXT.1.1|mapped|cases/3b-invalid-checksum-warning.nfscenario|invalid checksum raw frame ignored without advancing inbound sequence
+case|3.c|all|mandatory|FIX.4.2,FIX.4.4,FIXT.1.1|mapped|cases/3c-garbled-trailer-warning.nfscenario|trailing data after checksum ignored without advancing inbound sequence
+case|3.d|all|mandatory|FIX.4.4|mapped|cases/2a-5-heartbeat-accept.nfscenario|checksum field correctly placed and delimited accepted
+case|3.e|all|mandatory|FIX.4.2,FIX.4.4,FIXT.1.1|mapped|cases/3e-checksum-trailer-format-warning.nfscenario|malformed checksum trailer ignored without advancing inbound sequence
+case|4.a|all|mandatory|FIX.4.4|mapped|cases/4a-6-timers.nfscenario|idle outbound heartbeat baseline
+case|4.b|all|mandatory|FIX.4.4|mapped|cases/4b-test-request-echo.nfscenario|TestRequest to Heartbeat echo baseline
+case|5|all|mandatory|FIX.4.4|mapped|cases/2a-5-heartbeat-accept.nfscenario|valid inbound Heartbeat acceptance baseline
+case|6|all|mandatory|FIX.4.4|mapped|cases/4a-6-timers.nfscenario|idle inbound liveness escalation to TestRequest baseline
+case|7|all|mandatory|FIX.4.4|mapped|cases/7-receive-reject.nfscenario|inbound Reject acceptance baseline
+case|8|all|mandatory|FIX.4.4|mapped|cases/8-resend-request-replay.nfscenario|ResendRequest replay baseline with app replay and admin gap fill
+case|9|all|optional|FIX.4.2,FIX.4.4,FIXT.1.1|mapped|cases/9-sequence-sync-reset.nfscenario|cold restart branch resets both peers to sequence 1 and starts a new FIX session
+case|10.a|all|mandatory|FIX.4.4|mapped|cases/10a-gapfill-higher-msgseq-resend.nfscenario|gap fill with higher-than-expected MsgSeqNum triggers ResendRequest
+case|10.b|all|mandatory|FIX.4.4|mapped|cases/10b-sequence-reset-gapfill.nfscenario|gap fill advances inbound expected sequence
+case|10.c|all|mandatory|FIX.4.4|mapped|cases/10c-gapfill-stale-possdup-ignore.nfscenario|stale GapFill with PossDup ignored
+case|10.d|all|mandatory|FIX.4.4|mapped|cases/10d-gapfill-stale-no-possdup-logout.nfscenario|stale GapFill without PossDup logs out and disconnects
+case|10.e|all|mandatory|FIX.4.4|mapped|cases/10e-gapfill-lower-newseq-reject.nfscenario|GapFill with invalid lower NewSeqNo rejected
+case|11.a|all|mandatory|FIX.4.4|mapped|cases/11a-sequencereset-forward-jump.nfscenario|SequenceReset-Reset forward jump accepted
+case|11.b|all|mandatory|FIX.4.4|mapped|cases/11b-sequencereset-equal-newseq-accept.nfscenario|SequenceReset-Reset equal NewSeqNo accepted without sequence change
+case|11.c|all|mandatory|FIX.4.4|mapped|cases/11c-sequence-reset-low.nfscenario|backward NewSeqNo reject baseline
+case|12|all|mandatory|FIX.4.4|mapped|cases/12-13a-logout-ack.nfscenario|initiated Logout baseline with transport close
+case|13.a|all|mandatory|FIX.4.4|mapped|cases/12-13a-logout-ack.nfscenario|Logout acknowledgement baseline
+case|13.b|all|mandatory|FIX.4.4|mapped|cases/13b-logout-unsolicited.nfscenario|unsolicited Logout acknowledgement baseline
+case|14.a|all|mandatory|FIX.4.4|mapped|cases/14a-unknown-tag.nfscenario|undefined tag reject baseline
+case|14.b|all|mandatory|FIX.4.4|mapped|cases/14b-missing-required-field.nfscenario|required field missing reject baseline
+case|14.c|all|mandatory|FIX.4.4|mapped|cases/14c-field-not-defined-for-msgtype.nfscenario|field defined in spec but invalid for message type rejected
+case|14.d|all|mandatory|FIX.4.4|mapped|cases/14d-tag-without-value-reject.nfscenario|tag specified without value rejected with SessionRejectReason 4
+case|14.e|all|mandatory|FIX.4.4|mapped|cases/14e-value-out-of-range-reject.nfscenario|out-of-range ResendRequest sequence rejected with SessionRejectReason 5
+case|14.f|all|mandatory|FIX.4.4|mapped|cases/14f-incorrect-data-format-reject.nfscenario|incorrect numeric data format rejected with SessionRejectReason 6
+case|14.g|all|mandatory|FIX.4.4|mapped|cases/14g-field-order-reject.nfscenario|root field order violation rejected with SessionRejectReason 14
+case|14.h|all|mandatory|FIX.4.4|mapped|cases/14h-duplicate-tag-reject.nfscenario|duplicate non-group tag rejected
+case|14.i|all|mandatory|FIX.4.4|mapped|cases/14i-numingroup-count-reject.nfscenario|incorrect NumInGroup count rejected
+case|14.j|all|mandatory|FIX.4.4|mapped|cases/14j-repeating-group-order-reject.nfscenario|repeating group field order violation rejected with SessionRejectReason 15
+case|14.k|all|mandatory|FIX.4.4|mapped|cases/14k-embedded-soh-warning.nfscenario|embedded SOH in a non-data field is treated as garbled and ignored without advancing NextNumIn
+case|14.l|all|mandatory|FIX.4.2,FIX.4.4,FIXT.1.1|mapped|cases/14l-business-reject-application-unavailable.nfscenario|application unavailable path returns BusinessMessageReject reason 4
+case|14.m|all|mandatory|FIX.4.4|mapped|cases/14m-conditionally-required-business-reject.nfscenario|conditionally required Price is rejected with BusinessMessageReject reason 5
+case|14.n|all|mandatory|FIX.4.4|mapped|cases/14n-securedata-reject.nfscenario|SecureData presence is rejected with SessionRejectReason 7 in the current session-layer encryption baseline
+case|15|all|optional|FIX.4.2,FIX.4.4,FIXT.1.1|mapped|cases/15-field-order-acceptance.nfscenario|compatible validation mode accepts repeated legal field-order variants of the same session message type
+case|16.a|all|mandatory|FIX.4.4|mapped|cases/16a-offline-queue-application.nfscenario|application sends can be staged while the protocol session is inactive
+case|16.b|all|mandatory|FIX.4.4|mapped|cases/16b-offline-queue-flush-on-logon.nfscenario|queued application sends flush immediately after Logon activates the protocol session
+case|17.a|all|optional|FIX.4.2,FIX.4.4,FIXT.1.1|unsupported||session-layer EncryptMethod support is intentionally outside the current TLS baseline
+case|17.b|all|optional|FIX.4.2,FIX.4.4,FIXT.1.1|unsupported||session-layer EncryptMethod rejection is intentionally outside the current TLS baseline
+case|17.c|all|optional|FIX.4.2,FIX.4.4,FIXT.1.1|unsupported||Signature acceptance is intentionally outside the current TLS baseline
+case|17.d|all|optional|FIX.4.2,FIX.4.4,FIXT.1.1|unsupported||SignatureLength rejection is intentionally outside the current TLS baseline
+case|17.e|all|optional|FIX.4.2,FIX.4.4,FIXT.1.1|unsupported||Signature rejection is intentionally outside the current TLS baseline
+case|17.f|all|optional|FIX.4.2,FIX.4.4,FIXT.1.1|unsupported||SecureData acceptance is intentionally outside the current TLS baseline
+case|17.g|all|optional|FIX.4.2,FIX.4.4,FIXT.1.1|unsupported||SecureDataLen rejection is intentionally outside the current TLS baseline
+case|17.h|all|optional|FIX.4.2,FIX.4.4,FIXT.1.1|unsupported||SecureData decryption failure is intentionally outside the current TLS baseline
+case|17.i|all|optional|FIX.4.2,FIX.4.4,FIXT.1.1|unsupported||must-be-unencrypted field enforcement is intentionally outside the current TLS baseline
+case|17.j|all|optional|FIX.4.2,FIX.4.4,FIXT.1.1|unsupported||block-cipher leftover handling is intentionally outside the current TLS baseline
+case|18.a|all|optional|FIX.4.2,FIX.4.4,FIXT.1.1|unsupported||third-party addressing acceptance is not yet in the Phase 11 baseline
+case|18.b|all|optional|FIX.4.2,FIX.4.4,FIXT.1.1|unsupported||third-party addressing reject path is not yet in the Phase 11 baseline
+case|19.a|all|mandatory|FIX.4.4|mapped|cases/19a-possresend-duplicate-appid-ignore.nfscenario|PossResend duplicate application identifier is surfaced and ignored by the interop application model
+case|19.b|all|mandatory|FIX.4.4|mapped|cases/19b-possresend-first-seen-appid-process.nfscenario|PossResend first-seen application identifier is processed normally by the interop application model
+case|20|all|mandatory|FIX.4.4|mapped|cases/20-simultaneous-resend-request.nfscenario|concurrent ResendRequest replay is handled while local gap recovery remains in progress

@@ -14,7 +14,7 @@ namespace {
 auto
 BuildInteropArtifact(const std::filesystem::path& artifact_path) -> nimble::base::Status
 {
-  const auto ffd_path = std::filesystem::path(NIMBLEFIX_PROJECT_DIR) / "build" / "bench" / "quickfix_FIX44.ffd";
+  const auto ffd_path = std::filesystem::path(NIMBLEFIX_PROJECT_DIR) / "build" / "bench" / "quickfix_FIX44.nfd";
   auto dictionary = nimble::profile::LoadNormalizedDictionaryFile(ffd_path);
   if (!dictionary.ok()) {
     return dictionary.status();
@@ -32,14 +32,14 @@ BuildInteropArtifact(const std::filesystem::path& artifact_path) -> nimble::base
 TEST_CASE("interop-harness", "[interop-harness]")
 {
   const auto root = std::filesystem::path(NIMBLEFIX_PROJECT_DIR) / "tests" / "data" / "interop";
-  const auto artifact_path = root / "loopback-profile.art";
+  const auto artifact_path = root / "loopback-profile.nfa";
   const auto store_path = root / "loopback-a.store";
 
   std::filesystem::remove(artifact_path);
   std::filesystem::remove(store_path);
   REQUIRE(BuildInteropArtifact(artifact_path).ok());
 
-  auto scenario = nimble::runtime::LoadInteropScenarioFile(root / "loopback-basic.ffscenario");
+  auto scenario = nimble::runtime::LoadInteropScenarioFile(root / "loopback-basic.nfscenario");
   REQUIRE(scenario.ok());
 
   auto report = nimble::runtime::RunInteropScenario(scenario.value());
@@ -52,9 +52,9 @@ TEST_CASE("interop-harness", "[interop-harness]")
   std::filesystem::remove(store_path);
 
   const auto durable_root = std::filesystem::temp_directory_path() / "nimblefix-interop-durable-test";
-  const auto durable_artifact_path = durable_root / "loopback-profile.art";
-  const auto durable_config_path = durable_root / "loopback-runtime.ffcfg";
-  const auto durable_scenario_path = durable_root / "loopback-basic.ffscenario";
+  const auto durable_artifact_path = durable_root / "loopback-profile.nfa";
+  const auto durable_config_path = durable_root / "loopback-runtime.nfcfg";
+  const auto durable_scenario_path = durable_root / "loopback-basic.nfscenario";
   const auto durable_store_path = durable_root / "loopback-a.store";
 
   std::filesystem::remove_all(durable_root);
@@ -108,9 +108,9 @@ TEST_CASE("interop-harness", "[interop-harness]")
   std::filesystem::remove_all(durable_root);
 
   const auto official_root = std::filesystem::temp_directory_path() / "nimblefix-interop-official-test";
-  const auto official_artifact_path = official_root / "official-profile.art";
-  const auto official_config_path = official_root / "official-runtime.ffcfg";
-  const auto official_scenario_path = official_root / "official-case-2s.ffscenario";
+  const auto official_artifact_path = official_root / "official-profile.nfa";
+  const auto official_config_path = official_root / "official-runtime.nfcfg";
+  const auto official_scenario_path = official_root / "official-case-2s.nfscenario";
 
   std::filesystem::remove_all(official_root);
   std::filesystem::create_directories(official_root);
@@ -146,7 +146,7 @@ TEST_CASE("interop-harness", "[interop-harness]")
   REQUIRE(official_report.value().action_reports[1].outbound_frame_summaries.size() == 1U);
   REQUIRE(official_report.value().action_reports[1].outbound_frame_summaries.front().msg_type == "5");
 
-  const auto poss_resend_scenario_path = official_root / "official-case-19.ffscenario";
+  const auto poss_resend_scenario_path = official_root / "official-case-19.nfscenario";
   {
     std::ofstream scenario_out(poss_resend_scenario_path, std::ios::trunc);
     scenario_out << "config=" << official_config_path.filename().string() << "\n";
@@ -179,7 +179,7 @@ TEST_CASE("interop-harness", "[interop-harness]")
   REQUIRE(poss_resend_report.value().action_reports[4].ignored_application_messages == 0U);
   REQUIRE(poss_resend_report.value().action_reports[4].poss_resend_application_messages == 1U);
 
-  const auto offline_queue_scenario_path = official_root / "official-case-16.ffscenario";
+  const auto offline_queue_scenario_path = official_root / "official-case-16.nfscenario";
   {
     std::ofstream scenario_out(offline_queue_scenario_path, std::ios::trunc);
     scenario_out << "config=" << official_config_path.filename().string() << "\n";

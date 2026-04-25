@@ -701,7 +701,7 @@ TEST_CASE("live-initiator", "[live-initiator]")
   if (!dictionary.ok()) {
     SKIP("FIX44 artifact not available: " << dictionary.status().message());
   }
-  const auto artifact_path = std::filesystem::path(NIMBLEFIX_PROJECT_DIR) / "build" / "bench" / "quickfix_FIX44.art";
+  const auto artifact_path = std::filesystem::path(NIMBLEFIX_PROJECT_DIR) / "build" / "bench" / "quickfix_FIX44.nfa";
   const auto profile_id = dictionary.value().profile().header().profile_id;
 
   auto acceptor = nimble::transport::TcpAcceptor::Listen("127.0.0.1", 0U);
@@ -1117,7 +1117,7 @@ TEST_CASE("live-initiator-queue", "[live-initiator-queue]")
   if (!dictionary.ok()) {
     SKIP("FIX44 artifact not available: " << dictionary.status().message());
   }
-  const auto artifact_path = std::filesystem::path(NIMBLEFIX_PROJECT_DIR) / "build" / "bench" / "quickfix_FIX44.art";
+  const auto artifact_path = std::filesystem::path(NIMBLEFIX_PROJECT_DIR) / "build" / "bench" / "quickfix_FIX44.nfa";
   const auto profile_id = dictionary.value().profile().header().profile_id;
 
   auto acceptor = nimble::transport::TcpAcceptor::Listen("127.0.0.1", 0U);
@@ -1709,7 +1709,7 @@ TEST_CASE("live-initiator-reconnect-after-disconnect", "[live-initiator]")
   if (!dictionary.ok()) {
     SKIP("FIX44 artifact not available: " << dictionary.status().message());
   }
-  const auto artifact_path = std::filesystem::path(NIMBLEFIX_PROJECT_DIR) / "build" / "bench" / "quickfix_FIX44.art";
+  const auto artifact_path = std::filesystem::path(NIMBLEFIX_PROJECT_DIR) / "build" / "bench" / "quickfix_FIX44.nfa";
   const auto profile_id = dictionary.value().profile().header().profile_id;
 
   auto acceptor = nimble::transport::TcpAcceptor::Listen("127.0.0.1", 0U);
@@ -1777,7 +1777,7 @@ TEST_CASE("live-initiator-reconnect-max-retries", "[live-initiator]")
   if (!dictionary.ok()) {
     SKIP("FIX44 artifact not available: " << dictionary.status().message());
   }
-  const auto artifact_path = std::filesystem::path(NIMBLEFIX_PROJECT_DIR) / "build" / "bench" / "quickfix_FIX44.art";
+  const auto artifact_path = std::filesystem::path(NIMBLEFIX_PROJECT_DIR) / "build" / "bench" / "quickfix_FIX44.nfa";
   const auto profile_id = dictionary.value().profile().header().profile_id;
 
   auto acceptor = nimble::transport::TcpAcceptor::Listen("127.0.0.1", 0U);
@@ -1849,7 +1849,7 @@ TEST_CASE("live-initiator-reconnect-backoff-timing", "[live-initiator]")
   if (!dictionary.ok()) {
     SKIP("FIX44 artifact not available: " << dictionary.status().message());
   }
-  const auto artifact_path = std::filesystem::path(NIMBLEFIX_PROJECT_DIR) / "build" / "bench" / "quickfix_FIX44.art";
+  const auto artifact_path = std::filesystem::path(NIMBLEFIX_PROJECT_DIR) / "build" / "bench" / "quickfix_FIX44.nfa";
   const auto profile_id = dictionary.value().profile().header().profile_id;
 
   auto acceptor = nimble::transport::TcpAcceptor::Listen("127.0.0.1", 0U);
@@ -1962,7 +1962,7 @@ TEST_CASE("live-initiator-defers-outside-logon-window", "[live-initiator]")
     SKIP("FIX44 artifact not available: " << dictionary.status().message());
   }
 
-  const auto artifact_path = std::filesystem::path(NIMBLEFIX_PROJECT_DIR) / "build" / "bench" / "quickfix_FIX44.art";
+  const auto artifact_path = std::filesystem::path(NIMBLEFIX_PROJECT_DIR) / "build" / "bench" / "quickfix_FIX44.nfa";
   const auto profile_id = dictionary.value().profile().header().profile_id;
 
   auto acceptor = nimble::transport::TcpAcceptor::Listen("127.0.0.1", 0U);
@@ -2033,7 +2033,7 @@ TEST_CASE("live-initiator-open-session-async queues immediate dial", "[live-init
     SKIP("FIX44 artifact not available: " << dictionary.status().message());
   }
 
-  const auto artifact_path = std::filesystem::path(NIMBLEFIX_PROJECT_DIR) / "build" / "bench" / "quickfix_FIX44.art";
+  const auto artifact_path = std::filesystem::path(NIMBLEFIX_PROJECT_DIR) / "build" / "bench" / "quickfix_FIX44.nfa";
   const auto profile_id = dictionary.value().profile().header().profile_id;
 
   auto acceptor = nimble::transport::TcpAcceptor::Listen("127.0.0.1", 0U);

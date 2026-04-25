@@ -27,7 +27,7 @@
 //   T1 = immediately after FIX ExecutionReport→struct extraction
 //
 // Usage:
-//   nimblefix-loopback --artifact <path/to/quickfix_FIX44.art>
+//   nimblefix-loopback --artifact <path/to/quickfix_FIX44.nfa>
 //                    [--iterations <N>]   default 1000 per message type
 //                    [--warmup <W>]        default 50  per message type
 

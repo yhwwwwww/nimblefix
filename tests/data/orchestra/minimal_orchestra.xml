@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<fixr:repository xmlns:fixr="http://fixprotocol.io/2020/orchestra/repository" name="MinimalOrchestra">
+  <fixr:codeSets>
+    <fixr:codeSet name="OrdTypeCodeSet">
+      <fixr:code value="1" name="Market"/>
+      <fixr:code value="2" name="Limit"/>
+    </fixr:codeSet>
+    <fixr:codeSet name="ExecTypeCodeSet">
+      <fixr:code value="0" name="New"/>
+    </fixr:codeSet>
+  </fixr:codeSets>
+
+  <fixr:fields>
+    <fixr:field id="35" name="MsgType" type="String"/>
+    <fixr:field id="11" name="ClOrdID" type="String"/>
+    <fixr:field id="55" name="Symbol" type="String"/>
+    <fixr:field id="54" name="Side" type="Char"/>
+    <fixr:field id="38" name="OrderQty" type="Int"/>
+    <fixr:field id="40" name="OrdType" type="Char" codeSet="OrdTypeCodeSet"/>
+    <fixr:field id="44" name="Price" type="Price"/>
+    <fixr:field id="98" name="EncryptMethod" type="Int"/>
+    <fixr:field id="108" name="HeartBtInt" type="Int"/>
+    <fixr:field id="150" name="ExecType" type="Char" codeSet="ExecTypeCodeSet"/>
+  </fixr:fields>
+
+  <fixr:messages>
+    <fixr:message id="Logon" name="Logon" msgType="A" category="admin">
+      <fixr:fieldRef id="98" presence="required"/>
+      <fixr:fieldRef id="108" presence="required"/>
+    </fixr:message>
+
+    <fixr:message id="NewOrderSingle" name="NewOrderSingle" msgType="D" category="app">
+      <fixr:fieldRef id="11" presence="required"/>
+      <fixr:fieldRef id="55" presence="required"/>
+      <fixr:fieldRef id="54" presence="required"/>
+      <fixr:fieldRef id="38" presence="required"/>
+      <fixr:fieldRef id="40" presence="required">
+        <fixr:rule id="price-required-for-limit" fieldId="44" whenFieldId="40" whenValue="2" presence="required"/>
+        <fixr:rule id="unsupported-not-equal" fieldId="44" whenFieldId="40" whenValue="1" whenOperator="!=" presence="required"/>
+      </fixr:fieldRef>
+      <fixr:fieldRef id="44" presence="optional"/>
+    </fixr:message>
+
+    <fixr:message id="ExecutionReport" name="ExecutionReport" msgType="8" category="app">
+      <fixr:fieldRef id="150" presence="required"/>
+      <fixr:fieldRef id="11" presence="optional"/>
+    </fixr:message>
+  </fixr:messages>
+
+  <fixr:serviceSubsets>
+    <fixr:serviceSubset id="order-entry" name="order-entry">
+      <fixr:messageRef msgType="D" role="initiator" direction="send"/>
+      <fixr:messageRef msgType="8" role="initiator" direction="receive"/>
+    </fixr:serviceSubset>
+    <fixr:serviceSubset id="admin-only" name="admin-only">
+      <fixr:messageRef msgType="A" role="initiator"/>
+    </fixr:serviceSubset>
+  </fixr:serviceSubsets>
+
+  <fixr:flows>
+    <fixr:flow id="order-flow" name="order-flow">
+      <fixr:edge id="submit-order" fromRole="initiator" fromMsgType="D" toRole="acceptor" toMsgType="8"/>
+    </fixr:flow>
+  </fixr:flows>
+</fixr:repository>

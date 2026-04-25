@@ -61,7 +61,7 @@ EncodeFixFrame(std::string_view body_fields, std::string_view begin_string = "FI
 inline auto
 LoadFix44DictionaryView() -> base::Result<profile::NormalizedDictionaryView>
 {
-  const auto path = std::filesystem::path(NIMBLEFIX_PROJECT_DIR) / "build" / "bench" / "quickfix_FIX44.art";
+  const auto path = std::filesystem::path(NIMBLEFIX_PROJECT_DIR) / "build" / "bench" / "quickfix_FIX44.nfa";
   auto profile = profile::LoadProfileArtifact(path);
   if (!profile.ok()) {
     return profile.status();
@@ -86,7 +86,7 @@ BuildDictionaryViewFromDictionary(profile::NormalizedDictionary dict) -> base::R
   if (!artifact.ok()) {
     return artifact.status();
   }
-  const auto artifact_path = std::filesystem::temp_directory_path() / "nimblefix-test-support.art";
+  const auto artifact_path = std::filesystem::temp_directory_path() / "nimblefix-test-support.nfa";
   const auto write_status = profile::WriteProfileArtifact(artifact_path, artifact.value());
   if (!write_status.ok()) {
     return write_status;

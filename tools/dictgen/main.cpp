@@ -12,8 +12,8 @@ namespace {
 auto
 PrintUsage() -> void
 {
-  std::cout << "usage: nimblefix-dictgen --input <dictionary.ffd> [--merge "
-               "<overlay.ffd> ...] --output <profile.art> [--cpp-builders "
+  std::cout << "usage: nimblefix-dictgen --input <dictionary.nfd> [--merge "
+               "<overlay.nfd> ...] --output <profile.nfa> [--cpp-builders "
                "<generated.hpp>] [--cpp-readers <generated.hpp>]\n";
 }
 

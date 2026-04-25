@@ -39,10 +39,10 @@ QUICKFIX_SRC_DIR="$ROOT_DIR/bench/vendor/quickfix"
 QUICKFIX_BUILD_DIR="$BENCH_DIR/quickfix-build"
 
 QUICKFIX_XML="$QUICKFIX_SRC_DIR/spec/FIX44.xml"
-QUICKFIX_FFD="$BENCH_DIR/quickfix_FIX44.ffd"
-QUICKFIX_ART="$BENCH_DIR/quickfix_FIX44.art"
+QUICKFIX_NFD="$BENCH_DIR/quickfix_FIX44.nfd"
+QUICKFIX_NFA="$BENCH_DIR/quickfix_FIX44.nfa"
 NIMBLEFIX_BENCH_BIN=""
-XML2FFD_BIN=""
+XML2NFD_BIN=""
 DICTGEN_BIN=""
 QUICKFIX_BENCH_BIN=""
 XMAKE_CONFIGURED=0
@@ -53,8 +53,8 @@ usage: ./bench/bench.sh <command> [args...]
 
 commands:
   build         Build all benchmark binaries and benchmark input artifacts
-    nimblefix     Run NimbleFIX benchmark against build/bench/quickfix_FIX44.art
-    nimblefix-ffd Run NimbleFIX benchmark against build/bench/quickfix_FIX44.ffd
+    nimblefix     Run NimbleFIX benchmark against build/bench/quickfix_FIX44.nfa
+    nimblefix-nfd Run NimbleFIX benchmark against build/bench/quickfix_FIX44.nfd
   quickfix      Run QuickFIX comparison benchmark (parse, encode, session-inbound, replay, loopback)
   builder       Run the FIX44 encode-focused NimbleFIX benchmark variant
   compare       Run the default NimbleFIX and QuickFIX comparison suites side by side
@@ -341,7 +341,7 @@ resolve_paths() {
     fi
 
     NIMBLEFIX_BENCH_BIN="$BIN_DIR/nimblefix-bench"
-    XML2FFD_BIN="$BIN_DIR/nimblefix-xml2ffd"
+    XML2NFD_BIN="$BIN_DIR/nimblefix-xml2nfd"
     DICTGEN_BIN="$BIN_DIR/nimblefix-dictgen"
     QUICKFIX_BENCH_BIN="$BIN_DIR/quickfix-cpp-bench"
 }
@@ -374,7 +374,7 @@ fallback_to_cmake() {
     XMAKE_CONFIGURED=0
     BIN_DIR=""
     NIMBLEFIX_BENCH_BIN=""
-    XML2FFD_BIN=""
+    XML2NFD_BIN=""
     DICTGEN_BIN=""
     QUICKFIX_BENCH_BIN=""
     resolve_paths
@@ -459,9 +459,9 @@ xmake_build() {
 build_nimblefix_tools() {
     resolve_paths
     if [ "$RESOLVED_BUILD_SYSTEM" = "xmake" ]; then
-        xmake_build nimblefix-bench nimblefix-xml2ffd nimblefix-dictgen
+        xmake_build nimblefix-bench nimblefix-xml2nfd nimblefix-dictgen
     else
-        cmake_build nimblefix-bench nimblefix-xml2ffd nimblefix-dictgen
+        cmake_build nimblefix-bench nimblefix-xml2nfd nimblefix-dictgen
     fi
 }
 
@@ -496,21 +496,21 @@ run_nimblefix_artifact() {
     resolve_paths
     build_nimblefix_tools
     prepare_quickfix_dictionary
-    "$NIMBLEFIX_BENCH_BIN" --artifact "$QUICKFIX_ART" "$@"
+    "$NIMBLEFIX_BENCH_BIN" --artifact "$QUICKFIX_NFA" "$@"
 }
 
-run_nimblefix_ffd() {
+run_nimblefix_nfd() {
     resolve_paths
     build_nimblefix_tools
     prepare_quickfix_dictionary
-    "$NIMBLEFIX_BENCH_BIN" --dictionary "$QUICKFIX_FFD" "$@"
+    "$NIMBLEFIX_BENCH_BIN" --dictionary "$QUICKFIX_NFD" "$@"
 }
 
 run_builder() {
     resolve_paths
     build_nimblefix_tools
     prepare_quickfix_dictionary
-    "$NIMBLEFIX_BENCH_BIN" --artifact "$QUICKFIX_ART" "$@"
+    "$NIMBLEFIX_BENCH_BIN" --artifact "$QUICKFIX_NFA" "$@"
 }
 
 run_quickfix() {
@@ -539,11 +539,11 @@ case "$command_name" in
         fi
         run_nimblefix_artifact "$@"
         ;;
-    nimblefix-ffd)
+    nimblefix-nfd)
         if [ "$#" -eq 0 ]; then
             set -- --iterations 30000 --loopback 200 --replay 200
         fi
-        run_nimblefix_ffd "$@"
+        run_nimblefix_nfd "$@"
         ;;
     quickfix)
         if [ "$#" -eq 0 ]; then

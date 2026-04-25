@@ -45,7 +45,7 @@ The repository is split between the reusable engine surface, executable entrypoi
 | `bench/` | Benchmark drivers plus the side-by-side QuickFIX comparison harness |
 | `tests/` | Regression, runtime, soak, and integration coverage |
 | `scripts/` | Helper entrypoints used by developers and CI for offline build/test/bench flows |
-| `samples/` | Example `.ffd` profiles and overlays used by docs, tests, and codegen fixtures |
+| `samples/` | Example `.nfd` profiles and overlays used by docs, tests, and codegen fixtures |
 | `docs/` | Architecture and development documentation |
 
 At runtime, the tools do very little policy themselves. They parse CLI or config-file input, populate runtime config structs, and hand control to `Engine`, `LiveAcceptor`, or `LiveInitiator`. That keeps the hot-path logic inside the library rather than duplicated across binaries.
@@ -78,14 +78,14 @@ kVersionMismatch, kNotFound, kAlreadyExists
 
 ### 2. Profile (public include: `nimblefix/profile/`)
 
-Protocol metadata system. NimbleFIX keeps XML out of the hot path, but protocol metadata can arrive either as precompiled `.art` artifacts or as `.ffd` dictionaries parsed once at startup. Both paths normalize into the same runtime dictionary layout before workers start.
+Protocol metadata system. NimbleFIX keeps XML out of the hot path, but protocol metadata can arrive either as precompiled `.nfa` artifacts or as `.nfd` dictionaries parsed once at startup. Both paths normalize into the same runtime dictionary layout before workers start.
 
 **Pipeline:**
 
 ```
-.ffd (dictionary text)  ──►  dictgen  ──►  .art (binary artifact)  [optional precompilation]
+.nfd (dictionary text)  ──►  dictgen  ──►  .nfa (binary artifact)  [optional precompilation]
                         or
-.ffd (dictionary text)  ──►  Engine parses once at startup
+.nfd (dictionary text)  ──►  Engine parses once at startup
                                          │
                                          ├── StringTable
                                          ├── FieldDefs (tag → type, name, flags)
@@ -100,10 +100,10 @@ Protocol metadata system. NimbleFIX keeps XML out of the hot path, but protocol 
 
 | Type | Role |
 |------|------|
-| `LoadedProfile` | mmap'd view of a `.art` binary artifact |
+| `LoadedProfile` | mmap'd view of a `.nfa` binary artifact |
 | `NormalizedDictionaryView` | Read-only accessor over profile sections — field/message/group lookups |
 | `ProfileRegistry` | Holds all loaded profiles for the engine |
-| `ProfileLoader` | Loads `.art` files with optional `madvise`/`mlock` page warming; also loads `.ffd` dictionaries directly into memory |
+| `ProfileLoader` | Loads `.nfa` files with optional `madvise`/`mlock` page warming; also loads `.nfd` dictionaries directly into memory |
 
 **Artifact sections** (`SectionKind` enum):
 
@@ -113,7 +113,7 @@ kAdminRules, kValidationRules, kLookupTables,
 kTemplateDescriptors, kMessageFieldRules, kGroupFieldRules
 ```
 
-**Dictionary input format** (`.ffd`):
+**Dictionary input format** (`.nfd`):
 
 ```
 profile_id=1001
@@ -122,7 +122,7 @@ message|D|NewOrderSingle|0|35:r,49:r,56:r,453:o
 group|453|448|Parties|0|448:r,447:r,452:r
 ```
 
-**Overlay format**: Multiple `.ffd` files can be merged. The first provides the baseline, additional files extend or override fields/messages/groups.
+**Overlay format**: Multiple `.nfd` files can be merged. The first provides the baseline, additional files extend or override fields/messages/groups.
 
 ### 3. Message (public include: `nimblefix/message/`)
 
@@ -442,7 +442,7 @@ Central coordinator:
 
 ```cpp
 class Engine {
-    auto LoadProfiles(config) -> Status;     // Load .art files
+    auto LoadProfiles(config) -> Status;     // Load .nfa files
     auto Boot(config) -> Status;             // Initialize runtime, workers
     auto ResolveInboundSession(header) -> Result<ResolvedCounterparty>;
     void SetSessionFactory(SessionFactory);  // Dynamic session acceptance
@@ -451,7 +451,7 @@ class Engine {
 
 Primary responsibilities:
 
-- Load `.art` and/or `.ffd` profiles into `ProfileRegistry`
+- Load `.nfa` and/or `.nfd` profiles into `ProfileRegistry`
 - Materialize shared runtime services: metrics, trace, managed queues, store factories
 - Build the worker-shard inventory consumed by `LiveAcceptor` and `LiveInitiator`
 - Provide lifecycle (`Boot()`, `Run()`, `Stop()`) and `SessionHandle` surfaces for non-owner threads

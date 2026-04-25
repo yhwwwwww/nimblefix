@@ -11,9 +11,10 @@ namespace {
 auto
 PrintUsage() -> void
 {
-  std::cout << "usage:\n"
-            << "  nimblefix-fix-session-testcases --manifest <cases.ffcases> [--report <coverage.md>] [--filter <prefix>]\n"
-            << "  nimblefix-fix-session-testcases --import-html <session-cases.html> --output <cases.ffcases>\n";
+  std::cout
+    << "usage:\n"
+    << "  nimblefix-fix-session-testcases --manifest <cases.nfcases> [--report <coverage.md>] [--filter <prefix>]\n"
+    << "  nimblefix-fix-session-testcases --import-html <session-cases.html> --output <cases.nfcases>\n";
 }
 
 } // namespace

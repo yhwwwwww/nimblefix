@@ -1,0 +1,7 @@
+config=../configs/fixt11-acceptor.nfcfg
+action|protocol-connect|1101|ts=1
+expect-action|1|outbound=0|disconnect=0
+action|protocol-inbound|1101|seq=1|ts=10|body=35=A^98=0^108=30
+expect-action|2|outbound=1|disconnect=1
+expect-outbound|2|1|msg-type=5|text-contains=FIXT.1.1 logon requires DefaultApplVerID
+expect-session|1101|disconnected|1|2|0

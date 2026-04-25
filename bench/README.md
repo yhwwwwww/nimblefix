@@ -16,7 +16,7 @@ This directory is the canonical benchmark subsystem for NimbleFIX. It contains t
 ```bash
 ./bench/bench.sh build
 ./bench/bench.sh nimblefix
-./bench/bench.sh nimblefix-ffd
+./bench/bench.sh nimblefix-nfd
 ./bench/bench.sh quickfix
 ./bench/bench.sh builder
 ./bench/bench.sh compare
@@ -38,15 +38,15 @@ Important environment notes:
 
 - `bench.sh` defaults `NIMBLEFIX_XMAKE_CCACHE=n`. This is intentional: Linux xmake builds of the large QuickFIX targets can hit reproducible `.build_cache/... -> .objs/... file busy` failures when compiler cache is enabled.
 - Ubuntu 24.04's packaged xmake is currently `2.8.7`, which is too old for this project. In auto mode the helper will print that fact and fall back to CMake.
-- All benchmark commands intentionally consume QuickFIX FIX44 inputs only: `bench/vendor/quickfix/spec/FIX44.xml`, `build/bench/quickfix_FIX44.ffd`, or `build/bench/quickfix_FIX44.art`.
+- All benchmark commands intentionally consume QuickFIX FIX44 inputs only: `bench/vendor/quickfix/spec/FIX44.xml`, `build/bench/quickfix_FIX44.nfd`, or `build/bench/quickfix_FIX44.nfa`.
 
 ## Default Suites
 
 | Command | Default args | What it is for |
 |---------|--------------|----------------|
 | `build` | none | Build all benchmark binaries and regenerate the FIX44 benchmark artifacts |
-| `nimblefix` | `--iterations 100000 --loopback 1000 --replay 1000` | Main NimbleFIX suite against `quickfix_FIX44.art` |
-| `nimblefix-ffd` | `--iterations 30000 --loopback 200 --replay 200` | Same NimbleFIX suite but load the `.ffd` text dictionary directly |
+| `nimblefix` | `--iterations 100000 --loopback 1000 --replay 1000` | Main NimbleFIX suite against `quickfix_FIX44.nfa` |
+| `nimblefix-nfd` | `--iterations 30000 --loopback 200 --replay 200` | Same NimbleFIX suite but load the `.nfd` text dictionary directly |
 | `quickfix` | `--iterations 100000 --replay 1000 --replay-span 128 --loopback 1000` | Main QuickFIX comparison suite |
 | `builder` | `--iterations 100000 --loopback 0 --replay 0` | Encode-focused NimbleFIX iteration loop without replay/loopback noise |
 | `compare` | NimbleFIX defaults, then QuickFIX defaults | Full side-by-side report used by the README numbers |
@@ -235,9 +235,9 @@ The raw line additionally includes:
 
 ## Output Artifacts
 
-- `build/bench/quickfix_FIX44.ffd`: NimbleFIX text dictionary generated from QuickFIX `FIX44.xml`.
-- `build/bench/quickfix_FIX44.art`: compiled NimbleFIX artifact used by the main FIX44 suite.
-- `build/sample-basic.art`: shared sample artifact used by tests/codegen, not by the benchmark commands.
+- `build/bench/quickfix_FIX44.nfd`: NimbleFIX text dictionary generated from QuickFIX `FIX44.xml`.
+- `build/bench/quickfix_FIX44.nfa`: compiled NimbleFIX artifact used by the main FIX44 suite.
+- `build/sample-basic.nfa`: shared sample artifact used by tests/codegen, not by the benchmark commands.
 - `build/linux/x86_64/release/quickfix-cpp-bench`: xmake output for the QuickFIX comparison binary.
 - `build/cmake/<preset>/bin/quickfix-cpp-bench`: Ninja-based CMake output for the QuickFIX comparison binary.
 - `build/cmake/<preset>-make/bin/quickfix-cpp-bench`: make-based CMake fallback output for the QuickFIX comparison binary.

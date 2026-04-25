@@ -21,11 +21,11 @@ TEST_CASE("parser-surface", "[parser-surface]")
 {
   const auto root = std::filesystem::path(NIMBLEFIX_PROJECT_DIR) / "tests" / "data" / "fuzz";
 
-  const auto valid_config = ReadText(root / "runtime_config_valid.ffcfg");
-  const auto invalid_config = ReadText(root / "runtime_config_invalid.ffcfg");
-  const auto valid_dict = ReadText(root / "dictgen_valid.ffd");
-  const auto invalid_dict = ReadText(root / "dictgen_invalid.ffd");
-  const auto valid_overlay = ReadText(root / "overlay_valid.ffd");
+  const auto valid_config = ReadText(root / "runtime_config_valid.nfcfg");
+  const auto invalid_config = ReadText(root / "runtime_config_invalid.nfcfg");
+  const auto valid_dict = ReadText(root / "dictgen_valid.nfd");
+  const auto invalid_dict = ReadText(root / "dictgen_invalid.nfd");
+  const auto valid_overlay = ReadText(root / "overlay_valid.nfd");
 
   auto config = nimble::runtime::LoadEngineConfigText(valid_config, root);
   REQUIRE(config.ok());

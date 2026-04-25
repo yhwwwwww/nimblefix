@@ -1,7 +1,0 @@
-config=../configs/fix44-acceptor.ffcfg
-action|protocol-connect|4401|ts=1
-expect-action|1|outbound=0|disconnect=0
-action|protocol-inbound|4401|seq=1|ts=10|body=35=0
-expect-action|2|outbound=1|disconnect=1
-expect-outbound|2|1|msg-type=5|text-contains=received 0 before Logon completed
-expect-session|4401|disconnected|2|2|0

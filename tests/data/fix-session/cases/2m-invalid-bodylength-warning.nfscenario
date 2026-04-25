@@ -1,0 +1,10 @@
+config=../configs/fix44-acceptor.nfcfg
+action|protocol-connect|4401|ts=1
+action|protocol-inbound|4401|seq=1|ts=10|body=35=A^98=0^108=30
+action|protocol-inbound-raw|4401|ts=20|raw=8=FIX.4.4^9=5^35=0^34=2^49=BUY^56=SELL^52=20260402-12:00:00.000^10=165^
+action|protocol-inbound|4401|seq=2|ts=30|body=35=0
+expect-action|2|outbound=1|active=1|disconnect=0
+expect-outbound|2|1|msg-type=A|msg-seq-num=1
+expect-action|3|outbound=0|disconnect=0
+expect-action|4|outbound=0|disconnect=0
+expect-session|4401|active|3|2|0

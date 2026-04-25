@@ -1,4 +1,0 @@
-config=../configs/fix44-acceptor.ffcfg
-action|protocol-queue-application|4401|ts=5|body=35=D^11=ORD-16A^55=AAPL^54=1^60=20260425-12:00:00.000^40=1
-expect-action|1|outbound=0|app=0|queued-app=1|disconnect=0
-expect-session|4401|disconnected|1|1|0

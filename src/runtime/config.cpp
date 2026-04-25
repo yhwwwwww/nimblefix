@@ -7,6 +7,8 @@
 #include <unordered_set>
 #include <utility>
 
+#include "nimblefix/runtime/contract_binding.h"
+
 namespace nimble::runtime {
 
 namespace {
@@ -412,6 +414,11 @@ TlsTransportEnabledAtBuild() noexcept -> bool
 auto
 ValidateEngineConfig(const EngineConfig& config) -> base::Status
 {
+  auto loaded_contracts = LoadContractMap(config.profile_contracts);
+  if (!loaded_contracts.ok()) {
+    return loaded_contracts.status();
+  }
+
   if (config.worker_count == 0) {
     return base::Status::InvalidArgument("engine worker_count must be positive");
   }
@@ -521,6 +528,11 @@ ValidateEngineConfig(const EngineConfig& config) -> base::Status
                                              "' requires plain-only acceptor transport but no plain listener is "
                                              "configured");
       }
+    }
+
+    auto effective_counterparty = ResolveEffectiveCounterpartyConfig(counterparty, loaded_contracts.value());
+    if (!effective_counterparty.ok()) {
+      return effective_counterparty.status();
     }
   }
 
@@ -641,6 +653,13 @@ auto
 CounterpartyConfigBuilder::supported_app_msg_types(std::vector<std::string> values) -> CounterpartyConfigBuilder&
 {
   config_.supported_app_msg_types = std::move(values);
+  return *this;
+}
+
+auto
+CounterpartyConfigBuilder::contract_service_subsets(std::vector<std::string> values) -> CounterpartyConfigBuilder&
+{
+  config_.contract_service_subsets = std::move(values);
   return *this;
 }
 

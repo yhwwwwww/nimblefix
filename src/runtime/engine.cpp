@@ -8,6 +8,7 @@
 
 #include "nimblefix/codec/fix_codec.h"
 #include "nimblefix/profile/profile_loader.h"
+#include "nimblefix/runtime/contract_binding.h"
 #include "nimblefix/runtime/metrics.h"
 #include "nimblefix/runtime/profile_registry.h"
 #include "nimblefix/runtime/sharded_runtime.h"
@@ -83,6 +84,7 @@ struct Engine::Impl
   std::optional<EngineConfig> config_;
   std::optional<ShardedRuntime> runtime_;
   std::unordered_map<std::uint64_t, CounterpartyConfig> counterparties_;
+  LoadedContractMap contracts_;
   std::optional<SessionFactory> session_factory_;
   mutable std::mutex managed_queue_runner_mutex_;
   std::unordered_map<const void*, ManagedQueueRunnerSlot> managed_queue_runners_;
@@ -95,6 +97,7 @@ struct Engine::Impl
 #define config_ impl_->config_
 #define runtime_ impl_->runtime_
 #define counterparties_ impl_->counterparties_
+#define contracts_ impl_->contracts_
 #define session_factory_ impl_->session_factory_
 #define managed_queue_runner_mutex_ impl_->managed_queue_runner_mutex_
 #define managed_queue_runners_ impl_->managed_queue_runners_
@@ -162,6 +165,8 @@ auto
 Engine::LoadProfiles(const EngineConfig& config) -> base::Status
 {
   profiles_.Clear();
+  contracts_.clear();
+  ProfileRegistry loaded_profiles;
   const profile::ProfileLoadOptions load_options{
     .madvise = config.profile_madvise,
     .mlock = config.profile_mlock,
@@ -174,7 +179,7 @@ Engine::LoadProfiles(const EngineConfig& config) -> base::Status
 
     const auto profile_id = loaded.value().profile_id();
 
-    auto status = profiles_.Register(std::move(loaded).value());
+    auto status = loaded_profiles.Register(std::move(loaded).value());
     if (!status.ok()) {
       return status;
     }
@@ -190,13 +195,29 @@ Engine::LoadProfiles(const EngineConfig& config) -> base::Status
 
     const auto profile_id = loaded.value().profile_id();
 
-    auto status = profiles_.Register(std::move(loaded).value());
+    auto status = loaded_profiles.Register(std::move(loaded).value());
     if (!status.ok()) {
       return status;
     }
 
     trace_.Record(TraceEventKind::kProfileLoaded, profile_id, 0U, 0U, profile_id, 0U, dict_paths.front().string());
   }
+
+  auto loaded_contracts = LoadContractMap(config.profile_contracts);
+  if (!loaded_contracts.ok()) {
+    return loaded_contracts.status();
+  }
+  for (const auto& [profile_id, contract] : loaded_contracts.value()) {
+    const auto* loaded_profile = loaded_profiles.Find(profile_id);
+    if (loaded_profile == nullptr) {
+      return base::Status::NotFound("contract sidecar references an unloaded profile_id");
+    }
+    if (contract.schema_hash != 0U && contract.schema_hash != loaded_profile->schema_hash()) {
+      return base::Status::VersionMismatch("contract sidecar schema_hash does not match the loaded profile");
+    }
+  }
+  profiles_ = std::move(loaded_profiles);
+  contracts_ = std::move(loaded_contracts).value();
 
   return base::Status::Ok();
 }
@@ -227,7 +248,15 @@ Engine::Boot(const EngineConfig& config) -> base::Status
     return status;
   }
 
-  for (const auto& counterparty : config.counterparties) {
+  for (auto& counterparty : config_->counterparties) {
+    auto effective = ResolveEffectiveCounterpartyConfig(counterparty, contracts_);
+    if (!effective.ok()) {
+      return effective.status();
+    }
+    counterparty = std::move(effective).value();
+  }
+
+  for (const auto& counterparty : config_->counterparties) {
     if (profiles_.Find(counterparty.session.profile_id) == nullptr) {
       return base::Status::NotFound("counterparty references an unloaded profile");
     }

@@ -900,7 +900,7 @@ TEST_CASE("fix-codec: deeply nested groups beyond kMaxGroupNestingDepth", "[fix-
 
   auto artifact = nimble::profile::BuildProfileArtifact(deep_dict);
   REQUIRE(artifact.ok());
-  const auto artifact_path = std::filesystem::temp_directory_path() / "nimblefix-deep-nest-test.art";
+  const auto artifact_path = std::filesystem::temp_directory_path() / "nimblefix-deep-nest-test.nfa";
   auto write_status = nimble::profile::WriteProfileArtifact(artifact_path, artifact.value());
   REQUIRE(write_status.ok());
   auto loaded = nimble::profile::LoadProfileArtifact(artifact_path);

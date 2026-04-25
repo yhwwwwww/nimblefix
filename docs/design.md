@@ -286,7 +286,7 @@ FIX 的性能瓶颈不只在 parse，还在字段语义识别和 group 归属判
 
 字典合并仅发生在离线字典生成工具（`nimblefix-dictgen`）中，运行时不存在合并逻辑。
 
-工具接受一个基线 `.ffd` 文件和零个或多个增量 `.ffd` 文件，按以下规则合并为单一 `NormalizedDictionary`：
+工具接受一个基线 `.nfd` 文件和零个或多个增量 `.nfd` 文件，按以下规则合并为单一 `NormalizedDictionary`：
 
 1. 字段级合并
 
@@ -373,8 +373,8 @@ profile 绑定必须发生在 session 进入 `Active` 之前。
 
 1. 源定义层
 
-- 标准 FIX XML 或 `.ffd` 文件作为基线输入。
-- venue / broker / counterparty 的增量 `.ffd` 文件通过 `--merge` 合并。
+- 标准 FIX XML 或 `.nfd` 文件作为基线输入。
+- venue / broker / counterparty 的增量 `.nfd` 文件通过 `--merge` 合并。
 - validation policy 与 profile 绑定规则作为独立运行时配置。
 
 2. 生成层（离线工具 `nimblefix-dictgen`）
@@ -386,7 +386,7 @@ profile 绑定必须发生在 session 进入 `Active` 之前。
 
 3. 启动层
 
-- 进程启动时加载 artifact（或直接加载 `.ffd` 文件）。
+- 进程启动时加载 artifact（或直接加载 `.nfd` 文件）。
 - 绑定到 profile registry。
 - session 建立时只引用已经装载好的 profile。
 

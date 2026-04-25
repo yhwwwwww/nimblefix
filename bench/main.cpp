@@ -47,8 +47,8 @@ using bench_support::NowNs;
 auto
 PrintUsage() -> void
 {
-  std::cout << "usage: nimblefix-bench [--artifact <profile.art> | --dictionary "
-               "<profile.ffd> [--dictionary <overlay.ffd> ...]] [--iterations "
+  std::cout << "usage: nimblefix-bench [--artifact <profile.nfa> | --dictionary "
+               "<profile.nfd> [--dictionary <overlay.nfd> ...]] [--iterations "
                "<count>] [--loopback <count>] [--replay <count>] [--replay-span "
                "<count>] [--begin-string <value>] [--default-appl-ver-id <value>]\n";
 }
@@ -1191,7 +1191,7 @@ main(int argc, char** argv)
   }
 
   if (artifact_path.empty() && dictionary_paths.empty()) {
-    artifact_path = std::filesystem::path(NIMBLEFIX_PROJECT_DIR) / "build/bench/quickfix_FIX44.art";
+    artifact_path = std::filesystem::path(NIMBLEFIX_PROJECT_DIR) / "build/bench/quickfix_FIX44.nfa";
   } else if (!artifact_path.is_absolute()) {
     artifact_path = std::filesystem::path(NIMBLEFIX_PROJECT_DIR) / artifact_path;
   }

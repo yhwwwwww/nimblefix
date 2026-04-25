@@ -549,7 +549,7 @@ TEST_CASE("live-runtime", "[live-runtime]")
   if (!dictionary.ok()) {
     SKIP("FIX44 artifact not available: " << dictionary.status().message());
   }
-  const auto artifact_path = std::filesystem::path(NIMBLEFIX_PROJECT_DIR) / "build" / "bench" / "quickfix_FIX44.art";
+  const auto artifact_path = std::filesystem::path(NIMBLEFIX_PROJECT_DIR) / "build" / "bench" / "quickfix_FIX44.nfa";
   const auto profile_id = dictionary.value().profile().header().profile_id;
 
   nimble::runtime::EngineConfig config;
@@ -1099,7 +1099,7 @@ TEST_CASE("live-backpressure", "[live-backpressure]")
   if (!dictionary.ok()) {
     SKIP("FIX44 artifact not available: " << dictionary.status().message());
   }
-  const auto artifact_path = std::filesystem::path(NIMBLEFIX_PROJECT_DIR) / "build" / "bench" / "quickfix_FIX44.art";
+  const auto artifact_path = std::filesystem::path(NIMBLEFIX_PROJECT_DIR) / "build" / "bench" / "quickfix_FIX44.nfa";
   const auto profile_id = dictionary.value().profile().header().profile_id;
 
   nimble::runtime::EngineConfig config;
@@ -1181,7 +1181,7 @@ TEST_CASE("dynamic session factory accepts unknown CompID", "[live-session-facto
   if (!dictionary.ok()) {
     SKIP("FIX44 artifact not available: " << dictionary.status().message());
   }
-  const auto artifact_path = std::filesystem::path(NIMBLEFIX_PROJECT_DIR) / "build" / "bench" / "quickfix_FIX44.art";
+  const auto artifact_path = std::filesystem::path(NIMBLEFIX_PROJECT_DIR) / "build" / "bench" / "quickfix_FIX44.nfa";
   const auto profile_id = dictionary.value().profile().header().profile_id;
 
   nimble::runtime::EngineConfig config;
@@ -1253,7 +1253,7 @@ TEST_CASE("dynamic session factory rejects unknown CompID", "[live-session-facto
   if (!dictionary.ok()) {
     SKIP("FIX44 artifact not available: " << dictionary.status().message());
   }
-  const auto artifact_path = std::filesystem::path(NIMBLEFIX_PROJECT_DIR) / "build" / "bench" / "quickfix_FIX44.art";
+  const auto artifact_path = std::filesystem::path(NIMBLEFIX_PROJECT_DIR) / "build" / "bench" / "quickfix_FIX44.nfa";
   const auto profile_id = dictionary.value().profile().header().profile_id;
 
   nimble::runtime::EngineConfig config;
@@ -1339,7 +1339,7 @@ TEST_CASE("whitelist factory accepts listed CompID", "[live-session-factory]")
   if (!dictionary.ok()) {
     SKIP("FIX44 artifact not available: " << dictionary.status().message());
   }
-  const auto artifact_path = std::filesystem::path(NIMBLEFIX_PROJECT_DIR) / "build" / "bench" / "quickfix_FIX44.art";
+  const auto artifact_path = std::filesystem::path(NIMBLEFIX_PROJECT_DIR) / "build" / "bench" / "quickfix_FIX44.nfa";
   const auto profile_id = dictionary.value().profile().header().profile_id;
 
   nimble::runtime::EngineConfig config;
@@ -1404,7 +1404,7 @@ TEST_CASE("whitelist factory rejects unlisted CompID", "[live-session-factory]")
   if (!dictionary.ok()) {
     SKIP("FIX44 artifact not available: " << dictionary.status().message());
   }
-  const auto artifact_path = std::filesystem::path(NIMBLEFIX_PROJECT_DIR) / "build" / "bench" / "quickfix_FIX44.art";
+  const auto artifact_path = std::filesystem::path(NIMBLEFIX_PROJECT_DIR) / "build" / "bench" / "quickfix_FIX44.nfa";
   const auto profile_id = dictionary.value().profile().header().profile_id;
 
   nimble::runtime::EngineConfig config;
@@ -1499,7 +1499,7 @@ TEST_CASE("dynamic session factory is ignored when accept_unknown_sessions is di
   if (!dictionary.ok()) {
     SKIP("FIX44 artifact not available: " << dictionary.status().message());
   }
-  const auto artifact_path = std::filesystem::path(NIMBLEFIX_PROJECT_DIR) / "build" / "bench" / "quickfix_FIX44.art";
+  const auto artifact_path = std::filesystem::path(NIMBLEFIX_PROJECT_DIR) / "build" / "bench" / "quickfix_FIX44.nfa";
   const auto profile_id = dictionary.value().profile().header().profile_id;
 
   nimble::runtime::EngineConfig config;
@@ -1596,7 +1596,7 @@ TEST_CASE("busy-poll mode", "[live-runtime]")
   if (!dictionary.ok()) {
     SKIP("FIX44 artifact not available: " << dictionary.status().message());
   }
-  const auto artifact_path = std::filesystem::path(NIMBLEFIX_PROJECT_DIR) / "build" / "bench" / "quickfix_FIX44.art";
+  const auto artifact_path = std::filesystem::path(NIMBLEFIX_PROJECT_DIR) / "build" / "bench" / "quickfix_FIX44.nfa";
   const auto profile_id = dictionary.value().profile().header().profile_id;
 
   nimble::runtime::EngineConfig config;
@@ -1661,7 +1661,7 @@ TEST_CASE("busy-poll mode no missed events", "[live-runtime]")
   if (!dictionary.ok()) {
     SKIP("FIX44 artifact not available: " << dictionary.status().message());
   }
-  const auto artifact_path = std::filesystem::path(NIMBLEFIX_PROJECT_DIR) / "build" / "bench" / "quickfix_FIX44.art";
+  const auto artifact_path = std::filesystem::path(NIMBLEFIX_PROJECT_DIR) / "build" / "bench" / "quickfix_FIX44.nfa";
   const auto profile_id = dictionary.value().profile().header().profile_id;
 
   nimble::runtime::EngineConfig config;
@@ -1750,7 +1750,7 @@ TEST_CASE("epoll backend single session", "[live-runtime]")
   if (!nimble::runtime::IsIoBackendAvailable(nimble::runtime::IoBackend::kEpoll)) {
     SKIP("epoll not available");
   }
-  const auto artifact_path = std::filesystem::path(NIMBLEFIX_PROJECT_DIR) / "build" / "bench" / "quickfix_FIX44.art";
+  const auto artifact_path = std::filesystem::path(NIMBLEFIX_PROJECT_DIR) / "build" / "bench" / "quickfix_FIX44.nfa";
   const auto profile_id = dictionary.value().profile().header().profile_id;
 
   nimble::runtime::EngineConfig config;
@@ -1819,7 +1819,7 @@ TEST_CASE("io_uring backend single session", "[live-runtime]")
     SUCCEED("io_uring not available");
     return;
   }
-  const auto artifact_path = std::filesystem::path(NIMBLEFIX_PROJECT_DIR) / "build" / "bench" / "quickfix_FIX44.art";
+  const auto artifact_path = std::filesystem::path(NIMBLEFIX_PROJECT_DIR) / "build" / "bench" / "quickfix_FIX44.nfa";
   const auto profile_id = dictionary.value().profile().header().profile_id;
 
   nimble::runtime::EngineConfig config;

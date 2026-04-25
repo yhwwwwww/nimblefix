@@ -11,7 +11,7 @@ import time
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 BUILD_DIR = REPO_ROOT / "build"
-ARTIFACT_PATH = BUILD_DIR / "sample-basic.art"
+ARTIFACT_PATH = BUILD_DIR / "sample-basic.nfa"
 DICTGEN_BIN = REPO_ROOT / "build/linux/x86_64/release/nimblefix-dictgen"
 ACCEPTOR_BIN = REPO_ROOT / "build/linux/x86_64/release/nimblefix-acceptor"
 INITIATOR_BIN = REPO_ROOT / "build/linux/x86_64/release/nimblefix-initiator"
@@ -32,7 +32,7 @@ def ensure_prerequisites() -> None:
         run_checked([
             str(DICTGEN_BIN),
             "--input",
-            str(REPO_ROOT / "samples/basic_profile.ffd"),
+            str(REPO_ROOT / "samples/basic_profile.nfd"),
             "--output",
             str(ARTIFACT_PATH),
         ], name="dictgen")

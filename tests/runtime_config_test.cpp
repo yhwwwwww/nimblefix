@@ -20,7 +20,7 @@ namespace {
 auto
 BuildSampleArtifact(const std::filesystem::path& artifact_path, std::uint64_t profile_id) -> nimble::base::Status
 {
-  const auto ffd_path = std::filesystem::path(NIMBLEFIX_PROJECT_DIR) / "build" / "bench" / "quickfix_FIX44.ffd";
+  const auto ffd_path = std::filesystem::path(NIMBLEFIX_PROJECT_DIR) / "build" / "bench" / "quickfix_FIX44.nfd";
   auto dictionary = nimble::profile::LoadNormalizedDictionaryFile(ffd_path);
   if (!dictionary.ok()) {
     return dictionary.status();
@@ -101,7 +101,7 @@ TEST_CASE("runtime TLS config validation", "[runtime-config][tls]")
   std::filesystem::remove_all(temp_root);
   std::filesystem::create_directories(temp_root);
 
-  const auto artifact_path = temp_root / "sample-profile.art";
+  const auto artifact_path = temp_root / "sample-profile.nfa";
   const auto cert_path = temp_root / "server-chain.pem";
   const auto key_path = temp_root / "server-key.pem";
   const auto ca_path = temp_root / "ca.pem";
@@ -290,12 +290,12 @@ TEST_CASE("runtime-config", "[runtime-config]")
   const auto temp_root = std::filesystem::temp_directory_path() / "nimblefix-runtime-config-test";
   std::filesystem::create_directories(temp_root);
 
-  const auto artifact_path = temp_root / "sample-profile.art";
-  const auto transport_artifact_path = temp_root / "sample-transport-profile.art";
+  const auto artifact_path = temp_root / "sample-profile.nfa";
+  const auto transport_artifact_path = temp_root / "sample-transport-profile.nfa";
   REQUIRE(BuildSampleArtifact(artifact_path, 4400U).ok());
   REQUIRE(BuildSampleArtifact(transport_artifact_path, 4401U).ok());
 
-  const auto config_path = temp_root / "engine.ffcfg";
+  const auto config_path = temp_root / "engine.nfcfg";
   const auto store_path = temp_root / "session-2002.store";
   const auto durable_store_path = temp_root / "session-2004.store";
   const auto durable_local_store_path = temp_root / "session-2005.store";
@@ -308,8 +308,8 @@ TEST_CASE("runtime-config", "[runtime-config]")
   out << "engine.worker_cpu_affinity=3,5\n";
   out << "engine.queue_app_mode=threaded\n";
   out << "engine.app_cpu_affinity=11,13\n";
-  out << "profile=sample-profile.art\n";
-  out << "profile=sample-transport-profile.art\n";
+  out << "profile=sample-profile.nfa\n";
+  out << "profile=sample-transport-profile.nfa\n";
   out << "listener|main|127.0.0.1|9878|0\n";
   out << "counterparty|buy-sell-a|2001|4400|FIX.4.4|BUY1|SELL1|memory||memory|"
          "inline|30|true||compatible\n";
@@ -449,27 +449,27 @@ TEST_CASE("runtime-config", "[runtime-config]")
 
   const auto invalid_config_text = std::string("engine.worker_count=1\n"
                                                "engine.worker_cpu_affinity=1,2\n"
-                                               "profile=sample-transport-profile.art\n"
+                                               "profile=sample-transport-profile.nfa\n"
                                                "counterparty|bad-fixt|3001|4401|FIXT.1.1|SELLX|BUYX|memory||"
                                                "memory|inline|30|false\n");
   auto invalid = nimble::runtime::LoadEngineConfigText(invalid_config_text, temp_root);
   REQUIRE(!invalid.ok());
 
   const auto invalid_listener_text = std::string("engine.worker_count=2\n"
-                                                 "profile=sample-profile.art\n"
+                                                 "profile=sample-profile.nfa\n"
                                                  "listener|bad|127.0.0.1|9878|2\n");
   auto invalid_listener = nimble::runtime::LoadEngineConfigText(invalid_listener_text, temp_root);
   REQUIRE(!invalid_listener.ok());
 
   const auto invalid_app_cpu_text = std::string("engine.worker_count=2\n"
                                                 "engine.app_cpu_affinity=7\n"
-                                                "profile=sample-profile.art\n");
+                                                "profile=sample-profile.nfa\n");
   auto invalid_app_cpu = nimble::runtime::LoadEngineConfigText(invalid_app_cpu_text, temp_root);
   REQUIRE(!invalid_app_cpu.ok());
 
   const auto advanced_config_text =
     std::string("engine.worker_count=1\n"
-                "profile=sample-profile.art\n"
+                "profile=sample-profile.nfa\n"
                 "counterparty|scheduled|3001|4400|FIX.4.4|BUY|SELL|memory||memory|inline|"
                 "30|true||strict|0|utc-day|0|false|1000|5000|3|0|true|no-auto-reset|0|0|"
                 "0|true|true|true|true|true|false|false|09:30:00|16:00:00|mon|fri|08:45:"

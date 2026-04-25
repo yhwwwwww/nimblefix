@@ -1,8 +1,0 @@
-config=../configs/fix44-acceptor.ffcfg
-action|protocol-connect|4401|ts=1
-action|protocol-inbound|4401|seq=1|ts=10|body=35=A^98=0^108=30
-action|protocol-inbound|4401|seq=2|ts=20|body=35=D^11=ORD-2P^55=AAPL^54=1^60=20260425-12:00:00.000^40=1
-expect-action|2|outbound=1|active=1|disconnect=0
-expect-outbound|2|1|msg-type=A|msg-seq-num=1
-expect-action|3|outbound=0|disconnect=0
-expect-session|4401|active|3|2|0

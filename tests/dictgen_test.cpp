@@ -30,7 +30,7 @@ TEST_CASE("dictgen", "[dictgen]")
   };
 
   const auto project_root = std::filesystem::path(NIMBLEFIX_PROJECT_DIR);
-  const auto ffd_path = project_root / "build" / "bench" / "quickfix_FIX44.ffd";
+  const auto ffd_path = project_root / "build" / "bench" / "quickfix_FIX44.nfd";
 
   auto dictionary = nimble::profile::LoadNormalizedDictionaryFile(ffd_path);
   REQUIRE(dictionary.ok());
@@ -40,7 +40,7 @@ TEST_CASE("dictgen", "[dictgen]")
   auto artifact = nimble::profile::BuildProfileArtifact(dictionary.value());
   REQUIRE(artifact.ok());
 
-  const auto artifact_path = std::filesystem::temp_directory_path() / "nimblefix-dictgen-test.art";
+  const auto artifact_path = std::filesystem::temp_directory_path() / "nimblefix-dictgen-test.nfa";
   const auto write_status = nimble::profile::WriteProfileArtifact(artifact_path, artifact.value());
   REQUIRE(write_status.ok());
 

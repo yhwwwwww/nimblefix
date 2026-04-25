@@ -1,7 +1,0 @@
-config=../configs/fix44-initiator.ffcfg
-action|protocol-connect|4411|ts=1
-expect-action|1|outbound=1|disconnect=0
-expect-outbound|1|1|msg-type=A|msg-seq-num=1
-action|protocol-inbound|4411|seq=1|ts=10|body=35=A^98=0^108=30
-expect-action|2|outbound=0|active=1|disconnect=0
-expect-session|4411|active|2|2|0

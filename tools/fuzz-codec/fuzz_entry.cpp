@@ -110,7 +110,7 @@ GetFuzzState() -> FuzzState&
     if (!artifact.ok()) {
       __builtin_trap();
     }
-    const auto artifact_path = std::filesystem::temp_directory_path() / "nimblefix-fuzz-codec-libfuzzer.art";
+    const auto artifact_path = std::filesystem::temp_directory_path() / "nimblefix-fuzz-codec-libfuzzer.nfa";
     auto write_status = nimble::profile::WriteProfileArtifact(artifact_path, artifact.value());
     if (!write_status.ok()) {
       __builtin_trap();

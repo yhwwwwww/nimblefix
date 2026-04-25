@@ -22,7 +22,7 @@ using namespace nimble::codec::tags;
 auto
 PrintUsage() -> void
 {
-  std::cout << "usage: nimblefix-initiator --artifact <profile.art> --host "
+  std::cout << "usage: nimblefix-initiator --artifact <profile.nfa> --host "
                "<host> --port <port> --sender <sender> --target <target> "
                "[--begin-string <value>] [--default-appl-ver-id <value>] "
                "[--dispatch-mode inline|queue] [--validation-mode "

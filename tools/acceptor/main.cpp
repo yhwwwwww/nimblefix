@@ -39,13 +39,13 @@ struct Options
 auto
 PrintUsage() -> void
 {
-  std::cout << "usage: nimblefix-acceptor (--artifact <profile.art> --bind <host> "
+  std::cout << "usage: nimblefix-acceptor (--artifact <profile.nfa> --bind <host> "
                "--port <port> --sender <sender> --target <target> [--begin-string "
                "<value>] [--default-appl-ver-id <value>] [--dispatch-mode "
                "inline|queue] [--validation-mode "
                "strict|compatible|permissive|raw-pass-through] [--front-door-cpu "
                "<id>] [--worker-cpus <csv>] [--queue-runner-mode "
-               "co-scheduled|threaded] [--app-cpus <csv>] | --config <engine.ffcfg> "
+               "co-scheduled|threaded] [--app-cpus <csv>] | --config <engine.nfcfg> "
                "[--listener <name>] [--front-door-cpu <id>] [--worker-cpus <csv>] "
                "[--queue-runner-mode co-scheduled|threaded] [--app-cpus <csv>]) "
                "[--max-sessions <count>] [--idle-timeout-ms <value>]\n";
