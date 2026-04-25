@@ -1,0 +1,8 @@
+engine.worker_count=1
+engine.enable_metrics=true
+engine.trace_mode=ring
+engine.trace_capacity=64
+profile=../../../../build/bench/quickfix_FIX44.art
+counterparty|fix42-acceptor|4201|4400|FIX.4.2|SELL42|BUY42|memory||memory|inline|30|false||compatible
+counterparty|fix44-acceptor|4401|4400|FIX.4.4|SELL44|BUY44|memory||memory|inline|30|false||compatible
+counterparty|fixt11-acceptor|1101|4400|FIXT.1.1|SELLT|BUYT|memory||memory|inline|30|false|9|compatible

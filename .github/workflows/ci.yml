@@ -34,7 +34,7 @@ jobs:
             echo "CXX=g++-14" >> $GITHUB_ENV
           fi
 
-      - name: Configure, build, test, and benchmark smoke (xmake default)
+      - name: Configure, build, test, official session gate, and benchmark smoke (xmake default)
         run: bash ./scripts/offline_build.sh --bench smoke
 
   rhel-build-and-test:
@@ -64,7 +64,7 @@ jobs:
       - name: Pull container image
         run: docker pull ${{ matrix.image }}
 
-      - name: Configure, build, test, and benchmark smoke in container (CMake alternative)
+      - name: Configure, build, test, official session gate, and benchmark smoke in container (CMake alternative)
         shell: bash
         run: |
           docker run --rm \

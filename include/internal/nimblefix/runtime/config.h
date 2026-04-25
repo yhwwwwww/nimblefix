@@ -104,6 +104,9 @@ struct CounterpartyConfig
   session::TransportSessionProfile transport_profile;
   std::filesystem::path store_path;
   std::string default_appl_ver_id;
+  std::vector<std::string> supported_app_msg_types;
+  std::uint32_t sending_time_threshold_seconds{ 0 };
+  bool application_messages_available{ true };
   StoreMode store_mode{ StoreMode::kMemory };
   std::uint32_t durable_flush_threshold{ 0 };
   store::DurableStoreRolloverMode durable_rollover_mode{ store::DurableStoreRolloverMode::kUtcDay };

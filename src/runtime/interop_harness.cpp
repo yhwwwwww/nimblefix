@@ -1,14 +1,21 @@
 #include "nimblefix/runtime/interop_harness.h"
 
+#include "nimblefix/codec/fix_codec.h"
+#include "nimblefix/codec/fix_tags.h"
+#include "nimblefix/profile/normalized_dictionary.h"
+#include "nimblefix/profile/profile_loader.h"
 #include "nimblefix/runtime/internal_config_parser.h"
+#include "nimblefix/session/admin_protocol.h"
 
 #include <algorithm>
 #include <cctype>
+#include <deque>
 #include <filesystem>
 #include <fstream>
 #include <memory>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 
 #include "nimblefix/runtime/sharded_runtime.h"
 #include "nimblefix/session/resend_recovery.h"
@@ -23,6 +30,10 @@ namespace {
 constexpr char kInteropCommentPrefix = '#';
 constexpr char kInteropFieldSeparator = '|';
 constexpr std::string_view kInteropConfigPrefix = "config=";
+constexpr char kReadableFixDelimiter = '^';
+constexpr std::string_view kReadableEmbeddedSohToken = "<SOH>";
+constexpr std::string_view kDefaultSendingTime = "20260425-12:00:00.000";
+constexpr std::uint32_t kBusinessRejectReasonTag = 380U;
 
 namespace action_columns {
 constexpr std::size_t kKind = 0U;
@@ -63,14 +74,34 @@ constexpr std::size_t kMinimumEvents = 1U;
 constexpr std::size_t kCount = 2U;
 } // namespace trace_expectation_columns
 
+struct ProtocolSessionContext
+{
+  const CounterpartyConfig* counterparty{ nullptr };
+  const profile::NormalizedDictionaryView* dictionary{ nullptr };
+  std::unique_ptr<session::AdminProtocol> protocol;
+  std::deque<message::MessageRef> queued_application_messages;
+};
+
 struct ScenarioRuntimeContext
 {
   MetricsRegistry metrics;
   TraceRecorder trace;
+  std::vector<profile::NormalizedDictionaryView> dictionary_storage;
+  std::unordered_map<std::uint64_t, const profile::NormalizedDictionaryView*> dictionaries_by_profile_id;
   std::unordered_map<std::uint64_t, session::SessionCore> sessions;
   std::unordered_map<std::uint64_t, CounterpartyConfig> counterparties;
+  std::unordered_map<std::uint64_t, ProtocolSessionContext> protocols;
   std::unordered_map<std::uint64_t, std::unique_ptr<store::SessionStore>> stores;
+  std::unordered_map<std::uint64_t, std::unordered_set<std::string>> seen_application_ids;
   std::unordered_map<std::uint64_t, std::uint32_t> workers;
+};
+
+struct InteropInboundIdentity
+{
+  std::string_view begin_string;
+  std::string_view sender_comp_id;
+  std::string_view target_comp_id;
+  std::string_view default_appl_ver_id;
 };
 
 auto
@@ -153,6 +184,84 @@ ParseBoolWord(std::string_view token) -> base::Result<bool>
 }
 
 auto
+ParseBoolean(std::string_view token, const char* label) -> base::Result<bool>
+{
+  const auto value = Trim(token);
+  if (value == "1" || value == "true" || value == "yes") {
+    return true;
+  }
+  if (value == "0" || value == "false" || value == "no") {
+    return false;
+  }
+  return base::Status::InvalidArgument(std::string("invalid ") + label + " in interop scenario");
+}
+
+auto
+ParseOptions(const std::vector<std::string>& parts, std::size_t begin_index)
+  -> base::Result<std::unordered_map<std::string, std::string>>
+{
+  std::unordered_map<std::string, std::string> options;
+  for (std::size_t index = begin_index; index < parts.size(); ++index) {
+    const auto& raw = parts[index];
+    const auto equals = raw.find('=');
+    if (equals == std::string::npos || equals == 0U) {
+      return base::Status::InvalidArgument("interop scenario option must be key=value");
+    }
+    auto key = std::string(Trim(std::string_view(raw).substr(0, equals)));
+    auto value = std::string(Trim(std::string_view(raw).substr(equals + 1)));
+    if (!options.emplace(std::move(key), std::move(value)).second) {
+      return base::Status::InvalidArgument("interop scenario option specified more than once");
+    }
+  }
+  return options;
+}
+
+template<typename Integer>
+auto
+ParseOptionInteger(const std::unordered_map<std::string, std::string>& options,
+                   std::string_view key,
+                   const char* label,
+                   std::optional<Integer> fallback = std::nullopt) -> base::Result<Integer>
+{
+  const auto it = options.find(std::string(key));
+  if (it == options.end()) {
+    if (fallback.has_value()) {
+      return fallback.value();
+    }
+    return base::Status::InvalidArgument(std::string("interop scenario is missing option '") + std::string(key) + "'");
+  }
+  return ParseInteger<Integer>(it->second, label);
+}
+
+auto
+ParseOptionBoolean(const std::unordered_map<std::string, std::string>& options,
+                   std::string_view key,
+                   const char* label,
+                   std::optional<bool> fallback = std::nullopt) -> base::Result<bool>
+{
+  const auto it = options.find(std::string(key));
+  if (it == options.end()) {
+    if (fallback.has_value()) {
+      return fallback.value();
+    }
+    return base::Status::InvalidArgument(std::string("interop scenario is missing option '") + std::string(key) + "'");
+  }
+  return ParseBoolean(it->second, label);
+}
+
+auto
+GetOptionString(const std::unordered_map<std::string, std::string>& options,
+                std::string_view key,
+                std::string fallback = {}) -> std::string
+{
+  const auto it = options.find(std::string(key));
+  if (it == options.end()) {
+    return fallback;
+  }
+  return it->second;
+}
+
+auto
 ParseSessionState(std::string_view token) -> base::Result<session::SessionState>
 {
   const auto value = Trim(token);
@@ -210,6 +319,266 @@ MakeStore(const CounterpartyConfig& counterparty) -> base::Result<std::unique_pt
     return status;
   }
   return std::unique_ptr<store::SessionStore>(std::move(mmap_store));
+}
+
+auto
+FindProtocol(ScenarioRuntimeContext& context, std::uint64_t session_id) -> ProtocolSessionContext*
+{
+  const auto it = context.protocols.find(session_id);
+  if (it == context.protocols.end()) {
+    return nullptr;
+  }
+  return &it->second;
+}
+
+auto
+MakeProtocolConfig(const CounterpartyConfig& counterparty) -> session::AdminProtocolConfig
+{
+  session::AdminProtocolConfig config;
+  config.session = counterparty.session;
+  config.transport_profile = counterparty.transport_profile;
+  config.begin_string = counterparty.session.key.begin_string;
+  config.sender_comp_id = counterparty.session.key.sender_comp_id;
+  config.target_comp_id = counterparty.session.key.target_comp_id;
+  config.default_appl_ver_id = counterparty.default_appl_ver_id;
+  config.supported_app_msg_types = counterparty.supported_app_msg_types;
+  config.heartbeat_interval_seconds = counterparty.session.heartbeat_interval_seconds;
+  config.sending_time_threshold_seconds = counterparty.sending_time_threshold_seconds;
+  config.application_messages_available = counterparty.application_messages_available;
+  config.reset_seq_num_on_logon = counterparty.reset_seq_num_on_logon;
+  config.reset_seq_num_on_logout = counterparty.reset_seq_num_on_logout;
+  config.reset_seq_num_on_disconnect = counterparty.reset_seq_num_on_disconnect;
+  config.refresh_on_logon = counterparty.refresh_on_logon;
+  config.send_next_expected_msg_seq_num = counterparty.send_next_expected_msg_seq_num;
+  config.validation_policy = counterparty.validation_policy;
+  return config;
+}
+
+auto
+ReplaceReadableDelimiter(std::string value) -> std::string
+{
+  std::string replaced;
+  replaced.reserve(value.size());
+  for (std::size_t index = 0; index < value.size(); ++index) {
+    if (value.compare(index, kReadableEmbeddedSohToken.size(), kReadableEmbeddedSohToken) == 0) {
+      replaced.push_back('\x01');
+      index += kReadableEmbeddedSohToken.size() - 1U;
+      continue;
+    }
+    if (value[index] == kReadableFixDelimiter) {
+      replaced.push_back('\x01');
+      continue;
+    }
+    replaced.push_back(value[index]);
+  }
+  if (!replaced.empty() && replaced.back() != '\x01') {
+    replaced.push_back('\x01');
+  }
+  return replaced;
+}
+
+auto
+BytesFromText(std::string_view text) -> std::vector<std::byte>
+{
+  std::vector<std::byte> bytes;
+  bytes.reserve(text.size());
+  for (const auto ch : text) {
+    bytes.push_back(static_cast<std::byte>(static_cast<unsigned char>(ch)));
+  }
+  return bytes;
+}
+
+auto
+MakeProtocolInboundFrame(const CounterpartyConfig& counterparty, const InteropAction& action) -> std::vector<std::byte>
+{
+  if (action.kind == InteropActionKind::kProtocolInboundRaw) {
+    const auto raw = ReplaceReadableDelimiter(action.text);
+    return BytesFromText(raw);
+  }
+
+  const auto begin_string = action.begin_string.empty() ? counterparty.session.key.begin_string : action.begin_string;
+  const auto sender = action.sender_comp_id.empty() ? counterparty.session.key.target_comp_id : action.sender_comp_id;
+  const auto target = action.target_comp_id.empty() ? counterparty.session.key.sender_comp_id : action.target_comp_id;
+  const auto default_appl_ver_id = action.default_appl_ver_id;
+
+  auto body = ReplaceReadableDelimiter(action.text);
+  const auto first_delimiter = body.find('\x01');
+  if (first_delimiter == std::string::npos || !body.starts_with("35=")) {
+    return {};
+  }
+
+  std::string payload;
+  payload.reserve(body.size() + 96U + default_appl_ver_id.size() + action.orig_sending_time.size());
+  payload.append(body.substr(0, first_delimiter + 1U));
+  payload.append("49=");
+  payload.append(sender);
+  payload.push_back('\x01');
+  payload.append("56=");
+  payload.append(target);
+  payload.push_back('\x01');
+  payload.append("34=");
+  payload.append(std::to_string(action.seq_num));
+  payload.push_back('\x01');
+  payload.append("52=");
+  payload.append(kDefaultSendingTime);
+  payload.push_back('\x01');
+  if (action.poss_dup) {
+    payload.append("43=Y\x01");
+  }
+  if (!action.orig_sending_time.empty()) {
+    payload.append("122=");
+    payload.append(action.orig_sending_time);
+    payload.push_back('\x01');
+  }
+  if (!default_appl_ver_id.empty()) {
+    payload.append("1137=");
+    payload.append(default_appl_ver_id);
+    payload.push_back('\x01');
+  }
+  payload.append(body.substr(first_delimiter + 1U));
+
+  std::string full;
+  full.reserve(payload.size() + begin_string.size() + 32U);
+  full.append("8=");
+  full.append(begin_string);
+  full.push_back('\x01');
+  full.append("9=");
+  full.append(std::to_string(payload.size()));
+  full.push_back('\x01');
+  full.append(payload);
+
+  std::uint32_t checksum = 0;
+  for (const auto ch : full) {
+    checksum += static_cast<unsigned char>(ch);
+  }
+  checksum %= 256U;
+
+  full.append("10=");
+  if (checksum < 100U) {
+    full.push_back('0');
+  }
+  if (checksum < 10U) {
+    full.push_back('0');
+  }
+  full.append(std::to_string(checksum));
+  full.push_back('\x01');
+
+  return BytesFromText(full);
+}
+
+auto
+ResolveAcceptorLogonIdentity(const InteropScenario& scenario, const InteropAction& action)
+  -> base::Result<InteropInboundIdentity>
+{
+  std::string_view begin_string = action.begin_string;
+  std::string_view sender = action.sender_comp_id;
+  std::string_view target = action.target_comp_id;
+  std::string_view default_appl_ver_id = action.default_appl_ver_id;
+
+  if (scenario.engine_config.counterparties.size() == 1U) {
+    const auto& counterparty = scenario.engine_config.counterparties.front();
+    if (begin_string.empty()) {
+      begin_string = counterparty.session.key.begin_string;
+    }
+    if (sender.empty()) {
+      sender = counterparty.session.key.target_comp_id;
+    }
+    if (target.empty()) {
+      target = counterparty.session.key.sender_comp_id;
+    }
+    if (default_appl_ver_id.empty()) {
+      default_appl_ver_id = counterparty.default_appl_ver_id;
+    }
+  }
+
+  if (begin_string.empty() || sender.empty() || target.empty()) {
+    return base::Status::InvalidArgument(
+      "acceptor-logon-attempt requires begin/sender/target identity unless the scenario has exactly one counterparty");
+  }
+
+  return InteropInboundIdentity{
+    .begin_string = begin_string,
+    .sender_comp_id = sender,
+    .target_comp_id = target,
+    .default_appl_ver_id = default_appl_ver_id,
+  };
+}
+
+auto
+ResolveAcceptorLogonCounterparty(const InteropScenario& scenario, const InteropInboundIdentity& identity)
+  -> const CounterpartyConfig*
+{
+  for (const auto& counterparty : scenario.engine_config.counterparties) {
+    const auto& key = counterparty.session.key;
+    if (key.begin_string != identity.begin_string) {
+      continue;
+    }
+    if (key.sender_comp_id != identity.target_comp_id) {
+      continue;
+    }
+    if (key.target_comp_id != identity.sender_comp_id) {
+      continue;
+    }
+    if (!counterparty.default_appl_ver_id.empty() && counterparty.default_appl_ver_id != identity.default_appl_ver_id) {
+      continue;
+    }
+    return &counterparty;
+  }
+  return nullptr;
+}
+
+auto
+SummarizeProtocolEvent(const session::ProtocolEvent& event,
+                       const profile::NormalizedDictionaryView& dictionary,
+                       std::uint64_t session_id,
+                       InteropActionKind kind) -> base::Result<InteropActionReport>
+{
+  using namespace codec::tags;
+
+  InteropActionReport report;
+  report.session_id = session_id;
+  report.kind = kind;
+  report.outbound_frames = event.outbound_frames.size();
+  report.application_messages = event.application_messages.size();
+  report.session_active = event.session_active;
+  report.disconnect = event.disconnect;
+  report.session_reject = event.session_reject;
+  report.outbound_frame_summaries.reserve(event.outbound_frames.size());
+
+  for (const auto& frame : event.outbound_frames) {
+    auto decoded = codec::DecodeFixMessage(frame.bytes, dictionary);
+    if (!decoded.ok()) {
+      return decoded.status();
+    }
+
+    InteropOutboundFrameSummary summary;
+    summary.msg_type = decoded.value().header.msg_type;
+    summary.msg_seq_num = decoded.value().header.msg_seq_num;
+    const auto view = decoded.value().message.view();
+    summary.ref_seq_num = view.get_int(kRefSeqNum);
+    summary.ref_tag_id = view.get_int(kRefTagID);
+    summary.reject_reason = view.get_int(kRejectReason);
+    summary.business_reject_reason = view.get_int(kBusinessRejectReasonTag);
+    summary.begin_seq_no = view.get_int(kBeginSeqNo);
+    summary.end_seq_no = view.get_int(kEndSeqNo);
+    summary.new_seq_no = view.get_int(kNewSeqNo);
+    summary.gap_fill_flag = view.get_boolean(kGapFillFlag);
+    summary.ref_msg_type = std::string(view.get_string(kRefMsgType).value_or(std::string_view{}));
+    summary.test_req_id = std::string(view.get_string(kTestReqID).value_or(std::string_view{}));
+    summary.text = std::string(view.get_string(kText).value_or(std::string_view{}));
+    report.outbound_frame_summaries.push_back(std::move(summary));
+  }
+
+  return report;
+}
+
+auto
+ApplyProtocolDisconnect(ProtocolSessionContext& context, const session::ProtocolEvent& event) -> base::Status
+{
+  if (!event.disconnect) {
+    return base::Status::Ok();
+  }
+  return context.protocol->OnTransportClosed();
 }
 
 auto
@@ -298,8 +667,201 @@ MakeRecord(std::uint64_t session_id,
 }
 
 auto
+DecodeProtocolApplicationAction(const CounterpartyConfig& counterparty,
+                                const profile::NormalizedDictionaryView& dictionary,
+                                const InteropAction& action) -> base::Result<message::MessageRef>
+{
+  InteropAction decoded_action = action;
+  decoded_action.kind = InteropActionKind::kProtocolInbound;
+  decoded_action.seq_num = 1U;
+  decoded_action.begin_string = counterparty.session.key.begin_string;
+  decoded_action.sender_comp_id = counterparty.session.key.sender_comp_id;
+  decoded_action.target_comp_id = counterparty.session.key.target_comp_id;
+  decoded_action.default_appl_ver_id = counterparty.default_appl_ver_id;
+
+  auto frame = MakeProtocolInboundFrame(counterparty, decoded_action);
+  if (frame.empty()) {
+    return base::Status::InvalidArgument("interop protocol application action could not build a FIX frame");
+  }
+
+  auto decoded = codec::DecodeFixMessage(std::span<const std::byte>(frame.data(), frame.size()), dictionary);
+  if (!decoded.ok()) {
+    return decoded.status();
+  }
+  return message::MessageRef::Copy(decoded.value().message.view());
+}
+
+auto
+ResolveInteropApplicationId(message::MessageView view) -> std::string
+{
+  using namespace codec::tags;
+
+  return std::string(view.get_string(kClOrdID).value_or(std::string_view{}));
+}
+
+auto
+SummarizeApplicationOutcomes(ScenarioRuntimeContext& context,
+                             std::uint64_t session_id,
+                             std::uint32_t worker_id,
+                             std::uint64_t timestamp_ns,
+                             const session::ProtocolEvent& event,
+                             InteropActionReport* report) -> void
+{
+  report->processed_application_messages = event.application_messages.size();
+  if (event.application_messages.empty()) {
+    return;
+  }
+
+  auto& seen_application_ids = context.seen_application_ids[session_id];
+  for (const auto& application_message : event.application_messages) {
+    const auto application_id = ResolveInteropApplicationId(application_message.view());
+    if (!event.poss_resend) {
+      if (!application_id.empty()) {
+        seen_application_ids.insert(application_id);
+      }
+      continue;
+    }
+
+    ++report->poss_resend_application_messages;
+    if (application_id.empty()) {
+      continue;
+    }
+
+    const auto [_, inserted] = seen_application_ids.insert(application_id);
+    if (inserted) {
+      context.trace.Record(
+        TraceEventKind::kSessionEvent, session_id, worker_id, timestamp_ns, 0U, 0U, "app-poss-resend-first-seen");
+      continue;
+    }
+
+    if (report->processed_application_messages != 0U) {
+      --report->processed_application_messages;
+    }
+    ++report->ignored_application_messages;
+    context.trace.Record(
+      TraceEventKind::kSessionEvent, session_id, worker_id, timestamp_ns, 0U, 0U, "app-poss-resend-duplicate");
+  }
+}
+
+auto
+FlushQueuedProtocolApplications(ProtocolSessionContext& protocol_context,
+                                std::uint64_t timestamp_ns,
+                                session::ProtocolEvent* event) -> base::Status
+{
+  if (event == nullptr) {
+    return base::Status::InvalidArgument("queued protocol application flush requires an event");
+  }
+
+  while (!protocol_context.queued_application_messages.empty()) {
+    auto queued_message = std::move(protocol_context.queued_application_messages.front());
+    protocol_context.queued_application_messages.pop_front();
+    auto outbound = protocol_context.protocol->SendApplication(queued_message, timestamp_ns);
+    if (!outbound.ok()) {
+      return outbound.status();
+    }
+    event->outbound_frames.push_back(std::move(outbound).value());
+  }
+  return base::Status::Ok();
+}
+
+auto
 ValidateExpectations(const InteropScenario& scenario, const InteropReport& report) -> base::Status
 {
+  for (const auto& expectation : scenario.action_expectations) {
+    if (expectation.action_index == 0U || expectation.action_index > report.action_reports.size()) {
+      return base::Status::InvalidArgument("interop action expectation references an invalid action index");
+    }
+
+    const auto& action = report.action_reports[expectation.action_index - 1U];
+    if (expectation.outbound_frames.has_value() && action.outbound_frames != expectation.outbound_frames.value()) {
+      return base::Status::InvalidArgument("interop action expectation mismatch for outbound frame count");
+    }
+    if (expectation.application_messages.has_value() &&
+        action.application_messages != expectation.application_messages.value()) {
+      return base::Status::InvalidArgument("interop action expectation mismatch for application message count");
+    }
+    if (expectation.queued_application_messages.has_value() &&
+        action.queued_application_messages != expectation.queued_application_messages.value()) {
+      return base::Status::InvalidArgument("interop action expectation mismatch for queued application message count");
+    }
+    if (expectation.processed_application_messages.has_value() &&
+        action.processed_application_messages != expectation.processed_application_messages.value()) {
+      return base::Status::InvalidArgument(
+        "interop action expectation mismatch for processed application message count");
+    }
+    if (expectation.ignored_application_messages.has_value() &&
+        action.ignored_application_messages != expectation.ignored_application_messages.value()) {
+      return base::Status::InvalidArgument("interop action expectation mismatch for ignored application message count");
+    }
+    if (expectation.poss_resend_application_messages.has_value() &&
+        action.poss_resend_application_messages != expectation.poss_resend_application_messages.value()) {
+      return base::Status::InvalidArgument(
+        "interop action expectation mismatch for PossResend application message count");
+    }
+    if (expectation.session_active.has_value() && action.session_active != expectation.session_active.value()) {
+      return base::Status::InvalidArgument("interop action expectation mismatch for session_active");
+    }
+    if (expectation.disconnect.has_value() && action.disconnect != expectation.disconnect.value()) {
+      return base::Status::InvalidArgument("interop action expectation mismatch for disconnect");
+    }
+    if (expectation.session_reject.has_value() && action.session_reject != expectation.session_reject.value()) {
+      return base::Status::InvalidArgument("interop action expectation mismatch for session_reject");
+    }
+  }
+
+  for (const auto& expectation : scenario.outbound_expectations) {
+    if (expectation.action_index == 0U || expectation.action_index > report.action_reports.size()) {
+      return base::Status::InvalidArgument("interop outbound expectation references an invalid action index");
+    }
+
+    const auto& action = report.action_reports[expectation.action_index - 1U];
+    if (expectation.frame_index == 0U || expectation.frame_index > action.outbound_frame_summaries.size()) {
+      return base::Status::InvalidArgument("interop outbound expectation references an invalid frame index");
+    }
+
+    const auto& frame = action.outbound_frame_summaries[expectation.frame_index - 1U];
+    if (!expectation.msg_type.empty() && frame.msg_type != expectation.msg_type) {
+      return base::Status::InvalidArgument("interop outbound expectation mismatch for msg_type");
+    }
+    if (expectation.msg_seq_num.has_value() && frame.msg_seq_num != expectation.msg_seq_num.value()) {
+      return base::Status::InvalidArgument("interop outbound expectation mismatch for msg_seq_num");
+    }
+    if (expectation.ref_seq_num.has_value() && frame.ref_seq_num != expectation.ref_seq_num) {
+      return base::Status::InvalidArgument("interop outbound expectation mismatch for RefSeqNum");
+    }
+    if (expectation.ref_tag_id.has_value() && frame.ref_tag_id != expectation.ref_tag_id) {
+      return base::Status::InvalidArgument("interop outbound expectation mismatch for RefTagID");
+    }
+    if (expectation.reject_reason.has_value() && frame.reject_reason != expectation.reject_reason) {
+      return base::Status::InvalidArgument("interop outbound expectation mismatch for RejectReason");
+    }
+    if (expectation.business_reject_reason.has_value() &&
+        frame.business_reject_reason != expectation.business_reject_reason) {
+      return base::Status::InvalidArgument("interop outbound expectation mismatch for BusinessRejectReason");
+    }
+    if (expectation.begin_seq_no.has_value() && frame.begin_seq_no != expectation.begin_seq_no) {
+      return base::Status::InvalidArgument("interop outbound expectation mismatch for BeginSeqNo");
+    }
+    if (expectation.end_seq_no.has_value() && frame.end_seq_no != expectation.end_seq_no) {
+      return base::Status::InvalidArgument("interop outbound expectation mismatch for EndSeqNo");
+    }
+    if (expectation.new_seq_no.has_value() && frame.new_seq_no != expectation.new_seq_no) {
+      return base::Status::InvalidArgument("interop outbound expectation mismatch for NewSeqNo");
+    }
+    if (expectation.gap_fill_flag.has_value() && frame.gap_fill_flag != expectation.gap_fill_flag) {
+      return base::Status::InvalidArgument("interop outbound expectation mismatch for GapFillFlag");
+    }
+    if (!expectation.ref_msg_type.empty() && frame.ref_msg_type != expectation.ref_msg_type) {
+      return base::Status::InvalidArgument("interop outbound expectation mismatch for RefMsgType");
+    }
+    if (!expectation.test_req_id.empty() && frame.test_req_id != expectation.test_req_id) {
+      return base::Status::InvalidArgument("interop outbound expectation mismatch for TestReqID");
+    }
+    if (!expectation.text_contains.empty() && frame.text.find(expectation.text_contains) == std::string::npos) {
+      return base::Status::InvalidArgument("interop outbound expectation mismatch for Text(58)");
+    }
+  }
+
   for (const auto& expectation : scenario.session_expectations) {
     const auto it = std::find_if(report.sessions.begin(), report.sessions.end(), [&](const auto& snapshot) {
       return snapshot.session_id == expectation.session_id;
@@ -370,6 +932,113 @@ LoadInteropScenarioText(std::string_view text, const std::filesystem::path& base
 
       InteropAction action;
       action.session_id = session_id.value();
+      if (parts[action_columns::kAction].starts_with("protocol-") ||
+          parts[action_columns::kAction] == "acceptor-logon-attempt") {
+        auto options = ParseOptions(parts, action_columns::kSeqNum);
+        if (!options.ok()) {
+          return options.status();
+        }
+
+        if (parts[action_columns::kAction] == "protocol-connect") {
+          action.kind = InteropActionKind::kProtocolConnect;
+          auto timestamp_ns = ParseOptionInteger<std::uint64_t>(options.value(), "ts", "timestamp_ns", 0U);
+          if (!timestamp_ns.ok()) {
+            return timestamp_ns.status();
+          }
+          action.timestamp_ns = timestamp_ns.value();
+        } else if (parts[action_columns::kAction] == "protocol-inbound") {
+          action.kind = InteropActionKind::kProtocolInbound;
+          auto seq_num = ParseOptionInteger<std::uint32_t>(options.value(), "seq", "seq_num");
+          auto timestamp_ns = ParseOptionInteger<std::uint64_t>(options.value(), "ts", "timestamp_ns", 0U);
+          if (!seq_num.ok()) {
+            return seq_num.status();
+          }
+          if (!timestamp_ns.ok()) {
+            return timestamp_ns.status();
+          }
+          action.seq_num = seq_num.value();
+          action.timestamp_ns = timestamp_ns.value();
+          action.poss_dup = ParseOptionBoolean(options.value(), "possdup", "possdup", false).value();
+          action.begin_string = GetOptionString(options.value(), "begin");
+          action.sender_comp_id = GetOptionString(options.value(), "sender");
+          action.target_comp_id = GetOptionString(options.value(), "target");
+          action.default_appl_ver_id = GetOptionString(options.value(), "default-appl-ver-id");
+          action.orig_sending_time = GetOptionString(options.value(), "orig-sending-time");
+          action.text = GetOptionString(options.value(), "body");
+          if (action.text.empty()) {
+            return base::Status::InvalidArgument("protocol-inbound requires body=<fields>");
+          }
+        } else if (parts[action_columns::kAction] == "protocol-inbound-raw") {
+          action.kind = InteropActionKind::kProtocolInboundRaw;
+          auto timestamp_ns = ParseOptionInteger<std::uint64_t>(options.value(), "ts", "timestamp_ns", 0U);
+          if (!timestamp_ns.ok()) {
+            return timestamp_ns.status();
+          }
+          action.timestamp_ns = timestamp_ns.value();
+          action.text = GetOptionString(options.value(), "raw");
+          if (action.text.empty()) {
+            return base::Status::InvalidArgument("protocol-inbound-raw requires raw=<frame>");
+          }
+        } else if (parts[action_columns::kAction] == "protocol-send-application") {
+          action.kind = InteropActionKind::kProtocolSendApplication;
+          auto timestamp_ns = ParseOptionInteger<std::uint64_t>(options.value(), "ts", "timestamp_ns", 0U);
+          if (!timestamp_ns.ok()) {
+            return timestamp_ns.status();
+          }
+          action.timestamp_ns = timestamp_ns.value();
+          action.text = GetOptionString(options.value(), "body");
+          if (action.text.empty()) {
+            return base::Status::InvalidArgument("protocol-send-application requires body=<fields>");
+          }
+        } else if (parts[action_columns::kAction] == "protocol-queue-application") {
+          action.kind = InteropActionKind::kProtocolQueueApplication;
+          auto timestamp_ns = ParseOptionInteger<std::uint64_t>(options.value(), "ts", "timestamp_ns", 0U);
+          if (!timestamp_ns.ok()) {
+            return timestamp_ns.status();
+          }
+          action.timestamp_ns = timestamp_ns.value();
+          action.text = GetOptionString(options.value(), "body");
+          if (action.text.empty()) {
+            return base::Status::InvalidArgument("protocol-queue-application requires body=<fields>");
+          }
+        } else if (parts[action_columns::kAction] == "protocol-timer") {
+          action.kind = InteropActionKind::kProtocolTimer;
+          auto timestamp_ns = ParseOptionInteger<std::uint64_t>(options.value(), "ts", "timestamp_ns");
+          if (!timestamp_ns.ok()) {
+            return timestamp_ns.status();
+          }
+          action.timestamp_ns = timestamp_ns.value();
+        } else if (parts[action_columns::kAction] == "protocol-begin-logout") {
+          action.kind = InteropActionKind::kProtocolBeginLogout;
+          auto timestamp_ns = ParseOptionInteger<std::uint64_t>(options.value(), "ts", "timestamp_ns", 0U);
+          if (!timestamp_ns.ok()) {
+            return timestamp_ns.status();
+          }
+          action.timestamp_ns = timestamp_ns.value();
+          action.text = GetOptionString(options.value(), "text");
+        } else if (parts[action_columns::kAction] == "acceptor-logon-attempt") {
+          action.kind = InteropActionKind::kAcceptorLogonAttempt;
+          auto timestamp_ns = ParseOptionInteger<std::uint64_t>(options.value(), "ts", "timestamp_ns", 0U);
+          if (!timestamp_ns.ok()) {
+            return timestamp_ns.status();
+          }
+          action.timestamp_ns = timestamp_ns.value();
+          action.begin_string = GetOptionString(options.value(), "begin");
+          action.sender_comp_id = GetOptionString(options.value(), "sender");
+          action.target_comp_id = GetOptionString(options.value(), "target");
+          action.default_appl_ver_id = GetOptionString(options.value(), "default-appl-ver-id");
+          action.text = GetOptionString(options.value(), "body");
+          if (action.text.empty()) {
+            return base::Status::InvalidArgument("acceptor-logon-attempt requires body=<fields>");
+          }
+        } else {
+          return base::Status::InvalidArgument("unknown protocol interop action kind");
+        }
+
+        scenario.actions.push_back(std::move(action));
+        continue;
+      }
+
       if (parts[action_columns::kAction] == "connect") {
         action.kind = InteropActionKind::kConnect;
       } else if (parts[action_columns::kAction] == "logon") {
@@ -416,6 +1085,185 @@ LoadInteropScenarioText(std::string_view text, const std::filesystem::path& base
         return base::Status::InvalidArgument("unknown interop action kind");
       }
       scenario.actions.push_back(std::move(action));
+      continue;
+    }
+
+    if (parts[0] == "expect-action") {
+      if (parts.size() < 2U) {
+        return base::Status::InvalidArgument("expect-action requires an action index");
+      }
+      auto action_index = ParseInteger<std::uint64_t>(parts[1], "action_index");
+      if (!action_index.ok()) {
+        return action_index.status();
+      }
+      auto options = ParseOptions(parts, 2U);
+      if (!options.ok()) {
+        return options.status();
+      }
+
+      InteropActionExpectation expectation;
+      expectation.action_index = static_cast<std::size_t>(action_index.value());
+      if (options.value().contains("outbound")) {
+        auto value = ParseOptionInteger<std::uint64_t>(options.value(), "outbound", "outbound_frames");
+        if (!value.ok()) {
+          return value.status();
+        }
+        expectation.outbound_frames = static_cast<std::size_t>(value.value());
+      }
+      if (options.value().contains("app")) {
+        auto value = ParseOptionInteger<std::uint64_t>(options.value(), "app", "application_messages");
+        if (!value.ok()) {
+          return value.status();
+        }
+        expectation.application_messages = static_cast<std::size_t>(value.value());
+      }
+      if (options.value().contains("queued-app")) {
+        auto value = ParseOptionInteger<std::uint64_t>(options.value(), "queued-app", "queued_application_messages");
+        if (!value.ok()) {
+          return value.status();
+        }
+        expectation.queued_application_messages = static_cast<std::size_t>(value.value());
+      }
+      if (options.value().contains("processed-app")) {
+        auto value =
+          ParseOptionInteger<std::uint64_t>(options.value(), "processed-app", "processed_application_messages");
+        if (!value.ok()) {
+          return value.status();
+        }
+        expectation.processed_application_messages = static_cast<std::size_t>(value.value());
+      }
+      if (options.value().contains("ignored-app")) {
+        auto value = ParseOptionInteger<std::uint64_t>(options.value(), "ignored-app", "ignored_application_messages");
+        if (!value.ok()) {
+          return value.status();
+        }
+        expectation.ignored_application_messages = static_cast<std::size_t>(value.value());
+      }
+      if (options.value().contains("poss-resend-app")) {
+        auto value =
+          ParseOptionInteger<std::uint64_t>(options.value(), "poss-resend-app", "poss_resend_application_messages");
+        if (!value.ok()) {
+          return value.status();
+        }
+        expectation.poss_resend_application_messages = static_cast<std::size_t>(value.value());
+      }
+      if (options.value().contains("active")) {
+        auto value = ParseOptionBoolean(options.value(), "active", "session_active");
+        if (!value.ok()) {
+          return value.status();
+        }
+        expectation.session_active = value.value();
+      }
+      if (options.value().contains("disconnect")) {
+        auto value = ParseOptionBoolean(options.value(), "disconnect", "disconnect");
+        if (!value.ok()) {
+          return value.status();
+        }
+        expectation.disconnect = value.value();
+      }
+      if (options.value().contains("session-reject")) {
+        auto value = ParseOptionBoolean(options.value(), "session-reject", "session_reject");
+        if (!value.ok()) {
+          return value.status();
+        }
+        expectation.session_reject = value.value();
+      }
+
+      scenario.action_expectations.push_back(std::move(expectation));
+      continue;
+    }
+
+    if (parts[0] == "expect-outbound") {
+      if (parts.size() < 3U) {
+        return base::Status::InvalidArgument("expect-outbound requires action and frame indexes");
+      }
+      auto action_index = ParseInteger<std::uint64_t>(parts[1], "action_index");
+      auto frame_index = ParseInteger<std::uint64_t>(parts[2], "frame_index");
+      if (!action_index.ok()) {
+        return action_index.status();
+      }
+      if (!frame_index.ok()) {
+        return frame_index.status();
+      }
+
+      auto options = ParseOptions(parts, 3U);
+      if (!options.ok()) {
+        return options.status();
+      }
+
+      InteropOutboundExpectation expectation;
+      expectation.action_index = static_cast<std::size_t>(action_index.value());
+      expectation.frame_index = static_cast<std::size_t>(frame_index.value());
+      expectation.msg_type = GetOptionString(options.value(), "msg-type");
+      expectation.ref_msg_type = GetOptionString(options.value(), "ref-msg-type");
+      expectation.test_req_id = GetOptionString(options.value(), "test-req-id");
+      expectation.text_contains = GetOptionString(options.value(), "text-contains");
+      if (options.value().contains("msg-seq-num")) {
+        auto value = ParseOptionInteger<std::uint32_t>(options.value(), "msg-seq-num", "msg_seq_num");
+        if (!value.ok()) {
+          return value.status();
+        }
+        expectation.msg_seq_num = value.value();
+      }
+      if (options.value().contains("ref-seq")) {
+        auto value = ParseOptionInteger<std::int64_t>(options.value(), "ref-seq", "ref_seq_num");
+        if (!value.ok()) {
+          return value.status();
+        }
+        expectation.ref_seq_num = value.value();
+      }
+      if (options.value().contains("ref-tag")) {
+        auto value = ParseOptionInteger<std::int64_t>(options.value(), "ref-tag", "ref_tag_id");
+        if (!value.ok()) {
+          return value.status();
+        }
+        expectation.ref_tag_id = value.value();
+      }
+      if (options.value().contains("reject-reason")) {
+        auto value = ParseOptionInteger<std::int64_t>(options.value(), "reject-reason", "reject_reason");
+        if (!value.ok()) {
+          return value.status();
+        }
+        expectation.reject_reason = value.value();
+      }
+      if (options.value().contains("business-reject-reason")) {
+        auto value =
+          ParseOptionInteger<std::int64_t>(options.value(), "business-reject-reason", "business_reject_reason");
+        if (!value.ok()) {
+          return value.status();
+        }
+        expectation.business_reject_reason = value.value();
+      }
+      if (options.value().contains("begin-seq")) {
+        auto value = ParseOptionInteger<std::int64_t>(options.value(), "begin-seq", "begin_seq_no");
+        if (!value.ok()) {
+          return value.status();
+        }
+        expectation.begin_seq_no = value.value();
+      }
+      if (options.value().contains("end-seq")) {
+        auto value = ParseOptionInteger<std::int64_t>(options.value(), "end-seq", "end_seq_no");
+        if (!value.ok()) {
+          return value.status();
+        }
+        expectation.end_seq_no = value.value();
+      }
+      if (options.value().contains("new-seq")) {
+        auto value = ParseOptionInteger<std::int64_t>(options.value(), "new-seq", "new_seq_no");
+        if (!value.ok()) {
+          return value.status();
+        }
+        expectation.new_seq_no = value.value();
+      }
+      if (options.value().contains("gap-fill")) {
+        auto value = ParseOptionBoolean(options.value(), "gap-fill", "gap_fill_flag");
+        if (!value.ok()) {
+          return value.status();
+        }
+        expectation.gap_fill_flag = value.value();
+      }
+
+      scenario.outbound_expectations.push_back(std::move(expectation));
       continue;
     }
 
@@ -546,6 +1394,21 @@ RunInteropScenario(const InteropScenario& scenario) -> base::Result<InteropRepor
   context.metrics.Reset(scenario.engine_config.worker_count);
   context.trace.Configure(
     scenario.engine_config.trace_mode, scenario.engine_config.trace_capacity, scenario.engine_config.worker_count);
+  context.dictionary_storage.reserve(scenario.engine_config.profile_artifacts.size());
+
+  for (const auto& artifact_path : scenario.engine_config.profile_artifacts) {
+    auto loaded = profile::LoadProfileArtifact(artifact_path);
+    if (!loaded.ok()) {
+      return loaded.status();
+    }
+    auto dictionary = profile::NormalizedDictionaryView::FromProfile(std::move(loaded).value());
+    if (!dictionary.ok()) {
+      return dictionary.status();
+    }
+    const auto profile_id = dictionary.value().profile().header().profile_id;
+    context.dictionary_storage.push_back(std::move(dictionary).value());
+    context.dictionaries_by_profile_id.emplace(profile_id, &context.dictionary_storage.back());
+  }
 
   const ShardedRuntime routing(scenario.engine_config.worker_count);
   for (const auto& counterparty : scenario.engine_config.counterparties) {
@@ -570,20 +1433,44 @@ RunInteropScenario(const InteropScenario& scenario) -> base::Result<InteropRepor
     context.workers.emplace(session.session_id(), worker_id);
     context.stores.emplace(session.session_id(), std::move(store).value());
     context.sessions.emplace(session.session_id(), std::move(session));
+
+    const auto dictionary_it = context.dictionaries_by_profile_id.find(counterparty.session.profile_id);
+    if (dictionary_it == context.dictionaries_by_profile_id.end()) {
+      return base::Status::NotFound("interop scenario missing profile artifact for protocol session");
+    }
+    auto protocol = std::make_unique<session::AdminProtocol>(MakeProtocolConfig(counterparty),
+                                                             *dictionary_it->second,
+                                                             context.stores.at(counterparty.session.session_id).get());
+    context.protocols.emplace(counterparty.session.session_id,
+                              ProtocolSessionContext{
+                                .counterparty = &context.counterparties.at(counterparty.session.session_id),
+                                .dictionary = dictionary_it->second,
+                                .protocol = std::move(protocol),
+                              });
   }
 
+  std::vector<InteropActionReport> action_reports;
+  action_reports.reserve(scenario.actions.size());
   for (const auto& action : scenario.actions) {
-    auto* session = FindMutableSession(context, action.session_id);
-    if (session == nullptr) {
-      return base::Status::NotFound("interop action references unknown session");
+    session::SessionCore* session = nullptr;
+    store::SessionStore* store = nullptr;
+    std::uint32_t worker_id = 0U;
+    if (action.kind != InteropActionKind::kAcceptorLogonAttempt) {
+      session = FindMutableSession(context, action.session_id);
+      if (session == nullptr) {
+        return base::Status::NotFound("interop action references unknown session");
+      }
+      store = FindStore(context, action.session_id);
+      if (store == nullptr) {
+        return base::Status::NotFound("interop action references unknown session store");
+      }
+      worker_id = context.workers[action.session_id];
     }
-    auto* store = FindStore(context, action.session_id);
-    if (store == nullptr) {
-      return base::Status::NotFound("interop action references unknown session store");
-    }
-    const auto worker_id = context.workers[action.session_id];
 
     base::Status status;
+    InteropActionReport action_report;
+    action_report.session_id = action.session_id;
+    action_report.kind = action.kind;
     switch (action.kind) {
       case InteropActionKind::kConnect:
         status = session->OnTransportConnected();
@@ -623,6 +1510,7 @@ RunInteropScenario(const InteropScenario& scenario) -> base::Result<InteropRepor
                              seq.value(),
                              action.is_admin ? 1U : 0U,
                              "outbound");
+        action_reports.push_back(std::move(action_report));
         continue;
       }
       case InteropActionKind::kInbound:
@@ -650,6 +1538,7 @@ RunInteropScenario(const InteropScenario& scenario) -> base::Result<InteropRepor
                              action.seq_num,
                              action.is_admin ? 1U : 0U,
                              "inbound");
+        action_reports.push_back(std::move(action_report));
         continue;
       case InteropActionKind::kGap:
         status = session->ObserveInboundSeq(action.seq_num);
@@ -662,6 +1551,7 @@ RunInteropScenario(const InteropScenario& scenario) -> base::Result<InteropRepor
         }
         context.trace.Record(
           TraceEventKind::kSessionEvent, action.session_id, worker_id, action.timestamp_ns, action.seq_num, 0U, "gap");
+        action_reports.push_back(std::move(action_report));
         continue;
       case InteropActionKind::kCompleteResend:
         status = session->CompleteResend();
@@ -683,11 +1573,261 @@ RunInteropScenario(const InteropScenario& scenario) -> base::Result<InteropRepor
         context.trace.Record(
           TraceEventKind::kStoreEvent, action.session_id, worker_id, action.timestamp_ns, 2U, 0U, "recover-cold");
         break;
+      case InteropActionKind::kProtocolConnect: {
+        auto* protocol_context = FindProtocol(context, action.session_id);
+        if (protocol_context == nullptr) {
+          return base::Status::NotFound("interop action references unknown admin protocol session");
+        }
+        auto event = protocol_context->protocol->OnTransportConnected(action.timestamp_ns);
+        if (!event.ok()) {
+          return event.status();
+        }
+        auto summary =
+          SummarizeProtocolEvent(event.value(), *protocol_context->dictionary, action.session_id, action.kind);
+        if (!summary.ok()) {
+          return summary.status();
+        }
+        action_report = std::move(summary).value();
+        SummarizeApplicationOutcomes(
+          context, action.session_id, worker_id, action.timestamp_ns, event.value(), &action_report);
+        status = ApplyProtocolDisconnect(*protocol_context, event.value());
+        if (!status.ok()) {
+          return status;
+        }
+        context.sessions.at(action.session_id) = protocol_context->protocol->session();
+        context.trace.Record(
+          TraceEventKind::kSessionEvent, action.session_id, worker_id, action.timestamp_ns, 0U, 0U, "protocol-connect");
+        action_reports.push_back(std::move(action_report));
+        continue;
+      }
+      case InteropActionKind::kProtocolInbound:
+      case InteropActionKind::kProtocolInboundRaw: {
+        auto* protocol_context = FindProtocol(context, action.session_id);
+        if (protocol_context == nullptr) {
+          return base::Status::NotFound("interop action references unknown admin protocol session");
+        }
+        auto frame = MakeProtocolInboundFrame(*protocol_context->counterparty, action);
+        if (frame.empty()) {
+          return base::Status::InvalidArgument("interop protocol inbound action could not build a FIX frame");
+        }
+        auto event = protocol_context->protocol->OnInbound(std::span<const std::byte>(frame.data(), frame.size()),
+                                                           action.timestamp_ns);
+        if (!event.ok()) {
+          return event.status();
+        }
+        if (event.value().session_active && !protocol_context->queued_application_messages.empty()) {
+          status = FlushQueuedProtocolApplications(*protocol_context, action.timestamp_ns, &event.value());
+          if (!status.ok()) {
+            return status;
+          }
+        }
+        auto summary =
+          SummarizeProtocolEvent(event.value(), *protocol_context->dictionary, action.session_id, action.kind);
+        if (!summary.ok()) {
+          return summary.status();
+        }
+        action_report = std::move(summary).value();
+        SummarizeApplicationOutcomes(
+          context, action.session_id, worker_id, action.timestamp_ns, event.value(), &action_report);
+        status = ApplyProtocolDisconnect(*protocol_context, event.value());
+        if (!status.ok()) {
+          return status;
+        }
+        context.sessions.at(action.session_id) = protocol_context->protocol->session();
+        context.trace.Record(TraceEventKind::kSessionEvent,
+                             action.session_id,
+                             worker_id,
+                             action.timestamp_ns,
+                             action.seq_num,
+                             action.poss_dup ? 1U : 0U,
+                             action.kind == InteropActionKind::kProtocolInbound ? "protocol-inbound"
+                                                                                : "protocol-inbound-raw");
+        action_reports.push_back(std::move(action_report));
+        continue;
+      }
+      case InteropActionKind::kProtocolSendApplication: {
+        auto* protocol_context = FindProtocol(context, action.session_id);
+        if (protocol_context == nullptr) {
+          return base::Status::NotFound("interop action references unknown admin protocol session");
+        }
+        auto decoded =
+          DecodeProtocolApplicationAction(*protocol_context->counterparty, *protocol_context->dictionary, action);
+        if (!decoded.ok()) {
+          return decoded.status();
+        }
+
+        session::ProtocolEvent event;
+        auto outbound = protocol_context->protocol->SendApplication(decoded.value(), action.timestamp_ns);
+        if (!outbound.ok()) {
+          return outbound.status();
+        }
+        event.outbound_frames.push_back(std::move(outbound).value());
+
+        auto summary = SummarizeProtocolEvent(event, *protocol_context->dictionary, action.session_id, action.kind);
+        if (!summary.ok()) {
+          return summary.status();
+        }
+        action_report = std::move(summary).value();
+        SummarizeApplicationOutcomes(context, action.session_id, worker_id, action.timestamp_ns, event, &action_report);
+        status = ApplyProtocolDisconnect(*protocol_context, event);
+        if (!status.ok()) {
+          return status;
+        }
+        context.sessions.at(action.session_id) = protocol_context->protocol->session();
+        context.trace.Record(TraceEventKind::kSessionEvent,
+                             action.session_id,
+                             worker_id,
+                             action.timestamp_ns,
+                             0U,
+                             0U,
+                             "protocol-send-application");
+        action_reports.push_back(std::move(action_report));
+        continue;
+      }
+      case InteropActionKind::kProtocolQueueApplication: {
+        auto* protocol_context = FindProtocol(context, action.session_id);
+        if (protocol_context == nullptr) {
+          return base::Status::NotFound("interop action references unknown admin protocol session");
+        }
+        const auto snapshot = protocol_context->protocol->session().Snapshot();
+        if (snapshot.state == session::SessionState::kActive ||
+            snapshot.state == session::SessionState::kAwaitingLogout ||
+            snapshot.state == session::SessionState::kResendProcessing) {
+          return base::Status::InvalidArgument("protocol-queue-application only supports inactive protocol sessions");
+        }
+
+        auto decoded =
+          DecodeProtocolApplicationAction(*protocol_context->counterparty, *protocol_context->dictionary, action);
+        if (!decoded.ok()) {
+          return decoded.status();
+        }
+
+        protocol_context->queued_application_messages.push_back(std::move(decoded).value());
+        action_report.queued_application_messages = 1U;
+        context.trace.Record(TraceEventKind::kSessionEvent,
+                             action.session_id,
+                             worker_id,
+                             action.timestamp_ns,
+                             1U,
+                             0U,
+                             "protocol-queue-application");
+        action_reports.push_back(std::move(action_report));
+        continue;
+      }
+      case InteropActionKind::kProtocolTimer: {
+        auto* protocol_context = FindProtocol(context, action.session_id);
+        if (protocol_context == nullptr) {
+          return base::Status::NotFound("interop action references unknown admin protocol session");
+        }
+        auto event = protocol_context->protocol->OnTimer(action.timestamp_ns);
+        if (!event.ok()) {
+          return event.status();
+        }
+        auto summary =
+          SummarizeProtocolEvent(event.value(), *protocol_context->dictionary, action.session_id, action.kind);
+        if (!summary.ok()) {
+          return summary.status();
+        }
+        action_report = std::move(summary).value();
+        SummarizeApplicationOutcomes(
+          context, action.session_id, worker_id, action.timestamp_ns, event.value(), &action_report);
+        status = ApplyProtocolDisconnect(*protocol_context, event.value());
+        if (!status.ok()) {
+          return status;
+        }
+        context.sessions.at(action.session_id) = protocol_context->protocol->session();
+        context.trace.Record(
+          TraceEventKind::kSessionEvent, action.session_id, worker_id, action.timestamp_ns, 0U, 0U, "protocol-timer");
+        action_reports.push_back(std::move(action_report));
+        continue;
+      }
+      case InteropActionKind::kProtocolBeginLogout: {
+        auto* protocol_context = FindProtocol(context, action.session_id);
+        if (protocol_context == nullptr) {
+          return base::Status::NotFound("interop action references unknown admin protocol session");
+        }
+        auto frame = protocol_context->protocol->BeginLogout(action.text, action.timestamp_ns);
+        if (!frame.ok()) {
+          return frame.status();
+        }
+        session::ProtocolEvent event;
+        event.outbound_frames.push_back(std::move(frame).value());
+        auto summary = SummarizeProtocolEvent(event, *protocol_context->dictionary, action.session_id, action.kind);
+        if (!summary.ok()) {
+          return summary.status();
+        }
+        action_report = std::move(summary).value();
+        SummarizeApplicationOutcomes(context, action.session_id, worker_id, action.timestamp_ns, event, &action_report);
+        status = ApplyProtocolDisconnect(*protocol_context, event);
+        if (!status.ok()) {
+          return status;
+        }
+        context.sessions.at(action.session_id) = protocol_context->protocol->session();
+        context.trace.Record(TraceEventKind::kSessionEvent,
+                             action.session_id,
+                             worker_id,
+                             action.timestamp_ns,
+                             0U,
+                             0U,
+                             "protocol-begin-logout");
+        action_reports.push_back(std::move(action_report));
+        continue;
+      }
+      case InteropActionKind::kAcceptorLogonAttempt: {
+        if (!std::string_view(action.text).starts_with("35=A")) {
+          return base::Status::InvalidArgument("acceptor-logon-attempt only supports Logon(35=A) bodies");
+        }
+
+        auto identity = ResolveAcceptorLogonIdentity(scenario, action);
+        if (!identity.ok()) {
+          return identity.status();
+        }
+
+        const auto* matched = ResolveAcceptorLogonCounterparty(scenario, identity.value());
+        if (matched == nullptr) {
+          if (scenario.engine_config.accept_unknown_sessions) {
+            return base::Status::InvalidArgument(
+              "acceptor-logon-attempt does not model dynamic accept_unknown_sessions flows");
+          }
+          action_report.disconnect = true;
+          context.trace.Record(TraceEventKind::kSessionEvent,
+                               action.session_id,
+                               worker_id,
+                               action.timestamp_ns,
+                               0U,
+                               0U,
+                               "acceptor-logon-attempt-unmatched");
+          action_reports.push_back(std::move(action_report));
+          continue;
+        }
+
+        const auto session_it = context.sessions.find(matched->session.session_id);
+        if (session_it == context.sessions.end()) {
+          return base::Status::NotFound("acceptor-logon-attempt matched an unknown session");
+        }
+
+        if (session_it->second.state() == session::SessionState::kActive) {
+          action_report.disconnect = true;
+          context.trace.Record(TraceEventKind::kSessionEvent,
+                               matched->session.session_id,
+                               context.workers.at(matched->session.session_id),
+                               action.timestamp_ns,
+                               0U,
+                               0U,
+                               "acceptor-logon-attempt-duplicate");
+          action_reports.push_back(std::move(action_report));
+          continue;
+        }
+
+        return base::Status::InvalidArgument(
+          "acceptor-logon-attempt only models duplicate or unknown identity rejection paths");
+      }
     }
 
     if (!status.ok()) {
       return status;
     }
+    action_reports.push_back(std::move(action_report));
   }
 
   InteropReport report;
@@ -700,6 +1840,7 @@ RunInteropScenario(const InteropScenario& scenario) -> base::Result<InteropRepor
   });
   report.metrics = context.metrics.Snapshot();
   report.trace_events = context.trace.Snapshot();
+  report.action_reports = std::move(action_reports);
 
   auto status = ValidateExpectations(scenario, report);
   if (!status.ok()) {

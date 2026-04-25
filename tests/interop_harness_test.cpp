@@ -106,4 +106,103 @@ TEST_CASE("interop-harness", "[interop-harness]")
   REQUIRE(std::filesystem::exists(durable_store_path / "active.log"));
 
   std::filesystem::remove_all(durable_root);
+
+  const auto official_root = std::filesystem::temp_directory_path() / "nimblefix-interop-official-test";
+  const auto official_artifact_path = official_root / "official-profile.art";
+  const auto official_config_path = official_root / "official-runtime.ffcfg";
+  const auto official_scenario_path = official_root / "official-case-2s.ffscenario";
+
+  std::filesystem::remove_all(official_root);
+  std::filesystem::create_directories(official_root);
+  REQUIRE(BuildInteropArtifact(official_artifact_path).ok());
+
+  {
+    std::ofstream config_out(official_config_path, std::ios::trunc);
+    config_out << "engine.worker_count=1\n";
+    config_out << "engine.enable_metrics=true\n";
+    config_out << "engine.trace_mode=ring\n";
+    config_out << "engine.trace_capacity=32\n";
+    config_out << "profile=" << official_artifact_path.filename().string() << "\n";
+    config_out << "counterparty|official-acceptor|4101|4400|FIX.4.4|SELL|BUY|memory||memory|inline|30|false\n";
+  }
+
+  {
+    std::ofstream scenario_out(official_scenario_path, std::ios::trunc);
+    scenario_out << "config=" << official_config_path.filename().string() << "\n";
+    scenario_out << "action|protocol-connect|4101|ts=1\n";
+    scenario_out << "action|protocol-inbound|4101|seq=1|ts=10|body=35=0\n";
+    scenario_out << "expect-action|1|outbound=0|app=0|disconnect=0\n";
+    scenario_out << "expect-action|2|outbound=1|app=0|disconnect=1\n";
+    scenario_out << "expect-outbound|2|1|msg-type=5|text-contains=received 0 before Logon completed\n";
+    scenario_out << "expect-session|4101|disconnected|2|2|0\n";
+  }
+
+  auto official_scenario = nimble::runtime::LoadInteropScenarioFile(official_scenario_path);
+  REQUIRE(official_scenario.ok());
+
+  auto official_report = nimble::runtime::RunInteropScenario(official_scenario.value());
+  REQUIRE(official_report.ok());
+  REQUIRE(official_report.value().action_reports.size() == 2U);
+  REQUIRE(official_report.value().action_reports[1].outbound_frame_summaries.size() == 1U);
+  REQUIRE(official_report.value().action_reports[1].outbound_frame_summaries.front().msg_type == "5");
+
+  const auto poss_resend_scenario_path = official_root / "official-case-19.ffscenario";
+  {
+    std::ofstream scenario_out(poss_resend_scenario_path, std::ios::trunc);
+    scenario_out << "config=" << official_config_path.filename().string() << "\n";
+    scenario_out << "action|protocol-connect|4101|ts=1\n";
+    scenario_out << "action|protocol-inbound|4101|seq=1|ts=10|body=35=A^98=0^108=30\n";
+    scenario_out
+      << "action|protocol-inbound|4101|seq=2|ts=20|body=35=D^11=ORD-SEEN^55=AAPL^54=1^60=20260425-12:00:00.000^40=1\n";
+    scenario_out << "action|protocol-inbound|4101|seq=3|ts=30|possdup=1|orig-sending-time=20260425-11:59:00.000|body="
+                    "35=D^97=Y^11=ORD-SEEN^55=AAPL^54=1^60=20260425-12:00:00.000^40=1\n";
+    scenario_out << "action|protocol-inbound|4101|seq=4|ts=40|possdup=1|orig-sending-time=20260425-11:58:00.000|body="
+                    "35=D^97=Y^11=ORD-NEW^55=MSFT^54=1^60=20260425-12:00:01.000^40=1\n";
+    scenario_out << "expect-action|3|app=1|processed-app=1|ignored-app=0|poss-resend-app=0|disconnect=0\n";
+    scenario_out << "expect-action|4|app=1|processed-app=0|ignored-app=1|poss-resend-app=1|disconnect=0\n";
+    scenario_out << "expect-action|5|app=1|processed-app=1|ignored-app=0|poss-resend-app=1|disconnect=0\n";
+    scenario_out << "expect-session|4101|active|5|2|0\n";
+  }
+
+  auto poss_resend_scenario = nimble::runtime::LoadInteropScenarioFile(poss_resend_scenario_path);
+  REQUIRE(poss_resend_scenario.ok());
+
+  auto poss_resend_report = nimble::runtime::RunInteropScenario(poss_resend_scenario.value());
+  REQUIRE(poss_resend_report.ok());
+  REQUIRE(poss_resend_report.value().action_reports.size() == 5U);
+  REQUIRE(poss_resend_report.value().action_reports[2].processed_application_messages == 1U);
+  REQUIRE(poss_resend_report.value().action_reports[2].ignored_application_messages == 0U);
+  REQUIRE(poss_resend_report.value().action_reports[3].processed_application_messages == 0U);
+  REQUIRE(poss_resend_report.value().action_reports[3].ignored_application_messages == 1U);
+  REQUIRE(poss_resend_report.value().action_reports[3].poss_resend_application_messages == 1U);
+  REQUIRE(poss_resend_report.value().action_reports[4].processed_application_messages == 1U);
+  REQUIRE(poss_resend_report.value().action_reports[4].ignored_application_messages == 0U);
+  REQUIRE(poss_resend_report.value().action_reports[4].poss_resend_application_messages == 1U);
+
+  const auto offline_queue_scenario_path = official_root / "official-case-16.ffscenario";
+  {
+    std::ofstream scenario_out(offline_queue_scenario_path, std::ios::trunc);
+    scenario_out << "config=" << official_config_path.filename().string() << "\n";
+    scenario_out << "action|protocol-queue-application|4101|ts=5|body=35=D^11=ORD-OFFLINE^55=AAPL^54=1^60=20260425-12:"
+                    "00:00.000^40=1\n";
+    scenario_out << "action|protocol-connect|4101|ts=10\n";
+    scenario_out << "action|protocol-inbound|4101|seq=1|ts=20|body=35=A^98=0^108=30\n";
+    scenario_out << "expect-action|1|queued-app=1|disconnect=0\n";
+    scenario_out << "expect-action|3|outbound=2|active=1|disconnect=0\n";
+    scenario_out << "expect-outbound|3|1|msg-type=A|msg-seq-num=1\n";
+    scenario_out << "expect-outbound|3|2|msg-type=D|msg-seq-num=2\n";
+    scenario_out << "expect-session|4101|active|2|3|0\n";
+  }
+
+  auto offline_queue_scenario = nimble::runtime::LoadInteropScenarioFile(offline_queue_scenario_path);
+  REQUIRE(offline_queue_scenario.ok());
+
+  auto offline_queue_report = nimble::runtime::RunInteropScenario(offline_queue_scenario.value());
+  REQUIRE(offline_queue_report.ok());
+  REQUIRE(offline_queue_report.value().action_reports.size() == 3U);
+  REQUIRE(offline_queue_report.value().action_reports[0].queued_application_messages == 1U);
+  REQUIRE(offline_queue_report.value().action_reports[2].outbound_frame_summaries.size() == 2U);
+  REQUIRE(offline_queue_report.value().action_reports[2].outbound_frame_summaries[1].msg_type == "D");
+
+  std::filesystem::remove_all(official_root);
 }

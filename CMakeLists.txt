@@ -172,6 +172,11 @@ target_link_libraries(nimblefix-xml2ffd PRIVATE nimblefix nimblefix-thirdparty-p
 nimblefix_add_internal_headers(nimblefix-xml2ffd)
 
 if(NIMBLEFIX_BUILD_TOOLS)
+    file(GLOB NIMBLEFIX_FIX_SESSION_TESTCASE_SOURCES CONFIGURE_DEPENDS
+        "${PROJECT_SOURCE_DIR}/tools/fix-session-testcases/*.cpp"
+    )
+    nimblefix_add_binary(nimblefix-fix-session-testcases ${NIMBLEFIX_FIX_SESSION_TESTCASE_SOURCES})
+
     file(GLOB NIMBLEFIX_INTEROP_RUNNER_SOURCES CONFIGURE_DEPENDS
         "${PROJECT_SOURCE_DIR}/tools/interop-runner/*.cpp"
     )

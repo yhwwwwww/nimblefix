@@ -12,6 +12,23 @@ NimbleFIX is a C++20 FIX (Financial Information eXchange) protocol engine built 
 
 NimbleFIX operates as both **initiator** (client) and **acceptor** (server) using the same internal engine. It supports FIX 4.2, 4.3, 4.4, and FIXT.1.1 transport sessions.
 
+## FIX Standards Coverage
+
+NimbleFIX is intentionally focused on the classic low-latency FIX stack, not the entire FIX Family of Standards. Current coverage against the major FIX Trading standards families is:
+
+| Standard family | Status | Current scope |
+|---------|---------|---------|
+| **Classic FIX session layer** | **Implemented** | FIX 4.x / FIXT.1.1 initiator and acceptor runtime with Logon/Logout, heartbeat, sequence tracking, gap detection, resend recovery, reconnect, and persistence |
+| **FIX tagvalue encoding** | **Implemented** | Core codec, message builders, fixed-layout writers, raw pass-through, SIMD-assisted tag/value parsing |
+| **FIX over TLS (FIXS)** | **Implemented** | Optional OpenSSL-backed TLS transport, enabled at runtime per initiator counterparty or acceptor listener |
+| **FIX application-layer dictionaries** | **Partial** | Dictionary-driven `.ffd` / `.art` model with QuickFIX XML import tooling; not native FIX Orchestra schema support |
+| **FIX official session test cases** | **Partial** | Offline FIX Trading session-case manifest plus executable `.ffscenario` baseline; 73 of 85 official cases currently map to in-tree passing scenarios, and the remaining 12 optional cases are explicitly tracked as unsupported |
+| **FIX Orchestra** | **Absent** | No native Orchestra import, rules-of-engagement model, or Orchestra-driven code/test generation yet |
+| **FIXP / SOFH** | **Absent** | No FIX Performance Session Layer or Simple Open Framing Header support |
+| **FIXML / SBE / FAST** | **Absent** | No alternate wire encodings beyond classic tag=value FIX |
+| **JSON / GPB / ASN.1 FIX encodings** | **Absent** | No alternate serialized FIX encodings currently implemented |
+| **FIXatdl / MMT** | **Absent** | Not currently in scope for the engine/runtime/tooling stack |
+
 ## Why NimbleFIX?
 
 Existing open-source FIX engines (QuickFIX, QuickFIX/J, Fix8) are designed for correctness and broad compatibility, not for raw speed. They parse messages into dynamic maps, allocate on every message, and lock shared state across threads. This is fine for 99% of use cases — but not for firms where single-digit microsecond latency matters.

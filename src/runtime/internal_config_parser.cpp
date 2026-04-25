@@ -79,8 +79,11 @@ constexpr std::size_t kLogonTime = 39U;
 constexpr std::size_t kLogoutTime = 40U;
 constexpr std::size_t kLogonDay = 41U;
 constexpr std::size_t kLogoutDay = 42U;
+constexpr std::size_t kSendingTimeThresholdSeconds = 43U;
+constexpr std::size_t kSupportedAppMsgTypes = 44U;
+constexpr std::size_t kApplicationMessagesAvailable = 45U;
 constexpr std::size_t kMinFieldCount = kIsInitiator + 1U;
-constexpr std::size_t kMaxFieldCount = kLogoutDay + 1U;
+constexpr std::size_t kMaxFieldCount = kApplicationMessagesAvailable + 1U;
 } // namespace counterparty_columns
 
 auto
@@ -114,6 +117,15 @@ Split(std::string_view input, char delimiter) -> std::vector<std::string>
     begin = end + 1;
   }
   return parts;
+}
+
+auto
+SplitCsvList(std::string_view input) -> std::vector<std::string>
+{
+  if (Trim(input).empty()) {
+    return {};
+  }
+  return Split(input, kConfigListSeparator);
 }
 
 auto
@@ -649,7 +661,7 @@ LoadEngineConfigText(std::string_view text, const std::filesystem::path& base_di
 
     if (parts[0] == kCounterpartyRecordKind) {
       if (parts.size() < counterparty_columns::kMinFieldCount || parts.size() > counterparty_columns::kMaxFieldCount) {
-        return base::Status::InvalidArgument("counterparty config must have between 13 and 43 pipe-separated "
+        return base::Status::InvalidArgument("counterparty config must have between 13 and 46 pipe-separated "
                                              "parts");
       }
 
@@ -848,6 +860,24 @@ LoadEngineConfigText(std::string_view text, const std::filesystem::path& base_di
       if (!logout_day.ok()) {
         return logout_day.status();
       }
+      std::uint32_t sending_time_threshold_seconds = 0U;
+      if (parts.size() > counterparty_columns::kSendingTimeThresholdSeconds &&
+          !Trim(parts[counterparty_columns::kSendingTimeThresholdSeconds]).empty()) {
+        auto threshold = ParseInteger<std::uint32_t>(parts[counterparty_columns::kSendingTimeThresholdSeconds],
+                                                     "sending_time_threshold_seconds");
+        if (!threshold.ok()) {
+          return threshold.status();
+        }
+        sending_time_threshold_seconds = threshold.value();
+      }
+      const auto supported_app_msg_types = parts.size() > counterparty_columns::kSupportedAppMsgTypes
+                                             ? SplitCsvList(parts[counterparty_columns::kSupportedAppMsgTypes])
+                                             : std::vector<std::string>{};
+      auto application_messages_available =
+        ParseOptionalBoolColumn(parts, counterparty_columns::kApplicationMessagesAvailable, true);
+      if (!application_messages_available.ok()) {
+        return application_messages_available.status();
+      }
       auto heartbeat = ParseInteger<std::uint32_t>(parts[counterparty_columns::kHeartbeatIntervalSeconds],
                                                    "heartbeat_interval_seconds");
       if (!heartbeat.ok()) {
@@ -879,6 +909,9 @@ LoadEngineConfigText(std::string_view text, const std::filesystem::path& base_di
         .default_appl_ver_id = parts.size() > counterparty_columns::kDefaultApplVerId
                                  ? parts[counterparty_columns::kDefaultApplVerId]
                                  : std::string{},
+        .supported_app_msg_types = supported_app_msg_types,
+        .sending_time_threshold_seconds = sending_time_threshold_seconds,
+        .application_messages_available = application_messages_available.value(),
         .store_mode = store_mode.value(),
         .durable_flush_threshold = durable_flush_threshold.value(),
         .durable_rollover_mode = durable_rollover_mode.value(),

@@ -25,6 +25,7 @@ PRESET="$(env_or_default dev-release NIMBLEFIX_CMAKE_PRESET)"
 CMAKE_GENERATOR_KIND="$(env_or_default auto NIMBLEFIX_CMAKE_GENERATOR)"
 BENCH_MODE="smoke"
 XMAKE_BIN_DIR="$(env_or_default "$ROOT_DIR/build/linux/x86_64/$XMAKE_MODE" NIMBLEFIX_XMAKE_BIN_DIR)"
+OFFICIAL_FIX_SESSION_MANIFEST="$ROOT_DIR/tests/data/fix-session/official-session-cases.ffcases"
 RESOLVED_BUILD_SYSTEM=""
 RESOLVED_CMAKE_GENERATOR=""
 RESOLVED_CMAKE_GENERATOR_KIND=""
@@ -382,6 +383,32 @@ fallback_to_cmake() {
     return 0
 }
 
+run_official_fix_session_gate() {
+    local runner_path=""
+
+    case "$RESOLVED_BUILD_SYSTEM" in
+        xmake)
+            run_xmake build nimblefix-fix-session-testcases
+            runner_path="$XMAKE_BIN_DIR/nimblefix-fix-session-testcases"
+            ;;
+        cmake)
+            runner_path="$ROOT_DIR/build/cmake/$RESOLVED_CMAKE_PRESET/bin/nimblefix-fix-session-testcases"
+            ;;
+        *)
+            echo "error: official FIX session gate requires a resolved build system" >&2
+            exit 1
+            ;;
+    esac
+
+    if [ ! -x "$runner_path" ]; then
+        echo "error: official FIX session runner is missing at $runner_path" >&2
+        exit 1
+    fi
+
+    echo "info: running official FIX session testcase gate" >&2
+    "$runner_path" --manifest "$OFFICIAL_FIX_SESSION_MANIFEST"
+}
+
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --build-system)
@@ -464,6 +491,7 @@ if [ "$RESOLVED_BUILD_SYSTEM" = "xmake" ]; then
         echo "info: using xmake ($XMAKE_MODE)" >&2
         run_xmake build nimblefix-tests
         "$XMAKE_BIN_DIR/nimblefix-tests"
+        run_official_fix_session_gate
     elif [ "$BUILD_SYSTEM" = "auto" ] && fallback_to_cmake; then
         :
     else
@@ -476,6 +504,7 @@ elif [ "$RESOLVED_BUILD_SYSTEM" = "cmake" ]; then
     cmake --preset "$RESOLVED_CMAKE_PRESET"
     cmake --build --preset "$RESOLVED_CMAKE_PRESET"
     ctest --preset "$RESOLVED_CMAKE_PRESET"
+    run_official_fix_session_gate
 else
     echo "error: unresolved build system '$RESOLVED_BUILD_SYSTEM'" >&2
     exit 1

@@ -12,6 +12,23 @@ NimbleFIX 是一个用 C++20 从头实现的 FIX（Financial Information eXchang
 
 NimbleFIX 使用同一套内部引擎同时支持 **initiator**（客户端）和 **acceptor**（服务端），支持 FIX 4.2、4.3、4.4 和 FIXT.1.1。
 
+## FIX 标准覆盖情况
+
+NimbleFIX 的定位是聚焦经典、低延迟的 FIX 主干能力，而不是一次性覆盖整个 FIX Family of Standards。当前对 FIX Trading 主要标准族的覆盖情况如下：
+
+| 标准族 | 状态 | 当前范围 |
+|------|------|------|
+| **经典 FIX session layer** | **已实现** | FIX 4.x / FIXT.1.1 的 initiator / acceptor 运行时，包含 Logon/Logout、心跳、序列号跟踪、gap 检测、重传恢复、重连与持久化 |
+| **FIX tagvalue 编码** | **已实现** | 核心 codec、message builder、fixed-layout writer、raw pass-through 与 SIMD 辅助 tag/value 解析 |
+| **FIX over TLS (FIXS)** | **已实现** | 基于 OpenSSL 的可选 TLS transport，可按 initiator counterparty 或 acceptor listener 在运行时启用 |
+| **FIX 应用层字典** | **部分覆盖** | 以 `.ffd` / `.art` 为核心的字典模型，并提供 QuickFIX XML 导入工具；但还不是原生 FIX Orchestra schema 支持 |
+| **FIX 官方 session 测试案例** | **部分覆盖** | 已接入离线 FIX Trading session-case manifest 和可执行 `.ffscenario` baseline；当前 85 个官方 case 中已有 73 个映射到仓内通过的场景，剩余 12 个 optional case 仍以 unsupported 形式显式跟踪 |
+| **FIX Orchestra** | **未实现** | 还没有原生 Orchestra 导入、rules-of-engagement 模型、或基于 Orchestra 的代码/测试生成 |
+| **FIXP / SOFH** | **未实现** | 尚未支持 FIX Performance Session Layer 或 Simple Open Framing Header |
+| **FIXML / SBE / FAST** | **未实现** | 目前没有 classic tag=value 之外的其他 wire encoding |
+| **JSON / GPB / ASN.1 FIX 编码** | **未实现** | 尚未实现其他序列化形式的 FIX 编码 |
+| **FIXatdl / MMT** | **未实现** | 当前不在引擎/runtime/tooling 的范围内 |
+
 ## 为什么做这个项目？
 
 现有的开源 FIX 引擎（QuickFIX、QuickFIX/J、Fix8）以正确性和广泛兼容性为设计目标，而非极致速度。它们把消息解析到动态 map 中，每条消息都做堆分配，用锁保护跨线程共享状态。这对 99% 的场景够用——但对微秒级延迟有刚需的团队来说不够。

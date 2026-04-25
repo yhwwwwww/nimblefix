@@ -236,6 +236,9 @@ struct CounterpartyConfig
   std::filesystem::path store_path;
   // Conditionally required for FIXT.1.1 transport sessions.
   std::string default_appl_ver_id;
+  std::vector<std::string> supported_app_msg_types;
+  std::uint32_t sending_time_threshold_seconds{ 0 };
+  bool application_messages_available{ true };
   // Memory is the simplest default. Mmap and durable batch require store_path.
   StoreMode store_mode{ StoreMode::kMemory };
   // Durable-batch tuning. Ignored unless store_mode == kDurableBatch.
@@ -422,6 +425,32 @@ public:
   /// \param seconds Heartbeat interval in whole seconds.
   /// \return This builder.
   auto heartbeat_interval_seconds(std::uint32_t seconds) -> CounterpartyConfigBuilder&;
+
+  /// Override the maximum allowed absolute SendingTime drift in seconds.
+  ///
+  /// Zero disables SendingTime accuracy rejection.
+  ///
+  /// \param seconds Maximum tolerated absolute drift from wall clock.
+  /// \return This builder.
+  auto sending_time_threshold_seconds(std::uint32_t seconds) -> CounterpartyConfigBuilder&;
+
+  /// Restrict this session to a known subset of application message types.
+  ///
+  /// Empty means any application message type present in the bound dictionary is
+  /// considered supported.
+  ///
+  /// \param values Supported application MsgType values.
+  /// \return This builder.
+  auto supported_app_msg_types(std::vector<std::string> values) -> CounterpartyConfigBuilder&;
+
+  /// Toggle whether application handling is currently available for the session.
+  ///
+  /// When false, known application messages are answered with
+  /// BusinessMessageReject reason 4.
+  ///
+  /// \param available True when the application service is available.
+  /// \return This builder.
+  auto application_messages_available(bool available) -> CounterpartyConfigBuilder&;
 
   /// Select persistence backend and optional path.
   ///

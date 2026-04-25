@@ -1,0 +1,24 @@
+<html>
+  <body>
+    <h2>Buyside-oriented (session initiator) Logon and session initiation test case</h2>
+    <h3>Scenario 1B Connect and Send Logon message</h3>
+    <p>Mandatory</p>
+    <table>
+      <tr><td>a. Establish transport layer connection.</td><td>Successfully established transport layer connection.</td></tr>
+      <tr><td>b. Send Logon(35=A) request message.</td><td>Logon acknowledgement message sent by peer.</td></tr>
+    </table>
+    <h2>Sellside-oriented (session acceptor) Logon and session initiation test case</h2>
+    <h3>Scenario 2S. Receive any message other than a Logon message</h3>
+    <p>Mandatory</p>
+    <table>
+      <tr><td>First message received is not a Logon(35=A) message.</td><td>Disconnect.</td></tr>
+    </table>
+    <h2>Test cases applicable to all FIX systems</h2>
+    <h3>Scenario 4 Send Heartbeat message</h3>
+    <p>Mandatory</p>
+    <table>
+      <tr><td>a. No data sent during preset heartbeat interval.</td><td>Send Heartbeat(35=0) message.</td></tr>
+      <tr><td>b. TestRequest(35=1) message received.</td><td>Send Heartbeat(35=0) with TestReqID.</td></tr>
+    </table>
+  </body>
+</html>

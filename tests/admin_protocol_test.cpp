@@ -1,3 +1,5 @@
+#include <chrono>
+
 #include <catch2/catch_test_macros.hpp>
 
 #include "nimblefix/codec/fix_codec.h"
@@ -561,6 +563,55 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
       nimble::session::AdminProtocolConfig{
         .session =
           nimble::session::SessionConfig{
+            .session_id = 5047U,
+            .key = nimble::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
+            .profile_id = dictionary.value().profile().header().profile_id,
+            .heartbeat_interval_seconds = 30U,
+            .is_initiator = false,
+          },
+        .begin_string = "FIX.4.4",
+        .sender_comp_id = "SELL",
+        .target_comp_id = "BUY",
+        .heartbeat_interval_seconds = 30U,
+      },
+      dictionary.value(),
+      &store);
+
+    REQUIRE(protocol.OnTransportConnected(1U).ok());
+    REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
+
+    nimble::message::MessageBuilder heartbeat_builder("0");
+    heartbeat_builder.set_string(kMsgType, "0");
+    auto inbound = EncodeInboundFrame(std::move(heartbeat_builder).build(),
+                                      dictionary.value(),
+                                      "FIX.4.4",
+                                      "BUY",
+                                      "SELL",
+                                      2U,
+                                      true,
+                                      {},
+                                      "20260402-12:00:01.000");
+    REQUIRE(inbound.ok());
+
+    auto event = protocol.OnInbound(inbound.value(), 10U);
+    REQUIRE(event.ok());
+    REQUIRE(event.value().outbound_frames.size() == 1U);
+    REQUIRE(!event.value().disconnect);
+
+    auto decoded = nimble::codec::DecodeFixMessage(event.value().outbound_frames.front().bytes, dictionary.value());
+    REQUIRE(decoded.ok());
+    REQUIRE(decoded.value().header.msg_type == "3");
+    REQUIRE(decoded.value().message.view().get_int(kRefTagID).value() == kSendingTime);
+    REQUIRE(decoded.value().message.view().get_string(kRefMsgType).value() == "0");
+    REQUIRE(decoded.value().message.view().get_int(kRejectReason).value() == 10);
+  }
+
+  {
+    nimble::store::MemorySessionStore store;
+    nimble::session::AdminProtocol protocol(
+      nimble::session::AdminProtocolConfig{
+        .session =
+          nimble::session::SessionConfig{
             .session_id = 5021U,
             .key = nimble::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
             .profile_id = dictionary.value().profile().header().profile_id,
@@ -698,6 +749,45 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(decoded.ok());
     REQUIRE(decoded.value().header.msg_type == "5");
     REQUIRE(decoded.value().message.view().get_string(kText).value() == "unexpected SenderCompID on inbound frame");
+  }
+
+  {
+    nimble::store::MemorySessionStore store;
+    nimble::session::AdminProtocol protocol(
+      nimble::session::AdminProtocolConfig{
+        .session =
+          nimble::session::SessionConfig{
+            .session_id = 5046U,
+            .key = nimble::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
+            .profile_id = dictionary.value().profile().header().profile_id,
+            .heartbeat_interval_seconds = 30U,
+            .is_initiator = false,
+          },
+        .begin_string = "FIX.4.4",
+        .sender_comp_id = "SELL",
+        .target_comp_id = "BUY",
+        .heartbeat_interval_seconds = 30U,
+      },
+      dictionary.value(),
+      &store);
+
+    REQUIRE(protocol.OnTransportConnected(1U).ok());
+
+    nimble::message::MessageBuilder logon_builder("A");
+    logon_builder.set_string(kMsgType, "A").set_int(kEncryptMethod, 0).set_int(kHeartBtInt, 30);
+    auto inbound =
+      EncodeInboundFrame(std::move(logon_builder).build(), dictionary.value(), "FIX.4.2", "BUY", "SELL", 1U, false);
+    REQUIRE(inbound.ok());
+
+    auto event = protocol.OnInbound(inbound.value(), 10U);
+    REQUIRE(event.ok());
+    REQUIRE(event.value().outbound_frames.size() == 1U);
+    REQUIRE(event.value().disconnect);
+
+    auto decoded = nimble::codec::DecodeFixMessage(event.value().outbound_frames.front().bytes, dictionary.value());
+    REQUIRE(decoded.ok());
+    REQUIRE(decoded.value().header.msg_type == "5");
+    REQUIRE(decoded.value().message.view().get_string(kText).value() == "unexpected BeginString on inbound frame");
   }
 
   {
@@ -1415,8 +1505,15 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
 
     nimble::message::MessageBuilder overlapping_gap_fill_builder("4");
     overlapping_gap_fill_builder.set_string(kMsgType, "4").set_boolean(kGapFillFlag, true).set_int(kNewSeqNo, 6);
-    auto overlapping_gap_fill = EncodeInboundFrame(
-      std::move(overlapping_gap_fill_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 3U, false);
+    auto overlapping_gap_fill = EncodeInboundFrame(std::move(overlapping_gap_fill_builder).build(),
+                                                   dictionary.value(),
+                                                   "FIX.4.4",
+                                                   "BUY",
+                                                   "SELL",
+                                                   3U,
+                                                   true,
+                                                   {},
+                                                   "20260402-11:59:59.000");
     REQUIRE(overlapping_gap_fill.ok());
 
     auto overlapping_gap_fill_event = protocol.OnInbound(overlapping_gap_fill.value(), 30U);
@@ -1472,8 +1569,15 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
 
     nimble::message::MessageBuilder duplicate_gap_fill_builder("4");
     duplicate_gap_fill_builder.set_string(kMsgType, "4").set_boolean(kGapFillFlag, true).set_int(kNewSeqNo, 5);
-    auto duplicate_gap_fill = EncodeInboundFrame(
-      std::move(duplicate_gap_fill_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 3U, false);
+    auto duplicate_gap_fill = EncodeInboundFrame(std::move(duplicate_gap_fill_builder).build(),
+                                                 dictionary.value(),
+                                                 "FIX.4.4",
+                                                 "BUY",
+                                                 "SELL",
+                                                 3U,
+                                                 true,
+                                                 {},
+                                                 "20260402-11:59:59.000");
     REQUIRE(duplicate_gap_fill.ok());
 
     auto duplicate_gap_fill_event = protocol.OnInbound(duplicate_gap_fill.value(), 20U);
@@ -1490,6 +1594,57 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(recovery.ok());
     REQUIRE(recovery.value().next_in_seq == 5U);
     REQUIRE(recovery.value().last_inbound_ns == 20U);
+  }
+
+  {
+    nimble::store::MemorySessionStore store;
+    nimble::session::AdminProtocol protocol(
+      nimble::session::AdminProtocolConfig{
+        .session =
+          nimble::session::SessionConfig{
+            .session_id = 5045U,
+            .key = nimble::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
+            .profile_id = dictionary.value().profile().header().profile_id,
+            .heartbeat_interval_seconds = 30U,
+            .is_initiator = false,
+          },
+        .begin_string = "FIX.4.4",
+        .sender_comp_id = "SELL",
+        .target_comp_id = "BUY",
+        .heartbeat_interval_seconds = 30U,
+      },
+      dictionary.value(),
+      &store);
+
+    REQUIRE(protocol.OnTransportConnected(1U).ok());
+    REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
+
+    nimble::message::MessageBuilder first_gap_fill_builder("4");
+    first_gap_fill_builder.set_string(kMsgType, "4").set_boolean(kGapFillFlag, true).set_int(kNewSeqNo, 5);
+    auto first_gap_fill = EncodeInboundFrame(
+      std::move(first_gap_fill_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 2U, false);
+    REQUIRE(first_gap_fill.ok());
+    REQUIRE(protocol.OnInbound(first_gap_fill.value(), 10U).ok());
+    REQUIRE(protocol.session().Snapshot().next_in_seq == 5U);
+
+    nimble::message::MessageBuilder stale_gap_fill_builder("4");
+    stale_gap_fill_builder.set_string(kMsgType, "4").set_boolean(kGapFillFlag, true).set_int(kNewSeqNo, 6);
+    auto stale_gap_fill = EncodeInboundFrame(
+      std::move(stale_gap_fill_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 3U, false);
+    REQUIRE(stale_gap_fill.ok());
+
+    auto stale_gap_fill_event = protocol.OnInbound(stale_gap_fill.value(), 20U);
+    REQUIRE(stale_gap_fill_event.ok());
+    REQUIRE(stale_gap_fill_event.value().outbound_frames.size() == 1U);
+    REQUIRE(stale_gap_fill_event.value().disconnect);
+
+    auto decoded =
+      nimble::codec::DecodeFixMessage(stale_gap_fill_event.value().outbound_frames.front().bytes, dictionary.value());
+    REQUIRE(decoded.ok());
+    REQUIRE(decoded.value().header.msg_type == "5");
+    REQUIRE(decoded.value().message.view().get_string(kText).value() ==
+            "MsgSeqNum too low, expecting 5 but received 3");
+    REQUIRE(protocol.session().Snapshot().next_in_seq == 5U);
   }
 
   {
@@ -1767,6 +1922,134 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
       nimble::session::AdminProtocolConfig{
         .session =
           nimble::session::SessionConfig{
+            .session_id = 5008U,
+            .key = nimble::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
+            .profile_id = dictionary.value().profile().header().profile_id,
+            .heartbeat_interval_seconds = 30U,
+            .is_initiator = false,
+          },
+        .begin_string = "FIX.4.4",
+        .sender_comp_id = "SELL",
+        .target_comp_id = "BUY",
+        .supported_app_msg_types = { "D" },
+        .heartbeat_interval_seconds = 30U,
+      },
+      dictionary.value(),
+      &store);
+
+    REQUIRE(protocol.OnTransportConnected(1U).ok());
+    REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
+
+    nimble::message::MessageBuilder app_builder("AE");
+    app_builder.set_string(kMsgType, "AE");
+    auto inbound =
+      EncodeInboundFrame(std::move(app_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 2U, false);
+    REQUIRE(inbound.ok());
+
+    auto event = protocol.OnInbound(inbound.value(), 10U);
+    REQUIRE(event.ok());
+    REQUIRE(event.value().outbound_frames.size() == 1U);
+    REQUIRE(event.value().application_messages.empty());
+    REQUIRE(!event.value().disconnect);
+
+    auto decoded = nimble::codec::DecodeFixMessage(event.value().outbound_frames.front().bytes, dictionary.value());
+    REQUIRE(decoded.ok());
+    REQUIRE(decoded.value().header.msg_type == "j");
+    REQUIRE(decoded.value().message.view().get_string(kRefMsgType).value() == "AE");
+    REQUIRE(decoded.value().message.view().get_int(380).value() == 3);
+    REQUIRE(protocol.session().Snapshot().next_in_seq == 3U);
+  }
+
+  {
+    nimble::store::MemorySessionStore store;
+    nimble::session::AdminProtocol protocol(
+      nimble::session::AdminProtocolConfig{
+        .session =
+          nimble::session::SessionConfig{
+            .session_id = 5009U,
+            .key = nimble::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
+            .profile_id = dictionary.value().profile().header().profile_id,
+            .heartbeat_interval_seconds = 30U,
+            .is_initiator = false,
+          },
+        .begin_string = "FIX.4.4",
+        .sender_comp_id = "SELL",
+        .target_comp_id = "BUY",
+        .heartbeat_interval_seconds = 30U,
+        .application_messages_available = false,
+      },
+      dictionary.value(),
+      &store);
+
+    REQUIRE(protocol.OnTransportConnected(1U).ok());
+    REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
+
+    nimble::message::MessageBuilder app_builder("D");
+    app_builder.set_string(kMsgType, "D");
+    auto inbound =
+      EncodeInboundFrame(std::move(app_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 2U, false);
+    REQUIRE(inbound.ok());
+
+    auto event = protocol.OnInbound(inbound.value(), 10U);
+    REQUIRE(event.ok());
+    REQUIRE(event.value().outbound_frames.size() == 1U);
+    REQUIRE(event.value().application_messages.empty());
+    REQUIRE(!event.value().disconnect);
+
+    auto decoded = nimble::codec::DecodeFixMessage(event.value().outbound_frames.front().bytes, dictionary.value());
+    REQUIRE(decoded.ok());
+    REQUIRE(decoded.value().header.msg_type == "j");
+    REQUIRE(decoded.value().message.view().get_string(kRefMsgType).value() == "D");
+    REQUIRE(decoded.value().message.view().get_int(380).value() == 4);
+    REQUIRE(protocol.session().Snapshot().next_in_seq == 3U);
+  }
+
+  {
+    nimble::store::MemorySessionStore store;
+    nimble::session::AdminProtocol protocol(
+      nimble::session::AdminProtocolConfig{
+        .session =
+          nimble::session::SessionConfig{
+            .session_id = 5124U,
+            .key = nimble::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
+            .profile_id = dictionary.value().profile().header().profile_id,
+            .heartbeat_interval_seconds = 30U,
+            .is_initiator = false,
+          },
+        .begin_string = "FIX.4.4",
+        .sender_comp_id = "SELL",
+        .target_comp_id = "BUY",
+        .heartbeat_interval_seconds = 30U,
+      },
+      dictionary.value(),
+      &store);
+
+    REQUIRE(protocol.OnTransportConnected(1U).ok());
+    REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
+
+    const auto inbound = ::nimble::tests::EncodeFixFrame(
+      "35=D|34=2|49=BUY|56=SELL|52=20260402-12:00:00.000|11=ORD-14M|55=AAPL|54=1|60=20260402-12:00:00.000|40=2|");
+    auto event = protocol.OnInbound(inbound, 10U);
+    REQUIRE(event.ok());
+    REQUIRE(event.value().outbound_frames.size() == 1U);
+    REQUIRE(event.value().application_messages.empty());
+    REQUIRE(!event.value().disconnect);
+
+    auto decoded = nimble::codec::DecodeFixMessage(event.value().outbound_frames.front().bytes, dictionary.value());
+    REQUIRE(decoded.ok());
+    REQUIRE(decoded.value().header.msg_type == "j");
+    REQUIRE(decoded.value().message.view().get_string(kRefMsgType).value() == "D");
+    REQUIRE(decoded.value().message.view().get_int(380).value() == 5);
+    REQUIRE(decoded.value().message.view().get_string(kText).value().find("Price") != std::string_view::npos);
+    REQUIRE(protocol.session().Snapshot().next_in_seq == 3U);
+  }
+
+  {
+    nimble::store::MemorySessionStore store;
+    nimble::session::AdminProtocol protocol(
+      nimble::session::AdminProtocolConfig{
+        .session =
+          nimble::session::SessionConfig{
             .session_id = 5011U,
             .key = nimble::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
             .profile_id = dictionary.value().profile().header().profile_id,
@@ -1833,6 +2116,198 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(decoded.value().message.view().get_int(kRefTagID).value() == 9999);
     REQUIRE(decoded.value().message.view().get_string(kRefMsgType).value() == "D");
     REQUIRE(decoded.value().message.view().get_int(kRejectReason).value() == 3);
+  }
+
+  {
+    nimble::store::MemorySessionStore store;
+    nimble::session::AdminProtocol protocol(
+      nimble::session::AdminProtocolConfig{
+        .session =
+          nimble::session::SessionConfig{
+            .session_id = 5120U,
+            .key = nimble::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
+            .profile_id = dictionary.value().profile().header().profile_id,
+            .heartbeat_interval_seconds = 30U,
+            .is_initiator = false,
+          },
+        .begin_string = "FIX.4.4",
+        .sender_comp_id = "SELL",
+        .target_comp_id = "BUY",
+        .heartbeat_interval_seconds = 30U,
+      },
+      dictionary.value(),
+      &store);
+
+    REQUIRE(protocol.OnTransportConnected(1U).ok());
+    REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
+
+    const auto inbound =
+      ::nimble::tests::EncodeFixFrame("35=2|34=2|49=BUY|56=SELL|52=20260402-12:00:00.000|7=1|16=|");
+    auto event = protocol.OnInbound(inbound, 10U);
+    REQUIRE(event.ok());
+    REQUIRE(event.value().outbound_frames.size() == 1U);
+    REQUIRE(event.value().application_messages.empty());
+
+    auto decoded = nimble::codec::DecodeFixMessage(event.value().outbound_frames.front().bytes, dictionary.value());
+    REQUIRE(decoded.ok());
+    REQUIRE(decoded.value().header.msg_type == "3");
+    REQUIRE(decoded.value().message.view().get_int(kRefTagID).value() == kEndSeqNo);
+    REQUIRE(decoded.value().message.view().get_string(kRefMsgType).value() == "2");
+    REQUIRE(decoded.value().message.view().get_int(kRejectReason).value() == 4);
+  }
+
+  {
+    nimble::store::MemorySessionStore store;
+    nimble::session::AdminProtocol protocol(
+      nimble::session::AdminProtocolConfig{
+        .session =
+          nimble::session::SessionConfig{
+            .session_id = 5121U,
+            .key = nimble::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
+            .profile_id = dictionary.value().profile().header().profile_id,
+            .heartbeat_interval_seconds = 30U,
+            .is_initiator = false,
+          },
+        .begin_string = "FIX.4.4",
+        .sender_comp_id = "SELL",
+        .target_comp_id = "BUY",
+        .heartbeat_interval_seconds = 30U,
+      },
+      dictionary.value(),
+      &store);
+
+    REQUIRE(protocol.OnTransportConnected(1U).ok());
+    REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
+
+    const auto inbound =
+      ::nimble::tests::EncodeFixFrame("35=2|34=2|49=BUY|56=SELL|52=20260402-12:00:00.000|7=ABC|16=0|");
+    auto event = protocol.OnInbound(inbound, 10U);
+    REQUIRE(event.ok());
+    REQUIRE(event.value().outbound_frames.size() == 1U);
+    REQUIRE(event.value().application_messages.empty());
+
+    auto decoded = nimble::codec::DecodeFixMessage(event.value().outbound_frames.front().bytes, dictionary.value());
+    REQUIRE(decoded.ok());
+    REQUIRE(decoded.value().header.msg_type == "3");
+    REQUIRE(decoded.value().message.view().get_int(kRefTagID).value() == kBeginSeqNo);
+    REQUIRE(decoded.value().message.view().get_string(kRefMsgType).value() == "2");
+    REQUIRE(decoded.value().message.view().get_int(kRejectReason).value() == 6);
+  }
+
+  {
+    nimble::store::MemorySessionStore store;
+    nimble::session::AdminProtocol protocol(
+      nimble::session::AdminProtocolConfig{
+        .session =
+          nimble::session::SessionConfig{
+            .session_id = 5122U,
+            .key = nimble::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
+            .profile_id = dictionary.value().profile().header().profile_id,
+            .heartbeat_interval_seconds = 30U,
+            .is_initiator = false,
+          },
+        .begin_string = "FIX.4.4",
+        .sender_comp_id = "SELL",
+        .target_comp_id = "BUY",
+        .heartbeat_interval_seconds = 30U,
+      },
+      dictionary.value(),
+      &store);
+
+    REQUIRE(protocol.OnTransportConnected(1U).ok());
+    REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
+
+    const auto inbound =
+      ::nimble::tests::EncodeFixFrame("35=2|34=2|49=BUY|56=SELL|52=20260402-12:00:00.000|16=0|7=1|");
+    auto event = protocol.OnInbound(inbound, 10U);
+    REQUIRE(event.ok());
+    REQUIRE(event.value().outbound_frames.size() == 1U);
+    REQUIRE(event.value().application_messages.empty());
+
+    auto decoded = nimble::codec::DecodeFixMessage(event.value().outbound_frames.front().bytes, dictionary.value());
+    REQUIRE(decoded.ok());
+    REQUIRE(decoded.value().header.msg_type == "3");
+    REQUIRE(decoded.value().message.view().get_int(kRefTagID).value() == kBeginSeqNo);
+    REQUIRE(decoded.value().message.view().get_string(kRefMsgType).value() == "2");
+    REQUIRE(decoded.value().message.view().get_int(kRejectReason).value() == 14);
+  }
+
+  {
+    nimble::store::MemorySessionStore store;
+    nimble::session::AdminProtocol protocol(
+      nimble::session::AdminProtocolConfig{
+        .session =
+          nimble::session::SessionConfig{
+            .session_id = 5123U,
+            .key = nimble::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
+            .profile_id = dictionary.value().profile().header().profile_id,
+            .heartbeat_interval_seconds = 30U,
+            .is_initiator = false,
+          },
+        .begin_string = "FIX.4.4",
+        .sender_comp_id = "SELL",
+        .target_comp_id = "BUY",
+        .heartbeat_interval_seconds = 30U,
+      },
+      dictionary.value(),
+      &store);
+
+    REQUIRE(protocol.OnTransportConnected(1U).ok());
+    REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
+
+    const auto inbound = ::nimble::tests::EncodeFixFrame(
+      "35=D|34=2|49=BUY|56=SELL|52=20260402-12:00:00.000|11=ORD1|453=1|447=D|448=PTY1|452=7|");
+    auto event = protocol.OnInbound(inbound, 10U);
+    REQUIRE(event.ok());
+    REQUIRE(event.value().outbound_frames.size() == 1U);
+    REQUIRE(event.value().application_messages.empty());
+
+    auto decoded = nimble::codec::DecodeFixMessage(event.value().outbound_frames.front().bytes, dictionary.value());
+    REQUIRE(decoded.ok());
+    REQUIRE(decoded.value().header.msg_type == "3");
+    REQUIRE(decoded.value().message.view().get_int(kRefTagID).value() == kPartyIDSource);
+    REQUIRE(decoded.value().message.view().get_string(kRefMsgType).value() == "D");
+    REQUIRE(decoded.value().message.view().get_int(kRejectReason).value() == 15);
+  }
+
+  {
+    nimble::store::MemorySessionStore store;
+    nimble::session::AdminProtocol protocol(
+      nimble::session::AdminProtocolConfig{
+        .session =
+          nimble::session::SessionConfig{
+            .session_id = 5125U,
+            .key = nimble::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
+            .profile_id = dictionary.value().profile().header().profile_id,
+            .heartbeat_interval_seconds = 30U,
+            .is_initiator = false,
+          },
+        .begin_string = "FIX.4.4",
+        .sender_comp_id = "SELL",
+        .target_comp_id = "BUY",
+        .heartbeat_interval_seconds = 30U,
+      },
+      dictionary.value(),
+      &store);
+
+    REQUIRE(protocol.OnTransportConnected(1U).ok());
+    REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
+
+    const auto inbound = ::nimble::tests::EncodeFixFrame(
+      "35=0|34=2|49=BUY|56=SELL|52=20260402-12:00:00.000|58=CLEAR|90=4|91=ABCD|");
+    auto event = protocol.OnInbound(inbound, 10U);
+    REQUIRE(event.ok());
+    REQUIRE(event.value().outbound_frames.size() == 1U);
+    REQUIRE(event.value().application_messages.empty());
+    REQUIRE(!event.value().disconnect);
+
+    auto decoded = nimble::codec::DecodeFixMessage(event.value().outbound_frames.front().bytes, dictionary.value());
+    REQUIRE(decoded.ok());
+    REQUIRE(decoded.value().header.msg_type == "3");
+    REQUIRE(decoded.value().message.view().get_int(kRefTagID).value() == kSecureData);
+    REQUIRE(decoded.value().message.view().get_string(kRefMsgType).value() == "0");
+    REQUIRE(decoded.value().message.view().get_int(kRejectReason).value() == 7);
+    REQUIRE(protocol.session().Snapshot().next_in_seq == 3U);
   }
 
   {
@@ -1974,7 +2449,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
 
     const auto inbound =
-      ::nimble::tests::EncodeFixFrame("35=D|34=2|49=BUY|56=SELL|52=20260402-12:00:00.000|55=AAPL|453=1|");
+      ::nimble::tests::EncodeFixFrame("35=D|34=2|49=BUY|56=SELL|52=20260402-12:00:00.000|11=ORD1|453=1|");
     auto event = protocol.OnInbound(inbound, 10U);
     REQUIRE(event.ok());
     REQUIRE(event.value().outbound_frames.size() == 1U);
@@ -2013,8 +2488,8 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
 
     const auto inbound =
-      ::nimble::tests::EncodeFixFrame("35=D|34=2|49=BUY|56=SELL|52=20260402-12:00:00.000|11=ORD1|54=1|60="
-                                      "20260402-12:00:00.000|40=2|55=AAPL|9999=BAD|");
+      ::nimble::tests::EncodeFixFrame("35=D|34=2|49=BUY|56=SELL|52=20260402-12:00:00.000|11=ORD1|55=AAPL|54=1|60="
+                                      "20260402-12:00:00.000|40=1|9999=BAD|");
     auto event = protocol.OnInbound(inbound, 10U);
     REQUIRE(event.ok());
     REQUIRE(event.value().outbound_frames.empty());
@@ -2046,8 +2521,8 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
 
     const auto inbound =
-      ::nimble::tests::EncodeFixFrame("35=D|34=2|49=BUY|56=SELL|52=20260402-12:00:00.000|11=ORD1|54=1|60="
-                                      "20260402-12:00:00.000|40=2|55=AAPL|453=1|448=PARTY1|447=D|452=1|");
+      ::nimble::tests::EncodeFixFrame("35=D|34=2|49=BUY|56=SELL|52=20260402-12:00:00.000|11=ORD1|55=AAPL|54=1|60="
+                                      "20260402-12:00:00.000|40=1|453=1|448=PARTY1|447=D|452=1|");
     auto event = protocol.OnInbound(inbound, 10U);
     REQUIRE(event.ok());
     REQUIRE(event.value().outbound_frames.empty());
@@ -2079,8 +2554,8 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
 
     const auto inbound =
-      ::nimble::tests::EncodeFixFrame("35=D|34=2|49=BUY|56=SELL|52=20260402-12:00:00.000|11=ORD1|54=1|60="
-                                      "20260402-12:00:00.000|40=2|55=AAPL|55=MSFT|");
+      ::nimble::tests::EncodeFixFrame("35=D|34=2|49=BUY|56=SELL|52=20260402-12:00:00.000|11=ORD1|55=AAPL|55=MSFT|54=1|60="
+                                      "20260402-12:00:00.000|40=1|");
     auto event = protocol.OnInbound(inbound, 10U);
     REQUIRE(event.ok());
     REQUIRE(event.value().outbound_frames.empty());
@@ -2113,11 +2588,18 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
 
     const auto inbound =
       ::nimble::tests::EncodeFixFrame("35=D|34=2|49=BUY|56=SELL|52=20260402-12:00:00.000|11=ORD1|54=1|60="
-                                      "20260402-12:00:00.000|40=2|453=1|448=PTY1|447=D|452=7|55=AAPL|");
+                                      "20260402-12:00:00.000|40=1|453=1|448=PTY1|447=D|452=7|55=AAPL|");
     auto event = protocol.OnInbound(inbound, 10U);
     REQUIRE(event.ok());
-    REQUIRE(event.value().outbound_frames.empty());
-    REQUIRE(event.value().application_messages.size() == 1U);
+    REQUIRE(event.value().outbound_frames.size() == 1U);
+    REQUIRE(event.value().application_messages.empty());
+
+    auto decoded = nimble::codec::DecodeFixMessage(event.value().outbound_frames.front().bytes, dictionary.value());
+    REQUIRE(decoded.ok());
+    REQUIRE(decoded.value().header.msg_type == "3");
+    REQUIRE(decoded.value().message.view().get_int(kRefTagID).value() == kSymbol);
+    REQUIRE(decoded.value().message.view().get_string(kRefMsgType).value() == "D");
+    REQUIRE(decoded.value().message.view().get_int(kRejectReason).value() == 14);
   }
 
   {
@@ -2291,6 +2773,127 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE((*parties)[0].get_char(kPartyIDSource).value() == 'D');
     REQUIRE((*parties)[0].get_string(kPartyID).value() == "PTY1");
   }
+}
+
+TEST_CASE("malformed raw inbound frames are ignored without consuming sequence", "[admin-protocol]")
+{
+  auto dictionary = nimble::tests::LoadFix44DictionaryView();
+  if (!dictionary.ok()) {
+    SKIP("FIX44 artifact not available: " << dictionary.status().message());
+  }
+
+  nimble::store::MemorySessionStore store;
+  nimble::session::AdminProtocol protocol(
+    nimble::session::AdminProtocolConfig{
+      .session =
+        nimble::session::SessionConfig{
+          .session_id = 6000U,
+          .key = nimble::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
+          .profile_id = dictionary.value().profile().header().profile_id,
+          .heartbeat_interval_seconds = 30U,
+          .is_initiator = false,
+        },
+      .begin_string = "FIX.4.4",
+      .sender_comp_id = "SELL",
+      .target_comp_id = "BUY",
+      .heartbeat_interval_seconds = 30U,
+    },
+    dictionary.value(),
+    &store);
+
+  REQUIRE(protocol.OnTransportConnected(1U).ok());
+  REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
+  REQUIRE(protocol.session().Snapshot().next_in_seq == 2U);
+
+  auto malformed = nimble::tests::EncodeFixFrame("35=0|34=2|49=BUY|56=SELL|52=20260402-12:00:00.000|");
+  REQUIRE(malformed.size() > 2U);
+  const auto last_digit = std::to_integer<unsigned char>(malformed[malformed.size() - 2U]);
+  malformed[malformed.size() - 2U] = std::byte{ static_cast<unsigned char>(last_digit == '0' ? '1' : '0') };
+
+  auto malformed_event = protocol.OnInbound(std::span<const std::byte>(malformed.data(), malformed.size()), 20U);
+  REQUIRE(malformed_event.ok());
+  REQUIRE(malformed_event.value().outbound_frames.empty());
+  REQUIRE(malformed_event.value().application_messages.empty());
+  REQUIRE(!malformed_event.value().disconnect);
+  REQUIRE(protocol.session().Snapshot().next_in_seq == 2U);
+  REQUIRE(protocol.session().Snapshot().last_inbound_ns == 20U);
+
+  const auto valid = nimble::tests::EncodeFixFrame("35=0|34=2|49=BUY|56=SELL|52=20260402-12:00:01.000|");
+  auto valid_event = protocol.OnInbound(std::span<const std::byte>(valid.data(), valid.size()), 30U);
+  REQUIRE(valid_event.ok());
+  REQUIRE(valid_event.value().outbound_frames.empty());
+  REQUIRE(valid_event.value().application_messages.empty());
+  REQUIRE(!valid_event.value().disconnect);
+  REQUIRE(protocol.session().Snapshot().next_in_seq == 3U);
+  REQUIRE(protocol.session().Snapshot().last_inbound_ns == 30U);
+}
+
+TEST_CASE("SendingTime outside threshold rejects then logs out", "[admin-protocol]")
+{
+  auto dictionary = nimble::tests::LoadFix44DictionaryView();
+  if (!dictionary.ok()) {
+    SKIP("FIX44 artifact not available: " << dictionary.status().message());
+  }
+
+  const auto base_time = std::chrono::sys_days{ std::chrono::year{ 2026 } / 4 / 25 } + std::chrono::hours{ 12 };
+  const auto logon_timestamp_ns = static_cast<std::uint64_t>(
+    std::chrono::duration_cast<std::chrono::nanoseconds>(base_time.time_since_epoch()).count());
+  const auto stale_timestamp_ns =
+    static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                 (base_time + std::chrono::minutes{ 2 } + std::chrono::seconds{ 1 }).time_since_epoch())
+                                 .count());
+
+  nimble::store::MemorySessionStore store;
+  nimble::session::AdminProtocol protocol(
+    nimble::session::AdminProtocolConfig{
+      .session =
+        nimble::session::SessionConfig{
+          .session_id = 6002U,
+          .key = nimble::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
+          .profile_id = dictionary.value().profile().header().profile_id,
+          .heartbeat_interval_seconds = 30U,
+          .is_initiator = false,
+        },
+      .begin_string = "FIX.4.4",
+      .sender_comp_id = "SELL",
+      .target_comp_id = "BUY",
+      .heartbeat_interval_seconds = 30U,
+      .sending_time_threshold_seconds = 60U,
+    },
+    dictionary.value(),
+    &store);
+
+  REQUIRE(protocol.OnTransportConnected(logon_timestamp_ns - 1U).ok());
+
+  const auto inbound_logon =
+    nimble::tests::EncodeFixFrame("35=A|34=1|49=BUY|56=SELL|52=20260425-12:00:00.000|98=0|108=30|");
+  auto logon_event =
+    protocol.OnInbound(std::span<const std::byte>(inbound_logon.data(), inbound_logon.size()), logon_timestamp_ns);
+  REQUIRE(logon_event.ok());
+  REQUIRE(logon_event.value().outbound_frames.size() == 1U);
+  REQUIRE(!logon_event.value().disconnect);
+
+  const auto stale_heartbeat = nimble::tests::EncodeFixFrame("35=0|34=2|49=BUY|56=SELL|52=20260425-12:00:00.000|");
+  auto stale_event =
+    protocol.OnInbound(std::span<const std::byte>(stale_heartbeat.data(), stale_heartbeat.size()), stale_timestamp_ns);
+  REQUIRE(stale_event.ok());
+  REQUIRE(stale_event.value().outbound_frames.size() == 2U);
+  REQUIRE(stale_event.value().application_messages.empty());
+  REQUIRE(stale_event.value().disconnect);
+  REQUIRE(protocol.session().Snapshot().next_in_seq == 3U);
+  REQUIRE(protocol.session().Snapshot().next_out_seq == 4U);
+
+  auto reject = nimble::codec::DecodeFixMessage(stale_event.value().outbound_frames[0].bytes, dictionary.value());
+  REQUIRE(reject.ok());
+  REQUIRE(reject.value().header.msg_type == "3");
+  REQUIRE(reject.value().message.view().get_int(kRefTagID).value() == kSendingTime);
+  REQUIRE(reject.value().message.view().get_int(kRejectReason).value() == 10);
+  REQUIRE(reject.value().message.view().get_string(kRefMsgType).value() == "0");
+
+  auto logout = nimble::codec::DecodeFixMessage(stale_event.value().outbound_frames[1].bytes, dictionary.value());
+  REQUIRE(logout.ok());
+  REQUIRE(logout.value().header.msg_type == "5");
+  REQUIRE(logout.value().message.view().get_string(kText).value().find("configured tolerance") != std::string::npos);
 }
 
 TEST_CASE("PossResend flag detected on app message", "[admin-protocol]")

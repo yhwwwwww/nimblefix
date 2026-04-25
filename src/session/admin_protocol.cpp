@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstddef>
 #include <cstring>
 #include <string_view>
@@ -26,18 +27,40 @@ constexpr std::uint64_t kNanosPerSecond = 1'000'000'000ULL;
 constexpr std::uint32_t kSessionRejectRequiredTagMissing = 1U;
 constexpr std::uint32_t kSessionRejectTagNotDefinedForMessage = 2U;
 constexpr std::uint32_t kSessionRejectUndefinedTag = 3U;
+constexpr std::uint32_t kSessionRejectTagSpecifiedWithoutAValue = 4U;
 constexpr std::uint32_t kSessionRejectValueIncorrect = 5U;
+constexpr std::uint32_t kSessionRejectIncorrectDataFormatForValue = 6U;
+constexpr std::uint32_t kSessionRejectDecryptionProblem = 7U;
 constexpr std::uint32_t kSessionRejectCompIdProblem = 9U;
+constexpr std::uint32_t kSessionRejectSendingTimeAccuracyProblem = 10U;
 constexpr std::uint32_t kSessionRejectInvalidMsgType = 11U;
 constexpr std::uint32_t kSessionRejectTagAppearsMoreThanOnce = 13U;
+constexpr std::uint32_t kSessionRejectTagSpecifiedOutOfRequiredOrder = 14U;
+constexpr std::uint32_t kSessionRejectRepeatingGroupFieldsOutOfRequiredOrder = 15U;
 constexpr std::uint32_t kSessionRejectIncorrectNumInGroupCount = 16U;
+constexpr std::uint32_t kBusinessRejectReasonTag = 380U;
+constexpr std::uint32_t kBusinessRejectUnsupportedMessageType = 3U;
+constexpr std::uint32_t kBusinessRejectApplicationNotAvailable = 4U;
+constexpr std::uint32_t kBusinessRejectConditionallyRequiredFieldMissing = 5U;
 constexpr std::size_t kInitialEncodeBufferBytes = 1024U;
+
+struct ApplicationBusinessReject
+{
+  std::uint32_t reason{ 0U };
+  std::string text;
+};
 
 auto
 IsAdminMessage(std::string_view msg_type) -> bool
 {
   return msg_type == "0" || msg_type == "1" || msg_type == "2" || msg_type == "3" || msg_type == "4" ||
          msg_type == "5" || msg_type == "A";
+}
+
+auto
+ShouldIgnoreInboundDecodeFailure(const base::Status& status) -> bool
+{
+  return status.code() == base::ErrorCode::kFormatError;
 }
 
 auto
@@ -65,6 +88,169 @@ GetStringView(const message::MessageView& view, std::uint32_t tag) -> std::strin
 {
   const auto value = view.get_string(tag);
   return value.value_or(std::string_view{});
+}
+
+auto
+ParseDecimal(std::string_view text, std::size_t offset, std::size_t width, unsigned* value) -> bool
+{
+  if (offset + width > text.size()) {
+    return false;
+  }
+
+  unsigned parsed = 0U;
+  for (std::size_t index = 0; index < width; ++index) {
+    const auto ch = text[offset + index];
+    if (ch < '0' || ch > '9') {
+      return false;
+    }
+    parsed = parsed * 10U + static_cast<unsigned>(ch - '0');
+  }
+
+  *value = parsed;
+  return true;
+}
+
+auto
+ParseFixUtcTimestampNs(std::string_view text) -> std::optional<std::uint64_t>
+{
+  if (text.size() < 17U || text[8] != '-' || text[11] != ':' || text[14] != ':') {
+    return std::nullopt;
+  }
+
+  unsigned year = 0U;
+  unsigned month = 0U;
+  unsigned day = 0U;
+  unsigned hour = 0U;
+  unsigned minute = 0U;
+  unsigned second = 0U;
+  if (!ParseDecimal(text, 0U, 4U, &year) || !ParseDecimal(text, 4U, 2U, &month) || !ParseDecimal(text, 6U, 2U, &day) ||
+      !ParseDecimal(text, 9U, 2U, &hour) || !ParseDecimal(text, 12U, 2U, &minute) ||
+      !ParseDecimal(text, 15U, 2U, &second)) {
+    return std::nullopt;
+  }
+
+  if (hour > 23U || minute > 59U || second > 60U) {
+    return std::nullopt;
+  }
+
+  std::uint32_t fractional_ns = 0U;
+  if (text.size() > 17U) {
+    if (text[17] != '.') {
+      return std::nullopt;
+    }
+    const auto fractional = text.substr(18U);
+    if (fractional.empty() || fractional.size() > 9U) {
+      return std::nullopt;
+    }
+
+    unsigned parsed_fraction = 0U;
+    for (const auto ch : fractional) {
+      if (ch < '0' || ch > '9') {
+        return std::nullopt;
+      }
+      parsed_fraction = parsed_fraction * 10U + static_cast<unsigned>(ch - '0');
+    }
+    for (std::size_t index = fractional.size(); index < 9U; ++index) {
+      parsed_fraction *= 10U;
+    }
+    fractional_ns = parsed_fraction;
+  }
+
+  using namespace std::chrono;
+  const auto ymd =
+    year_month_day{ std::chrono::year(static_cast<int>(year)), std::chrono::month(month), std::chrono::day(day) };
+  if (!ymd.ok()) {
+    return std::nullopt;
+  }
+
+  const auto time_point =
+    sys_days{ ymd } + hours{ hour } + minutes{ minute } + seconds{ second } + nanoseconds{ fractional_ns };
+  const auto epoch_ns = duration_cast<nanoseconds>(time_point.time_since_epoch()).count();
+  if (epoch_ns < 0) {
+    return std::nullopt;
+  }
+  return static_cast<std::uint64_t>(epoch_ns);
+}
+
+auto
+SendingTimeOutsideThreshold(std::string_view sending_time, std::uint64_t timestamp_ns, std::uint32_t threshold_seconds)
+  -> bool
+{
+  if (threshold_seconds == 0U || sending_time.empty()) {
+    return false;
+  }
+
+  const auto parsed_sending_time_ns = ParseFixUtcTimestampNs(sending_time);
+  if (!parsed_sending_time_ns.has_value()) {
+    return false;
+  }
+
+  const auto threshold_ns = static_cast<std::uint64_t>(threshold_seconds) * kNanosPerSecond;
+  const auto earlier = std::min(parsed_sending_time_ns.value(), timestamp_ns);
+  const auto later = std::max(parsed_sending_time_ns.value(), timestamp_ns);
+  return later - earlier > threshold_ns;
+}
+
+auto
+ResolveApplicationBusinessRejectReason(const AdminProtocolConfig& config,
+                                       const profile::NormalizedDictionaryView& dictionary,
+                                       const codec::DecodedMessageView& decoded) -> std::optional<std::uint32_t>
+{
+  if (IsAdminMessage(decoded.header.msg_type)) {
+    return std::nullopt;
+  }
+
+  if (dictionary.find_message(decoded.header.msg_type) == nullptr) {
+    return std::nullopt;
+  }
+
+  if (!config.application_messages_available) {
+    return kBusinessRejectApplicationNotAvailable;
+  }
+
+  if (config.supported_app_msg_types.empty()) {
+    return std::nullopt;
+  }
+
+  const auto supported =
+    std::find(config.supported_app_msg_types.begin(), config.supported_app_msg_types.end(), decoded.header.msg_type);
+  if (supported != config.supported_app_msg_types.end()) {
+    return std::nullopt;
+  }
+  return kBusinessRejectUnsupportedMessageType;
+}
+
+auto
+ResolveConditionalApplicationBusinessReject(const codec::DecodedMessageView& decoded)
+  -> std::optional<ApplicationBusinessReject>
+{
+  const auto view = decoded.message.view();
+  if (decoded.header.msg_type == "D") {
+    const auto ord_type = view.get_char(kOrdType);
+    if (ord_type.has_value() && ord_type.value() == '2' && !view.has_field(kPrice)) {
+      return ApplicationBusinessReject{
+        .reason = kBusinessRejectConditionallyRequiredFieldMissing,
+        .text = "NewOrderSingle limit orders require Price",
+      };
+    }
+  }
+  return std::nullopt;
+}
+
+auto
+RejectUnsupportedSessionEncryption(const message::MessageView& view,
+                                   std::uint32_t* ref_tag_id,
+                                   std::uint32_t* reject_reason,
+                                   std::string* text) -> bool
+{
+  if (!view.has_field(kSecureDataLen) && !view.has_field(kSecureData)) {
+    return true;
+  }
+
+  *ref_tag_id = view.has_field(kSecureData) ? kSecureData : kSecureDataLen;
+  *reject_reason = kSessionRejectDecryptionProblem;
+  *text = "session-layer SecureData is not supported by this runtime";
+  return false;
 }
 
 auto
@@ -99,8 +285,13 @@ ShouldRejectValidationIssue(const ValidationPolicy& policy, const codec::Validat
     case codec::ValidationIssueKind::kUnknownField:
     case codec::ValidationIssueKind::kFieldNotAllowed:
       return policy.reject_unknown_fields;
+    case codec::ValidationIssueKind::kTagSpecifiedWithoutAValue:
+    case codec::ValidationIssueKind::kIncorrectDataFormatForValue:
+    case codec::ValidationIssueKind::kTagSpecifiedOutOfRequiredOrder:
+      return true;
     case codec::ValidationIssueKind::kDuplicateField:
       return policy.reject_duplicate_fields;
+    case codec::ValidationIssueKind::kRepeatingGroupFieldsOutOfRequiredOrder:
     case codec::ValidationIssueKind::kIncorrectNumInGroupCount:
       return policy.reject_invalid_group_structure;
     default:
@@ -116,8 +307,16 @@ ValidationIssueRejectReason(const codec::ValidationIssue& issue) -> std::uint32_
       return kSessionRejectTagNotDefinedForMessage;
     case codec::ValidationIssueKind::kUnknownField:
       return kSessionRejectUndefinedTag;
+    case codec::ValidationIssueKind::kTagSpecifiedWithoutAValue:
+      return kSessionRejectTagSpecifiedWithoutAValue;
+    case codec::ValidationIssueKind::kIncorrectDataFormatForValue:
+      return kSessionRejectIncorrectDataFormatForValue;
     case codec::ValidationIssueKind::kDuplicateField:
       return kSessionRejectTagAppearsMoreThanOnce;
+    case codec::ValidationIssueKind::kTagSpecifiedOutOfRequiredOrder:
+      return kSessionRejectTagSpecifiedOutOfRequiredOrder;
+    case codec::ValidationIssueKind::kRepeatingGroupFieldsOutOfRequiredOrder:
+      return kSessionRejectRepeatingGroupFieldsOutOfRequiredOrder;
     case codec::ValidationIssueKind::kIncorrectNumInGroupCount:
       return kSessionRejectIncorrectNumInGroupCount;
     default:
@@ -557,6 +756,13 @@ AdminProtocol::ValidateCompIds(const codec::DecodedMessageView& decoded,
                                bool* disconnect) const -> bool
 {
   const bool is_logon = decoded.header.msg_type == "A";
+  if (!config_.begin_string.empty() && decoded.header.begin_string != config_.begin_string) {
+    *ref_tag_id = kBeginString;
+    *reject_reason = kSessionRejectValueIncorrect;
+    *text = "unexpected BeginString on inbound frame";
+    *disconnect = true;
+    return false;
+  }
   if (config_.validation_policy.enforce_comp_ids && !config_.target_comp_id.empty() &&
       decoded.header.sender_comp_id != config_.target_comp_id) {
     *ref_tag_id = kSenderCompID;
@@ -620,6 +826,11 @@ AdminProtocol::ValidateAdministrativeMessage(const codec::DecodedMessageView& de
 
   *disconnect = false;
 
+  const auto view = decoded.message.view();
+  if (!RejectUnsupportedSessionEncryption(view, ref_tag_id, reject_reason, text)) {
+    return false;
+  }
+
   if (decoded.validation_issue.present() &&
       ShouldRejectValidationIssue(config_.validation_policy, decoded.validation_issue)) {
     *ref_tag_id = decoded.validation_issue.tag;
@@ -629,7 +840,6 @@ AdminProtocol::ValidateAdministrativeMessage(const codec::DecodedMessageView& de
     return false;
   }
 
-  const auto view = decoded.message.view();
   if (decoded.header.msg_type == "A") {
     if (!view.has_field(kEncryptMethod)) {
       *ref_tag_id = kEncryptMethod;
@@ -720,6 +930,11 @@ AdminProtocol::ValidateApplicationMessage(const codec::DecodedMessageView& decod
 {
   if (IsAdminMessage(decoded.header.msg_type)) {
     return true;
+  }
+
+  const auto view = decoded.message.view();
+  if (!RejectUnsupportedSessionEncryption(view, ref_tag_id, reject_reason, text)) {
+    return false;
   }
 
   const auto* message_def = dictionary_.find_message(decoded.header.msg_type);
@@ -1266,7 +1481,23 @@ AdminProtocol::OnInbound(std::span<const std::byte> frame, std::uint64_t timesta
 {
   auto decode_status = codec::DecodeFixMessageView(frame, dictionary_, decode_table_, &inbound_decode_scratch_);
   if (!decode_status.ok()) {
-    return decode_status;
+    if (!ShouldIgnoreInboundDecodeFailure(decode_status)) {
+      return decode_status;
+    }
+    auto status = EnsureInitialized();
+    if (!status.ok()) {
+      return status;
+    }
+    // Official session warning cases treat malformed inbound frames as ignored warnings.
+    status = session_.RecordInboundActivity(timestamp_ns);
+    if (!status.ok()) {
+      return status;
+    }
+    status = PersistRecoveryState();
+    if (!status.ok()) {
+      return status;
+    }
+    return ProtocolEvent{};
   }
   auto event = OnInbound(inbound_decode_scratch_, timestamp_ns);
   if (!event.ok()) {
@@ -1294,7 +1525,23 @@ AdminProtocol::OnInbound(std::vector<std::byte>&& frame, std::uint64_t timestamp
   auto decode_status = codec::DecodeFixMessageView(
     std::span<const std::byte>(frame.data(), frame.size()), dictionary_, decode_table_, &inbound_decode_scratch_);
   if (!decode_status.ok()) {
-    return decode_status;
+    if (!ShouldIgnoreInboundDecodeFailure(decode_status)) {
+      return decode_status;
+    }
+    auto status = EnsureInitialized();
+    if (!status.ok()) {
+      return status;
+    }
+    // Official session warning cases treat malformed inbound frames as ignored warnings.
+    status = session_.RecordInboundActivity(timestamp_ns);
+    if (!status.ok()) {
+      return status;
+    }
+    status = PersistRecoveryState();
+    if (!status.ok()) {
+      return status;
+    }
+    return ProtocolEvent{};
   }
   auto event = OnInbound(inbound_decode_scratch_, timestamp_ns);
   if (!event.ok()) {
@@ -1334,23 +1581,91 @@ AdminProtocol::OnInbound(const codec::DecodedMessageView& decoded, std::uint64_t
   const bool inbound_logon_reset = is_logon && HasBoolean(view, kResetSeqNumFlag);
   const bool acceptor_config_logon_reset =
     is_logon && !config_.session.is_initiator && config_.reset_seq_num_on_logon && !inbound_logon_reset;
+  auto snapshot_before = session_.Snapshot();
 
   std::uint32_t ref_tag_id = 0U;
   std::uint32_t reject_reason = 0U;
   std::string reject_text;
   bool disconnect = false;
+  const auto consume_expected_inbound_before_reject = [&]() -> base::Status {
+    const auto state = session_.state();
+    if (state != SessionState::kActive && state != SessionState::kAwaitingLogout &&
+        state != SessionState::kResendProcessing) {
+      return base::Status::Ok();
+    }
+    if (decoded.header.msg_seq_num != snapshot_before.next_in_seq) {
+      return base::Status::Ok();
+    }
+
+    auto observe_status = session_.ObserveInboundSeq(decoded.header.msg_seq_num);
+    if (!observe_status.ok()) {
+      return observe_status;
+    }
+    if (session_.ConsumeResendCompleted()) {
+      outstanding_test_request_id_.clear();
+    }
+
+    observe_status = session_.RecordInboundActivity(timestamp_ns);
+    if (!observe_status.ok()) {
+      return observe_status;
+    }
+    return PersistRecoveryState();
+  };
+  const auto reject_then_logout =
+    [&](std::uint32_t ref_tag_id, std::uint32_t reject_reason, std::string text) -> base::Result<ProtocolEvent> {
+    auto reject_event = RejectInbound(decoded, ref_tag_id, reject_reason, text, timestamp_ns, false);
+    if (!reject_event.ok()) {
+      return reject_event.status();
+    }
+    auto logout = BeginLogout(text, timestamp_ns);
+    if (!logout.ok()) {
+      return logout.status();
+    }
+    reject_event.value().outbound_frames.push_back(std::move(logout).value());
+    reject_event.value().disconnect = true;
+    return reject_event;
+  };
   if (!ValidateCompIds(decoded, &ref_tag_id, &reject_reason, &reject_text, &disconnect)) {
+    status = consume_expected_inbound_before_reject();
+    if (!status.ok()) {
+      return status;
+    }
     return RejectInbound(decoded, ref_tag_id, reject_reason, std::move(reject_text), timestamp_ns, disconnect);
   }
 
   status = ValidatePossDup(decoded);
   if (!status.ok()) {
+    auto consume_status = consume_expected_inbound_before_reject();
+    if (!consume_status.ok()) {
+      return consume_status;
+    }
     return RejectInbound(decoded,
                          kOrigSendingTime,
                          kSessionRejectRequiredTagMissing,
                          status.message(),
                          timestamp_ns,
                          decoded.header.msg_type == "A");
+  }
+  if (decoded.header.poss_dup && !decoded.header.orig_sending_time.empty() && !decoded.header.sending_time.empty() &&
+      decoded.header.orig_sending_time > decoded.header.sending_time) {
+    auto consume_status = consume_expected_inbound_before_reject();
+    if (!consume_status.ok()) {
+      return consume_status;
+    }
+    return RejectInbound(decoded,
+                         kSendingTime,
+                         kSessionRejectSendingTimeAccuracyProblem,
+                         "OrigSendingTime must not be later than SendingTime",
+                         timestamp_ns,
+                         decoded.header.msg_type == "A");
+  }
+  if (SendingTimeOutsideThreshold(decoded.header.sending_time, timestamp_ns, config_.sending_time_threshold_seconds)) {
+    auto consume_status = consume_expected_inbound_before_reject();
+    if (!consume_status.ok()) {
+      return consume_status;
+    }
+    return reject_then_logout(
+      kSendingTime, kSessionRejectSendingTimeAccuracyProblem, "SendingTime is outside the configured tolerance");
   }
 
   if (is_logon && config_.refresh_on_logon) {
@@ -1360,7 +1675,6 @@ AdminProtocol::OnInbound(const codec::DecodedMessageView& decoded, std::uint64_t
     }
   }
 
-  auto snapshot_before = session_.Snapshot();
   if (inbound_logon_reset || acceptor_config_logon_reset) {
     const auto next_out_seq = config_.session.is_initiator ? snapshot_before.next_out_seq : 1U;
     status = ResetSessionState(1U, next_out_seq, !config_.session.is_initiator);
@@ -1423,6 +1737,18 @@ AdminProtocol::OnInbound(const codec::DecodedMessageView& decoded, std::uint64_t
       std::uint32_t new_seq_num = 0U;
       if (!ParseSequenceResetNewSeq(view, &new_seq_num, &reject_reason, &reject_text)) {
         return RejectInbound(decoded, kNewSeqNo, reject_reason, std::move(reject_text), timestamp_ns, false);
+      }
+
+      if (inbound_gap_fill && !decoded.header.poss_dup) {
+        auto logout = BeginLogout("MsgSeqNum too low, expecting " + std::to_string(snapshot_before.next_in_seq) +
+                                    " but received " + std::to_string(decoded.header.msg_seq_num),
+                                  timestamp_ns);
+        if (!logout.ok()) {
+          return logout.status();
+        }
+        event.outbound_frames.push_back(std::move(logout).value());
+        event.disconnect = true;
+        return event;
       }
 
       if (new_seq_num < snapshot_before.next_in_seq) {
@@ -1720,6 +2046,34 @@ AdminProtocol::OnInbound(const codec::DecodedMessageView& decoded, std::uint64_t
   ref_tag_id = 0U;
   reject_reason = 0U;
   reject_text.clear();
+  const auto build_business_reject = [&](std::uint32_t business_reject_reason,
+                                         std::string text) -> base::Result<ProtocolEvent> {
+    ProtocolEvent business_reject_event;
+    auto builder = BuildAdminMessage("j");
+    builder.set_int(kRefSeqNum, static_cast<std::int64_t>(decoded.header.msg_seq_num));
+    builder.set_string(kRefMsgType, std::string(decoded.message.view().msg_type()));
+    builder.set_int(kBusinessRejectReasonTag, static_cast<std::int64_t>(business_reject_reason));
+    if (!text.empty()) {
+      builder.set_string(kText, std::move(text));
+    }
+    auto frame = EncodeFrame(std::move(builder).build(), true, timestamp_ns, true, false, true, 0U);
+    if (!frame.ok()) {
+      return frame.status();
+    }
+    business_reject_event.outbound_frames.push_back(std::move(frame).value());
+    return business_reject_event;
+  };
+  if (const auto business_reject_reason = ResolveApplicationBusinessRejectReason(config_, dictionary_, decoded);
+      business_reject_reason.has_value()) {
+    const auto text = business_reject_reason.value() == kBusinessRejectApplicationNotAvailable
+                        ? std::string("application handling is not available for this session")
+                        : std::string("application message type is not supported for this session");
+    return build_business_reject(business_reject_reason.value(), text);
+  }
+  if (const auto conditional_business_reject = ResolveConditionalApplicationBusinessReject(decoded);
+      conditional_business_reject.has_value()) {
+    return build_business_reject(conditional_business_reject->reason, conditional_business_reject->text);
+  }
   if (!ValidateApplicationMessage(decoded, &ref_tag_id, &reject_reason, &reject_text)) {
     return RejectInbound(decoded, ref_tag_id, reject_reason, std::move(reject_text), timestamp_ns, false);
   }

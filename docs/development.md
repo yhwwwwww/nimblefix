@@ -28,6 +28,7 @@ NimbleFIX supports both offline xmake and offline CMake flows. xmake is the prim
 | `nimblefix-acceptor` | binary | CLI FIX server (echo) |
 | `nimblefix-soak` | binary | Stress tester with fault injection |
 | `nimblefix-interop-runner` | binary | Interop scenario runner |
+| `nimblefix-fix-session-testcases` | binary | Official FIX session testcase runner and coverage report generator |
 | `nimblefix-fuzz-codec` | binary | Codec/admin fuzzer |
 | `nimblefix-fuzz-config` | binary | Config parser fuzzer |
 | `nimblefix-fuzz-dictgen` | binary | Dictionary parser fuzzer |
@@ -38,6 +39,7 @@ NimbleFIX supports both offline xmake and offline CMake flows. xmake is the prim
 xmake f -c -m release --ccache=n -y
 xmake build nimblefix-tests
 xmake build nimblefix-bench
+xmake build nimblefix-fix-session-testcases
 xmake clean
 
 bash ./scripts/offline_build.sh --bench smoke   # Auto: xmake >= 3.0.0 -> cmake + Ninja -> cmake + make
@@ -51,6 +53,8 @@ ctest --preset dev-release
 ```
 
 The helper scripts auto-select `xmake >= 3.0.0`, then `cmake + Ninja`, then `cmake + make`. Default xmake builds write executables to `./build/linux/x86_64/release/`. Ninja-based CMake presets remain available at `./build/cmake/<preset>/bin/`, and make-based fallback presets live at `./build/cmake/<preset>-make/bin/`. The examples below assume `BIN_DIR=./build/linux/x86_64/release` for the default path and invoke binaries directly for reproducibility and predictable argument handling.
+
+`offline_build.sh` now gates the repository's official FIX session baseline after the Catch2 or CTest pass. The default local and CI regression path therefore covers both the core unit/integration suite and `tests/data/fix-session/official-session-cases.ffcases`.
 
 Both `offline_build.sh` and `bench.sh` default `NIMBLEFIX_XMAKE_CCACHE=n` on the xmake path. That mirrors the CI-safe setting and avoids Linux `.build_cache/... file busy` failures seen on the larger benchmark and QuickFIX targets.
 
@@ -175,6 +179,7 @@ $BIN_DIR/nimblefix-tests --list-tags
 | `[live-backpressure]` | Backpressure handling |
 | `[live-session-factory]` | Dynamic session factory |
 | `[interop-harness]` | Interop scenarios |
+| `[fix-session-testcases]` | Official FIX session manifest and importer coverage |
 | `[live-initiator]` | Live initiator mode |
 | `[live-initiator-queue]` | Queue-decoupled initiator |
 | `[outbound-fragment]` | Outbound fragment encoding |
@@ -549,7 +554,7 @@ $BIN_DIR/nimblefix-initiator \
 
 ## Configuration File Format (`.ffcfg`) — Internal
 
-The `.ffcfg` format is used by NimbleFIX's built-in tools (`nimblefix-acceptor`, `nimblefix-interop-runner`) and tests. It is **not** part of the library's public API. Applications should populate `EngineConfig` directly from their own configuration source (TOML, YAML, JSON, database, etc.) and call `Engine::Boot(config)`.
+The `.ffcfg` format is used by NimbleFIX's built-in tools (`nimblefix-acceptor`, `nimblefix-interop-runner`, `nimblefix-fix-session-testcases`) and tests. It is **not** part of the library's public API. Applications should populate `EngineConfig` directly from their own configuration source (TOML, YAML, JSON, database, etc.) and call `Engine::Boot(config)`.
 
 ```
 engine.worker_count=2
@@ -617,6 +622,23 @@ $BIN_DIR/nimblefix-interop-runner --scenario tests/data/interop/loopback.ffscena
 ```
 
 Runs scripted FIX message exchange scenarios and validates behavior.
+
+For scenario authoring or mismatch debugging, `nimblefix-interop-runner` also supports `--dump-report`:
+
+```bash
+$BIN_DIR/nimblefix-interop-runner --scenario tests/data/fix-session/cases/2s-first-message-not-logon.ffscenario --dump-report
+```
+
+### Official FIX Session Cases
+
+```bash
+$BIN_DIR/nimblefix-fix-session-testcases --manifest tests/data/fix-session/official-session-cases.ffcases
+$BIN_DIR/nimblefix-fix-session-testcases --manifest tests/data/fix-session/official-session-cases.ffcases --filter 1S
+$BIN_DIR/nimblefix-fix-session-testcases --manifest tests/data/fix-session/official-session-cases.ffcases --report audits/20260425-fix-session-coverage.md
+$BIN_DIR/nimblefix-fix-session-testcases --import-html /path/to/session-cases.html --output /tmp/official-session-cases.ffcases
+```
+
+The repository keeps the canonical Phase 11 baseline as `tests/data/fix-session/official-session-cases.ffcases` plus mapped `.ffscenario` files under `tests/data/fix-session/cases/`. Raw FIX Trading HTML is not required at build or test time; if you obtain an updated official page offline, use `--import-html` to bootstrap a local manifest and then map cases onto the existing interop harness.
 
 ### External Interop (QuickFIX)
 

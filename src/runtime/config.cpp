@@ -631,6 +631,27 @@ CounterpartyConfigBuilder::heartbeat_interval_seconds(std::uint32_t seconds) -> 
 }
 
 auto
+CounterpartyConfigBuilder::sending_time_threshold_seconds(std::uint32_t seconds) -> CounterpartyConfigBuilder&
+{
+  config_.sending_time_threshold_seconds = seconds;
+  return *this;
+}
+
+auto
+CounterpartyConfigBuilder::supported_app_msg_types(std::vector<std::string> values) -> CounterpartyConfigBuilder&
+{
+  config_.supported_app_msg_types = std::move(values);
+  return *this;
+}
+
+auto
+CounterpartyConfigBuilder::application_messages_available(bool available) -> CounterpartyConfigBuilder&
+{
+  config_.application_messages_available = available;
+  return *this;
+}
+
+auto
 CounterpartyConfigBuilder::store(StoreMode mode, std::filesystem::path path) -> CounterpartyConfigBuilder&
 {
   config_.store_mode = mode;

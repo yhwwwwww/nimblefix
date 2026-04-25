@@ -80,6 +80,7 @@ struct ParsedContainerRef
 struct ScopeValidationState
 {
   SeenTagBuffer seen_tags;
+  int last_rule_index{ -1 };
 };
 
 struct CompiledScopeTemplate;
@@ -135,6 +136,85 @@ HasSeenTag(const ScopeValidationState& state, std::uint32_t tag) -> bool
   return state.seen_tags.contains(tag);
 }
 
+[[maybe_unused]] auto ParseSigned(std::string_view text, const char* label) -> base::Result<std::int64_t>;
+[[maybe_unused]] auto ParseDouble(std::string_view text, const char* label) -> base::Result<double>;
+auto ParseBoolean(std::string_view text, const char* label) -> base::Result<bool>;
+
+auto
+TrackRuleOrder(ScopeValidationState* state,
+               int rule_index,
+               ValidationIssue* issue,
+               std::uint32_t tag,
+               ValidationIssueKind issue_kind) -> void
+{
+  if (state == nullptr || issue_kind == ValidationIssueKind::kNone || rule_index < 0) {
+    return;
+  }
+
+  if (state->last_rule_index > rule_index) {
+    const auto text = issue_kind == ValidationIssueKind::kRepeatingGroupFieldsOutOfRequiredOrder
+                        ? "field " + std::to_string(tag) + " is out of required order within the repeating group"
+                        : "field " + std::to_string(tag) + " is out of required order";
+    SetValidationIssue(issue, issue_kind, tag, text);
+    return;
+  }
+
+  if (rule_index > state->last_rule_index) {
+    state->last_rule_index = rule_index;
+  }
+}
+
+auto
+ValidateScalarFieldValue(std::uint32_t tag,
+                         std::string_view value,
+                         message::FieldTypeIndex field_type,
+                         ValidationIssue* issue) -> void
+{
+  if (issue == nullptr || issue->present()) {
+    return;
+  }
+
+  if (value.empty()) {
+    SetValidationIssue(issue,
+                       ValidationIssueKind::kTagSpecifiedWithoutAValue,
+                       tag,
+                       "field " + std::to_string(tag) + " is specified without a value");
+    return;
+  }
+
+  const auto set_incorrect_format = [&]() {
+    SetValidationIssue(issue,
+                       ValidationIssueKind::kIncorrectDataFormatForValue,
+                       tag,
+                       "field " + std::to_string(tag) + " has incorrect data format");
+  };
+
+  switch (field_type) {
+    case message::kFieldInt:
+      if (!ParseSigned(value, "integer field").ok()) {
+        set_incorrect_format();
+      }
+      return;
+    case message::kFieldChar:
+      if (value.size() != 1U) {
+        set_incorrect_format();
+      }
+      return;
+    case message::kFieldFloat:
+      if (!ParseDouble(value, "floating-point field").ok()) {
+        set_incorrect_format();
+      }
+      return;
+    case message::kFieldBoolean:
+      if (!ParseBoolean(value, "boolean field").ok()) {
+        set_incorrect_format();
+      }
+      return;
+    default:
+      return;
+  }
+}
+
 template<typename RuleSpan>
 auto
 ValidateConsumedField(const profile::NormalizedDictionaryView& dictionary,
@@ -146,7 +226,8 @@ ValidateConsumedField(const profile::NormalizedDictionaryView& dictionary,
                       bool allow_standard_session_fields,
                       bool schema_known,
                       const char* scope_name,
-                      const profile::FieldDefRecord* known_field_def = nullptr) -> void
+                      const profile::FieldDefRecord* known_field_def = nullptr,
+                      ValidationIssueKind order_issue_kind = ValidationIssueKind::kNone) -> void
 {
   if (state == nullptr) {
     return;
@@ -184,6 +265,8 @@ ValidateConsumedField(const profile::NormalizedDictionaryView& dictionary,
       return;
     }
   }
+
+  TrackRuleOrder(state, rule_index, issue, tag, order_issue_kind);
 }
 
 auto
@@ -306,9 +389,6 @@ ScanNextField(std::span<const std::byte> bytes,
     return base::Status::FormatError("FIX frame is missing its final delimiter");
   }
   const auto field_len = soh_index - field_start;
-  if (equals == field_len - 1U) {
-    return base::Status::FormatError("invalid FIX field syntax");
-  }
   const auto* field_bytes = reinterpret_cast<const char*>(bytes.data() + field_start);
   const auto tag = ParseTagInline(field_bytes, equals);
   if (tag == 0U) {
@@ -754,12 +834,18 @@ ParseParsedGroupEntries(const profile::NormalizedDictionaryView& dictionary,
         return peek.status();
       }
       if (peek.value().tag != group_def.delimiter_tag) {
-        SetValidationIssue(validation_issue,
-                           ValidationIssueKind::kIncorrectNumInGroupCount,
-                           group_def.count_tag,
-                           "group " + std::to_string(group_def.count_tag) + " expected delimiter tag " +
-                             std::to_string(group_def.delimiter_tag) + " for entry " +
-                             std::to_string(entry_index + 1U));
+        const auto delimiter_issue = dictionary.group_rule_allows_tag(group_def, peek.value().tag)
+                                       ? ValidationIssueKind::kRepeatingGroupFieldsOutOfRequiredOrder
+                                       : ValidationIssueKind::kIncorrectNumInGroupCount;
+        SetValidationIssue(
+          validation_issue,
+          delimiter_issue,
+          delimiter_issue == ValidationIssueKind::kRepeatingGroupFieldsOutOfRequiredOrder ? peek.value().tag
+                                                                                          : group_def.count_tag,
+          delimiter_issue == ValidationIssueKind::kRepeatingGroupFieldsOutOfRequiredOrder
+            ? "field " + std::to_string(peek.value().tag) + " is out of required order within the repeating group"
+            : "group " + std::to_string(group_def.count_tag) + " expected delimiter tag " +
+                std::to_string(group_def.delimiter_tag) + " for entry " + std::to_string(entry_index + 1U));
         return byte_pos;
       }
     }
@@ -787,8 +873,22 @@ ParseParsedGroupEntries(const profile::NormalizedDictionaryView& dictionary,
       }
 
       if (const auto ri = dictionary.group_rule_index(group_def, tag); ri >= 0) {
-        ValidateConsumedField(
-          dictionary, tag, group_rules, ri, &validation_state, validation_issue, false, true, "group");
+        const auto* field_def = dictionary.find_field(tag);
+        ValidateConsumedField(dictionary,
+                             tag,
+                             group_rules,
+                             ri,
+                             &validation_state,
+                             validation_issue,
+                             false,
+                             true,
+                             "group",
+                             field_def,
+                             ValidationIssueKind::kRepeatingGroupFieldsOutOfRequiredOrder);
+
+        auto value_sv = std::string_view(reinterpret_cast<const char*>(bytes.data() + field.value().value_offset),
+                                         field.value().value_length);
+        ValidateScalarFieldValue(tag, value_sv, ResolveFieldTypeWithDef(tag, field_def), validation_issue);
 
         auto slot = MakeParsedFieldSlot(
           tag, static_cast<std::uint32_t>(field.value().value_offset), field.value().value_length, dictionary);
@@ -797,8 +897,6 @@ ParseParsedGroupEntries(const profile::NormalizedDictionaryView& dictionary,
         }
 
         if (const auto* nested_group = dictionary.find_group(tag); nested_group != nullptr) {
-          auto value_sv = std::string_view(reinterpret_cast<const char*>(bytes.data() + field.value().value_offset),
-                                           field.value().value_length);
           auto next_pos = ParseParsedGroupEntries(dictionary,
                                                   bytes,
                                                   field.value().next_pos,
@@ -2375,10 +2473,10 @@ DecodeFixMessageView(std::span<const std::byte> bytes,
 
   SessionHeaderView header;
   ValidationIssue validation_issue;
+  ScopeValidationState message_validation;
   header.begin_string = std::string_view(reinterpret_cast<const char*>(bytes.data() + field0.value().value_offset),
                                          field0.value().value_length);
   header.body_length = declared_body_length.value();
-  ScopeValidationState message_validation;
   message_validation.seen_tags.reserve(bytes.size() / 8U);
 
   std::size_t byte_pos = field1.value().next_pos;
@@ -2498,6 +2596,10 @@ DecodeFixMessageView(std::span<const std::byte> bytes,
     // Single find_field per field — used for both validation and type
     // resolution.
     const auto* field_def = dictionary.find_field(tag);
+    const auto* group_def =
+      (cached_message_def != nullptr && dictionary.message_rule_allows_tag(*cached_message_def, tag))
+        ? dictionary.find_group(tag)
+        : nullptr;
 
     ValidateConsumedField(dictionary,
                           tag,
@@ -2508,12 +2610,14 @@ DecodeFixMessageView(std::span<const std::byte> bytes,
                           true,
                           cached_message_def != nullptr,
                           "message",
-                          field_def);
+                          field_def,
+                          group_def != nullptr ? ValidationIssueKind::kNone
+                                                : ValidationIssueKind::kTagSpecifiedOutOfRequiredOrder);
 
-    const auto* group_def =
-      (cached_message_def != nullptr && dictionary.message_rule_allows_tag(*cached_message_def, tag))
-        ? dictionary.find_group(tag)
-        : nullptr;
+    ValidateScalarFieldValue(tag,
+                             value_sv,
+                             ResolveFieldTypeWithDef(tag, field_def),
+                             &validation_issue);
     if (group_def != nullptr) {
       auto slot = MakeParsedFieldSlotWithType(tag,
                                               static_cast<std::uint32_t>(scanned.value().value_offset),
@@ -2653,6 +2757,7 @@ DecodeFixMessageView(std::span<const std::byte> bytes,
 
   SessionHeaderView header;
   ValidationIssue validation_issue;
+  ScopeValidationState message_validation;
   header.begin_string = std::string_view(reinterpret_cast<const char*>(bytes.data() + field0.value().value_offset),
                                          field0.value().value_length);
   header.body_length = declared_body_length.value();
@@ -2802,6 +2907,7 @@ DecodeFixMessageView(std::span<const std::byte> bytes,
       }
 
       const auto& compiled_slot = compiled->slot(slot_idx);
+    ValidateScalarFieldValue(tag, value_sv, compiled_slot.field_type, &validation_issue);
 
       if (compiled_slot.is_group_count) {
         // Group field — use the pre-resolved GroupDefRecord.
@@ -2832,6 +2938,12 @@ DecodeFixMessageView(std::span<const std::byte> bytes,
         byte_pos = next_pos.value();
         continue;
       }
+
+      TrackRuleOrder(&message_validation,
+                     static_cast<int>(slot_idx),
+                     &validation_issue,
+                     tag,
+                     ValidationIssueKind::kTagSpecifiedOutOfRequiredOrder);
 
       // Scalar field — type is pre-resolved, no dictionary lookup needed.
       auto slot = MakeParsedFieldSlotWithType(tag,

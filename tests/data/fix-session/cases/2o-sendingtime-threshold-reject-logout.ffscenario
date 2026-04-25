@@ -1,0 +1,10 @@
+config=../configs/fix44-acceptor-52-threshold.ffcfg
+action|protocol-connect|4401|ts=1777118399000000000
+action|protocol-inbound|4401|seq=1|ts=1777118400000000000|body=35=A^98=0^108=30
+action|protocol-inbound|4401|seq=2|ts=1777118521000000000|body=35=0
+expect-action|2|outbound=1|active=1|disconnect=0
+expect-outbound|2|1|msg-type=A|msg-seq-num=1
+expect-action|3|outbound=2|disconnect=1
+expect-outbound|3|1|msg-type=3|ref-tag=52|ref-msg-type=0|reject-reason=10
+expect-outbound|3|2|msg-type=5|text-contains=configured tolerance
+expect-session|4401|disconnected|3|4|0

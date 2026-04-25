@@ -502,7 +502,10 @@ struct AdminProtocolConfig
   std::string sender_comp_id;
   std::string target_comp_id;
   std::string default_appl_ver_id;
+  std::vector<std::string> supported_app_msg_types;
   std::uint32_t heartbeat_interval_seconds{ 30 };
+  std::uint32_t sending_time_threshold_seconds{ 0 };
+  bool application_messages_available{ true };
   bool reset_seq_num_on_logon{ false };
   bool reset_seq_num_on_logout{ false };
   bool reset_seq_num_on_disconnect{ false };
