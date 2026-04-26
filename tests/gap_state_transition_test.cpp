@@ -671,6 +671,7 @@ TEST_CASE("gap-transition: second gap-triggering message extends gap then both "
     .set_string(kSide, "1")
     .set_int(kOrderQty, 100)
     .set_string(kOrdType, "2")
+    .set_string(kPrice, "150.50")
     .set_string(kTransactTime, "20260414-12:00:00.000");
   auto frame1 = EncodeInboundFrame(std::move(order1).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 4U, false);
   REQUIRE(frame1.ok());
@@ -687,6 +688,7 @@ TEST_CASE("gap-transition: second gap-triggering message extends gap then both "
     .set_string(kSide, "1")
     .set_int(kOrderQty, 200)
     .set_string(kOrdType, "2")
+    .set_string(kPrice, "151.25")
     .set_string(kTransactTime, "20260414-12:00:01.000");
   auto frame2 = EncodeInboundFrame(std::move(order2).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 6U, false);
   REQUIRE(frame2.ok());
@@ -727,6 +729,7 @@ TEST_CASE("gap-transition: second gap-triggering message extends gap then both "
     .set_string(kSide, "1")
     .set_int(kOrderQty, 100)
     .set_string(kOrdType, "2")
+    .set_string(kPrice, "150.50")
     .set_string(kTransactTime, "20260414-12:00:00.000");
   auto replay4_frame = EncodeInboundFrame(
     std::move(replay4).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 4U, true, {}, "20260414-11:59:01.000");

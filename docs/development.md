@@ -718,10 +718,15 @@ Set `ValidationPolicy` on session config:
 
 | Mode | Behavior |
 |------|----------|
-| `kStrict` | Reject unknown tags, enforce field order, no duplicates |
-| `kCompatible` | Allow unknown tags, relaxed ordering |
-| `kPermissive` | Allow unknown tags + duplicates + order violations |
+| `kStrict` | Reject unknown tags, duplicate tags, empty values, bad scalar formats, and field-order violations |
+| `kCompatible` | Allow unknown tags and duplicates, relax field ordering, but still reject empty values, bad scalar formats, and malformed groups |
+| `kPermissive` | Allow unknown tags, duplicates, empty values, bad scalar formats, and order violations |
 | `kRawPassThrough` | Accept any legal FIX byte stream |
+
+`ValidationPolicy` also exposes individual booleans for these checks, including
+`reject_tag_without_value`, `reject_incorrect_data_format`, and
+`reject_fields_out_of_order`, so integrations can start from a preset and then
+tune only the counterparty-specific exceptions they need.
 
 ---
 

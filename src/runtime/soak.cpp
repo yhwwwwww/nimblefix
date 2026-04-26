@@ -96,6 +96,7 @@ BuildApplicationMessage(const profile::NormalizedDictionaryView& dictionary, std
   builder.set_string(kTransactTime, "20260406-12:00:00.000");
   builder.set_int(kOrderQty, static_cast<std::int64_t>(100U + round));
   builder.set_char(kOrdType, '2');
+  builder.set_string(kPrice, "100.00");
   if (dictionary.find_field(kAccount) != nullptr && (round % 2U) == 0U) {
     builder.set_string(kAccount, "ACCT-" + std::to_string(round + 1U));
   }

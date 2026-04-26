@@ -192,8 +192,10 @@ TEST_CASE("fix-codec", "[fix-codec]")
                                                                     "12:00:00.000|55=AAPL|11=ORD-1|"),
                                     dictionary.value());
   REQUIRE(out_of_order.ok());
-  // Ordering validation removed — out-of-order fields are no longer flagged.
-  REQUIRE(!out_of_order.value().validation_issue.present());
+  REQUIRE(out_of_order.value().validation_issue.present());
+  REQUIRE(out_of_order.value().validation_issue.kind ==
+          nimble::codec::ValidationIssueKind::kTagSpecifiedOutOfRequiredOrder);
+  REQUIRE(out_of_order.value().validation_issue.tag == kClOrdID);
 
   auto invalid_group =
     nimble::codec::DecodeFixMessage(::nimble::tests::EncodeFixFrame("35=D|34=1|49=BUY|56=SELL|52=20260402-"
@@ -613,7 +615,7 @@ TEST_CASE("codec negative: truncated frame", "[fix-codec][negative]")
   REQUIRE(peek.status().code() == nimble::base::ErrorCode::kFormatError);
 }
 
-TEST_CASE("codec negative: field with no value", "[fix-codec][negative]")
+TEST_CASE("codec validation: field with no value", "[fix-codec]")
 {
   // Construct a frame where tag 58 has an empty value: "58=\x01".
   std::string body = "35=D"
@@ -652,8 +654,10 @@ TEST_CASE("codec negative: field with no value", "[fix-codec][negative]")
   }
 
   auto result = nimble::codec::DecodeFixMessage(bytes, dictionary.value());
-  REQUIRE_FALSE(result.ok());
-  REQUIRE(result.status().code() == nimble::base::ErrorCode::kFormatError);
+  REQUIRE(result.ok());
+  REQUIRE(result.value().validation_issue.present());
+  REQUIRE(result.value().validation_issue.kind == nimble::codec::ValidationIssueKind::kTagSpecifiedWithoutAValue);
+  REQUIRE(result.value().validation_issue.tag == kText);
 }
 
 TEST_CASE("codec negative: duplicate tag in message", "[fix-codec][negative]")

@@ -286,12 +286,15 @@ ShouldRejectValidationIssue(const ValidationPolicy& policy, const codec::Validat
     case codec::ValidationIssueKind::kFieldNotAllowed:
       return policy.reject_unknown_fields;
     case codec::ValidationIssueKind::kTagSpecifiedWithoutAValue:
+      return policy.reject_tag_without_value;
     case codec::ValidationIssueKind::kIncorrectDataFormatForValue:
+      return policy.reject_incorrect_data_format;
     case codec::ValidationIssueKind::kTagSpecifiedOutOfRequiredOrder:
-      return true;
+      return policy.reject_fields_out_of_order;
     case codec::ValidationIssueKind::kDuplicateField:
       return policy.reject_duplicate_fields;
     case codec::ValidationIssueKind::kRepeatingGroupFieldsOutOfRequiredOrder:
+      return policy.reject_fields_out_of_order;
     case codec::ValidationIssueKind::kIncorrectNumInGroupCount:
       return policy.reject_invalid_group_structure;
     default:

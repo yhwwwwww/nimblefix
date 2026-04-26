@@ -2141,8 +2141,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(protocol.OnTransportConnected(1U).ok());
     REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
 
-    const auto inbound =
-      ::nimble::tests::EncodeFixFrame("35=2|34=2|49=BUY|56=SELL|52=20260402-12:00:00.000|7=1|16=|");
+    const auto inbound = ::nimble::tests::EncodeFixFrame("35=2|34=2|49=BUY|56=SELL|52=20260402-12:00:00.000|7=1|16=|");
     auto event = protocol.OnInbound(inbound, 10U);
     REQUIRE(event.ok());
     REQUIRE(event.value().outbound_frames.size() == 1U);
@@ -2217,8 +2216,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(protocol.OnTransportConnected(1U).ok());
     REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
 
-    const auto inbound =
-      ::nimble::tests::EncodeFixFrame("35=2|34=2|49=BUY|56=SELL|52=20260402-12:00:00.000|16=0|7=1|");
+    const auto inbound = ::nimble::tests::EncodeFixFrame("35=2|34=2|49=BUY|56=SELL|52=20260402-12:00:00.000|16=0|7=1|");
     auto event = protocol.OnInbound(inbound, 10U);
     REQUIRE(event.ok());
     REQUIRE(event.value().outbound_frames.size() == 1U);
@@ -2293,8 +2291,8 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(protocol.OnTransportConnected(1U).ok());
     REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
 
-    const auto inbound = ::nimble::tests::EncodeFixFrame(
-      "35=0|34=2|49=BUY|56=SELL|52=20260402-12:00:00.000|58=CLEAR|90=4|91=ABCD|");
+    const auto inbound =
+      ::nimble::tests::EncodeFixFrame("35=0|34=2|49=BUY|56=SELL|52=20260402-12:00:00.000|58=CLEAR|90=4|91=ABCD|");
     auto event = protocol.OnInbound(inbound, 10U);
     REQUIRE(event.ok());
     REQUIRE(event.value().outbound_frames.size() == 1U);
@@ -2553,9 +2551,9 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(protocol.OnTransportConnected(1U).ok());
     REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
 
-    const auto inbound =
-      ::nimble::tests::EncodeFixFrame("35=D|34=2|49=BUY|56=SELL|52=20260402-12:00:00.000|11=ORD1|55=AAPL|55=MSFT|54=1|60="
-                                      "20260402-12:00:00.000|40=1|");
+    const auto inbound = ::nimble::tests::EncodeFixFrame(
+      "35=D|34=2|49=BUY|56=SELL|52=20260402-12:00:00.000|11=ORD1|55=AAPL|55=MSFT|54=1|60="
+      "20260402-12:00:00.000|40=1|");
     auto event = protocol.OnInbound(inbound, 10U);
     REQUIRE(event.ok());
     REQUIRE(event.value().outbound_frames.empty());
@@ -2591,15 +2589,8 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
                                       "20260402-12:00:00.000|40=1|453=1|448=PTY1|447=D|452=7|55=AAPL|");
     auto event = protocol.OnInbound(inbound, 10U);
     REQUIRE(event.ok());
-    REQUIRE(event.value().outbound_frames.size() == 1U);
-    REQUIRE(event.value().application_messages.empty());
-
-    auto decoded = nimble::codec::DecodeFixMessage(event.value().outbound_frames.front().bytes, dictionary.value());
-    REQUIRE(decoded.ok());
-    REQUIRE(decoded.value().header.msg_type == "3");
-    REQUIRE(decoded.value().message.view().get_int(kRefTagID).value() == kSymbol);
-    REQUIRE(decoded.value().message.view().get_string(kRefMsgType).value() == "D");
-    REQUIRE(decoded.value().message.view().get_int(kRejectReason).value() == 14);
+    REQUIRE(event.value().outbound_frames.empty());
+    REQUIRE(event.value().application_messages.size() == 1U);
   }
 
   {

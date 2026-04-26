@@ -42,6 +42,12 @@ struct ValidationPolicy
   bool reject_unknown_fields{ true };
   // Reject duplicate scalar tags within the same message or group entry.
   bool reject_duplicate_fields{ true };
+  // Reject scalar tags whose value is empty.
+  bool reject_tag_without_value{ true };
+  // Reject scalar values that do not match the dictionary-declared type.
+  bool reject_incorrect_data_format{ true };
+  // Reject fields that appear before an earlier dictionary rule in the same scope.
+  bool reject_fields_out_of_order{ true };
   // Reject malformed repeating-group structure or count mismatches.
   bool reject_invalid_group_structure{ true };
 
@@ -59,6 +65,9 @@ struct ValidationPolicy
       .require_required_fields_on_app_messages = true,
       .reject_unknown_fields = false,
       .reject_duplicate_fields = false,
+      .reject_tag_without_value = true,
+      .reject_incorrect_data_format = true,
+      .reject_fields_out_of_order = false,
       .reject_invalid_group_structure = true,
     };
   }
@@ -75,6 +84,9 @@ struct ValidationPolicy
       .require_required_fields_on_app_messages = false,
       .reject_unknown_fields = false,
       .reject_duplicate_fields = false,
+      .reject_tag_without_value = false,
+      .reject_incorrect_data_format = false,
+      .reject_fields_out_of_order = false,
       .reject_invalid_group_structure = false,
     };
   }
@@ -91,6 +103,9 @@ struct ValidationPolicy
       .require_required_fields_on_app_messages = false,
       .reject_unknown_fields = false,
       .reject_duplicate_fields = false,
+      .reject_tag_without_value = false,
+      .reject_incorrect_data_format = false,
+      .reject_fields_out_of_order = false,
       .reject_invalid_group_structure = false,
     };
   }

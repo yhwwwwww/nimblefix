@@ -23,6 +23,6 @@ expect-action|10|outbound=1|active=1|disconnect=0
 expect-outbound|10|1|msg-type=A|msg-seq-num=1
 expect-action|11|outbound=1|session-reject=0|disconnect=0
 expect-action|12|outbound=1|session-reject=0|disconnect=0
-expect-session|4201|active|4|3|0
-expect-session|4401|active|4|3|0
-expect-session|1101|active|4|3|0
+expect-session|4201|active|4|2|0
+expect-session|4401|active|4|2|0
+expect-session|1101|active|4|2|0
