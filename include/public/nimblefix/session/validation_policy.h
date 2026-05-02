@@ -50,8 +50,28 @@ struct ValidationPolicy
   bool reject_fields_out_of_order{ true };
   // Reject malformed repeating-group structure or count mismatches.
   bool reject_invalid_group_structure{ true };
+  // Verify inbound CheckSum(10) against the byte sum through the field before it.
+  bool verify_checksum{ true };
 
-  [[nodiscard]] static auto Strict() -> ValidationPolicy { return ValidationPolicy{}; }
+  [[nodiscard]] static auto Strict() -> ValidationPolicy
+  {
+    return ValidationPolicy{
+      .mode = ValidationMode::kStrict,
+      .enforce_comp_ids = true,
+      .require_default_appl_ver_id_on_logon = true,
+      .require_orig_sending_time_on_poss_dup = true,
+      .reject_on_stale_msg_seq_num = true,
+      .require_known_app_message_type = true,
+      .require_required_fields_on_app_messages = true,
+      .reject_unknown_fields = true,
+      .reject_duplicate_fields = true,
+      .reject_tag_without_value = true,
+      .reject_incorrect_data_format = true,
+      .reject_fields_out_of_order = true,
+      .reject_invalid_group_structure = true,
+      .verify_checksum = true,
+    };
+  }
 
   [[nodiscard]] static auto Compatible() -> ValidationPolicy
   {
@@ -69,6 +89,7 @@ struct ValidationPolicy
       .reject_incorrect_data_format = true,
       .reject_fields_out_of_order = false,
       .reject_invalid_group_structure = true,
+      .verify_checksum = true,
     };
   }
 
@@ -88,6 +109,7 @@ struct ValidationPolicy
       .reject_incorrect_data_format = false,
       .reject_fields_out_of_order = false,
       .reject_invalid_group_structure = false,
+      .verify_checksum = true,
     };
   }
 
@@ -107,6 +129,7 @@ struct ValidationPolicy
       .reject_incorrect_data_format = false,
       .reject_fields_out_of_order = false,
       .reject_invalid_group_structure = false,
+      .verify_checksum = false,
     };
   }
 };

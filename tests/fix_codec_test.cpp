@@ -4,10 +4,10 @@
 #include <cstddef>
 #include <vector>
 
+#include "nimblefix/advanced/message_builder.h"
 #include "nimblefix/codec/fix_codec.h"
 #include "nimblefix/codec/fix_tags.h"
 #include "nimblefix/codec/simd_scan.h"
-#include "nimblefix/advanced/message_builder.h"
 #include "nimblefix/message/message_ref.h"
 
 #include "test_support.h"
@@ -450,6 +450,27 @@ TEST_CASE("codec negative: bad checksum value", "[fix-codec][negative]")
   auto peek = nimble::codec::PeekSessionHeader(tampered);
   REQUIRE_FALSE(peek.ok());
   REQUIRE(peek.status().code() == nimble::base::ErrorCode::kFormatError);
+}
+
+TEST_CASE("codec decode can skip checksum verification", "[fix-codec]")
+{
+  auto dictionary = nimble::tests::LoadFix44DictionaryView();
+  if (!dictionary.ok()) {
+    SKIP("FIX44 artifact not available: " << dictionary.status().message());
+  }
+
+  auto frame = nimble::tests::EncodeFixFrame("35=D|34=1|49=BUY|56=SELL|52=20260402-12:00:00.000|11=ORD-1|55=AAPL|");
+  REQUIRE(frame.size() >= 3U);
+  frame[frame.size() - 2U] = frame[frame.size() - 2U] == std::byte('0') ? std::byte('1') : std::byte('0');
+
+  auto verified = nimble::codec::DecodeFixMessage(frame, dictionary.value(), nimble::codec::kFixSoh, true);
+  REQUIRE_FALSE(verified.ok());
+  REQUIRE(verified.status().code() == nimble::base::ErrorCode::kFormatError);
+
+  auto skipped = nimble::codec::DecodeFixMessage(frame, dictionary.value(), nimble::codec::kFixSoh, false);
+  REQUIRE(skipped.ok());
+  REQUIRE(skipped.value().header.msg_type == "D");
+  REQUIRE(skipped.value().header.msg_seq_num == 1U);
 }
 
 TEST_CASE("codec negative: incorrect BodyLength", "[fix-codec][negative]")

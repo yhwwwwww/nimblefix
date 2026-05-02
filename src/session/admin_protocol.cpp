@@ -7,13 +7,13 @@
 #include <cstring>
 #include <string_view>
 
+#include "nimblefix/advanced/message_builder.h"
+#include "nimblefix/advanced/typed_message_view.h"
 #include "nimblefix/codec/compiled_decoder.h"
 #include "nimblefix/codec/fast_int_format.h"
 #include "nimblefix/codec/fix_tags.h"
 #include "nimblefix/codec/raw_passthrough.h"
 #include "nimblefix/codec/simd_scan.h"
-#include "nimblefix/advanced/message_builder.h"
-#include "nimblefix/advanced/typed_message_view.h"
 #include "nimblefix/profile/normalized_dictionary.h"
 #include "nimblefix/store/session_store.h"
 
@@ -1486,7 +1486,12 @@ AdminProtocol::OnTransportClosed() -> base::Status
 auto
 AdminProtocol::OnInbound(std::span<const std::byte> frame, std::uint64_t timestamp_ns) -> base::Result<ProtocolEvent>
 {
-  auto decode_status = codec::DecodeFixMessageView(frame, dictionary_, decode_table_, &inbound_decode_scratch_);
+  auto decode_status = codec::DecodeFixMessageView(frame,
+                                                   dictionary_,
+                                                   decode_table_,
+                                                   &inbound_decode_scratch_,
+                                                   codec::kFixSoh,
+                                                   config_.validation_policy.verify_checksum);
   if (!decode_status.ok()) {
     if (!ShouldIgnoreInboundDecodeFailure(decode_status)) {
       return decode_status;
@@ -1535,8 +1540,12 @@ AdminProtocol::OnInbound(std::span<const std::byte> frame, std::uint64_t timesta
 auto
 AdminProtocol::OnInbound(std::vector<std::byte>&& frame, std::uint64_t timestamp_ns) -> base::Result<ProtocolEvent>
 {
-  auto decode_status = codec::DecodeFixMessageView(
-    std::span<const std::byte>(frame.data(), frame.size()), dictionary_, decode_table_, &inbound_decode_scratch_);
+  auto decode_status = codec::DecodeFixMessageView(std::span<const std::byte>(frame.data(), frame.size()),
+                                                   dictionary_,
+                                                   decode_table_,
+                                                   &inbound_decode_scratch_,
+                                                   codec::kFixSoh,
+                                                   config_.validation_policy.verify_checksum);
   if (!decode_status.ok()) {
     if (!ShouldIgnoreInboundDecodeFailure(decode_status)) {
       return decode_status;
@@ -2398,8 +2407,12 @@ AdminProtocol::DrainDeferredGapFrames(std::uint64_t timestamp_ns, ProtocolEvent*
     ++index;
 
     codec::DecodedMessageView decoded;
-    auto decode_status =
-      codec::DecodeFixMessageView(std::span<const std::byte>(frame), dictionary_, decode_table_, &decoded);
+    auto decode_status = codec::DecodeFixMessageView(std::span<const std::byte>(frame),
+                                                     dictionary_,
+                                                     decode_table_,
+                                                     &decoded,
+                                                     codec::kFixSoh,
+                                                     config_.validation_policy.verify_checksum);
     if (!decode_status.ok()) {
       continue; // corrupt frame — discard silently
     }

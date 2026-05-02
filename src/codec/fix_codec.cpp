@@ -136,9 +136,12 @@ HasSeenTag(const ScopeValidationState& state, std::uint32_t tag) -> bool
   return state.seen_tags.contains(tag);
 }
 
-[[maybe_unused]] auto ParseSigned(std::string_view text, const char* label) -> base::Result<std::int64_t>;
-[[maybe_unused]] auto ParseDouble(std::string_view text, const char* label) -> base::Result<double>;
-auto ParseBoolean(std::string_view text, const char* label) -> base::Result<bool>;
+[[maybe_unused]] auto
+ParseSigned(std::string_view text, const char* label) -> base::Result<std::int64_t>;
+[[maybe_unused]] auto
+ParseDouble(std::string_view text, const char* label) -> base::Result<double>;
+auto
+ParseBoolean(std::string_view text, const char* label) -> base::Result<bool>;
 
 auto
 TrackRuleOrder(ScopeValidationState* state,
@@ -875,16 +878,16 @@ ParseParsedGroupEntries(const profile::NormalizedDictionaryView& dictionary,
       if (const auto ri = dictionary.group_rule_index(group_def, tag); ri >= 0) {
         const auto* field_def = dictionary.find_field(tag);
         ValidateConsumedField(dictionary,
-                             tag,
-                             group_rules,
-                             ri,
-                             &validation_state,
-                             validation_issue,
-                             false,
-                             true,
-                             "group",
-                             field_def,
-                             ValidationIssueKind::kRepeatingGroupFieldsOutOfRequiredOrder);
+                              tag,
+                              group_rules,
+                              ri,
+                              &validation_state,
+                              validation_issue,
+                              false,
+                              true,
+                              "group",
+                              field_def,
+                              ValidationIssueKind::kRepeatingGroupFieldsOutOfRequiredOrder);
 
         auto value_sv = std::string_view(reinterpret_cast<const char*>(bytes.data() + field.value().value_offset),
                                          field.value().value_length);
@@ -2431,7 +2434,8 @@ auto
 DecodeFixMessageView(std::span<const std::byte> bytes,
                      const profile::NormalizedDictionaryView& dictionary,
                      DecodedMessageView* output,
-                     char delimiter) -> base::Status
+                     char delimiter,
+                     bool verify_checksum) -> base::Status
 {
   auto prepared = PrepareDecodeOutput(output, bytes);
   if (!prepared.ok()) {
@@ -2612,12 +2616,9 @@ DecodeFixMessageView(std::span<const std::byte> bytes,
                           "message",
                           field_def,
                           group_def != nullptr ? ValidationIssueKind::kNone
-                                                : ValidationIssueKind::kTagSpecifiedOutOfRequiredOrder);
+                                               : ValidationIssueKind::kTagSpecifiedOutOfRequiredOrder);
 
-    ValidateScalarFieldValue(tag,
-                             value_sv,
-                             ResolveFieldTypeWithDef(tag, field_def),
-                             &validation_issue);
+    ValidateScalarFieldValue(tag, value_sv, ResolveFieldTypeWithDef(tag, field_def), &validation_issue);
     if (group_def != nullptr) {
       auto slot = MakeParsedFieldSlotWithType(tag,
                                               static_cast<std::uint32_t>(scanned.value().value_offset),
@@ -2665,30 +2666,32 @@ DecodeFixMessageView(std::span<const std::byte> bytes,
     return base::Status::FormatError("BodyLength mismatch");
   }
 
-  const auto actual_checksum = [&]() -> std::uint32_t {
-    const auto* data = bytes.data();
-    std::uint32_t sum = 0;
+  if (verify_checksum) {
+    const auto actual_checksum = [&]() -> std::uint32_t {
+      const auto* data = bytes.data();
+      std::uint32_t sum = 0;
 #if NIMBLEFIX_HAS_SSE2
-    const auto zero = _mm_setzero_si128();
-    std::size_t i = 0;
-    for (; i + 16 <= checksum_field_start; i += 16) {
-      auto chunk = _mm_loadu_si128(reinterpret_cast<const __m128i*>(data + i));
-      auto sad = _mm_sad_epu8(chunk, zero);
-      sum +=
-        static_cast<std::uint32_t>(_mm_extract_epi16(sad, 0)) + static_cast<std::uint32_t>(_mm_extract_epi16(sad, 4));
-    }
-    for (; i < checksum_field_start; ++i) {
-      sum += std::to_integer<unsigned char>(data[i]);
-    }
+      const auto zero = _mm_setzero_si128();
+      std::size_t i = 0;
+      for (; i + 16 <= checksum_field_start; i += 16) {
+        auto chunk = _mm_loadu_si128(reinterpret_cast<const __m128i*>(data + i));
+        auto sad = _mm_sad_epu8(chunk, zero);
+        sum +=
+          static_cast<std::uint32_t>(_mm_extract_epi16(sad, 0)) + static_cast<std::uint32_t>(_mm_extract_epi16(sad, 4));
+      }
+      for (; i < checksum_field_start; ++i) {
+        sum += std::to_integer<unsigned char>(data[i]);
+      }
 #else
-    for (std::size_t i = 0; i < checksum_field_start; ++i) {
-      sum += std::to_integer<unsigned char>(data[i]);
-    }
+      for (std::size_t i = 0; i < checksum_field_start; ++i) {
+        sum += std::to_integer<unsigned char>(data[i]);
+      }
 #endif
-    return sum % 256U;
-  }();
-  if (actual_checksum != header.checksum) {
-    return base::Status::FormatError("CheckSum mismatch");
+      return sum % 256U;
+    }();
+    if (actual_checksum != header.checksum) {
+      return base::Status::FormatError("CheckSum mismatch");
+    }
   }
 
   output->header = std::move(header);
@@ -2700,10 +2703,11 @@ DecodeFixMessageView(std::span<const std::byte> bytes,
 auto
 DecodeFixMessageView(std::span<const std::byte> bytes,
                      const profile::NormalizedDictionaryView& dictionary,
-                     char delimiter) -> base::Result<DecodedMessageView>
+                     char delimiter,
+                     bool verify_checksum) -> base::Result<DecodedMessageView>
 {
   DecodedMessageView decoded;
-  auto status = DecodeFixMessageView(bytes, dictionary, &decoded, delimiter);
+  auto status = DecodeFixMessageView(bytes, dictionary, &decoded, delimiter, verify_checksum);
   if (!status.ok()) {
     return status;
   }
@@ -2715,7 +2719,8 @@ DecodeFixMessageView(std::span<const std::byte> bytes,
                      const profile::NormalizedDictionaryView& dictionary,
                      const CompiledDecoderTable& compiled_decoders,
                      DecodedMessageView* output,
-                     char delimiter) -> base::Status
+                     char delimiter,
+                     bool verify_checksum) -> base::Status
 {
   auto prepared = PrepareDecodeOutput(output, bytes);
   if (!prepared.ok()) {
@@ -2907,7 +2912,7 @@ DecodeFixMessageView(std::span<const std::byte> bytes,
       }
 
       const auto& compiled_slot = compiled->slot(slot_idx);
-    ValidateScalarFieldValue(tag, value_sv, compiled_slot.field_type, &validation_issue);
+      ValidateScalarFieldValue(tag, value_sv, compiled_slot.field_type, &validation_issue);
 
       if (compiled_slot.is_group_count) {
         // Group field — use the pre-resolved GroupDefRecord.
@@ -2984,30 +2989,32 @@ DecodeFixMessageView(std::span<const std::byte> bytes,
     return base::Status::FormatError("BodyLength mismatch");
   }
 
-  const auto actual_checksum = [&]() -> std::uint32_t {
-    const auto* data = bytes.data();
-    std::uint32_t sum = 0;
+  if (verify_checksum) {
+    const auto actual_checksum = [&]() -> std::uint32_t {
+      const auto* data = bytes.data();
+      std::uint32_t sum = 0;
 #if NIMBLEFIX_HAS_SSE2
-    const auto zero = _mm_setzero_si128();
-    std::size_t i = 0;
-    for (; i + 16 <= checksum_field_start; i += 16) {
-      auto chunk = _mm_loadu_si128(reinterpret_cast<const __m128i*>(data + i));
-      auto sad = _mm_sad_epu8(chunk, zero);
-      sum +=
-        static_cast<std::uint32_t>(_mm_extract_epi16(sad, 0)) + static_cast<std::uint32_t>(_mm_extract_epi16(sad, 4));
-    }
-    for (; i < checksum_field_start; ++i) {
-      sum += std::to_integer<unsigned char>(data[i]);
-    }
+      const auto zero = _mm_setzero_si128();
+      std::size_t i = 0;
+      for (; i + 16 <= checksum_field_start; i += 16) {
+        auto chunk = _mm_loadu_si128(reinterpret_cast<const __m128i*>(data + i));
+        auto sad = _mm_sad_epu8(chunk, zero);
+        sum +=
+          static_cast<std::uint32_t>(_mm_extract_epi16(sad, 0)) + static_cast<std::uint32_t>(_mm_extract_epi16(sad, 4));
+      }
+      for (; i < checksum_field_start; ++i) {
+        sum += std::to_integer<unsigned char>(data[i]);
+      }
 #else
-    for (std::size_t i = 0; i < checksum_field_start; ++i) {
-      sum += std::to_integer<unsigned char>(data[i]);
-    }
+      for (std::size_t i = 0; i < checksum_field_start; ++i) {
+        sum += std::to_integer<unsigned char>(data[i]);
+      }
 #endif
-    return sum % 256U;
-  }();
-  if (actual_checksum != header.checksum) {
-    return base::Status::FormatError("CheckSum mismatch");
+      return sum % 256U;
+    }();
+    if (actual_checksum != header.checksum) {
+      return base::Status::FormatError("CheckSum mismatch");
+    }
   }
 
   output->header = std::move(header);
@@ -3020,10 +3027,11 @@ auto
 DecodeFixMessageView(std::span<const std::byte> bytes,
                      const profile::NormalizedDictionaryView& dictionary,
                      const CompiledDecoderTable& compiled_decoders,
-                     char delimiter) -> base::Result<DecodedMessageView>
+                     char delimiter,
+                     bool verify_checksum) -> base::Result<DecodedMessageView>
 {
   DecodedMessageView decoded;
-  auto status = DecodeFixMessageView(bytes, dictionary, compiled_decoders, &decoded, delimiter);
+  auto status = DecodeFixMessageView(bytes, dictionary, compiled_decoders, &decoded, delimiter, verify_checksum);
   if (!status.ok()) {
     return status;
   }
@@ -3031,10 +3039,12 @@ DecodeFixMessageView(std::span<const std::byte> bytes,
 }
 
 auto
-DecodeFixMessage(std::span<const std::byte> bytes, const profile::NormalizedDictionaryView& dictionary, char delimiter)
-  -> base::Result<DecodedMessage>
+DecodeFixMessage(std::span<const std::byte> bytes,
+                 const profile::NormalizedDictionaryView& dictionary,
+                 char delimiter,
+                 bool verify_checksum) -> base::Result<DecodedMessage>
 {
-  auto decoded = DecodeFixMessageView(bytes, dictionary, delimiter);
+  auto decoded = DecodeFixMessageView(bytes, dictionary, delimiter, verify_checksum);
   if (!decoded.ok()) {
     return decoded.status();
   }
@@ -3042,7 +3052,8 @@ DecodeFixMessage(std::span<const std::byte> bytes, const profile::NormalizedDict
 }
 
 auto
-PeekSessionHeaderView(std::span<const std::byte> bytes, char delimiter) -> base::Result<SessionHeaderView>
+PeekSessionHeaderView(std::span<const std::byte> bytes, char delimiter, bool verify_checksum)
+  -> base::Result<SessionHeaderView>
 {
   const char normalized_delimiter = NormalizeDelimiter(delimiter);
   const auto delimiter_byte = static_cast<std::byte>(static_cast<unsigned char>(normalized_delimiter));
@@ -3237,22 +3248,24 @@ PeekSessionHeaderView(std::span<const std::byte> bytes, char delimiter) -> base:
     return base::Status::FormatError("BodyLength mismatch");
   }
 
-  std::uint32_t actual_checksum = 0;
-  for (std::size_t index = 0; index < checksum_field_start; ++index) {
-    actual_checksum += std::to_integer<unsigned char>(bytes[index]);
-  }
-  actual_checksum %= 256U;
-  if (actual_checksum != header.checksum) {
-    return base::Status::FormatError("CheckSum mismatch");
+  if (verify_checksum) {
+    std::uint32_t actual_checksum = 0;
+    for (std::size_t index = 0; index < checksum_field_start; ++index) {
+      actual_checksum += std::to_integer<unsigned char>(bytes[index]);
+    }
+    actual_checksum %= 256U;
+    if (actual_checksum != header.checksum) {
+      return base::Status::FormatError("CheckSum mismatch");
+    }
   }
 
   return header;
 }
 
 auto
-PeekSessionHeader(std::span<const std::byte> bytes, char delimiter) -> base::Result<SessionHeader>
+PeekSessionHeader(std::span<const std::byte> bytes, char delimiter, bool verify_checksum) -> base::Result<SessionHeader>
 {
-  auto header = PeekSessionHeaderView(bytes, delimiter);
+  auto header = PeekSessionHeaderView(bytes, delimiter, verify_checksum);
   if (!header.ok()) {
     return header.status();
   }

@@ -373,18 +373,21 @@ EncodeFixMessage(message::MessageView message,
 auto
 DecodeFixMessage(std::span<const std::byte> bytes,
                  const profile::NormalizedDictionaryView& dictionary,
-                 char delimiter = kFixSoh) -> base::Result<DecodedMessage>;
+                 char delimiter = kFixSoh,
+                 bool verify_checksum = true) -> base::Result<DecodedMessage>;
 
 auto
 DecodeFixMessageView(std::span<const std::byte> bytes,
                      const profile::NormalizedDictionaryView& dictionary,
                      DecodedMessageView* output,
-                     char delimiter = kFixSoh) -> base::Status;
+                     char delimiter = kFixSoh,
+                     bool verify_checksum = true) -> base::Status;
 
 auto
 DecodeFixMessageView(std::span<const std::byte> bytes,
                      const profile::NormalizedDictionaryView& dictionary,
-                     char delimiter = kFixSoh) -> base::Result<DecodedMessageView>;
+                     char delimiter = kFixSoh,
+                     bool verify_checksum = true) -> base::Result<DecodedMessageView>;
 
 class CompiledDecoderTable;
 
@@ -393,18 +396,22 @@ DecodeFixMessageView(std::span<const std::byte> bytes,
                      const profile::NormalizedDictionaryView& dictionary,
                      const CompiledDecoderTable& compiled_decoders,
                      DecodedMessageView* output,
-                     char delimiter = kFixSoh) -> base::Status;
+                     char delimiter = kFixSoh,
+                     bool verify_checksum = true) -> base::Status;
 
 auto
 DecodeFixMessageView(std::span<const std::byte> bytes,
                      const profile::NormalizedDictionaryView& dictionary,
                      const CompiledDecoderTable& compiled_decoders,
-                     char delimiter = kFixSoh) -> base::Result<DecodedMessageView>;
+                     char delimiter = kFixSoh,
+                     bool verify_checksum = true) -> base::Result<DecodedMessageView>;
 
 auto
-PeekSessionHeader(std::span<const std::byte> bytes, char delimiter = kFixSoh) -> base::Result<SessionHeader>;
+PeekSessionHeader(std::span<const std::byte> bytes, char delimiter = kFixSoh, bool verify_checksum = true)
+  -> base::Result<SessionHeader>;
 
 auto
-PeekSessionHeaderView(std::span<const std::byte> bytes, char delimiter = kFixSoh) -> base::Result<SessionHeaderView>;
+PeekSessionHeaderView(std::span<const std::byte> bytes, char delimiter = kFixSoh, bool verify_checksum = true)
+  -> base::Result<SessionHeaderView>;
 
 } // namespace nimble::codec

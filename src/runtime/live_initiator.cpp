@@ -1474,7 +1474,8 @@ LiveInitiator::ProcessConnection(WorkerShardState& shard,
       }
 
       const auto frame_bytes = frame.value().value();
-      auto header = codec::PeekSessionHeaderView(frame_bytes);
+      auto header = codec::PeekSessionHeaderView(
+        frame_bytes, codec::kFixSoh, connection->session->counterparty.validation_policy.verify_checksum);
       if (!header.ok()) {
         if (connection->session != nullptr) {
           RecordProtocolFailure(*connection->session, header.status());
@@ -1754,7 +1755,10 @@ LiveInitiator::HandleInboundFrame(WorkerShardState& shard,
   std::optional<message::MessageView> admin_message;
   session::ProtocolEvent event;
   if (options_.application != nullptr) {
-    auto decoded = codec::DecodeFixMessageView(frame, *connection.session->dictionary);
+    auto decoded = codec::DecodeFixMessageView(frame,
+                                               *connection.session->dictionary,
+                                               codec::kFixSoh,
+                                               connection.session->counterparty.validation_policy.verify_checksum);
     if (!decoded.ok()) {
       return decoded.status();
     }
@@ -1768,7 +1772,10 @@ LiveInitiator::HandleInboundFrame(WorkerShardState& shard,
     }
     event = std::move(protocol_event).value();
   } else {
-    auto decoded = codec::DecodeFixMessageView(frame, *connection.session->dictionary);
+    auto decoded = codec::DecodeFixMessageView(frame,
+                                               *connection.session->dictionary,
+                                               codec::kFixSoh,
+                                               connection.session->counterparty.validation_policy.verify_checksum);
     if (!decoded.ok()) {
       return decoded.status();
     }

@@ -93,7 +93,8 @@ ValidationPolicyEquals(const session::ValidationPolicy& left, const session::Val
          left.reject_tag_without_value == right.reject_tag_without_value &&
          left.reject_incorrect_data_format == right.reject_incorrect_data_format &&
          left.reject_fields_out_of_order == right.reject_fields_out_of_order &&
-         left.reject_invalid_group_structure == right.reject_invalid_group_structure;
+         left.reject_invalid_group_structure == right.reject_invalid_group_structure &&
+         left.verify_checksum == right.verify_checksum;
 }
 
 auto

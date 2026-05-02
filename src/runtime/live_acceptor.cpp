@@ -1533,7 +1533,9 @@ LiveAcceptor::ProcessConnection(WorkerShardState& shard,
             break;
           }
           const auto frame_bytes = frame.value().value();
-          auto header = codec::PeekSessionHeaderView(frame_bytes);
+          const bool verify_checksum =
+            connection->session == nullptr || connection->session->counterparty.validation_policy.verify_checksum;
+          auto header = codec::PeekSessionHeaderView(frame_bytes, codec::kFixSoh, verify_checksum);
           if (!header.ok()) {
             MarkConnectionForClose(*connection, header.status().message(), false);
             break;
@@ -1573,7 +1575,9 @@ LiveAcceptor::ProcessConnection(WorkerShardState& shard,
       auto stashed_copy = std::move(connection->stashed_app_frame);
       connection->stashed_app_frame.clear();
       const auto frame_bytes = std::span<const std::byte>(stashed_copy.data(), stashed_copy.size());
-      auto header = codec::PeekSessionHeaderView(frame_bytes);
+      const bool verify_checksum =
+        connection->session == nullptr || connection->session->counterparty.validation_policy.verify_checksum;
+      auto header = codec::PeekSessionHeaderView(frame_bytes, codec::kFixSoh, verify_checksum);
       if (!header.ok()) {
         if (connection->session != nullptr) {
           RecordProtocolFailure(*connection->session, header.status());
@@ -1631,7 +1635,9 @@ LiveAcceptor::ProcessConnection(WorkerShardState& shard,
       }
 
       const auto frame_bytes = frame.value().value();
-      auto header = codec::PeekSessionHeaderView(frame_bytes);
+      const bool verify_checksum =
+        connection->session == nullptr || connection->session->counterparty.validation_policy.verify_checksum;
+      auto header = codec::PeekSessionHeaderView(frame_bytes, codec::kFixSoh, verify_checksum);
       if (!header.ok()) {
         if (connection->session != nullptr) {
           RecordProtocolFailure(*connection->session, header.status());
@@ -1976,7 +1982,10 @@ LiveAcceptor::HandleInboundFrame(WorkerShardState& shard,
   std::optional<message::MessageView> admin_message;
   session::ProtocolEvent event;
   if (options_.application != nullptr) {
-    auto decoded = codec::DecodeFixMessageView(frame, *connection->session->dictionary);
+    auto decoded = codec::DecodeFixMessageView(frame,
+                                               *connection->session->dictionary,
+                                               codec::kFixSoh,
+                                               connection->session->counterparty.validation_policy.verify_checksum);
     if (!decoded.ok()) {
       return decoded.status();
     }
@@ -1990,7 +1999,10 @@ LiveAcceptor::HandleInboundFrame(WorkerShardState& shard,
     }
     event = std::move(protocol_event).value();
   } else {
-    auto decoded = codec::DecodeFixMessageView(frame, *connection->session->dictionary);
+    auto decoded = codec::DecodeFixMessageView(frame,
+                                               *connection->session->dictionary,
+                                               codec::kFixSoh,
+                                               connection->session->counterparty.validation_policy.verify_checksum);
     if (!decoded.ok()) {
       return decoded.status();
     }

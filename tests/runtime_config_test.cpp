@@ -141,6 +141,8 @@ RequireSameCoreConfig(const nimble::runtime::EngineConfig& expected, const nimbl
     REQUIRE(actual_counterparty.recovery_mode == expected_counterparty.recovery_mode);
     REQUIRE(actual_counterparty.dispatch_mode == expected_counterparty.dispatch_mode);
     REQUIRE(actual_counterparty.validation_policy.mode == expected_counterparty.validation_policy.mode);
+    REQUIRE(actual_counterparty.validation_policy.verify_checksum ==
+            expected_counterparty.validation_policy.verify_checksum);
     REQUIRE(actual_counterparty.reset_seq_num_on_logon == expected_counterparty.reset_seq_num_on_logon);
     REQUIRE(actual_counterparty.reset_seq_num_on_logout == expected_counterparty.reset_seq_num_on_logout);
     REQUIRE(actual_counterparty.reset_seq_num_on_disconnect == expected_counterparty.reset_seq_num_on_disconnect);
@@ -699,6 +701,7 @@ TEST_CASE("runtime-config", "[runtime-config]")
   REQUIRE(config.value().profile_artifacts.size() == 2U);
   REQUIRE(config.value().counterparties.size() == 5U);
   REQUIRE(config.value().counterparties[0].validation_policy.mode == nimble::session::ValidationMode::kCompatible);
+  REQUIRE(config.value().counterparties[0].validation_policy.verify_checksum);
   REQUIRE(config.value().counterparties[1].store_mode == nimble::runtime::StoreMode::kMmap);
   REQUIRE(config.value().counterparties[1].store_path == store_path);
   REQUIRE(config.value().counterparties[2].default_appl_ver_id == "9");
@@ -906,7 +909,17 @@ TEST_CASE("runtime-config", "[runtime-config]")
   REQUIRE(acceptor.session.key.begin_string == "FIX.4.4");
   REQUIRE(acceptor.dispatch_mode == nimble::runtime::AppDispatchMode::kQueueDecoupled);
   REQUIRE(acceptor.validation_policy.mode == nimble::session::ValidationMode::kCompatible);
+  REQUIRE(acceptor.validation_policy.verify_checksum);
   REQUIRE(!acceptor.reconnect_enabled);
+
+  const auto strict_policy = nimble::session::ValidationPolicy::Strict();
+  const auto compatible_policy = nimble::session::ValidationPolicy::Compatible();
+  const auto permissive_policy = nimble::session::ValidationPolicy::Permissive();
+  const auto raw_policy = nimble::session::ValidationPolicy::RawPassThrough();
+  REQUIRE(strict_policy.verify_checksum);
+  REQUIRE(compatible_policy.verify_checksum);
+  REQUIRE(permissive_policy.verify_checksum);
+  REQUIRE_FALSE(raw_policy.verify_checksum);
 
   REQUIRE(!nimble::runtime::TlsClientConfig{}.enabled);
   REQUIRE(!nimble::runtime::TlsServerConfig{}.enabled);
