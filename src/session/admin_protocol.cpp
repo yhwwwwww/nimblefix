@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstring>
+#include <optional>
 #include <string_view>
 
 #include "nimblefix/advanced/message_builder.h"
@@ -280,27 +281,218 @@ BuildAdminMessage(std::string_view msg_type) -> message::MessageBuilder
 }
 
 auto
-ShouldRejectValidationIssue(const ValidationPolicy& policy, const codec::ValidationIssue& issue) -> bool
+NotifyValidationWarning(std::uint64_t session_id,
+                        const codec::ValidationIssue& issue,
+                        std::string_view msg_type,
+                        ValidationCallback* callback) -> void
+{
+  if (callback == nullptr) {
+    return;
+  }
+  callback->OnValidationWarning(session_id, issue, msg_type);
+}
+
+auto
+ShouldRejectValidationIssue(const ValidationPolicy& policy,
+                            const codec::ValidationIssue& issue,
+                            std::uint64_t session_id,
+                            std::string_view msg_type,
+                            std::string_view issue_value,
+                            ValidationCallback* callback) -> bool
 {
   switch (issue.kind) {
     case codec::ValidationIssueKind::kUnknownField:
     case codec::ValidationIssueKind::kFieldNotAllowed:
-      return policy.reject_unknown_fields;
+      switch (policy.unknown_field_action) {
+        case UnknownFieldAction::kIgnore:
+          NotifyValidationWarning(session_id, issue, msg_type, callback);
+          return false;
+        case UnknownFieldAction::kLogAndProcess:
+          if (callback != nullptr && !callback->OnUnknownField(session_id, issue.tag, issue_value, msg_type)) {
+            return true;
+          }
+          NotifyValidationWarning(session_id, issue, msg_type, callback);
+          return false;
+        case UnknownFieldAction::kReject:
+        default:
+          if (policy.reject_unknown_fields) {
+            return true;
+          }
+          NotifyValidationWarning(session_id, issue, msg_type, callback);
+          return false;
+      }
     case codec::ValidationIssueKind::kTagSpecifiedWithoutAValue:
-      return policy.reject_tag_without_value;
+      if (policy.reject_tag_without_value) {
+        return true;
+      }
+      NotifyValidationWarning(session_id, issue, msg_type, callback);
+      return false;
     case codec::ValidationIssueKind::kIncorrectDataFormatForValue:
-      return policy.reject_incorrect_data_format;
+      switch (policy.malformed_field_action) {
+        case MalformedFieldAction::kIgnore:
+          NotifyValidationWarning(session_id, issue, msg_type, callback);
+          return false;
+        case MalformedFieldAction::kLog:
+          if (callback != nullptr &&
+              !callback->OnMalformedField(session_id, issue.tag, issue_value, msg_type, issue.text)) {
+            return true;
+          }
+          NotifyValidationWarning(session_id, issue, msg_type, callback);
+          return false;
+        case MalformedFieldAction::kReject:
+        default:
+          if (policy.reject_incorrect_data_format) {
+            return true;
+          }
+          NotifyValidationWarning(session_id, issue, msg_type, callback);
+          return false;
+      }
     case codec::ValidationIssueKind::kTagSpecifiedOutOfRequiredOrder:
-      return policy.reject_fields_out_of_order;
+      if (policy.reject_fields_out_of_order) {
+        return true;
+      }
+      NotifyValidationWarning(session_id, issue, msg_type, callback);
+      return false;
     case codec::ValidationIssueKind::kDuplicateField:
-      return policy.reject_duplicate_fields;
+      if (policy.reject_duplicate_fields) {
+        return true;
+      }
+      NotifyValidationWarning(session_id, issue, msg_type, callback);
+      return false;
     case codec::ValidationIssueKind::kRepeatingGroupFieldsOutOfRequiredOrder:
-      return policy.reject_fields_out_of_order;
+      if (policy.reject_fields_out_of_order) {
+        return true;
+      }
+      NotifyValidationWarning(session_id, issue, msg_type, callback);
+      return false;
     case codec::ValidationIssueKind::kIncorrectNumInGroupCount:
-      return policy.reject_invalid_group_structure;
+      if (policy.reject_invalid_group_structure) {
+        return true;
+      }
+      NotifyValidationWarning(session_id, issue, msg_type, callback);
+      return false;
+    case codec::ValidationIssueKind::kEnumValueNotAllowed:
+      if (!policy.validate_enum_values) {
+        NotifyValidationWarning(session_id, issue, msg_type, callback);
+        return false;
+      }
+      // Route enum violations through malformed_field_action when not kReject.
+      switch (policy.malformed_field_action) {
+        case MalformedFieldAction::kIgnore:
+          NotifyValidationWarning(session_id, issue, msg_type, callback);
+          return false;
+        case MalformedFieldAction::kLog:
+          if (callback != nullptr &&
+              !callback->OnMalformedField(session_id, issue.tag, issue_value, msg_type, issue.text)) {
+            return true;
+          }
+          NotifyValidationWarning(session_id, issue, msg_type, callback);
+          return false;
+        case MalformedFieldAction::kReject:
+        default:
+          return true;
+      }
     default:
       return false;
   }
+}
+
+auto
+FindFieldValue(message::MessageView view, std::uint32_t tag) -> std::optional<std::string_view>
+{
+  for (std::size_t index = 0U; index < view.field_count(); ++index) {
+    const auto field = view.field_at(index);
+    if (field.has_value() && field->tag == tag) {
+      return field->string_value;
+    }
+  }
+
+  for (std::size_t group_index = 0U; group_index < view.group_count(); ++group_index) {
+    const auto group = view.group_at(group_index);
+    if (!group.has_value()) {
+      continue;
+    }
+    for (const auto entry : *group) {
+      auto value = FindFieldValue(entry, tag);
+      if (value.has_value()) {
+        return value;
+      }
+    }
+  }
+  return std::nullopt;
+}
+
+auto
+FieldValueAllowedByEnum(const profile::NormalizedDictionaryView& dictionary,
+                        const profile::FieldDefRecord& field_def,
+                        std::string_view value) -> bool
+{
+  if (field_def.enum_count == 0U || value.empty()) {
+    return true;
+  }
+
+  const auto enum_values = dictionary.enum_values();
+  const auto begin = static_cast<std::size_t>(field_def.enum_offset);
+  const auto count = static_cast<std::size_t>(field_def.enum_count);
+  if (begin >= enum_values.size()) {
+    return true;
+  }
+
+  const auto end = std::min(begin + count, enum_values.size());
+  for (std::size_t index = begin; index < end; ++index) {
+    const auto allowed = dictionary.string_at(enum_values[index].value_offset);
+    if (allowed.has_value() && *allowed == value) {
+      return true;
+    }
+  }
+  return false;
+}
+
+auto
+FindEnumValidationIssueInView(const profile::NormalizedDictionaryView& dictionary, message::MessageView view)
+  -> std::optional<codec::ValidationIssue>
+{
+  for (std::size_t index = 0U; index < view.field_count(); ++index) {
+    const auto field = view.field_at(index);
+    if (!field.has_value()) {
+      continue;
+    }
+    const auto* field_def = dictionary.find_field(field->tag);
+    if (field_def == nullptr || FieldValueAllowedByEnum(dictionary, *field_def, field->string_value)) {
+      continue;
+    }
+    return codec::ValidationIssue{
+      .kind = codec::ValidationIssueKind::kEnumValueNotAllowed,
+      .tag = field->tag,
+      .text = "field " + std::to_string(field->tag) + " has an enum value not present in the bound dictionary",
+    };
+  }
+
+  for (std::size_t group_index = 0U; group_index < view.group_count(); ++group_index) {
+    const auto group = view.group_at(group_index);
+    if (!group.has_value()) {
+      continue;
+    }
+    for (const auto entry : *group) {
+      auto issue = FindEnumValidationIssueInView(dictionary, entry);
+      if (issue.has_value()) {
+        return issue;
+      }
+    }
+  }
+  return std::nullopt;
+}
+
+auto
+FindEnumValidationIssue(const ValidationPolicy& policy,
+                        ValidationCallback* callback,
+                        const profile::NormalizedDictionaryView& dictionary,
+                        const codec::DecodedMessageView& decoded) -> std::optional<codec::ValidationIssue>
+{
+  if (!policy.validate_enum_values && callback == nullptr) {
+    return std::nullopt;
+  }
+  return FindEnumValidationIssueInView(dictionary, decoded.message.view());
 }
 
 auto
@@ -323,6 +515,8 @@ ValidationIssueRejectReason(const codec::ValidationIssue& issue) -> std::uint32_
       return kSessionRejectRepeatingGroupFieldsOutOfRequiredOrder;
     case codec::ValidationIssueKind::kIncorrectNumInGroupCount:
       return kSessionRejectIncorrectNumInGroupCount;
+    case codec::ValidationIssueKind::kEnumValueNotAllowed:
+      return kSessionRejectValueIncorrect;
     default:
       return 0U;
   }
@@ -836,11 +1030,32 @@ AdminProtocol::ValidateAdministrativeMessage(const codec::DecodedMessageView& de
     return false;
   }
 
+  auto* validation_callback = config_.validation_callback.get();
   if (decoded.validation_issue.present() &&
-      ShouldRejectValidationIssue(config_.validation_policy, decoded.validation_issue)) {
+      ShouldRejectValidationIssue(config_.validation_policy,
+                                  decoded.validation_issue,
+                                  config_.session.session_id,
+                                  decoded.header.msg_type,
+                                  FindFieldValue(view, decoded.validation_issue.tag).value_or(std::string_view{}),
+                                  validation_callback)) {
     *ref_tag_id = decoded.validation_issue.tag;
     *reject_reason = ValidationIssueRejectReason(decoded.validation_issue);
     *text = decoded.validation_issue.text;
+    *disconnect = decoded.header.msg_type == "A";
+    return false;
+  }
+
+  auto enum_issue = FindEnumValidationIssue(config_.validation_policy, validation_callback, dictionary_, decoded);
+  if (enum_issue.has_value() &&
+      ShouldRejectValidationIssue(config_.validation_policy,
+                                  *enum_issue,
+                                  config_.session.session_id,
+                                  decoded.header.msg_type,
+                                  FindFieldValue(view, enum_issue->tag).value_or(std::string_view{}),
+                                  validation_callback)) {
+    *ref_tag_id = enum_issue->tag;
+    *reject_reason = ValidationIssueRejectReason(*enum_issue);
+    *text = enum_issue->text;
     *disconnect = decoded.header.msg_type == "A";
     return false;
   }
@@ -953,11 +1168,31 @@ AdminProtocol::ValidateApplicationMessage(const codec::DecodedMessageView& decod
     return false;
   }
 
+  auto* validation_callback = config_.validation_callback.get();
   if (decoded.validation_issue.present() &&
-      ShouldRejectValidationIssue(config_.validation_policy, decoded.validation_issue)) {
+      ShouldRejectValidationIssue(config_.validation_policy,
+                                  decoded.validation_issue,
+                                  config_.session.session_id,
+                                  decoded.header.msg_type,
+                                  FindFieldValue(view, decoded.validation_issue.tag).value_or(std::string_view{}),
+                                  validation_callback)) {
     *ref_tag_id = decoded.validation_issue.tag;
     *reject_reason = ValidationIssueRejectReason(decoded.validation_issue);
     *text = decoded.validation_issue.text;
+    return false;
+  }
+
+  auto enum_issue = FindEnumValidationIssue(config_.validation_policy, validation_callback, dictionary_, decoded);
+  if (enum_issue.has_value() &&
+      ShouldRejectValidationIssue(config_.validation_policy,
+                                  *enum_issue,
+                                  config_.session.session_id,
+                                  decoded.header.msg_type,
+                                  FindFieldValue(view, enum_issue->tag).value_or(std::string_view{}),
+                                  validation_callback)) {
+    *ref_tag_id = enum_issue->tag;
+    *reject_reason = ValidationIssueRejectReason(*enum_issue);
+    *text = enum_issue->text;
     return false;
   }
 

@@ -94,7 +94,9 @@ ValidationPolicyEquals(const session::ValidationPolicy& left, const session::Val
          left.reject_incorrect_data_format == right.reject_incorrect_data_format &&
          left.reject_fields_out_of_order == right.reject_fields_out_of_order &&
          left.reject_invalid_group_structure == right.reject_invalid_group_structure &&
-         left.verify_checksum == right.verify_checksum;
+         left.verify_checksum == right.verify_checksum && left.unknown_field_action == right.unknown_field_action &&
+         left.malformed_field_action == right.malformed_field_action &&
+         left.validate_enum_values == right.validate_enum_values;
 }
 
 auto
@@ -168,6 +170,7 @@ CounterpartyEquals(const CounterpartyConfig& left, const CounterpartyConfig& rig
          left.durable_use_system_timezone == right.durable_use_system_timezone &&
          left.recovery_mode == right.recovery_mode && left.dispatch_mode == right.dispatch_mode &&
          ValidationPolicyEquals(left.validation_policy, right.validation_policy) &&
+         left.validation_callback.get() == right.validation_callback.get() &&
          left.reset_seq_num_on_logon == right.reset_seq_num_on_logon &&
          left.reset_seq_num_on_logout == right.reset_seq_num_on_logout &&
          left.reset_seq_num_on_disconnect == right.reset_seq_num_on_disconnect &&
@@ -254,6 +257,9 @@ CounterpartyChangedFields(const CounterpartyConfig& current, const CounterpartyC
   if (!ValidationPolicyEquals(current.validation_policy, proposed.validation_policy)) {
     fields.emplace_back("validation_policy");
   }
+  if (current.validation_callback.get() != proposed.validation_callback.get()) {
+    fields.emplace_back("validation_callback");
+  }
   AppendFieldIfChanged(
     current.reset_seq_num_on_logon, proposed.reset_seq_num_on_logon, "reset_seq_num_on_logon", fields);
   AppendFieldIfChanged(
@@ -302,6 +308,9 @@ CounterpartyRequiresRemoveAddFields(const CounterpartyConfig& current, const Cou
   }
   if (!ValidationPolicyEquals(current.validation_policy, proposed.validation_policy)) {
     fields.emplace_back("validation_policy");
+  }
+  if (current.validation_callback.get() != proposed.validation_callback.get()) {
+    fields.emplace_back("validation_callback");
   }
   return fields;
 }

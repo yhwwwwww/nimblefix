@@ -1165,7 +1165,10 @@ ConfigToText(const EngineConfig& config) -> std::string
         << JoinCsv(counterparty.supported_app_msg_types) << '|'
         << BoolToText(counterparty.application_messages_available) << '|'
         << JoinCsv(counterparty.contract_service_subsets) << '|'
-        << codec::TimestampResolutionName(counterparty.timestamp_resolution) << '\n';
+        << codec::TimestampResolutionName(counterparty.timestamp_resolution) << '|'
+        << session::UnknownFieldActionName(counterparty.validation_policy.unknown_field_action) << '|'
+        << session::MalformedFieldActionName(counterparty.validation_policy.malformed_field_action) << '|'
+        << BoolToText(counterparty.validation_policy.validate_enum_values) << '\n';
   }
 
   return out.str();

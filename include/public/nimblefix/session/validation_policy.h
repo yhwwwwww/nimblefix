@@ -18,6 +18,28 @@ enum class ValidationMode : std::uint32_t
   kRawPassThrough,
 };
 
+/// Per-field action for unknown tag encounters.
+enum class UnknownFieldAction : std::uint32_t
+{
+  // Send BusinessMessageReject (existing behavior for strict).
+  kReject = 0,
+  // Silently accept the field.
+  kIgnore = 1,
+  // Accept and surface via ValidationCallback.
+  kLogAndProcess = 2,
+};
+
+/// Per-field action for malformed value encounters.
+enum class MalformedFieldAction : std::uint32_t
+{
+  // Reject the message.
+  kReject = 0,
+  // Silently accept.
+  kIgnore = 1,
+  // Accept and surface via ValidationCallback.
+  kLog = 2,
+};
+
 /// Inbound FIX validation contract for one session.
 ///
 /// Design intent: keep the coarse mode (`Strict`/`Compatible`/...) visible for
@@ -52,6 +74,12 @@ struct ValidationPolicy
   bool reject_invalid_group_structure{ true };
   // Verify inbound CheckSum(10) against the byte sum through the field before it.
   bool verify_checksum{ true };
+  // Fine-grained unknown field handling (overrides reject_unknown_fields when not kReject).
+  UnknownFieldAction unknown_field_action{ UnknownFieldAction::kReject };
+  // Fine-grained malformed field handling (overrides reject_incorrect_data_format when not kReject).
+  MalformedFieldAction malformed_field_action{ MalformedFieldAction::kReject };
+  // When false, skip dictionary-declared enum value validation during decode.
+  bool validate_enum_values{ true };
 
   [[nodiscard]] static auto Strict() -> ValidationPolicy
   {
@@ -70,6 +98,9 @@ struct ValidationPolicy
       .reject_fields_out_of_order = true,
       .reject_invalid_group_structure = true,
       .verify_checksum = true,
+      .unknown_field_action = UnknownFieldAction::kReject,
+      .malformed_field_action = MalformedFieldAction::kReject,
+      .validate_enum_values = true,
     };
   }
 
@@ -90,6 +121,9 @@ struct ValidationPolicy
       .reject_fields_out_of_order = false,
       .reject_invalid_group_structure = true,
       .verify_checksum = true,
+      .unknown_field_action = UnknownFieldAction::kIgnore,
+      .malformed_field_action = MalformedFieldAction::kReject,
+      .validate_enum_values = true,
     };
   }
 
@@ -110,6 +144,9 @@ struct ValidationPolicy
       .reject_fields_out_of_order = false,
       .reject_invalid_group_structure = false,
       .verify_checksum = true,
+      .unknown_field_action = UnknownFieldAction::kIgnore,
+      .malformed_field_action = MalformedFieldAction::kIgnore,
+      .validate_enum_values = false,
     };
   }
 
@@ -130,9 +167,40 @@ struct ValidationPolicy
       .reject_fields_out_of_order = false,
       .reject_invalid_group_structure = false,
       .verify_checksum = false,
+      .unknown_field_action = UnknownFieldAction::kIgnore,
+      .malformed_field_action = MalformedFieldAction::kIgnore,
+      .validate_enum_values = false,
     };
   }
 };
+
+/// Return a stable lowercase name for one unknown-field action.
+[[nodiscard]] inline auto
+UnknownFieldActionName(UnknownFieldAction action) -> std::string_view
+{
+  switch (action) {
+    case UnknownFieldAction::kIgnore:
+      return "ignore";
+    case UnknownFieldAction::kLogAndProcess:
+      return "log-and-process";
+    default:
+      return "reject";
+  }
+}
+
+/// Return a stable lowercase name for one malformed-field action.
+[[nodiscard]] inline auto
+MalformedFieldActionName(MalformedFieldAction action) -> std::string_view
+{
+  switch (action) {
+    case MalformedFieldAction::kIgnore:
+      return "ignore";
+    case MalformedFieldAction::kLog:
+      return "log";
+    default:
+      return "reject";
+  }
+}
 
 /// Build one preset validation policy.
 ///

@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -12,6 +13,7 @@
 #include "nimblefix/session/resend_recovery.h"
 #include "nimblefix/session/session_core.h"
 #include "nimblefix/session/transport_profile.h"
+#include "nimblefix/session/validation_callback.h"
 #include "nimblefix/session/validation_policy.h"
 #include "nimblefix/store/durable_batch_store.h"
 
@@ -260,6 +262,10 @@ struct CounterpartyConfig
   session::RecoveryMode recovery_mode{ session::RecoveryMode::kMemoryOnly };
   AppDispatchMode dispatch_mode{ AppDispatchMode::kInline };
   session::ValidationPolicy validation_policy{ session::ValidationPolicy::Strict() };
+  // Optional per-session validation callback. When set, validation events
+  // for unknown/malformed fields are routed to this callback instead of
+  // being silently rejected or accepted.
+  std::shared_ptr<session::ValidationCallback> validation_callback;
   // Session reset and refresh behavior.
   bool reset_seq_num_on_logon{ false };
   bool reset_seq_num_on_logout{ false };

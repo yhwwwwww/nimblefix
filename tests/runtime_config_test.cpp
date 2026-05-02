@@ -144,6 +144,12 @@ RequireSameCoreConfig(const nimble::runtime::EngineConfig& expected, const nimbl
     REQUIRE(actual_counterparty.validation_policy.mode == expected_counterparty.validation_policy.mode);
     REQUIRE(actual_counterparty.validation_policy.verify_checksum ==
             expected_counterparty.validation_policy.verify_checksum);
+    REQUIRE(actual_counterparty.validation_policy.unknown_field_action ==
+            expected_counterparty.validation_policy.unknown_field_action);
+    REQUIRE(actual_counterparty.validation_policy.malformed_field_action ==
+            expected_counterparty.validation_policy.malformed_field_action);
+    REQUIRE(actual_counterparty.validation_policy.validate_enum_values ==
+            expected_counterparty.validation_policy.validate_enum_values);
     REQUIRE(actual_counterparty.reset_seq_num_on_logon == expected_counterparty.reset_seq_num_on_logon);
     REQUIRE(actual_counterparty.reset_seq_num_on_logout == expected_counterparty.reset_seq_num_on_logout);
     REQUIRE(actual_counterparty.reset_seq_num_on_disconnect == expected_counterparty.reset_seq_num_on_disconnect);
@@ -568,6 +574,8 @@ TEST_CASE("ConfigToText round-trip", "[runtime-config]")
       .validation_policy(nimble::session::ValidationPolicy::Compatible())
       .reconnect(250U, 2000U, 7U)
       .build();
+  initiator.validation_policy.unknown_field_action = nimble::session::UnknownFieldAction::kLogAndProcess;
+  initiator.validation_policy.malformed_field_action = nimble::session::MalformedFieldAction::kLog;
   initiator.durable_flush_threshold = 4U;
   initiator.durable_rollover_mode = nimble::store::DurableStoreRolloverMode::kLocalTime;
   initiator.durable_archive_limit = 9U;
@@ -622,8 +630,8 @@ TEST_CASE("ConfigToText round-trip", "[runtime-config]")
   const auto text = nimble::runtime::ConfigToText(config);
   REQUIRE(text.find("listener|main|127.0.0.1|9901|0") != std::string::npos);
   REQUIRE(text.find("counterparty|initiator-a|1001|4400|FIX.4.4|BUY1|SELL1|durable|") != std::string::npos);
-  REQUIRE(text.find("|D,8|false||nanoseconds") != std::string::npos);
-  REQUIRE(text.find("|true||seconds") != std::string::npos);
+  REQUIRE(text.find("|D,8|false||nanoseconds|log-and-process|log|true") != std::string::npos);
+  REQUIRE(text.find("|true||seconds|ignore|ignore|false") != std::string::npos);
 
   const auto parsed = nimble::runtime::LoadEngineConfigText(text);
   REQUIRE(parsed.ok());
@@ -706,6 +714,11 @@ TEST_CASE("runtime-config", "[runtime-config]")
   REQUIRE(config.value().counterparties.size() == 5U);
   REQUIRE(config.value().counterparties[0].validation_policy.mode == nimble::session::ValidationMode::kCompatible);
   REQUIRE(config.value().counterparties[0].validation_policy.verify_checksum);
+  REQUIRE(config.value().counterparties[0].validation_policy.unknown_field_action ==
+          nimble::session::UnknownFieldAction::kIgnore);
+  REQUIRE(config.value().counterparties[0].validation_policy.malformed_field_action ==
+          nimble::session::MalformedFieldAction::kReject);
+  REQUIRE(config.value().counterparties[0].validation_policy.validate_enum_values);
   REQUIRE(config.value().counterparties[0].timestamp_resolution == nimble::codec::TimestampResolution::kMilliseconds);
   REQUIRE(config.value().counterparties[1].store_mode == nimble::runtime::StoreMode::kMmap);
   REQUIRE(config.value().counterparties[1].store_path == store_path);
@@ -926,6 +939,18 @@ TEST_CASE("runtime-config", "[runtime-config]")
   REQUIRE(compatible_policy.verify_checksum);
   REQUIRE(permissive_policy.verify_checksum);
   REQUIRE_FALSE(raw_policy.verify_checksum);
+  REQUIRE(strict_policy.unknown_field_action == nimble::session::UnknownFieldAction::kReject);
+  REQUIRE(strict_policy.malformed_field_action == nimble::session::MalformedFieldAction::kReject);
+  REQUIRE(strict_policy.validate_enum_values);
+  REQUIRE(compatible_policy.unknown_field_action == nimble::session::UnknownFieldAction::kIgnore);
+  REQUIRE(compatible_policy.malformed_field_action == nimble::session::MalformedFieldAction::kReject);
+  REQUIRE(compatible_policy.validate_enum_values);
+  REQUIRE(permissive_policy.unknown_field_action == nimble::session::UnknownFieldAction::kIgnore);
+  REQUIRE(permissive_policy.malformed_field_action == nimble::session::MalformedFieldAction::kIgnore);
+  REQUIRE_FALSE(permissive_policy.validate_enum_values);
+  REQUIRE(raw_policy.unknown_field_action == nimble::session::UnknownFieldAction::kIgnore);
+  REQUIRE(raw_policy.malformed_field_action == nimble::session::MalformedFieldAction::kIgnore);
+  REQUIRE_FALSE(raw_policy.validate_enum_values);
 
   REQUIRE(!nimble::runtime::TlsClientConfig{}.enabled);
   REQUIRE(!nimble::runtime::TlsServerConfig{}.enabled);

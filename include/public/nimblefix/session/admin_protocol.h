@@ -19,6 +19,7 @@
 #include "nimblefix/session/session_core.h"
 #include "nimblefix/session/session_send_envelope.h"
 #include "nimblefix/session/transport_profile.h"
+#include "nimblefix/session/validation_callback.h"
 #include "nimblefix/session/validation_policy.h"
 
 namespace nimble::profile {
@@ -523,6 +524,7 @@ struct AdminProtocolConfig
   bool refresh_on_logon{ false };
   bool send_next_expected_msg_seq_num{ false };
   ValidationPolicy validation_policy{ ValidationPolicy::Strict() };
+  std::shared_ptr<ValidationCallback> validation_callback;
 };
 
 /// Single-session FIX admin state machine and frame finalizer.

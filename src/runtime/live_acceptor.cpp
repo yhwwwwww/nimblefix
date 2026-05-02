@@ -163,6 +163,7 @@ MakeProtocolConfig(const CounterpartyConfig& counterparty) -> session::AdminProt
     .refresh_on_logon = counterparty.refresh_on_logon,
     .send_next_expected_msg_seq_num = counterparty.send_next_expected_msg_seq_num,
     .validation_policy = counterparty.validation_policy,
+    .validation_callback = counterparty.validation_callback,
   };
 }
 

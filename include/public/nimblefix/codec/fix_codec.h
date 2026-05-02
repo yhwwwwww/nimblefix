@@ -33,6 +33,7 @@ enum class ValidationIssueKind : std::uint32_t
   kIncorrectDataFormatForValue,
   kTagSpecifiedOutOfRequiredOrder,
   kRepeatingGroupFieldsOutOfRequiredOrder,
+  kEnumValueNotAllowed,
 };
 
 struct ValidationIssue

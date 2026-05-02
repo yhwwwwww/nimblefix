@@ -1,10 +1,12 @@
 #include <chrono>
+#include <memory>
+#include <string>
 
 #include <catch2/catch_test_macros.hpp>
 
+#include "nimblefix/advanced/message_builder.h"
 #include "nimblefix/codec/fix_codec.h"
 #include "nimblefix/codec/fix_tags.h"
-#include "nimblefix/advanced/message_builder.h"
 #include "nimblefix/session/admin_protocol.h"
 #include "nimblefix/store/memory_store.h"
 
@@ -13,6 +15,109 @@
 namespace {
 
 using namespace nimble::codec::tags;
+
+class RecordingValidationCallback final : public nimble::session::ValidationCallback
+{
+public:
+  bool accept_unknown{ true };
+  bool accept_malformed{ true };
+  std::uint32_t unknown_count{ 0U };
+  std::uint32_t malformed_count{ 0U };
+  std::uint32_t warning_count{ 0U };
+  std::uint64_t last_session_id{ 0U };
+  std::uint32_t last_tag{ 0U };
+  std::string last_value;
+  std::string last_msg_type;
+  std::string last_issue_text;
+
+  auto OnUnknownField(std::uint64_t session_id, std::uint32_t tag, std::string_view value, std::string_view msg_type)
+    -> bool override
+  {
+    ++unknown_count;
+    last_session_id = session_id;
+    last_tag = tag;
+    last_value = std::string(value);
+    last_msg_type = std::string(msg_type);
+    return accept_unknown;
+  }
+
+  auto OnMalformedField(std::uint64_t session_id,
+                        std::uint32_t tag,
+                        std::string_view value,
+                        std::string_view msg_type,
+                        std::string_view issue_text) -> bool override
+  {
+    ++malformed_count;
+    last_session_id = session_id;
+    last_tag = tag;
+    last_value = std::string(value);
+    last_msg_type = std::string(msg_type);
+    last_issue_text = std::string(issue_text);
+    return accept_malformed;
+  }
+
+  auto OnValidationWarning(std::uint64_t session_id,
+                           const nimble::codec::ValidationIssue& issue,
+                           std::string_view msg_type) -> void override
+  {
+    ++warning_count;
+    last_session_id = session_id;
+    last_tag = issue.tag;
+    last_msg_type = std::string(msg_type);
+    last_issue_text = issue.text;
+  }
+};
+
+auto
+MakeAcceptorProtocolConfig(std::uint64_t session_id,
+                           const nimble::profile::NormalizedDictionaryView& dictionary,
+                           nimble::session::ValidationPolicy validation_policy,
+                           std::shared_ptr<nimble::session::ValidationCallback> validation_callback = {})
+  -> nimble::session::AdminProtocolConfig
+{
+  return nimble::session::AdminProtocolConfig{
+    .session =
+      nimble::session::SessionConfig{
+        .session_id = session_id,
+        .key = nimble::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
+        .profile_id = dictionary.profile().header().profile_id,
+        .heartbeat_interval_seconds = 30U,
+        .is_initiator = false,
+      },
+    .begin_string = "FIX.4.4",
+    .sender_comp_id = "SELL",
+    .target_comp_id = "BUY",
+    .heartbeat_interval_seconds = 30U,
+    .validation_policy = validation_policy,
+    .validation_callback = std::move(validation_callback),
+  };
+}
+
+auto
+InboundApplicationFrame(std::string_view body_fields) -> std::vector<std::byte>
+{
+  return ::nimble::tests::EncodeFixFrame(body_fields);
+}
+
+auto
+RequireAcceptedApplication(nimble::session::ProtocolEvent event) -> void
+{
+  REQUIRE(event.outbound_frames.empty());
+  REQUIRE(event.application_messages.size() == 1U);
+}
+
+auto
+RequireSessionReject(const nimble::profile::NormalizedDictionaryView& dictionary,
+                     nimble::session::ProtocolEvent event,
+                     std::uint32_t ref_tag_id) -> void
+{
+  REQUIRE(event.outbound_frames.size() == 1U);
+  REQUIRE(event.application_messages.empty());
+  auto decoded = nimble::codec::DecodeFixMessage(event.outbound_frames.front().bytes, dictionary);
+  REQUIRE(decoded.ok());
+  REQUIRE(decoded.value().header.msg_type == "3");
+  REQUIRE(decoded.value().message.view().get_int(kRefTagID).value() == ref_tag_id);
+}
 
 auto
 EncodeInboundFrame(const nimble::message::Message& message,
@@ -3730,4 +3835,157 @@ TEST_CASE("Reject received processed silently", "[admin-protocol]")
 
   const auto after = protocol.session().Snapshot();
   REQUIRE(after.next_in_seq == 3U);
+}
+
+TEST_CASE("admin protocol validation policy controls unknown fields", "[admin-protocol][validation-policy]")
+{
+  auto dictionary = nimble::tests::LoadFix44DictionaryView();
+  if (!dictionary.ok()) {
+    SKIP("FIX44 artifact not available: " << dictionary.status().message());
+  }
+
+  const auto inbound = InboundApplicationFrame("35=D|34=2|49=BUY|56=SELL|52=20260402-12:00:00.000|11=ORD1|55="
+                                               "AAPL|54=1|60=20260402-12:00:00.000|40=1|9999=BAD|");
+
+  {
+    nimble::store::MemorySessionStore store;
+    nimble::session::AdminProtocol protocol(
+      MakeAcceptorProtocolConfig(6101U, dictionary.value(), nimble::session::ValidationPolicy::Strict()),
+      dictionary.value(),
+      &store);
+    REQUIRE(protocol.OnTransportConnected(1U).ok());
+    REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
+
+    auto event = protocol.OnInbound(inbound, 10U);
+    REQUIRE(event.ok());
+    RequireSessionReject(dictionary.value(), event.value(), 9999U);
+  }
+
+  {
+    nimble::store::MemorySessionStore store;
+    nimble::session::AdminProtocol protocol(
+      MakeAcceptorProtocolConfig(6102U, dictionary.value(), nimble::session::ValidationPolicy::Compatible()),
+      dictionary.value(),
+      &store);
+    REQUIRE(protocol.OnTransportConnected(1U).ok());
+    REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
+
+    auto event = protocol.OnInbound(inbound, 10U);
+    REQUIRE(event.ok());
+    RequireAcceptedApplication(std::move(event).value());
+  }
+}
+
+TEST_CASE("admin protocol validation callback handles log-and-process unknown fields",
+          "[admin-protocol][validation-policy]")
+{
+  auto dictionary = nimble::tests::LoadFix44DictionaryView();
+  if (!dictionary.ok()) {
+    SKIP("FIX44 artifact not available: " << dictionary.status().message());
+  }
+
+  auto policy = nimble::session::ValidationPolicy::Strict();
+  policy.unknown_field_action = nimble::session::UnknownFieldAction::kLogAndProcess;
+  auto callback = std::make_shared<RecordingValidationCallback>();
+
+  nimble::store::MemorySessionStore store;
+  nimble::session::AdminProtocol protocol(
+    MakeAcceptorProtocolConfig(6103U, dictionary.value(), policy, callback), dictionary.value(), &store);
+  REQUIRE(protocol.OnTransportConnected(1U).ok());
+  REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
+
+  const auto inbound = InboundApplicationFrame("35=D|34=2|49=BUY|56=SELL|52=20260402-12:00:00.000|11=ORD1|55="
+                                               "AAPL|54=1|60=20260402-12:00:00.000|40=1|9999=BAD|");
+  auto event = protocol.OnInbound(inbound, 10U);
+  REQUIRE(event.ok());
+  RequireAcceptedApplication(std::move(event).value());
+  REQUIRE(callback->unknown_count == 1U);
+  REQUIRE(callback->warning_count == 1U);
+  REQUIRE(callback->last_session_id == 6103U);
+  REQUIRE(callback->last_tag == 9999U);
+  REQUIRE(callback->last_value == "BAD");
+  REQUIRE(callback->last_msg_type == "D");
+}
+
+TEST_CASE("admin protocol validation policy controls malformed fields", "[admin-protocol][validation-policy]")
+{
+  auto dictionary = nimble::tests::LoadFix44DictionaryView();
+  if (!dictionary.ok()) {
+    SKIP("FIX44 artifact not available: " << dictionary.status().message());
+  }
+
+  const auto inbound = InboundApplicationFrame("35=D|34=2|49=BUY|56=SELL|52=20260402-12:00:00.000|11=ORD1|55="
+                                               "AAPL|54=X|60=20260402-12:00:00.000|40=1|");
+
+  {
+    auto policy = nimble::session::ValidationPolicy::Permissive();
+    nimble::store::MemorySessionStore store;
+    nimble::session::AdminProtocol protocol(
+      MakeAcceptorProtocolConfig(6104U, dictionary.value(), policy), dictionary.value(), &store);
+    REQUIRE(protocol.OnTransportConnected(1U).ok());
+    REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
+
+    auto event = protocol.OnInbound(inbound, 10U);
+    REQUIRE(event.ok());
+    RequireAcceptedApplication(std::move(event).value());
+  }
+
+  {
+    auto policy = nimble::session::ValidationPolicy::Strict();
+    policy.malformed_field_action = nimble::session::MalformedFieldAction::kLog;
+    auto callback = std::make_shared<RecordingValidationCallback>();
+    nimble::store::MemorySessionStore store;
+    nimble::session::AdminProtocol protocol(
+      MakeAcceptorProtocolConfig(6105U, dictionary.value(), policy, callback), dictionary.value(), &store);
+    REQUIRE(protocol.OnTransportConnected(1U).ok());
+    REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
+
+    auto event = protocol.OnInbound(inbound, 10U);
+    REQUIRE(event.ok());
+    RequireAcceptedApplication(std::move(event).value());
+    REQUIRE(callback->malformed_count == 1U);
+    REQUIRE(callback->warning_count == 1U);
+    REQUIRE(callback->last_session_id == 6105U);
+    REQUIRE(callback->last_tag == kSide);
+    REQUIRE(callback->last_value == "X");
+    REQUIRE(callback->last_msg_type == "D");
+  }
+}
+
+TEST_CASE("admin protocol validation policy controls enum validation", "[admin-protocol][validation-policy]")
+{
+  auto dictionary = nimble::tests::LoadFix44DictionaryView();
+  if (!dictionary.ok()) {
+    SKIP("FIX44 artifact not available: " << dictionary.status().message());
+  }
+
+  const auto inbound = InboundApplicationFrame("35=D|34=2|49=BUY|56=SELL|52=20260402-12:00:00.000|11=ORD1|55="
+                                               "AAPL|54=Z|60=20260402-12:00:00.000|40=1|");
+
+  {
+    auto policy = nimble::session::ValidationPolicy::Strict();
+    nimble::store::MemorySessionStore store;
+    nimble::session::AdminProtocol protocol(
+      MakeAcceptorProtocolConfig(6106U, dictionary.value(), policy), dictionary.value(), &store);
+    REQUIRE(protocol.OnTransportConnected(1U).ok());
+    REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
+
+    auto event = protocol.OnInbound(inbound, 10U);
+    REQUIRE(event.ok());
+    RequireSessionReject(dictionary.value(), event.value(), kSide);
+  }
+
+  {
+    auto policy = nimble::session::ValidationPolicy::Strict();
+    policy.validate_enum_values = false;
+    nimble::store::MemorySessionStore store;
+    nimble::session::AdminProtocol protocol(
+      MakeAcceptorProtocolConfig(6107U, dictionary.value(), policy), dictionary.value(), &store);
+    REQUIRE(protocol.OnTransportConnected(1U).ok());
+    REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
+
+    auto event = protocol.OnInbound(inbound, 10U);
+    REQUIRE(event.ok());
+    RequireAcceptedApplication(std::move(event).value());
+  }
 }

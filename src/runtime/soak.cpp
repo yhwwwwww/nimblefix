@@ -581,6 +581,8 @@ RunSoak(const SoakConfig& config) -> base::Result<SoakReport>
         .default_appl_ver_id = harness.counterparty.session.default_appl_ver_id,
         .heartbeat_interval_seconds = harness.counterparty.session.heartbeat_interval_seconds,
         .timestamp_resolution = harness.counterparty.timestamp_resolution,
+        .validation_policy = harness.counterparty.validation_policy,
+        .validation_callback = harness.counterparty.validation_callback,
       },
       dictionary.value(),
       &harness.store);

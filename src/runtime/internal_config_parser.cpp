@@ -85,8 +85,11 @@ constexpr std::size_t kSupportedAppMsgTypes = 44U;
 constexpr std::size_t kApplicationMessagesAvailable = 45U;
 constexpr std::size_t kContractServiceSubsets = 46U;
 constexpr std::size_t kTimestampResolution = 47U;
+constexpr std::size_t kUnknownFieldAction = 48U;
+constexpr std::size_t kMalformedFieldAction = 49U;
+constexpr std::size_t kValidateEnumValues = 50U;
 constexpr std::size_t kMinFieldCount = kIsInitiator + 1U;
-constexpr std::size_t kMaxFieldCount = kTimestampResolution + 1U;
+constexpr std::size_t kMaxFieldCount = kValidateEnumValues + 1U;
 } // namespace counterparty_columns
 
 auto
@@ -429,6 +432,38 @@ ParseValidationMode(std::string_view token) -> base::Result<session::ValidationM
     return session::ValidationMode::kRawPassThrough;
   }
   return base::Status::InvalidArgument("unknown validation mode in runtime config");
+}
+
+auto
+ParseUnknownFieldAction(std::string_view token) -> base::Result<session::UnknownFieldAction>
+{
+  const auto value = Lowercase(Trim(token));
+  if (value == "reject") {
+    return session::UnknownFieldAction::kReject;
+  }
+  if (value == "ignore") {
+    return session::UnknownFieldAction::kIgnore;
+  }
+  if (value == "log-and-process" || value == "log_and_process") {
+    return session::UnknownFieldAction::kLogAndProcess;
+  }
+  return base::Status::InvalidArgument("unknown unknown_field_action in runtime config");
+}
+
+auto
+ParseMalformedFieldAction(std::string_view token) -> base::Result<session::MalformedFieldAction>
+{
+  const auto value = Lowercase(Trim(token));
+  if (value == "reject") {
+    return session::MalformedFieldAction::kReject;
+  }
+  if (value == "ignore") {
+    return session::MalformedFieldAction::kIgnore;
+  }
+  if (value == "log") {
+    return session::MalformedFieldAction::kLog;
+  }
+  return base::Status::InvalidArgument("unknown malformed_field_action in runtime config");
 }
 
 auto
@@ -927,6 +962,31 @@ LoadEngineConfigText(std::string_view text, const std::filesystem::path& base_di
       if (!timestamp_resolution.ok()) {
         return timestamp_resolution.status();
       }
+      auto validation_policy = session::MakeValidationPolicy(validation_mode.value());
+      if (parts.size() > counterparty_columns::kUnknownFieldAction &&
+          !Trim(parts[counterparty_columns::kUnknownFieldAction]).empty()) {
+        auto unknown_field_action = ParseUnknownFieldAction(parts[counterparty_columns::kUnknownFieldAction]);
+        if (!unknown_field_action.ok()) {
+          return unknown_field_action.status();
+        }
+        validation_policy.unknown_field_action = unknown_field_action.value();
+      }
+      if (parts.size() > counterparty_columns::kMalformedFieldAction &&
+          !Trim(parts[counterparty_columns::kMalformedFieldAction]).empty()) {
+        auto malformed_field_action = ParseMalformedFieldAction(parts[counterparty_columns::kMalformedFieldAction]);
+        if (!malformed_field_action.ok()) {
+          return malformed_field_action.status();
+        }
+        validation_policy.malformed_field_action = malformed_field_action.value();
+      }
+      if (parts.size() > counterparty_columns::kValidateEnumValues &&
+          !Trim(parts[counterparty_columns::kValidateEnumValues]).empty()) {
+        auto validate_enum_values = ParseBool(parts[counterparty_columns::kValidateEnumValues]);
+        if (!validate_enum_values.ok()) {
+          return validate_enum_values.status();
+        }
+        validation_policy.validate_enum_values = validate_enum_values.value();
+      }
       auto heartbeat = ParseInteger<std::uint32_t>(parts[counterparty_columns::kHeartbeatIntervalSeconds],
                                                    "heartbeat_interval_seconds");
       if (!heartbeat.ok()) {
@@ -971,7 +1031,7 @@ LoadEngineConfigText(std::string_view text, const std::filesystem::path& base_di
         .durable_use_system_timezone = durable_use_system_tz.value(),
         .recovery_mode = recovery_mode.value(),
         .dispatch_mode = dispatch_mode.value(),
-        .validation_policy = session::MakeValidationPolicy(validation_mode.value()),
+        .validation_policy = validation_policy,
         .reset_seq_num_on_logon = reset_seq_num_on_logon.value(),
         .reset_seq_num_on_logout = reset_seq_num_on_logout.value(),
         .reset_seq_num_on_disconnect = reset_seq_num_on_disconnect.value(),

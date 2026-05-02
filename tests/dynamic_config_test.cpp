@@ -2,15 +2,20 @@
 
 #include <algorithm>
 #include <filesystem>
+#include <memory>
 #include <string>
 #include <string_view>
 
 #include "nimblefix/runtime/dynamic_config.h"
 #include "nimblefix/runtime/engine.h"
+#include "nimblefix/session/validation_callback.h"
 
 namespace {
 
 constexpr std::uint64_t kFix44ProfileId = 4400U;
+
+class DynamicConfigValidationCallback final : public nimble::session::ValidationCallback
+{};
 
 auto
 Fix44ArtifactPath() -> std::filesystem::path
@@ -216,6 +221,21 @@ TEST_CASE("compute config delta detects timestamp resolution change", "[dynamic-
   });
   REQUIRE(it != delta.changes.end());
   REQUIRE(it->description.find("timestamp_resolution") != std::string::npos);
+}
+
+TEST_CASE("compute config delta compares validation callback identity", "[dynamic-config]")
+{
+  auto current = MakeEngineConfig({ MakeCounterparty(1U, "venue-a") });
+  auto proposed = current;
+  proposed.counterparties.front().validation_callback = std::make_shared<DynamicConfigValidationCallback>();
+
+  const auto delta = nimble::runtime::ComputeConfigDelta(current, proposed);
+  REQUIRE(HasChange(delta, nimble::runtime::ConfigChangeKind::kModifyCounterparty, 1U));
+  const auto it = std::find_if(delta.changes.begin(), delta.changes.end(), [](const auto& change) {
+    return change.kind == nimble::runtime::ConfigChangeKind::kModifyCounterparty && change.session_id == 1U;
+  });
+  REQUIRE(it != delta.changes.end());
+  REQUIRE(it->description.find("validation_callback") != std::string::npos);
 }
 
 TEST_CASE("engine apply config skips restart-required changes", "[dynamic-config]")
