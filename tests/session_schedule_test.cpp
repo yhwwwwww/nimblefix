@@ -45,6 +45,21 @@ MakeWeeklySchedule() -> nimble::runtime::SessionScheduleConfig
 }
 
 auto
+MakeChainedSchedule() -> nimble::runtime::SessionScheduleConfig
+{
+  nimble::runtime::SessionScheduleConfig schedule;
+  schedule.segments.push_back(nimble::runtime::SessionScheduleSegment{
+    .start_time = nimble::runtime::SessionTimeOfDay{ 1U, 0U, 0U },
+    .end_time = nimble::runtime::SessionTimeOfDay{ 9U, 0U, 0U },
+  });
+  schedule.segments.push_back(nimble::runtime::SessionScheduleSegment{
+    .start_time = nimble::runtime::SessionTimeOfDay{ 14U, 0U, 0U },
+    .end_time = nimble::runtime::SessionTimeOfDay{ 21U, 0U, 0U },
+  });
+  return schedule;
+}
+
+auto
 MakeCounterparty(std::uint64_t session_id = 1001U) -> nimble::runtime::CounterpartyConfig
 {
   return nimble::runtime::CounterpartyConfigBuilder::Initiator(
@@ -168,6 +183,34 @@ TEST_CASE("next session window start outside window", "[session-schedule]")
           MakeUtcNs(2026, 7, 7, 9, 0, 0));
 }
 
+TEST_CASE("chained schedule two non-overlapping segments", "[session-schedule]")
+{
+  const auto schedule = MakeChainedSchedule();
+
+  REQUIRE(nimble::runtime::IsWithinSessionWindow(schedule, MakeUtcNs(2026, 7, 6, 2, 0, 0)));
+  REQUIRE(nimble::runtime::IsWithinSessionWindow(schedule, MakeUtcNs(2026, 7, 6, 15, 0, 0)));
+  REQUIRE(!nimble::runtime::IsWithinSessionWindow(schedule, MakeUtcNs(2026, 7, 6, 10, 0, 0)));
+  REQUIRE(!nimble::runtime::IsWithinSessionWindow(schedule, MakeUtcNs(2026, 7, 6, 22, 0, 0)));
+}
+
+TEST_CASE("chained schedule next window start picks earliest", "[session-schedule]")
+{
+  const auto schedule = MakeChainedSchedule();
+
+  REQUIRE(nimble::runtime::NextSessionWindowStart(schedule, MakeUtcNs(2026, 7, 6, 10, 0, 0)) ==
+          MakeUtcNs(2026, 7, 6, 14, 0, 0));
+  REQUIRE(nimble::runtime::NextSessionWindowStart(schedule, MakeUtcNs(2026, 7, 6, 22, 0, 0)) ==
+          MakeUtcNs(2026, 7, 7, 1, 0, 0));
+}
+
+TEST_CASE("chained schedule next window close", "[session-schedule]")
+{
+  const auto schedule = MakeChainedSchedule();
+
+  REQUIRE(nimble::runtime::NextSessionWindowClose(schedule, MakeUtcNs(2026, 7, 6, 2, 0, 0)) ==
+          MakeUtcNs(2026, 7, 6, 9, 0, 0));
+}
+
 TEST_CASE("blackout calendar add and check dates", "[session-schedule]")
 {
   nimble::runtime::BlackoutCalendar calendar;
@@ -232,6 +275,16 @@ TEST_CASE("session window with blackouts", "[session-schedule]")
   calendar.AddDate(20260706U);
 
   REQUIRE(!nimble::runtime::IsWithinSessionWindowWithBlackouts(schedule, calendar, MakeUtcNs(2026, 7, 6, 12, 0, 0)));
+}
+
+TEST_CASE("chained schedule with blackout", "[session-schedule]")
+{
+  const auto schedule = MakeChainedSchedule();
+  nimble::runtime::BlackoutCalendar calendar;
+  calendar.AddDate(20260706U);
+
+  REQUIRE(!nimble::runtime::IsWithinSessionWindowWithBlackouts(schedule, calendar, MakeUtcNs(2026, 7, 6, 2, 0, 0)));
+  REQUIRE(nimble::runtime::IsWithinSessionWindowWithBlackouts(schedule, calendar, MakeUtcNs(2026, 7, 7, 2, 0, 0)));
 }
 
 TEST_CASE("logon window with blackouts", "[session-schedule]")
@@ -387,6 +440,33 @@ TEST_CASE("explain schedule daily window 3 days", "[session-schedule]")
   REQUIRE(timeline.entries[5].unix_time_ns == MakeUtcNs(2026, 7, 8, 17, 0, 0));
 }
 
+TEST_CASE("chained schedule explain timeline", "[session-schedule]")
+{
+  auto counterparty = MakeCounterparty();
+  counterparty.session_schedule = MakeChainedSchedule();
+
+  const nimble::runtime::BlackoutCalendar calendar;
+  const auto timeline = nimble::runtime::ExplainSchedule(counterparty, calendar, MakeUtcNs(2026, 7, 6, 0, 0, 0), 3U);
+
+  REQUIRE(!timeline.non_stop);
+  REQUIRE(timeline.entries.size() == 12U);
+  REQUIRE(std::is_sorted(timeline.entries.begin(), timeline.entries.end(), [](const auto& left, const auto& right) {
+    return left.unix_time_ns <= right.unix_time_ns;
+  }));
+  REQUIRE(timeline.entries[0].kind == nimble::runtime::SessionScheduleEventKind::kEnteredSessionWindow);
+  REQUIRE(timeline.entries[0].unix_time_ns == MakeUtcNs(2026, 7, 6, 1, 0, 0));
+  REQUIRE(timeline.entries[1].kind == nimble::runtime::SessionScheduleEventKind::kExitedSessionWindow);
+  REQUIRE(timeline.entries[1].unix_time_ns == MakeUtcNs(2026, 7, 6, 9, 0, 0));
+  REQUIRE(timeline.entries[2].kind == nimble::runtime::SessionScheduleEventKind::kEnteredSessionWindow);
+  REQUIRE(timeline.entries[2].unix_time_ns == MakeUtcNs(2026, 7, 6, 14, 0, 0));
+  REQUIRE(timeline.entries[3].kind == nimble::runtime::SessionScheduleEventKind::kExitedSessionWindow);
+  REQUIRE(timeline.entries[3].unix_time_ns == MakeUtcNs(2026, 7, 6, 21, 0, 0));
+  REQUIRE(timeline.entries[8].kind == nimble::runtime::SessionScheduleEventKind::kEnteredSessionWindow);
+  REQUIRE(timeline.entries[8].unix_time_ns == MakeUtcNs(2026, 7, 8, 1, 0, 0));
+  REQUIRE(timeline.entries[11].kind == nimble::runtime::SessionScheduleEventKind::kExitedSessionWindow);
+  REQUIRE(timeline.entries[11].unix_time_ns == MakeUtcNs(2026, 7, 8, 21, 0, 0));
+}
+
 TEST_CASE("explain schedule with blackout", "[session-schedule]")
 {
   auto counterparty = MakeCounterparty();
@@ -468,4 +548,24 @@ TEST_CASE("explain schedule local time handles dst transition", "[session-schedu
 
   REQUIRE(has_pre_dst_open);
   REQUIRE(has_post_dst_open);
+}
+
+TEST_CASE("chained schedule validation rejects mixing", "[session-schedule]")
+{
+  auto schedule = MakeChainedSchedule();
+  schedule.start_time = nimble::runtime::SessionTimeOfDay{ 9U, 0U, 0U };
+
+  const auto status = nimble::runtime::ValidateSessionSchedule(schedule);
+  REQUIRE(!status.ok());
+  REQUIRE(status.message().find("cannot mix legacy single-window fields with chained segments") != std::string::npos);
+}
+
+TEST_CASE("chained schedule validation rejects non_stop with segments", "[session-schedule]")
+{
+  auto schedule = MakeChainedSchedule();
+  schedule.non_stop_session = true;
+
+  const auto status = nimble::runtime::ValidateSessionSchedule(schedule);
+  REQUIRE(!status.ok());
+  REQUIRE(status.message().find("non_stop_session cannot be combined with chained segments") != std::string::npos);
 }

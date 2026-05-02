@@ -9,6 +9,7 @@
 #include <string_view>
 #include <unordered_set>
 #include <utility>
+#include <vector>
 
 #include "nimblefix/runtime/contract_binding.h"
 #include "nimblefix/runtime/schedule_helpers.h"
@@ -65,6 +66,12 @@ HasLogonWindowFields(const SessionScheduleConfig& schedule) -> bool
 }
 
 auto
+HasLegacyWindowFields(const SessionScheduleConfig& schedule) -> bool
+{
+  return HasSessionWindowFields(schedule) || HasLogonWindowFields(schedule);
+}
+
+auto
 SecondsOfDay(const SessionTimeOfDay& time) -> int
 {
   return static_cast<int>(time.hour) * 3600 + static_cast<int>(time.minute) * 60 + static_cast<int>(time.second);
@@ -105,6 +112,41 @@ BuildWindowSpec(const SessionScheduleConfig& schedule, bool logon_window) -> std
       schedule.start_day.has_value() ? std::optional<int>(static_cast<int>(*schedule.start_day)) : std::nullopt,
     .end_day = schedule.end_day.has_value() ? std::optional<int>(static_cast<int>(*schedule.end_day)) : std::nullopt,
   };
+}
+
+auto
+BuildWindowSpecs(const SessionScheduleConfig& schedule, bool logon_window) -> std::vector<SessionWindowSpec>
+{
+  if (schedule.non_stop_session) {
+    return {};
+  }
+
+  std::vector<SessionWindowSpec> windows;
+  if (!schedule.segments.empty()) {
+    windows.reserve(schedule.segments.size());
+    for (const auto& segment : schedule.segments) {
+      SessionScheduleConfig segment_schedule;
+      segment_schedule.use_local_time = segment.use_local_time;
+      segment_schedule.start_time = segment.start_time;
+      segment_schedule.end_time = segment.end_time;
+      segment_schedule.start_day = segment.start_day;
+      segment_schedule.end_day = segment.end_day;
+      segment_schedule.logon_time = segment.logon_time;
+      segment_schedule.logout_time = segment.logout_time;
+      segment_schedule.logon_day = segment.logon_day;
+      segment_schedule.logout_day = segment.logout_day;
+
+      if (auto window = BuildWindowSpec(segment_schedule, logon_window); window.has_value()) {
+        windows.push_back(*window);
+      }
+    }
+    return windows;
+  }
+
+  if (auto window = BuildWindowSpec(schedule, logon_window); window.has_value()) {
+    windows.push_back(*window);
+  }
+  return windows;
 }
 
 auto
@@ -225,7 +267,32 @@ ValidateSessionSchedule(const SessionScheduleConfig& schedule) -> base::Status
     return base::Status::Ok();
   };
 
-  if (schedule.non_stop_session && (HasSessionWindowFields(schedule) || HasLogonWindowFields(schedule))) {
+  if (!schedule.segments.empty()) {
+    if (schedule.non_stop_session) {
+      return base::Status::InvalidArgument("non_stop_session cannot be combined with chained segments");
+    }
+    if (HasLegacyWindowFields(schedule)) {
+      return base::Status::InvalidArgument("cannot mix legacy single-window fields with chained segments");
+    }
+
+    for (const auto& segment : schedule.segments) {
+      auto segment_session_status = validate_time_pair(
+        "chained segment session window", segment.start_time, segment.end_time, segment.start_day, segment.end_day);
+      if (!segment_session_status.ok()) {
+        return segment_session_status;
+      }
+
+      auto segment_logon_status = validate_time_pair(
+        "chained segment logon window", segment.logon_time, segment.logout_time, segment.logon_day, segment.logout_day);
+      if (!segment_logon_status.ok()) {
+        return segment_logon_status;
+      }
+    }
+
+    return base::Status::Ok();
+  }
+
+  if (schedule.non_stop_session && HasLegacyWindowFields(schedule)) {
     return base::Status::InvalidArgument("non_stop_session cannot be combined with session or logon window "
                                          "settings");
   }
@@ -248,25 +315,41 @@ ValidateSessionSchedule(const SessionScheduleConfig& schedule) -> base::Status
 auto
 IsWithinSessionWindow(const SessionScheduleConfig& schedule, std::uint64_t unix_time_ns) -> bool
 {
-  const auto window = detail::BuildWindowSpec(schedule, false);
-  return !window.has_value() || detail::IsWithinWindow(*window, unix_time_ns);
+  const auto windows = detail::BuildWindowSpecs(schedule, false);
+  if (windows.empty()) {
+    return true;
+  }
+  return std::any_of(
+    windows.begin(), windows.end(), [&](const auto& window) { return detail::IsWithinWindow(window, unix_time_ns); });
 }
 
 auto
 IsWithinLogonWindow(const SessionScheduleConfig& schedule, std::uint64_t unix_time_ns) -> bool
 {
-  const auto window = detail::BuildWindowSpec(schedule, true);
-  return !window.has_value() || detail::IsWithinWindow(*window, unix_time_ns);
+  const auto windows = detail::BuildWindowSpecs(schedule, true);
+  if (windows.empty()) {
+    return true;
+  }
+  return std::any_of(
+    windows.begin(), windows.end(), [&](const auto& window) { return detail::IsWithinWindow(window, unix_time_ns); });
 }
 
 auto
 NextLogonWindowStart(const SessionScheduleConfig& schedule, std::uint64_t unix_time_ns) -> std::optional<std::uint64_t>
 {
-  const auto window = detail::BuildWindowSpec(schedule, true);
-  if (!window.has_value()) {
+  const auto windows = detail::BuildWindowSpecs(schedule, true);
+  if (windows.empty()) {
     return unix_time_ns;
   }
-  return detail::NextWindowStart(*window, unix_time_ns);
+
+  std::optional<std::uint64_t> earliest;
+  for (const auto& window : windows) {
+    const auto candidate = detail::NextWindowStart(window, unix_time_ns);
+    if (candidate.has_value() && (!earliest.has_value() || *candidate < *earliest)) {
+      earliest = candidate;
+    }
+  }
+  return earliest;
 }
 
 namespace {
@@ -387,6 +470,14 @@ SessionScheduleFieldPath(std::size_t index, std::string_view field) -> std::stri
 }
 
 auto
+SessionScheduleSegmentFieldPath(std::size_t counterparty_index, std::size_t segment_index, std::string_view field)
+  -> std::string
+{
+  return SessionScheduleFieldPath(counterparty_index, "segments[") + std::to_string(segment_index) + "]." +
+         std::string(field);
+}
+
+auto
 DayCutFieldPath(std::size_t index, std::string_view field) -> std::string
 {
   return CounterpartyFieldPath(index, "day_cut.") + std::string(field);
@@ -491,6 +582,7 @@ ValidateSessionScheduleFull(const SessionScheduleConfig& schedule, std::size_t c
   ConfigValidationResult result;
 
   const auto add_time_pair_diagnostics = [&](std::string_view label,
+                                             const auto& make_field_path,
                                              std::string_view start_time_field,
                                              const std::optional<SessionTimeOfDay>& start_time,
                                              std::string_view end_time_field,
@@ -500,59 +592,76 @@ ValidateSessionScheduleFull(const SessionScheduleConfig& schedule, std::size_t c
                                              std::string_view end_day_field,
                                              const std::optional<SessionDayOfWeek>& end_day) {
     if (start_time.has_value() != end_time.has_value()) {
-      AddDiagnostic(
-        result,
-        SessionScheduleFieldPath(counterparty_index, start_time.has_value() ? end_time_field : start_time_field),
-        std::string(label) + " requires both start and end times",
-        "both start and end times configured together",
-        start_time.has_value() ? "missing end time" : "missing start time");
+      AddDiagnostic(result,
+                    make_field_path(start_time.has_value() ? end_time_field : start_time_field),
+                    std::string(label) + " requires both start and end times",
+                    "both start and end times configured together",
+                    start_time.has_value() ? "missing end time" : "missing start time");
     }
     if (start_day.has_value() != end_day.has_value()) {
-      AddDiagnostic(
-        result,
-        SessionScheduleFieldPath(counterparty_index, start_day.has_value() ? end_day_field : start_day_field),
-        std::string(label) + " requires both start and end days",
-        "both start and end days configured together",
-        start_day.has_value() ? "missing end day" : "missing start day");
+      AddDiagnostic(result,
+                    make_field_path(start_day.has_value() ? end_day_field : start_day_field),
+                    std::string(label) + " requires both start and end days",
+                    "both start and end days configured together",
+                    start_day.has_value() ? "missing end day" : "missing start day");
     }
     if ((start_day.has_value() || end_day.has_value()) && !start_time.has_value()) {
       AddDiagnostic(result,
-                    SessionScheduleFieldPath(counterparty_index, start_time_field),
+                    make_field_path(start_time_field),
                     std::string(label) + " days require matching times",
                     "start_time and end_time present when days are configured",
                     "missing start_time");
     }
     if (start_time.has_value() && !IsValidTimeOfDay(*start_time)) {
       AddDiagnostic(result,
-                    SessionScheduleFieldPath(counterparty_index, start_time_field),
+                    make_field_path(start_time_field),
                     std::string(label) + " start time is out of range",
                     "hour 0-23, minute 0-59, second 0-59",
                     TimeOfDayDiagnosticText(*start_time));
     }
     if (end_time.has_value() && !IsValidTimeOfDay(*end_time)) {
       AddDiagnostic(result,
-                    SessionScheduleFieldPath(counterparty_index, end_time_field),
+                    make_field_path(end_time_field),
                     std::string(label) + " end time is out of range",
                     "hour 0-23, minute 0-59, second 0-59",
                     TimeOfDayDiagnosticText(*end_time));
     }
     if (start_day.has_value() && !IsValidDayOfWeek(*start_day)) {
       AddDiagnostic(result,
-                    SessionScheduleFieldPath(counterparty_index, start_day_field),
+                    make_field_path(start_day_field),
                     std::string(label) + " start day is out of range",
                     "0-6",
                     DayOfWeekDiagnosticText(*start_day));
     }
     if (end_day.has_value() && !IsValidDayOfWeek(*end_day)) {
       AddDiagnostic(result,
-                    SessionScheduleFieldPath(counterparty_index, end_day_field),
+                    make_field_path(end_day_field),
                     std::string(label) + " end day is out of range",
                     "0-6",
                     DayOfWeekDiagnosticText(*end_day));
     }
   };
 
-  if (schedule.non_stop_session && (HasSessionWindowFields(schedule) || HasLogonWindowFields(schedule))) {
+  const auto legacy_field_path = [counterparty_index](std::string_view field) {
+    return SessionScheduleFieldPath(counterparty_index, field);
+  };
+
+  if (!schedule.segments.empty()) {
+    if (schedule.non_stop_session) {
+      AddDiagnostic(result,
+                    SessionScheduleFieldPath(counterparty_index, "non_stop_session"),
+                    "non_stop_session cannot be combined with chained segments",
+                    "non_stop_session=false when chained segments are configured",
+                    "true with chained segments");
+    }
+    if (HasLegacyWindowFields(schedule)) {
+      AddDiagnostic(result,
+                    SessionScheduleFieldPath(counterparty_index, "segments"),
+                    "cannot mix legacy single-window fields with chained segments",
+                    "either legacy single-window fields or chained segments, not both",
+                    "legacy fields and chained segments configured together");
+    }
+  } else if (schedule.non_stop_session && HasLegacyWindowFields(schedule)) {
     AddDiagnostic(result,
                   SessionScheduleFieldPath(counterparty_index, "non_stop_session"),
                   "non_stop_session cannot be combined with session or logon window settings",
@@ -561,6 +670,7 @@ ValidateSessionScheduleFull(const SessionScheduleConfig& schedule, std::size_t c
   }
 
   add_time_pair_diagnostics("session window",
+                            legacy_field_path,
                             "start_time",
                             schedule.start_time,
                             "end_time",
@@ -570,6 +680,7 @@ ValidateSessionScheduleFull(const SessionScheduleConfig& schedule, std::size_t c
                             "end_day",
                             schedule.end_day);
   add_time_pair_diagnostics("logon window",
+                            legacy_field_path,
                             "logon_time",
                             schedule.logon_time,
                             "logout_time",
@@ -578,6 +689,34 @@ ValidateSessionScheduleFull(const SessionScheduleConfig& schedule, std::size_t c
                             schedule.logon_day,
                             "logout_day",
                             schedule.logout_day);
+
+  for (std::size_t segment_index = 0; segment_index < schedule.segments.size(); ++segment_index) {
+    const auto& segment = schedule.segments[segment_index];
+    const auto segment_field_path = [counterparty_index, segment_index](std::string_view field) {
+      return SessionScheduleSegmentFieldPath(counterparty_index, segment_index, field);
+    };
+
+    add_time_pair_diagnostics("chained segment session window",
+                              segment_field_path,
+                              "start_time",
+                              segment.start_time,
+                              "end_time",
+                              segment.end_time,
+                              "start_day",
+                              segment.start_day,
+                              "end_day",
+                              segment.end_day);
+    add_time_pair_diagnostics("chained segment logon window",
+                              segment_field_path,
+                              "logon_time",
+                              segment.logon_time,
+                              "logout_time",
+                              segment.logout_time,
+                              "logon_day",
+                              segment.logon_day,
+                              "logout_day",
+                              segment.logout_day);
+  }
 
   return result;
 }

@@ -136,6 +136,12 @@ DateParts(BlackoutDate date) -> std::tuple<std::uint32_t, std::uint32_t, std::ui
 auto
 HasSessionWindowFields(const SessionScheduleConfig& schedule) -> bool
 {
+  if (!schedule.segments.empty()) {
+    return std::any_of(schedule.segments.begin(), schedule.segments.end(), [](const auto& segment) {
+      return segment.start_time.has_value() || segment.end_time.has_value() || segment.start_day.has_value() ||
+             segment.end_day.has_value();
+    });
+  }
   return schedule.start_time.has_value() || schedule.end_time.has_value() || schedule.start_day.has_value() ||
          schedule.end_day.has_value();
 }
@@ -143,8 +149,49 @@ HasSessionWindowFields(const SessionScheduleConfig& schedule) -> bool
 auto
 HasLogonWindowFields(const SessionScheduleConfig& schedule) -> bool
 {
+  if (!schedule.segments.empty()) {
+    return std::any_of(schedule.segments.begin(), schedule.segments.end(), [](const auto& segment) {
+      return segment.logon_time.has_value() || segment.logout_time.has_value() || segment.logon_day.has_value() ||
+             segment.logout_day.has_value();
+    });
+  }
   return schedule.logon_time.has_value() || schedule.logout_time.has_value() || schedule.logon_day.has_value() ||
          schedule.logout_day.has_value();
+}
+
+auto
+EarliestWindowStart(const std::vector<detail::SessionWindowSpec>& windows, std::uint64_t unix_time_ns)
+  -> std::optional<std::uint64_t>
+{
+  if (windows.empty()) {
+    return unix_time_ns;
+  }
+
+  std::optional<std::uint64_t> earliest;
+  for (const auto& window : windows) {
+    const auto candidate = detail::NextWindowStart(window, unix_time_ns);
+    if (candidate.has_value() && (!earliest.has_value() || *candidate < *earliest)) {
+      earliest = candidate;
+    }
+  }
+  return earliest;
+}
+
+auto
+EarliestContainingWindowClose(const std::vector<detail::SessionWindowSpec>& windows, std::uint64_t unix_time_ns)
+  -> std::optional<std::uint64_t>
+{
+  std::optional<std::uint64_t> earliest;
+  for (const auto& window : windows) {
+    if (!detail::IsWithinWindow(window, unix_time_ns)) {
+      continue;
+    }
+    const auto candidate = NextWindowClose(window, unix_time_ns);
+    if (candidate.has_value() && (!earliest.has_value() || *candidate < *earliest)) {
+      earliest = candidate;
+    }
+  }
+  return earliest;
 }
 
 auto
@@ -438,32 +485,28 @@ auto
 NextSessionWindowClose(const SessionScheduleConfig& schedule, std::uint64_t unix_time_ns)
   -> std::optional<std::uint64_t>
 {
-  const auto window = detail::BuildWindowSpec(schedule, false);
-  if (!window.has_value()) {
+  const auto windows = detail::BuildWindowSpecs(schedule, false);
+  if (windows.empty()) {
     return std::nullopt;
   }
-  return NextWindowClose(*window, unix_time_ns);
+  return EarliestContainingWindowClose(windows, unix_time_ns);
 }
 
 auto
 NextLogonWindowClose(const SessionScheduleConfig& schedule, std::uint64_t unix_time_ns) -> std::optional<std::uint64_t>
 {
-  const auto window = detail::BuildWindowSpec(schedule, true);
-  if (!window.has_value()) {
+  const auto windows = detail::BuildWindowSpecs(schedule, true);
+  if (windows.empty()) {
     return std::nullopt;
   }
-  return NextWindowClose(*window, unix_time_ns);
+  return EarliestContainingWindowClose(windows, unix_time_ns);
 }
 
 auto
 NextSessionWindowStart(const SessionScheduleConfig& schedule, std::uint64_t unix_time_ns)
   -> std::optional<std::uint64_t>
 {
-  const auto window = detail::BuildWindowSpec(schedule, false);
-  if (!window.has_value()) {
-    return unix_time_ns;
-  }
-  return detail::NextWindowStart(*window, unix_time_ns);
+  return EarliestWindowStart(detail::BuildWindowSpecs(schedule, false), unix_time_ns);
 }
 
 auto

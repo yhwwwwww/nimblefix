@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <ctime>
 #include <optional>
+#include <vector>
 
 #include "nimblefix/runtime/config.h"
 
@@ -28,6 +29,11 @@ struct CalendarPoint
 
 [[nodiscard]] auto
 BuildWindowSpec(const SessionScheduleConfig& schedule, bool logon_window) -> std::optional<SessionWindowSpec>;
+
+/// Build multiple window specs from a chained schedule config.
+/// Returns empty vector for non_stop sessions or when no windows configured.
+[[nodiscard]] auto
+BuildWindowSpecs(const SessionScheduleConfig& schedule, bool logon_window) -> std::vector<SessionWindowSpec>;
 
 [[nodiscard]] auto
 BuildCalendarPoint(std::uint64_t unix_time_ns, bool use_local_time) -> CalendarPoint;

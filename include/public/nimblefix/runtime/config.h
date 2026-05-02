@@ -123,6 +123,26 @@ struct SessionTimeOfDay
   std::uint8_t second{ 0 };
 };
 
+/// One time-window segment in a chained schedule.
+///
+/// Each segment describes an independent session-active window and optional
+/// logon window, with its own timezone interpretation. When multiple segments
+/// are present in SessionScheduleConfig::segments, the session is considered
+/// active if it falls within ANY segment (logical OR).
+struct SessionScheduleSegment
+{
+  /// Interpret this segment's times in local time instead of UTC.
+  bool use_local_time{ false };
+  std::optional<SessionTimeOfDay> start_time;
+  std::optional<SessionTimeOfDay> end_time;
+  std::optional<SessionDayOfWeek> start_day;
+  std::optional<SessionDayOfWeek> end_day;
+  std::optional<SessionTimeOfDay> logon_time;
+  std::optional<SessionTimeOfDay> logout_time;
+  std::optional<SessionDayOfWeek> logon_day;
+  std::optional<SessionDayOfWeek> logout_day;
+};
+
 /// Optional session and logon window rules for one counterparty.
 ///
 /// Design intent: keep the public schedule surface close to traditional FIX
@@ -151,6 +171,10 @@ struct SessionScheduleConfig
   std::optional<SessionTimeOfDay> logout_time;
   std::optional<SessionDayOfWeek> logon_day;
   std::optional<SessionDayOfWeek> logout_day;
+  /// Chained schedule segments. When non-empty, the legacy single-window
+  /// fields (start_time/end_time etc.) must be empty. The session is
+  /// considered active if it falls within ANY segment window.
+  std::vector<SessionScheduleSegment> segments;
 };
 
 /// Optional TLS client policy for initiator connections.
