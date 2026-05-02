@@ -84,8 +84,9 @@ constexpr std::size_t kSendingTimeThresholdSeconds = 43U;
 constexpr std::size_t kSupportedAppMsgTypes = 44U;
 constexpr std::size_t kApplicationMessagesAvailable = 45U;
 constexpr std::size_t kContractServiceSubsets = 46U;
+constexpr std::size_t kTimestampResolution = 47U;
 constexpr std::size_t kMinFieldCount = kIsInitiator + 1U;
-constexpr std::size_t kMaxFieldCount = kContractServiceSubsets + 1U;
+constexpr std::size_t kMaxFieldCount = kTimestampResolution + 1U;
 } // namespace counterparty_columns
 
 auto
@@ -431,6 +432,25 @@ ParseValidationMode(std::string_view token) -> base::Result<session::ValidationM
 }
 
 auto
+ParseTimestampResolution(std::string_view token) -> base::Result<codec::TimestampResolution>
+{
+  const auto value = Lowercase(Trim(token));
+  if (value.empty() || value == "milliseconds") {
+    return codec::TimestampResolution::kMilliseconds;
+  }
+  if (value == "seconds") {
+    return codec::TimestampResolution::kSeconds;
+  }
+  if (value == "microseconds") {
+    return codec::TimestampResolution::kMicroseconds;
+  }
+  if (value == "nanoseconds") {
+    return codec::TimestampResolution::kNanoseconds;
+  }
+  return base::Status::InvalidArgument("unknown timestamp_resolution in runtime config");
+}
+
+auto
 ResolvePath(const std::filesystem::path& base_dir, std::string_view raw_path) -> std::filesystem::path
 {
   if (raw_path.empty()) {
@@ -680,7 +700,7 @@ LoadEngineConfigText(std::string_view text, const std::filesystem::path& base_di
 
     if (parts[0] == kCounterpartyRecordKind) {
       if (parts.size() < counterparty_columns::kMinFieldCount || parts.size() > counterparty_columns::kMaxFieldCount) {
-        return base::Status::InvalidArgument("counterparty config must have between 13 and 46 pipe-separated "
+        return base::Status::InvalidArgument("counterparty config must have between 13 and 48 pipe-separated "
                                              "parts");
       }
 
@@ -900,6 +920,13 @@ LoadEngineConfigText(std::string_view text, const std::filesystem::path& base_di
       const auto contract_service_subsets = parts.size() > counterparty_columns::kContractServiceSubsets
                                               ? SplitCsvList(parts[counterparty_columns::kContractServiceSubsets])
                                               : std::vector<std::string>{};
+      auto timestamp_resolution =
+        ParseTimestampResolution(parts.size() > counterparty_columns::kTimestampResolution
+                                   ? std::string_view(parts[counterparty_columns::kTimestampResolution])
+                                   : std::string_view{});
+      if (!timestamp_resolution.ok()) {
+        return timestamp_resolution.status();
+      }
       auto heartbeat = ParseInteger<std::uint32_t>(parts[counterparty_columns::kHeartbeatIntervalSeconds],
                                                    "heartbeat_interval_seconds");
       if (!heartbeat.ok()) {
@@ -934,6 +961,7 @@ LoadEngineConfigText(std::string_view text, const std::filesystem::path& base_di
         .supported_app_msg_types = supported_app_msg_types,
         .contract_service_subsets = contract_service_subsets,
         .sending_time_threshold_seconds = sending_time_threshold_seconds,
+        .timestamp_resolution = timestamp_resolution.value(),
         .application_messages_available = application_messages_available.value(),
         .store_mode = store_mode.value(),
         .durable_flush_threshold = durable_flush_threshold.value(),

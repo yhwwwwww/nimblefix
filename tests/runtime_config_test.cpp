@@ -130,6 +130,7 @@ RequireSameCoreConfig(const nimble::runtime::EngineConfig& expected, const nimbl
     REQUIRE(actual_counterparty.supported_app_msg_types == expected_counterparty.supported_app_msg_types);
     REQUIRE(actual_counterparty.contract_service_subsets == expected_counterparty.contract_service_subsets);
     REQUIRE(actual_counterparty.sending_time_threshold_seconds == expected_counterparty.sending_time_threshold_seconds);
+    REQUIRE(actual_counterparty.timestamp_resolution == expected_counterparty.timestamp_resolution);
     REQUIRE(actual_counterparty.application_messages_available == expected_counterparty.application_messages_available);
     REQUIRE(actual_counterparty.store_mode == expected_counterparty.store_mode);
     REQUIRE(actual_counterparty.durable_flush_threshold == expected_counterparty.durable_flush_threshold);
@@ -578,6 +579,7 @@ TEST_CASE("ConfigToText round-trip", "[runtime-config]")
   initiator.refresh_on_logon = true;
   initiator.send_next_expected_msg_seq_num = true;
   initiator.sending_time_threshold_seconds = 60U;
+  initiator.timestamp_resolution = nimble::codec::TimestampResolution::kNanoseconds;
   initiator.supported_app_msg_types = { "D", "8" };
   initiator.application_messages_available = false;
   initiator.day_cut = nimble::session::DayCutConfig{
@@ -607,6 +609,7 @@ TEST_CASE("ConfigToText round-trip", "[runtime-config]")
       .build();
   acceptor.recovery_mode = nimble::session::RecoveryMode::kNoRecovery;
   acceptor.durable_rollover_mode = nimble::store::DurableStoreRolloverMode::kDisabled;
+  acceptor.timestamp_resolution = nimble::codec::TimestampResolution::kSeconds;
   acceptor.day_cut = nimble::session::DayCutConfig{
     .mode = nimble::session::DayCutMode::kExternalControl,
     .reset_hour = 0,
@@ -619,7 +622,8 @@ TEST_CASE("ConfigToText round-trip", "[runtime-config]")
   const auto text = nimble::runtime::ConfigToText(config);
   REQUIRE(text.find("listener|main|127.0.0.1|9901|0") != std::string::npos);
   REQUIRE(text.find("counterparty|initiator-a|1001|4400|FIX.4.4|BUY1|SELL1|durable|") != std::string::npos);
-  REQUIRE(text.find("|D,8|false|") != std::string::npos);
+  REQUIRE(text.find("|D,8|false||nanoseconds") != std::string::npos);
+  REQUIRE(text.find("|true||seconds") != std::string::npos);
 
   const auto parsed = nimble::runtime::LoadEngineConfigText(text);
   REQUIRE(parsed.ok());
@@ -702,6 +706,7 @@ TEST_CASE("runtime-config", "[runtime-config]")
   REQUIRE(config.value().counterparties.size() == 5U);
   REQUIRE(config.value().counterparties[0].validation_policy.mode == nimble::session::ValidationMode::kCompatible);
   REQUIRE(config.value().counterparties[0].validation_policy.verify_checksum);
+  REQUIRE(config.value().counterparties[0].timestamp_resolution == nimble::codec::TimestampResolution::kMilliseconds);
   REQUIRE(config.value().counterparties[1].store_mode == nimble::runtime::StoreMode::kMmap);
   REQUIRE(config.value().counterparties[1].store_path == store_path);
   REQUIRE(config.value().counterparties[2].default_appl_ver_id == "9");
@@ -721,6 +726,7 @@ TEST_CASE("runtime-config", "[runtime-config]")
   REQUIRE(config.value().counterparties[4].reconnect_max_retries == 0U);
   REQUIRE(config.value().counterparties[4].durable_local_utc_offset_seconds == 3600);
   REQUIRE(!config.value().counterparties[4].durable_use_system_timezone);
+  REQUIRE(config.value().counterparties[4].timestamp_resolution == nimble::codec::TimestampResolution::kMilliseconds);
   config.value().accept_unknown_sessions = true;
 
   nimble::runtime::Engine engine;

@@ -1128,7 +1128,9 @@ AppendResolvedHeaderFields(std::string& out,
                            UtcTimestampBuffer* timestamp_buffer) -> void
 {
   const auto seq_num = options.msg_seq_num == 0U ? 1U : options.msg_seq_num;
-  const auto sending_time = options.sending_time.empty() ? CurrentUtcTimestamp(timestamp_buffer) : options.sending_time;
+  const auto sending_time = options.sending_time.empty()
+                              ? CurrentUtcTimestamp(timestamp_buffer, options.timestamp_resolution)
+                              : options.sending_time;
 
   AppendPrefixedStringField(
     out, checksum, kMsgTypePrefix, msg_type.empty() ? std::string_view("UNKNOWN") : msg_type, delimiter);
@@ -1731,6 +1733,31 @@ WriteFourDigits(char* out, int value) -> void
 }
 
 auto
+WriteSixDigits(char* out, int value) -> void
+{
+  out[0] = static_cast<char>('0' + ((value / 100000) % 10));
+  out[1] = static_cast<char>('0' + ((value / 10000) % 10));
+  out[2] = static_cast<char>('0' + ((value / 1000) % 10));
+  out[3] = static_cast<char>('0' + ((value / 100) % 10));
+  out[4] = static_cast<char>('0' + ((value / 10) % 10));
+  out[5] = static_cast<char>('0' + (value % 10));
+}
+
+auto
+WriteNineDigits(char* out, int value) -> void
+{
+  out[0] = static_cast<char>('0' + ((value / 100000000) % 10));
+  out[1] = static_cast<char>('0' + ((value / 10000000) % 10));
+  out[2] = static_cast<char>('0' + ((value / 1000000) % 10));
+  out[3] = static_cast<char>('0' + ((value / 100000) % 10));
+  out[4] = static_cast<char>('0' + ((value / 10000) % 10));
+  out[5] = static_cast<char>('0' + ((value / 1000) % 10));
+  out[6] = static_cast<char>('0' + ((value / 100) % 10));
+  out[7] = static_cast<char>('0' + ((value / 10) % 10));
+  out[8] = static_cast<char>('0' + (value % 10));
+}
+
+auto
 EncodeFixMessageGenericToBuffer(message::MessageView message,
                                 const profile::NormalizedDictionaryView& dictionary,
                                 const EncodeOptions& options,
@@ -1888,13 +1915,18 @@ struct FrameEncodeTemplate::State
 auto
 CurrentUtcTimestamp(UtcTimestampBuffer* buffer) -> std::string_view
 {
+  return CurrentUtcTimestamp(buffer, TimestampResolution::kMilliseconds);
+}
+
+auto
+CurrentUtcTimestamp(UtcTimestampBuffer* buffer, TimestampResolution resolution) -> std::string_view
+{
   if (buffer == nullptr) {
     return {};
   }
 
   const auto now = std::chrono::system_clock::now();
   const auto seconds = std::chrono::time_point_cast<std::chrono::seconds>(now);
-  const auto millis = static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(now - seconds).count());
 
   const auto time = std::chrono::system_clock::to_time_t(now);
   std::tm tm{};
@@ -1910,8 +1942,36 @@ CurrentUtcTimestamp(UtcTimestampBuffer* buffer) -> std::string_view
   WriteTwoDigits(out + 12, tm.tm_min);
   out[14] = ':';
   WriteTwoDigits(out + 15, tm.tm_sec);
-  out[17] = '.';
-  WriteThreeDigits(out + 18, millis);
+
+  switch (resolution) {
+    case TimestampResolution::kSeconds:
+      buffer->length = 17U;
+      break;
+    case TimestampResolution::kMicroseconds: {
+      const auto micros =
+        static_cast<int>(std::chrono::duration_cast<std::chrono::microseconds>(now - seconds).count());
+      out[17] = '.';
+      WriteSixDigits(out + 18, micros);
+      buffer->length = 24U;
+      break;
+    }
+    case TimestampResolution::kNanoseconds: {
+      const auto nanos = static_cast<int>(std::chrono::duration_cast<std::chrono::nanoseconds>(now - seconds).count());
+      out[17] = '.';
+      WriteNineDigits(out + 18, nanos);
+      buffer->length = kUtcTimestampMaxLength;
+      break;
+    }
+    case TimestampResolution::kMilliseconds:
+    default: {
+      const auto millis =
+        static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(now - seconds).count());
+      out[17] = '.';
+      WriteThreeDigits(out + 18, millis);
+      buffer->length = kUtcTimestampLength;
+      break;
+    }
+  }
   return buffer->view();
 }
 
@@ -2091,8 +2151,9 @@ FrameEncodeTemplate::EncodeToBuffer(message::MessageView message,
   }
 
   UtcTimestampBuffer timestamp_buffer;
-  const auto sending_time =
-    options.sending_time.empty() ? CurrentUtcTimestamp(&timestamp_buffer) : options.sending_time;
+  const auto sending_time = options.sending_time.empty()
+                              ? CurrentUtcTimestamp(&timestamp_buffer, options.timestamp_resolution)
+                              : options.sending_time;
   AppendPrefixedStringField(full, &checksum, state_->sending_time_prefix, sending_time, delimiter);
   if (!state_->default_appl_ver_fragment.empty()) {
     AppendTracked(full, &checksum, state_->default_appl_ver_fragment);
@@ -2198,8 +2259,9 @@ FrameEncodeTemplate::EncodeToBuffer(message::MessageView message,
   }
 
   UtcTimestampBuffer timestamp_buffer;
-  const auto sending_time =
-    options.sending_time.empty() ? CurrentUtcTimestamp(&timestamp_buffer) : options.sending_time;
+  const auto sending_time = options.sending_time.empty()
+                              ? CurrentUtcTimestamp(&timestamp_buffer, options.timestamp_resolution)
+                              : options.sending_time;
   AppendPrefixedStringField(full, &checksum, state_->sending_time_prefix, sending_time, delimiter);
   if (!state_->default_appl_ver_fragment.empty()) {
     AppendTracked(full, &checksum, state_->default_appl_ver_fragment);

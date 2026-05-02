@@ -489,8 +489,9 @@ EncodePreEncodedApplicationToBuffer(EncodedApplicationMessageView message,
   }
 
   codec::UtcTimestampBuffer timestamp_buffer;
-  const auto sending_time =
-    options.sending_time.empty() ? codec::CurrentUtcTimestamp(&timestamp_buffer) : options.sending_time;
+  const auto sending_time = options.sending_time.empty()
+                              ? codec::CurrentUtcTimestamp(&timestamp_buffer, options.timestamp_resolution)
+                              : options.sending_time;
   append_string_field(kSendingTimePrefix, sending_time);
 
   if (message.msg_type == "A" && !options.default_appl_ver_id.empty()) {
@@ -1043,6 +1044,7 @@ AdminProtocol::EncodeFrame(message::MessageView message,
   options.target_comp_id = config_.target_comp_id;
   options.default_appl_ver_id = config_.default_appl_ver_id;
   options.orig_sending_time = orig_sending_time;
+  options.timestamp_resolution = config_.timestamp_resolution;
   options.msg_seq_num = seq_num;
   options.poss_dup = poss_dup;
   ApplySessionSendEnvelope(&options, envelope);
@@ -1093,6 +1095,7 @@ AdminProtocol::EncodeFrame(EncodedApplicationMessageView message,
   options.target_comp_id = config_.target_comp_id;
   options.default_appl_ver_id = config_.default_appl_ver_id;
   options.orig_sending_time = orig_sending_time;
+  options.timestamp_resolution = config_.timestamp_resolution;
   options.msg_seq_num = seq_num;
   options.poss_dup = poss_dup;
   ApplySessionSendEnvelope(&options, envelope);
@@ -1320,7 +1323,7 @@ AdminProtocol::ReplayOutbound(std::uint32_t begin_seq,
   // Pre-build replay options — only seq_num and orig_sending_time change per
   // message.
   codec::UtcTimestampBuffer ts_buf;
-  const auto sending_time = codec::CurrentUtcTimestamp(&ts_buf);
+  const auto sending_time = codec::CurrentUtcTimestamp(&ts_buf, config_.timestamp_resolution);
 
   codec::ReplayOptions replay_opts;
   replay_opts.sender_comp_id = config_.sender_comp_id;

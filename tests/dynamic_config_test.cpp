@@ -202,6 +202,22 @@ TEST_CASE("engine apply config modifies counterparty", "[dynamic-config]")
   REQUIRE(engine.FindCounterpartyConfig(1U)->name == "venue-a-renamed");
 }
 
+TEST_CASE("compute config delta detects timestamp resolution change", "[dynamic-config]")
+{
+  auto current = MakeEngineConfig({ MakeCounterparty(1U, "venue-a") });
+  auto proposed = current;
+  proposed.counterparties.front().timestamp_resolution = nimble::codec::TimestampResolution::kMicroseconds;
+
+  const auto delta = nimble::runtime::ComputeConfigDelta(current, proposed);
+  REQUIRE(HasChange(delta, nimble::runtime::ConfigChangeKind::kModifyCounterparty, 1U));
+  REQUIRE_FALSE(delta.requires_restart);
+  const auto it = std::find_if(delta.changes.begin(), delta.changes.end(), [](const auto& change) {
+    return change.kind == nimble::runtime::ConfigChangeKind::kModifyCounterparty && change.session_id == 1U;
+  });
+  REQUIRE(it != delta.changes.end());
+  REQUIRE(it->description.find("timestamp_resolution") != std::string::npos);
+}
+
 TEST_CASE("engine apply config skips restart-required changes", "[dynamic-config]")
 {
   RequireFix44Artifact();

@@ -77,9 +77,9 @@ struct ConfigDelta
 /// remove + re-add:
 ///   - Live-changeable: name, application_messages_available, supported_app_msg_types,
 ///     reconnect_enabled, reconnect_initial_ms, reconnect_max_ms, reconnect_max_retries,
-///     session_schedule, sending_time_threshold_seconds, reset_seq_num_on_logon,
-///     reset_seq_num_on_logout, reset_seq_num_on_disconnect, refresh_on_logon,
-///     send_next_expected_msg_seq_num, contract_service_subsets
+///     session_schedule, sending_time_threshold_seconds, timestamp_resolution,
+///     reset_seq_num_on_logon, reset_seq_num_on_logout, reset_seq_num_on_disconnect,
+///     refresh_on_logon, send_next_expected_msg_seq_num, contract_service_subsets
 ///   - Require remove+add: store_mode, store_path, recovery_mode, dispatch_mode,
 ///     session.profile_id, session.key, transport_profile, validation_policy
 [[nodiscard]] auto

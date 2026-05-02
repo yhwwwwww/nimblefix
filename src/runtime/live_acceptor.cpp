@@ -155,6 +155,7 @@ MakeProtocolConfig(const CounterpartyConfig& counterparty) -> session::AdminProt
     .supported_app_msg_types = counterparty.supported_app_msg_types,
     .heartbeat_interval_seconds = counterparty.session.heartbeat_interval_seconds,
     .sending_time_threshold_seconds = counterparty.sending_time_threshold_seconds,
+    .timestamp_resolution = counterparty.timestamp_resolution,
     .application_messages_available = counterparty.application_messages_available,
     .reset_seq_num_on_logon = counterparty.reset_seq_num_on_logon,
     .reset_seq_num_on_logout = counterparty.reset_seq_num_on_logout,

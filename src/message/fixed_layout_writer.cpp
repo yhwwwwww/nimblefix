@@ -515,7 +515,9 @@ FixedLayoutWriter::encode_to_buffer(const profile::NormalizedDictionaryView& /*d
 
   // 7. SendingTime
   codec::UtcTimestampBuffer ts_buf;
-  const auto sending_time = options.sending_time.empty() ? codec::CurrentUtcTimestamp(&ts_buf) : options.sending_time;
+  const auto sending_time = options.sending_time.empty()
+                              ? codec::CurrentUtcTimestamp(&ts_buf, options.timestamp_resolution)
+                              : options.sending_time;
   out.append(codec::tags::kSendingTimePrefix);
   out.append(sending_time);
   out.push_back(delimiter);
@@ -714,7 +716,9 @@ FixedLayoutWriter::encode_to_buffer(const profile::NormalizedDictionaryView& /*d
   }
 
   codec::UtcTimestampBuffer ts_buf;
-  const auto sending_time = options.sending_time.empty() ? codec::CurrentUtcTimestamp(&ts_buf) : options.sending_time;
+  const auto sending_time = options.sending_time.empty()
+                              ? codec::CurrentUtcTimestamp(&ts_buf, options.timestamp_resolution)
+                              : options.sending_time;
   out.append(codec::tags::kSendingTimePrefix);
   out.append(sending_time);
   out.push_back(delimiter);

@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "nimblefix/base/status.h"
+#include "nimblefix/codec/timestamp_resolution.h"
 #include "nimblefix/runtime/io_backend.h"
 #include "nimblefix/session/resend_recovery.h"
 #include "nimblefix/session/session_core.h"
@@ -243,6 +244,9 @@ struct CounterpartyConfig
   // Orchestra rules on the hot path.
   std::vector<std::string> contract_service_subsets;
   std::uint32_t sending_time_threshold_seconds{ 0 };
+  // Outbound SendingTime(52) timestamp resolution. Default millisecond
+  // preserves FIX 4.x compatibility. Nanosecond is useful for ultra-low-latency venues.
+  codec::TimestampResolution timestamp_resolution{ codec::TimestampResolution::kMilliseconds };
   bool application_messages_available{ true };
   // Memory is the simplest default. Mmap and durable batch require store_path.
   StoreMode store_mode{ StoreMode::kMemory };
@@ -446,6 +450,12 @@ public:
   /// \param seconds Maximum tolerated absolute drift from wall clock.
   /// \return This builder.
   auto sending_time_threshold_seconds(std::uint32_t seconds) -> CounterpartyConfigBuilder&;
+
+  /// Override outbound SendingTime(52) timestamp precision.
+  ///
+  /// \param resolution Timestamp precision for engine-generated outbound timestamps.
+  /// \return This builder.
+  auto timestamp_resolution(codec::TimestampResolution resolution) -> CounterpartyConfigBuilder&;
 
   /// Restrict this session to a known subset of application message types.
   ///

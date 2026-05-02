@@ -1164,7 +1164,8 @@ ConfigToText(const EngineConfig& config) -> std::string
         << OptionalDayToText(schedule.logout_day) << '|' << counterparty.sending_time_threshold_seconds << '|'
         << JoinCsv(counterparty.supported_app_msg_types) << '|'
         << BoolToText(counterparty.application_messages_available) << '|'
-        << JoinCsv(counterparty.contract_service_subsets) << '\n';
+        << JoinCsv(counterparty.contract_service_subsets) << '|'
+        << codec::TimestampResolutionName(counterparty.timestamp_resolution) << '\n';
   }
 
   return out.str();
@@ -1277,6 +1278,13 @@ auto
 CounterpartyConfigBuilder::sending_time_threshold_seconds(std::uint32_t seconds) -> CounterpartyConfigBuilder&
 {
   config_.sending_time_threshold_seconds = seconds;
+  return *this;
+}
+
+auto
+CounterpartyConfigBuilder::timestamp_resolution(codec::TimestampResolution resolution) -> CounterpartyConfigBuilder&
+{
+  config_.timestamp_resolution = resolution;
   return *this;
 }
 

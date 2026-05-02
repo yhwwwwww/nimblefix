@@ -9,9 +9,9 @@
 #include <utility>
 #include <vector>
 
+#include "nimblefix/advanced/message_builder.h"
 #include "nimblefix/codec/fix_codec.h"
 #include "nimblefix/codec/fix_tags.h"
-#include "nimblefix/advanced/message_builder.h"
 #include "nimblefix/profile/normalized_dictionary.h"
 #include "nimblefix/profile/profile_loader.h"
 #include "nimblefix/runtime/engine.h"
@@ -580,6 +580,7 @@ RunSoak(const SoakConfig& config) -> base::Result<SoakReport>
         .target_comp_id = harness.counterparty.session.key.target_comp_id,
         .default_appl_ver_id = harness.counterparty.session.default_appl_ver_id,
         .heartbeat_interval_seconds = harness.counterparty.session.heartbeat_interval_seconds,
+        .timestamp_resolution = harness.counterparty.timestamp_resolution,
       },
       dictionary.value(),
       &harness.store);

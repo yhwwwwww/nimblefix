@@ -1,7 +1,9 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <algorithm>
+#include <cctype>
 #include <cstddef>
+#include <string_view>
 #include <vector>
 
 #include "nimblefix/advanced/message_builder.h"
@@ -289,6 +291,95 @@ TEST_CASE("fix-codec", "[fix-codec]")
   REQUIRE(spill_parties->size() == 10U);
   REQUIRE((*spill_parties)[0].get_string(kPartyID).value() == "PARTY-0");
   REQUIRE((*spill_parties)[9].get_string(kPartyID).value() == "PARTY-9");
+}
+
+TEST_CASE("utc timestamp resolution formatting", "[fix-codec]")
+{
+  const auto require_digits = [](std::string_view value, std::size_t offset, std::size_t count) {
+    REQUIRE(value.size() >= offset + count);
+    for (std::size_t index = offset; index < offset + count; ++index) {
+      REQUIRE(std::isdigit(static_cast<unsigned char>(value[index])) != 0);
+    }
+  };
+  const auto require_common_prefix = [&](std::string_view value) {
+    REQUIRE(value.size() >= 17U);
+    require_digits(value, 0U, 8U);
+    REQUIRE(value[8] == '-');
+    require_digits(value, 9U, 2U);
+    REQUIRE(value[11] == ':');
+    require_digits(value, 12U, 2U);
+    REQUIRE(value[14] == ':');
+    require_digits(value, 15U, 2U);
+  };
+  const auto require_fraction =
+    [&](nimble::codec::TimestampResolution resolution, std::size_t expected_size, std::size_t fractional_digits) {
+      nimble::codec::UtcTimestampBuffer buffer;
+      const auto timestamp = nimble::codec::CurrentUtcTimestamp(&buffer, resolution);
+      REQUIRE(timestamp.size() == expected_size);
+      REQUIRE(buffer.view().size() == expected_size);
+      require_common_prefix(timestamp);
+      REQUIRE(timestamp[17] == '.');
+      require_digits(timestamp, 18U, fractional_digits);
+    };
+
+  REQUIRE(nimble::codec::TimestampResolutionName(nimble::codec::TimestampResolution::kSeconds) == "seconds");
+  REQUIRE(nimble::codec::TimestampResolutionName(nimble::codec::TimestampResolution::kMilliseconds) == "milliseconds");
+  REQUIRE(nimble::codec::TimestampResolutionName(nimble::codec::TimestampResolution::kMicroseconds) == "microseconds");
+  REQUIRE(nimble::codec::TimestampResolutionName(nimble::codec::TimestampResolution::kNanoseconds) == "nanoseconds");
+
+  nimble::codec::UtcTimestampBuffer seconds_buffer;
+  const auto seconds =
+    nimble::codec::CurrentUtcTimestamp(&seconds_buffer, nimble::codec::TimestampResolution::kSeconds);
+  REQUIRE(seconds.size() == 17U);
+  require_common_prefix(seconds);
+  REQUIRE(seconds.find('.') == std::string_view::npos);
+
+  require_fraction(nimble::codec::TimestampResolution::kMilliseconds, nimble::codec::kUtcTimestampLength, 3U);
+  require_fraction(nimble::codec::TimestampResolution::kMicroseconds, 24U, 6U);
+  require_fraction(nimble::codec::TimestampResolution::kNanoseconds, nimble::codec::kUtcTimestampMaxLength, 9U);
+}
+
+TEST_CASE("auto-generated SendingTime honors encode timestamp resolution", "[fix-codec]")
+{
+  auto dictionary = nimble::tests::LoadFix44DictionaryView();
+  if (!dictionary.ok()) {
+    SKIP("FIX44 artifact not available: " << dictionary.status().message());
+  }
+
+  nimble::message::MessageBuilder builder("D");
+  builder.set_string(kMsgType, "D").set_string(kClOrdID, "ORD-TS").set_string(kSymbol, "AAPL");
+  const auto message = std::move(builder).build();
+
+  nimble::codec::EncodeOptions options;
+  options.begin_string = "FIX.4.4";
+  options.sender_comp_id = "BUY";
+  options.target_comp_id = "SELL";
+  options.msg_seq_num = 1U;
+  options.timestamp_resolution = nimble::codec::TimestampResolution::kNanoseconds;
+
+  auto encoded = nimble::codec::EncodeFixMessage(message, dictionary.value(), options);
+  REQUIRE(encoded.ok());
+  auto decoded = nimble::codec::DecodeFixMessageView(encoded.value(), dictionary.value());
+  REQUIRE(decoded.ok());
+  REQUIRE(decoded.value().header.sending_time.size() == nimble::codec::kUtcTimestampMaxLength);
+
+  auto compiled_template = nimble::codec::CompileFrameEncodeTemplate(dictionary.value(),
+                                                                     "D",
+                                                                     nimble::codec::EncodeTemplateConfig{
+                                                                       .begin_string = "FIX.4.4",
+                                                                       .sender_comp_id = "BUY",
+                                                                       .target_comp_id = "SELL",
+                                                                       .delimiter = nimble::codec::kFixSoh,
+                                                                     });
+  REQUIRE(compiled_template.ok());
+  options.timestamp_resolution = nimble::codec::TimestampResolution::kSeconds;
+  nimble::codec::EncodeBuffer buffer;
+  auto templated = compiled_template.value().EncodeToBuffer(message, options, &buffer);
+  REQUIRE(templated.ok());
+  auto templated_decoded = nimble::codec::DecodeFixMessageView(buffer.bytes(), dictionary.value());
+  REQUIRE(templated_decoded.ok());
+  REQUIRE(templated_decoded.value().header.sending_time.size() == 17U);
+  REQUIRE(templated_decoded.value().header.sending_time.find('.') == std::string_view::npos);
 }
 
 TEST_CASE("SIMD SOH scan correctness", "[simd-scan]")

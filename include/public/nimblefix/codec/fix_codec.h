@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "nimblefix/base/result.h"
+#include "nimblefix/codec/timestamp_resolution.h"
 #include "nimblefix/message/message_view.h"
 #include "nimblefix/profile/normalized_dictionary.h"
 
@@ -17,6 +18,7 @@ namespace nimble::codec {
 
 inline constexpr char kFixSoh = '\x01';
 inline constexpr std::size_t kUtcTimestampLength = 21U;
+inline constexpr std::size_t kUtcTimestampMaxLength = 27U;
 inline constexpr std::uint32_t kMaxGroupEntryCount = 10000U;
 inline constexpr std::uint16_t kMaxGroupNestingDepth = 16U;
 
@@ -144,6 +146,7 @@ struct EncodeOptions
   std::string default_appl_ver_id;
   std::string_view sending_time;
   std::string_view orig_sending_time;
+  TimestampResolution timestamp_resolution{ TimestampResolution::kMilliseconds };
   std::uint32_t msg_seq_num{ 0 };
   bool poss_dup{ false };
   bool poss_resend{ false };
@@ -152,9 +155,10 @@ struct EncodeOptions
 
 struct UtcTimestampBuffer
 {
-  std::array<char, kUtcTimestampLength> storage{};
+  std::array<char, kUtcTimestampMaxLength> storage{};
+  std::size_t length{ kUtcTimestampLength };
 
-  [[nodiscard]] auto view() const -> std::string_view { return std::string_view(storage.data(), storage.size()); }
+  [[nodiscard]] auto view() const -> std::string_view { return std::string_view(storage.data(), length); }
 };
 
 struct EncodeTemplateConfig
@@ -283,6 +287,9 @@ private:
 
 auto
 CurrentUtcTimestamp(UtcTimestampBuffer* buffer) -> std::string_view;
+
+auto
+CurrentUtcTimestamp(UtcTimestampBuffer* buffer, TimestampResolution resolution) -> std::string_view;
 
 auto
 CurrentUtcTimestamp() -> std::string;
