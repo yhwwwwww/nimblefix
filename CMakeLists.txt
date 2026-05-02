@@ -104,6 +104,7 @@ file(GLOB NIMBLEFIX_LIBRARY_SOURCES CONFIGURE_DEPENDS
     "${PROJECT_SOURCE_DIR}/src/message/*.cpp"
     "${PROJECT_SOURCE_DIR}/src/codec/*.cpp"
     "${PROJECT_SOURCE_DIR}/src/transport/*.cpp"
+    "${PROJECT_SOURCE_DIR}/src/tools/msgdump/*.cpp"
 )
 
 add_library(nimblefix STATIC ${NIMBLEFIX_LIBRARY_SOURCES})
@@ -201,6 +202,11 @@ if(NIMBLEFIX_BUILD_TOOLS)
         "${PROJECT_SOURCE_DIR}/tools/acceptor/*.cpp"
     )
     nimblefix_add_binary(nimblefix-acceptor ${NIMBLEFIX_ACCEPTOR_SOURCES})
+
+    file(GLOB NIMBLEFIX_MSGDUMP_SOURCES CONFIGURE_DEPENDS
+        "${PROJECT_SOURCE_DIR}/tools/msgdump/*.cpp"
+    )
+    nimblefix_add_binary(nimblefix-msgdump ${NIMBLEFIX_MSGDUMP_SOURCES})
 endif()
 
 if(NIMBLEFIX_BUILD_FUZZERS)
