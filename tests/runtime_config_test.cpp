@@ -134,6 +134,7 @@ RequireSameCoreConfig(const nimble::runtime::EngineConfig& expected, const nimbl
     REQUIRE(actual_counterparty.supported_app_msg_types == expected_counterparty.supported_app_msg_types);
     REQUIRE(actual_counterparty.contract_service_subsets == expected_counterparty.contract_service_subsets);
     REQUIRE(actual_counterparty.sending_time_threshold_seconds == expected_counterparty.sending_time_threshold_seconds);
+    REQUIRE(actual_counterparty.warmup_message_count == expected_counterparty.warmup_message_count);
     REQUIRE(actual_counterparty.timestamp_resolution == expected_counterparty.timestamp_resolution);
     REQUIRE(actual_counterparty.application_messages_available == expected_counterparty.application_messages_available);
     REQUIRE(actual_counterparty.store_mode == expected_counterparty.store_mode);
@@ -691,6 +692,7 @@ TEST_CASE("ConfigToText round-trip", "[runtime-config]")
   initiator.refresh_on_logon = true;
   initiator.send_next_expected_msg_seq_num = true;
   initiator.sending_time_threshold_seconds = 60U;
+  initiator.warmup_message_count = 3U;
   initiator.timestamp_resolution = nimble::codec::TimestampResolution::kNanoseconds;
   initiator.supported_app_msg_types = { "D", "8" };
   initiator.application_messages_available = false;
@@ -734,8 +736,8 @@ TEST_CASE("ConfigToText round-trip", "[runtime-config]")
   const auto text = nimble::runtime::ConfigToText(config);
   REQUIRE(text.find("listener|main|127.0.0.1|9901|0") != std::string::npos);
   REQUIRE(text.find("counterparty|initiator-a|1001|4400|FIX.4.4|BUY1|SELL1|durable|") != std::string::npos);
-  REQUIRE(text.find("|D,8|false||nanoseconds|log-and-process|log|true") != std::string::npos);
-  REQUIRE(text.find("|true||seconds|ignore|ignore|false") != std::string::npos);
+  REQUIRE(text.find("|D,8|false||nanoseconds|log-and-process|log|true||3") != std::string::npos);
+  REQUIRE(text.find("|true||seconds|ignore|ignore|false||0") != std::string::npos);
 
   const auto parsed = nimble::runtime::LoadEngineConfigText(text);
   REQUIRE(parsed.ok());

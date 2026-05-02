@@ -247,6 +247,10 @@ struct CounterpartyConfig
   // Orchestra rules on the hot path.
   std::vector<std::string> contract_service_subsets;
   std::uint32_t sending_time_threshold_seconds{ 0 };
+  // Number of inbound application messages after session activation to treat
+  // as warmup. Callbacks can query is_warmup() to distinguish these messages.
+  // 0 disables warmup tracking (is_warmup() always returns false).
+  std::uint32_t warmup_message_count{ 0 };
   // Outbound SendingTime(52) timestamp resolution. Default millisecond
   // preserves FIX 4.x compatibility. Nanosecond is useful for ultra-low-latency venues.
   codec::TimestampResolution timestamp_resolution{ codec::TimestampResolution::kMilliseconds };
@@ -463,6 +467,12 @@ public:
   /// \param seconds Maximum tolerated absolute drift from wall clock.
   /// \return This builder.
   auto sending_time_threshold_seconds(std::uint32_t seconds) -> CounterpartyConfigBuilder&;
+
+  /// Configure inbound application warmup message count.
+  ///
+  /// \param count Number of inbound application messages treated as warmup after logon.
+  /// \return This builder.
+  auto warmup_message_count(std::uint32_t count) -> CounterpartyConfigBuilder&;
 
   /// Override outbound SendingTime(52) timestamp precision.
   ///

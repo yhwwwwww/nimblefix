@@ -295,6 +295,7 @@ protected:
     -> base::Status;
   auto DispatchAppMessage(ConnectionState& connection, message::MessageView message, std::uint64_t timestamp_ns)
     -> base::Status;
+  auto PrepareAppMessageCallback(ConnectionState& connection) -> bool;
   auto ServiceTimer(WorkerShardState& shard, ConnectionState& connection, std::uint64_t timestamp_ns) -> base::Status;
   auto SendFrame(ConnectionState& connection, const session::EncodedFrame& frame, std::uint64_t timestamp_ns)
     -> base::Status;

@@ -766,6 +766,7 @@ AdminProtocol::AdminProtocol(AdminProtocolConfig config,
   impl_->dictionary_ = &dictionary;
   impl_->store_ = store;
   impl_->session_.emplace(impl_->config_.session);
+  impl_->session_->SetWarmupCount(impl_->config_.warmup_message_count);
 
   // If transport_profile was left at default but begin_string was set, derive
   // the profile from begin_string so callers that only set begin_string still

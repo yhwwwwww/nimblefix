@@ -316,3 +316,18 @@ TEST_CASE("config delta detects counterparty fields requiring remove add", "[dyn
   REQUIRE(it->description.find("requires remove+add") != std::string::npos);
   REQUIRE(it->description.find("store_mode") != std::string::npos);
 }
+
+TEST_CASE("config delta detects warmup message count changes", "[dynamic-config]")
+{
+  auto current = MakeEngineConfig({ MakeCounterparty(1U, "venue-a") });
+  auto proposed = current;
+  proposed.counterparties.front().warmup_message_count = 2U;
+
+  const auto delta = nimble::runtime::ComputeConfigDelta(current, proposed);
+  REQUIRE_FALSE(delta.requires_restart);
+  const auto it = std::find_if(delta.changes.begin(), delta.changes.end(), [](const auto& change) {
+    return change.kind == nimble::runtime::ConfigChangeKind::kModifyCounterparty && change.session_id == 1U;
+  });
+  REQUIRE(it != delta.changes.end());
+  REQUIRE(it->description.find("warmup_message_count") != std::string::npos);
+}

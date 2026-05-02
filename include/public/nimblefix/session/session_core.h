@@ -4,9 +4,9 @@
 #include <optional>
 #include <string>
 
+#include "nimblefix/advanced/session_handle.h"
 #include "nimblefix/base/result.h"
 #include "nimblefix/base/status.h"
-#include "nimblefix/advanced/session_handle.h"
 #include "nimblefix/session/session_key.h"
 #include "nimblefix/session/session_snapshot.h"
 #include "nimblefix/session/transport_profile.h"
@@ -107,6 +107,14 @@ public:
     return false;
   }
 
+  /// Set the warmup message count. Called during session setup.
+  auto SetWarmupCount(std::uint32_t count) -> void;
+  /// Decrement warmup counter for one inbound app message. Returns true when
+  /// that message is part of the warmup phase.
+  [[nodiscard]] auto ConsumeWarmupMessage() -> bool;
+  /// Whether the session is currently in warmup phase.
+  [[nodiscard]] auto is_warmup() const -> bool;
+
   [[nodiscard]] auto Snapshot() const -> SessionSnapshot;
   [[nodiscard]] auto handle(std::uint32_t worker_id) const -> SessionHandle;
 
@@ -120,6 +128,8 @@ private:
   std::uint64_t last_outbound_ns_{ 0 };
   std::optional<ResendRange> pending_resend_{};
   bool resend_completed_{ false };
+  std::uint32_t warmup_remaining_{ 0 };
+  std::uint32_t warmup_total_{ 0 };
   DayCutConfig day_cut_config_{};
   std::int32_t last_day_cut_date_{ -1 }; // Julian-style day number to avoid re-triggering
   const TransportSessionProfile* transport_profile_{ nullptr };

@@ -85,6 +85,7 @@ struct RuntimeEvent
   std::string text;
   std::uint64_t timestamp_ns{ 0 };
   bool poss_resend{ false };
+  bool is_warmup{ false };
 
   [[nodiscard]] auto message_view() const -> message::MessageView { return message.view(); }
 };

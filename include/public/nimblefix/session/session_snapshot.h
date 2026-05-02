@@ -34,6 +34,7 @@ struct SessionSnapshot
   std::uint64_t last_outbound_ns{ 0 };
   bool has_pending_resend{ false };
   ResendRange pending_resend{};
+  bool is_warmup{ false };
 };
 
 } // namespace nimble::session

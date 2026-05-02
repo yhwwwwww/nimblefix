@@ -64,6 +64,7 @@ MakeProtocolConfig(const CounterpartyConfig& counterparty) -> session::AdminProt
     .supported_app_msg_types = counterparty.supported_app_msg_types,
     .heartbeat_interval_seconds = counterparty.session.heartbeat_interval_seconds,
     .sending_time_threshold_seconds = counterparty.sending_time_threshold_seconds,
+    .warmup_message_count = counterparty.warmup_message_count,
     .timestamp_resolution = counterparty.timestamp_resolution,
     .application_messages_available = counterparty.application_messages_available,
     .reset_seq_num_on_logon = counterparty.reset_seq_num_on_logon,
@@ -428,6 +429,7 @@ LiveSessionWorker::DispatchAppMessage(ConnectionState& connection,
     .text = {},
     .timestamp_ns = timestamp_ns,
     .poss_resend = message.get_boolean(codec::tags::kPossResend).value_or(false),
+    .is_warmup = PrepareAppMessageCallback(connection),
   };
   base::Status status;
   auto* worker_shard = FindWorkerShard(connection.session->worker_id);
@@ -582,6 +584,16 @@ auto
 LiveSessionWorker::PublishNotification(const session::SessionNotification& notification) -> void
 {
   session_registry_.PublishNotification(notification);
+}
+
+auto
+LiveSessionWorker::PrepareAppMessageCallback(ConnectionState& connection) -> bool
+{
+  auto& session = connection.session->protocol->mutable_session();
+  const bool was_warmup = session.is_warmup();
+  static_cast<void>(session.ConsumeWarmupMessage());
+  UpdateSessionSnapshot(*connection.session);
+  return was_warmup;
 }
 
 auto

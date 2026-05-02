@@ -580,6 +580,7 @@ RunSoak(const SoakConfig& config) -> base::Result<SoakReport>
         .target_comp_id = harness.counterparty.session.key.target_comp_id,
         .default_appl_ver_id = harness.counterparty.session.default_appl_ver_id,
         .heartbeat_interval_seconds = harness.counterparty.session.heartbeat_interval_seconds,
+        .warmup_message_count = harness.counterparty.warmup_message_count,
         .timestamp_resolution = harness.counterparty.timestamp_resolution,
         .validation_policy = harness.counterparty.validation_policy,
         .validation_callback = harness.counterparty.validation_callback,

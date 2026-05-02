@@ -3,8 +3,8 @@
 #include <memory>
 #include <utility>
 
-#include "nimblefix/base/status.h"
 #include "nimblefix/advanced/runtime_application.h"
+#include "nimblefix/base/status.h"
 #include "nimblefix/runtime/application.h"
 #include "nimblefix/runtime/session.h"
 
@@ -21,7 +21,8 @@ template<class Profile, class ApplicationType>
 class TypedRuntimeApplication final : public ApplicationCallbacks
 {
 public:
-  TypedRuntimeApplication(nimble::runtime::ProfileBinding<Profile>* binding, std::shared_ptr<ApplicationType> application)
+  TypedRuntimeApplication(nimble::runtime::ProfileBinding<Profile>* binding,
+                          std::shared_ptr<ApplicationType> application)
     : binding_(binding)
     , application_(std::move(application))
   {
@@ -58,7 +59,7 @@ private:
       return base::Status::InvalidArgument("profile binding is null");
     }
 
-    InlineSession<Profile> session(event.handle);
+    InlineSession<Profile> session(event.handle, event.is_warmup);
     return binding_->dispatcher().Dispatch(session, event.message_view(), *application_);
   }
 

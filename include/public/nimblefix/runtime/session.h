@@ -12,6 +12,13 @@
 
 namespace nimble::runtime {
 
+namespace detail {
+
+template<class Profile, class ApplicationType>
+class TypedRuntimeApplication;
+
+} // namespace detail
+
 template<class Profile>
 class Session
 {
@@ -27,6 +34,11 @@ public:
   [[nodiscard]] auto session_id() const -> std::uint64_t { return handle_.session_id(); }
   [[nodiscard]] auto worker_id() const -> std::uint32_t { return handle_.worker_id(); }
   auto snapshot() const -> base::Result<session::SessionSnapshot> { return handle_.Snapshot(); }
+  [[nodiscard]] auto is_warmup() const -> bool
+  {
+    auto snap = snapshot();
+    return snap.ok() && snap.value().is_warmup;
+  }
   [[nodiscard]] auto raw_handle() const -> const session::SessionHandle& { return handle_; }
 
   auto send_message(message::Message message) -> base::Status
@@ -65,6 +77,14 @@ public:
   [[nodiscard]] auto session_id() const -> std::uint64_t { return handle_.session_id(); }
   [[nodiscard]] auto worker_id() const -> std::uint32_t { return handle_.worker_id(); }
   auto snapshot() const -> base::Result<session::SessionSnapshot> { return handle_.Snapshot(); }
+  [[nodiscard]] auto is_warmup() const -> bool
+  {
+    if (has_callback_warmup_) {
+      return callback_warmup_;
+    }
+    auto snap = snapshot();
+    return snap.ok() && snap.value().is_warmup;
+  }
   [[nodiscard]] auto raw_handle() const -> const session::SessionHandle& { return handle_; }
 
   auto send_message(message::Message message) -> base::Status
@@ -85,7 +105,19 @@ public:
   }
 
 private:
+  template<class BoundProfile, class ApplicationType>
+  friend class detail::TypedRuntimeApplication;
+
+  InlineSession(session::SessionHandle handle, bool is_warmup)
+    : handle_(std::move(handle))
+    , callback_warmup_(is_warmup)
+    , has_callback_warmup_(true)
+  {
+  }
+
   session::SessionHandle handle_{};
+  bool callback_warmup_{ false };
+  bool has_callback_warmup_{ false };
 };
 
 } // namespace nimble::runtime

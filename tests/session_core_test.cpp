@@ -825,6 +825,38 @@ TEST_CASE("session-core: snapshot reflects all fields", "[session-core][edge]")
   REQUIRE(!snap.has_pending_resend);
 }
 
+TEST_CASE("session-core warmup counter transitions and snapshots", "[session-core][warmup]")
+{
+  auto s = MakeActive();
+  REQUIRE_FALSE(s.is_warmup());
+  REQUIRE_FALSE(s.Snapshot().is_warmup);
+
+  s.SetWarmupCount(2U);
+  REQUIRE(s.is_warmup());
+  REQUIRE(s.Snapshot().is_warmup);
+
+  REQUIRE(s.ConsumeWarmupMessage());
+  REQUIRE(s.is_warmup());
+  REQUIRE(s.Snapshot().is_warmup);
+
+  REQUIRE(s.ConsumeWarmupMessage());
+  REQUIRE_FALSE(s.is_warmup());
+  REQUIRE_FALSE(s.Snapshot().is_warmup);
+
+  REQUIRE_FALSE(s.ConsumeWarmupMessage());
+  REQUIRE_FALSE(s.is_warmup());
+}
+
+TEST_CASE("session-core warmup count zero stays disabled", "[session-core][warmup]")
+{
+  auto s = MakeActive();
+  s.SetWarmupCount(0U);
+
+  REQUIRE_FALSE(s.is_warmup());
+  REQUIRE_FALSE(s.ConsumeWarmupMessage());
+  REQUIRE_FALSE(s.Snapshot().is_warmup);
+}
+
 TEST_CASE("session-core: handle fields", "[session-core][edge]")
 {
   SessionCore s(MakeConfig());

@@ -153,6 +153,7 @@ SessionCore::OnLogonAccepted() -> base::Status
   }
 
   state_ = SessionState::kActive;
+  warmup_remaining_ = warmup_total_;
   return base::Status::Ok();
 }
 
@@ -274,6 +275,29 @@ SessionCore::RecordOutboundActivity(std::uint64_t timestamp_ns) -> base::Status
 }
 
 auto
+SessionCore::SetWarmupCount(std::uint32_t count) -> void
+{
+  warmup_total_ = count;
+  warmup_remaining_ = count;
+}
+
+auto
+SessionCore::ConsumeWarmupMessage() -> bool
+{
+  if (warmup_remaining_ > 0) {
+    --warmup_remaining_;
+    return true;
+  }
+  return false;
+}
+
+auto
+SessionCore::is_warmup() const -> bool
+{
+  return warmup_remaining_ > 0;
+}
+
+auto
 SessionCore::Snapshot() const -> SessionSnapshot
 {
   return SessionSnapshot{
@@ -286,6 +310,7 @@ SessionCore::Snapshot() const -> SessionSnapshot
     .last_outbound_ns = last_outbound_ns_,
     .has_pending_resend = pending_resend_.has_value(),
     .pending_resend = pending_resend_.value_or(ResendRange{}),
+    .is_warmup = is_warmup(),
   };
 }
 

@@ -156,6 +156,7 @@ MakeProtocolConfig(const CounterpartyConfig& counterparty) -> session::AdminProt
     .supported_app_msg_types = counterparty.supported_app_msg_types,
     .heartbeat_interval_seconds = counterparty.session.heartbeat_interval_seconds,
     .sending_time_threshold_seconds = counterparty.sending_time_threshold_seconds,
+    .warmup_message_count = counterparty.warmup_message_count,
     .timestamp_resolution = counterparty.timestamp_resolution,
     .application_messages_available = counterparty.application_messages_available,
     .reset_seq_num_on_logon = counterparty.reset_seq_num_on_logon,
@@ -2238,6 +2239,16 @@ LiveAcceptor::DispatchAdminMessage(const ActiveSession& session,
 }
 
 auto
+LiveAcceptor::PrepareAppMessageCallback(ConnectionState& connection) -> bool
+{
+  auto& session = connection.session->protocol->mutable_session();
+  const bool was_warmup = session.is_warmup();
+  static_cast<void>(session.ConsumeWarmupMessage());
+  UpdateSessionSnapshot(*connection.session);
+  return was_warmup;
+}
+
+auto
 LiveAcceptor::DispatchAppMessage(ConnectionState& connection, message::MessageView message, std::uint64_t timestamp_ns)
   -> base::Status
 {
@@ -2255,6 +2266,7 @@ LiveAcceptor::DispatchAppMessage(ConnectionState& connection, message::MessageVi
     .text = {},
     .timestamp_ns = timestamp_ns,
     .poss_resend = message.get_boolean(codec::tags::kPossResend).value_or(false),
+    .is_warmup = PrepareAppMessageCallback(connection),
   };
   base::Status status;
   auto* worker_shard = FindWorkerShard(connection.session->worker_id);
@@ -2756,6 +2768,7 @@ LiveAcceptor::MakeActiveSession(const CounterpartyConfig& counterparty,
   session_state->store = std::move(store).value();
   session_state->protocol.emplace(
     MakeProtocolConfig(counterparty), *session_state->dictionary, session_state->store.get());
+  session_state->protocol->mutable_session().SetDayCutConfig(counterparty.day_cut);
   return session_state;
 }
 

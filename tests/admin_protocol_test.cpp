@@ -286,6 +286,39 @@ TEST_CASE("admin protocol treats SenderSubID and TargetSubID as per-message enve
   REQUIRE(decoded_third.value().header.target_sub_id.empty());
 }
 
+TEST_CASE("admin protocol initializes session warmup count", "[admin-protocol][warmup]")
+{
+  auto dictionary = nimble::tests::LoadFix44DictionaryView();
+  if (!dictionary.ok()) {
+    SKIP("FIX44 artifact not available: " << dictionary.status().message());
+  }
+
+  nimble::store::MemorySessionStore store;
+  nimble::session::AdminProtocol protocol(
+    nimble::session::AdminProtocolConfig{
+      .session =
+        nimble::session::SessionConfig{
+          .session_id = 5010U,
+          .key = nimble::session::SessionKey{ "FIX.4.4", "SELL", "BUY" },
+          .profile_id = dictionary.value().profile().header().profile_id,
+          .heartbeat_interval_seconds = 30U,
+          .is_initiator = false,
+        },
+      .begin_string = "FIX.4.4",
+      .sender_comp_id = "SELL",
+      .target_comp_id = "BUY",
+      .heartbeat_interval_seconds = 30U,
+      .warmup_message_count = 2U,
+    },
+    dictionary.value(),
+    &store);
+
+  REQUIRE(protocol.OnTransportConnected(1U).ok());
+  REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
+  REQUIRE(protocol.session().is_warmup());
+  REQUIRE(protocol.session().Snapshot().is_warmup);
+}
+
 auto
 ActivateAcceptorSession(nimble::session::AdminProtocol* protocol,
                         const nimble::profile::NormalizedDictionaryView& dictionary,

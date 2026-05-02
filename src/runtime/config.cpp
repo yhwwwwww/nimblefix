@@ -1175,7 +1175,8 @@ ConfigToText(const EngineConfig& config) -> std::string
         << session::UnknownFieldActionName(counterparty.validation_policy.unknown_field_action) << '|'
         << session::MalformedFieldActionName(counterparty.validation_policy.malformed_field_action) << '|'
         << BoolToText(counterparty.validation_policy.validate_enum_values) << '|'
-        << JoinCsv(counterparty.alternate_endpoints, EndpointToText) << '\n';
+        << JoinCsv(counterparty.alternate_endpoints, EndpointToText) << '|' << counterparty.warmup_message_count
+        << '\n';
     if (counterparty.connection_strategy != nullptr) {
       out << "# counterparty " << counterparty.name
           << " has a runtime-only connection_strategy; strategy objects are not serialized\n";
@@ -1292,6 +1293,13 @@ auto
 CounterpartyConfigBuilder::sending_time_threshold_seconds(std::uint32_t seconds) -> CounterpartyConfigBuilder&
 {
   config_.sending_time_threshold_seconds = seconds;
+  return *this;
+}
+
+auto
+CounterpartyConfigBuilder::warmup_message_count(std::uint32_t count) -> CounterpartyConfigBuilder&
+{
+  config_.warmup_message_count = count;
   return *this;
 }
 

@@ -161,6 +161,7 @@ CounterpartyEquals(const CounterpartyConfig& left, const CounterpartyConfig& rig
          left.supported_app_msg_types == right.supported_app_msg_types &&
          left.contract_service_subsets == right.contract_service_subsets &&
          left.sending_time_threshold_seconds == right.sending_time_threshold_seconds &&
+         left.warmup_message_count == right.warmup_message_count &&
          left.timestamp_resolution == right.timestamp_resolution &&
          left.application_messages_available == right.application_messages_available &&
          left.store_mode == right.store_mode && left.durable_flush_threshold == right.durable_flush_threshold &&
@@ -237,6 +238,7 @@ CounterpartyChangedFields(const CounterpartyConfig& current, const CounterpartyC
                        proposed.sending_time_threshold_seconds,
                        "sending_time_threshold_seconds",
                        fields);
+  AppendFieldIfChanged(current.warmup_message_count, proposed.warmup_message_count, "warmup_message_count", fields);
   AppendFieldIfChanged(current.timestamp_resolution, proposed.timestamp_resolution, "timestamp_resolution", fields);
   AppendFieldIfChanged(current.application_messages_available,
                        proposed.application_messages_available,

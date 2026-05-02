@@ -470,6 +470,7 @@ struct AdminProtocolConfig
   std::vector<std::string> supported_app_msg_types;
   std::uint32_t heartbeat_interval_seconds{ 30 };
   std::uint32_t sending_time_threshold_seconds{ 0 };
+  std::uint32_t warmup_message_count{ 0 };
   codec::TimestampResolution timestamp_resolution{ codec::TimestampResolution::kMilliseconds };
   bool application_messages_available{ true };
   bool reset_seq_num_on_logon{ false };

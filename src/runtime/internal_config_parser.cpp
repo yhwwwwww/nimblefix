@@ -89,8 +89,9 @@ constexpr std::size_t kUnknownFieldAction = 48U;
 constexpr std::size_t kMalformedFieldAction = 49U;
 constexpr std::size_t kValidateEnumValues = 50U;
 constexpr std::size_t kAlternateEndpoints = 51U;
+constexpr std::size_t kWarmupMessageCount = 52U;
 constexpr std::size_t kMinFieldCount = kIsInitiator + 1U;
-constexpr std::size_t kMaxFieldCount = kAlternateEndpoints + 1U;
+constexpr std::size_t kMaxFieldCount = kWarmupMessageCount + 1U;
 } // namespace counterparty_columns
 
 auto
@@ -972,6 +973,16 @@ LoadEngineConfigText(std::string_view text, const std::filesystem::path& base_di
         }
         sending_time_threshold_seconds = threshold.value();
       }
+      std::uint32_t warmup_message_count = 0U;
+      if (parts.size() > counterparty_columns::kWarmupMessageCount &&
+          !Trim(parts[counterparty_columns::kWarmupMessageCount]).empty()) {
+        auto count =
+          ParseInteger<std::uint32_t>(parts[counterparty_columns::kWarmupMessageCount], "warmup_message_count");
+        if (!count.ok()) {
+          return count.status();
+        }
+        warmup_message_count = count.value();
+      }
       const auto supported_app_msg_types = parts.size() > counterparty_columns::kSupportedAppMsgTypes
                                              ? SplitCsvList(parts[counterparty_columns::kSupportedAppMsgTypes])
                                              : std::vector<std::string>{};
@@ -1056,6 +1067,7 @@ LoadEngineConfigText(std::string_view text, const std::filesystem::path& base_di
         .supported_app_msg_types = supported_app_msg_types,
         .contract_service_subsets = contract_service_subsets,
         .sending_time_threshold_seconds = sending_time_threshold_seconds,
+        .warmup_message_count = warmup_message_count,
         .timestamp_resolution = timestamp_resolution.value(),
         .application_messages_available = application_messages_available.value(),
         .store_mode = store_mode.value(),
