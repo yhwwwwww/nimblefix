@@ -4,6 +4,8 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <mutex>
+#include <optional>
 #include <vector>
 
 #include "nimblefix/base/result.h"
@@ -143,6 +145,9 @@ public:
   /// Apply a received state snapshot to the engine (standby path).
   auto ApplySnapshot(Engine& engine, const HaStateSnapshot& snapshot) -> base::Status;
 
+  /// Last state snapshot accepted by ApplySnapshot, if any.
+  [[nodiscard]] auto last_applied_snapshot() const -> const std::optional<HaStateSnapshot>&;
+
   /// Check heartbeat health and trigger failover if needed.
   /// Call this periodically (e.g., from a timer or monitor thread).
   auto CheckHealth(std::uint64_t current_time_ns = 0) -> void;
@@ -150,6 +155,19 @@ public:
 private:
   struct Impl;
   std::unique_ptr<Impl> impl_;
+};
+
+/// Reference in-memory state replicator/receiver pair for testing and
+/// single-process HA simulation.
+class InMemoryHaTransport
+{
+public:
+  [[nodiscard]] auto replicator() -> HaStateReplicator;
+  [[nodiscard]] auto receiver() -> HaStateReceiver;
+
+private:
+  mutable std::mutex mutex_;
+  std::optional<HaStateSnapshot> latest_;
 };
 
 } // namespace nimble::runtime

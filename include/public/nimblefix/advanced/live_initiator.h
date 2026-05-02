@@ -9,12 +9,13 @@
 #include <stop_token> // IWYU pragma: keep
 #include <string>
 #include <string_view> // IWYU pragma: keep
+#include <vector>
 
+#include "nimblefix/advanced/runtime_application.h"
 #include "nimblefix/base/result.h" // IWYU pragma: keep
 #include "nimblefix/base/status.h"
 #include "nimblefix/profile/normalized_dictionary.h" // IWYU pragma: keep
-#include "nimblefix/advanced/runtime_application.h"
-#include "nimblefix/runtime/config.h" // IWYU pragma: keep
+#include "nimblefix/runtime/config.h"                // IWYU pragma: keep
 
 namespace nimble::codec {
 
@@ -26,11 +27,13 @@ namespace nimble::runtime {
 
 class Engine;
 enum class TraceEventKind : std::uint32_t;
+struct SessionSequenceState;
 
 } // namespace nimble::runtime
 
 namespace nimble::session {
 
+struct SessionSnapshot;
 struct EncodedFrame;
 struct ProtocolEvent;
 class ProtocolFrameCollection;
@@ -120,6 +123,7 @@ public:
   [[nodiscard]] auto active_connection_count() const -> std::size_t;
   [[nodiscard]] auto completed_session_count() const -> std::size_t;
   [[nodiscard]] auto pending_reconnect_count() const -> std::size_t;
+  [[nodiscard]] auto LoadAllSessionSnapshots() const -> std::vector<session::SessionSnapshot>;
 
 private:
 #include "nimblefix/runtime/detail/live_initiator_private.inc"

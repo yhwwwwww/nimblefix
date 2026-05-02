@@ -8,6 +8,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <vector>
 
 #include "nimblefix/base/result.h"
 #include "nimblefix/base/status.h"
@@ -16,6 +17,7 @@
 #include "nimblefix/runtime/config.h"
 #include "nimblefix/runtime/diagnostics.h"
 #include "nimblefix/runtime/dynamic_config.h"
+#include "nimblefix/runtime/ha.h"
 #include "nimblefix/runtime/metrics.h"
 #include "nimblefix/runtime/profile_binding.h"
 #include "nimblefix/runtime/profile_registry.h"
@@ -23,6 +25,7 @@
 #include "nimblefix/runtime/sharded_runtime.h"
 #include "nimblefix/runtime/trace.h"
 #include "nimblefix/session/session_key.h"
+#include "nimblefix/session/session_snapshot.h"
 
 namespace nimble::runtime {
 
@@ -47,6 +50,10 @@ inline constexpr std::uint64_t kFirstDynamicSessionId = 0x8000'0000'0000'0000ULL
 // Return session.session_id == 0 to let Engine auto-assign a dynamic session id
 // from kFirstDynamicSessionId upward.
 using SessionFactory = std::function<base::Result<CounterpartyConfig>(const session::SessionKey& key)>;
+
+/// Provider function that returns all live session snapshots.
+/// Installed by runtime components (Initiator/Acceptor) that own LiveSessionRegistry.
+using SessionSnapshotProvider = std::function<std::vector<session::SessionSnapshot>()>;
 
 class WhitelistSessionFactory
 {
@@ -141,6 +148,15 @@ public:
   // Install or replace the dynamic factory used for unknown inbound acceptor
   // Logons. Static counterparties always match first.
   void SetSessionFactory(SessionFactory factory);
+
+  /// Install or replace the runtime-owned live session snapshot provider.
+  void SetSessionSnapshotProvider(SessionSnapshotProvider provider);
+  /// Query live session snapshots if a runtime component has installed a provider.
+  [[nodiscard]] auto QuerySessionSnapshots() const -> std::vector<session::SessionSnapshot>;
+  /// Store an HA snapshot that runtime sessions should apply when they boot.
+  void SetLastAppliedHaSnapshot(HaStateSnapshot snapshot);
+  /// Return the last HA snapshot staged for runtime session boot, if any.
+  [[nodiscard]] auto last_applied_ha_snapshot() const -> const HaStateSnapshot*;
 
 private:
   friend auto EnsureManagedQueueRunnerStarted(Engine& engine,

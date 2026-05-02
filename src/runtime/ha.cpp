@@ -1,5 +1,6 @@
 #include "nimblefix/runtime/ha.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <mutex>
@@ -30,6 +31,8 @@ struct HaController::Impl
   std::atomic<std::uint64_t> last_peer_heartbeat_ns{ 0 };
   std::atomic<bool> running{ false };
   bool configured{ false };
+  std::optional<HaStateSnapshot> last_applied_snapshot;
+  std::uint64_t last_applied_generation{ 0 };
 
   auto ChangeRole(HaRole expected, HaRole desired) -> base::Status
   {
@@ -159,15 +162,29 @@ HaController::TakeSnapshot(const Engine& engine) -> base::Result<HaStateSnapshot
   HaStateSnapshot snapshot;
   snapshot.snapshot_timestamp_ns = NowNs();
   snapshot.generation = generation();
-  snapshot.sessions.reserve(config->counterparties.size());
+
+  auto session_snapshots = engine.QuerySessionSnapshots();
+  snapshot.sessions.reserve(std::max(session_snapshots.size(), config->counterparties.size()));
+  for (const auto& ss : session_snapshots) {
+    snapshot.sessions.push_back(SessionSequenceState{
+      .session_id = ss.session_id,
+      .next_inbound_seq = ss.next_in_seq,
+      .next_outbound_seq = ss.next_out_seq,
+      .last_activity_ns = std::max(ss.last_inbound_ns, ss.last_outbound_ns),
+    });
+  }
+
   for (const auto& counterparty : config->counterparties) {
-    // Sequence numbers are owned by runtime workers and stores. This public HA
-    // building block records session membership now; precise sequence replay
-    // requires future worker/store integration.
+    const auto found = std::any_of(snapshot.sessions.begin(), snapshot.sessions.end(), [&](const auto& state) {
+      return state.session_id == counterparty.session.session_id;
+    });
+    if (found) {
+      continue;
+    }
     snapshot.sessions.push_back(SessionSequenceState{
       .session_id = counterparty.session.session_id,
-      .next_inbound_seq = 0U,
-      .next_outbound_seq = 0U,
+      .next_inbound_seq = 1U,
+      .next_outbound_seq = 1U,
       .last_activity_ns = 0U,
     });
   }
@@ -180,10 +197,18 @@ HaController::ApplySnapshot(Engine& engine, const HaStateSnapshot& snapshot) -> 
   if (engine.config() == nullptr) {
     return base::Status::InvalidArgument("engine must be booted before applying HA snapshot");
   }
-  (void)snapshot;
-  // Applying replicated sequence state requires worker-owned SessionCore/store
-  // hooks that are intentionally outside this initial coordination surface.
+
+  std::lock_guard lock(impl_->mutex);
+  impl_->last_applied_snapshot = snapshot;
+  impl_->last_applied_generation = snapshot.generation;
+  engine.SetLastAppliedHaSnapshot(snapshot);
   return base::Status::Ok();
+}
+
+auto
+HaController::last_applied_snapshot() const -> const std::optional<HaStateSnapshot>&
+{
+  return impl_->last_applied_snapshot;
 }
 
 auto
@@ -221,6 +246,28 @@ HaController::CheckHealth(std::uint64_t current_time_ns) -> void
   } else {
     impl_->peer_state.store(HaPeerState::kAlive, std::memory_order_release);
   }
+}
+
+auto
+InMemoryHaTransport::replicator() -> HaStateReplicator
+{
+  return [this](const HaStateSnapshot& snapshot) -> base::Status {
+    std::lock_guard lock(mutex_);
+    latest_ = snapshot;
+    return base::Status::Ok();
+  };
+}
+
+auto
+InMemoryHaTransport::receiver() -> HaStateReceiver
+{
+  return [this]() -> base::Result<HaStateSnapshot> {
+    std::lock_guard lock(mutex_);
+    if (!latest_.has_value()) {
+      return base::Status::NotFound("no snapshot available");
+    }
+    return *latest_;
+  };
 }
 
 } // namespace nimble::runtime

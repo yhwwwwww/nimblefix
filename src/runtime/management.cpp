@@ -1,6 +1,8 @@
 #include "nimblefix/runtime/management.h"
 
+#include <algorithm>
 #include <chrono>
+#include <span>
 #include <sstream>
 #include <utility>
 
@@ -19,9 +21,10 @@ NowNs() -> std::uint64_t
 }
 
 auto
-BuildSessionStatus(const CounterpartyConfig& counterparty) -> ManagedSessionStatus
+BuildSessionStatus(const CounterpartyConfig& counterparty, std::span<const session::SessionSnapshot> snapshots)
+  -> ManagedSessionStatus
 {
-  return ManagedSessionStatus{
+  ManagedSessionStatus status{
     .session_id = counterparty.session.session_id,
     .name = counterparty.name,
     .state = session::SessionState::kDisconnected,
@@ -37,6 +40,16 @@ BuildSessionStatus(const CounterpartyConfig& counterparty) -> ManagedSessionStat
     .dispatch_mode = counterparty.dispatch_mode,
     .reconnect_enabled = counterparty.reconnect_enabled,
   };
+  const auto it = std::find_if(snapshots.begin(), snapshots.end(), [&](const auto& snapshot) {
+    return snapshot.session_id == counterparty.session.session_id;
+  });
+  if (it != snapshots.end()) {
+    status.state = it->state;
+    status.next_inbound_seq = it->next_in_seq;
+    status.next_outbound_seq = it->next_out_seq;
+    status.last_activity_ns = std::max(it->last_inbound_ns, it->last_outbound_ns);
+  }
+  return status;
 }
 
 } // namespace
@@ -85,9 +98,10 @@ ManagementPlane::QueryEngineStatus() const -> base::Result<EngineManagementStatu
   status.loaded_profiles = static_cast<std::uint32_t>(impl_->engine->profiles().size());
   status.listener_count = static_cast<std::uint32_t>(config->listeners.size());
   status.uptime = std::chrono::nanoseconds(status.timestamp_ns - impl_->boot_timestamp_ns);
+  const auto snapshots = impl_->engine->QuerySessionSnapshots();
   status.sessions.reserve(config->counterparties.size());
   for (const auto& counterparty : config->counterparties) {
-    status.sessions.push_back(BuildSessionStatus(counterparty));
+    status.sessions.push_back(BuildSessionStatus(counterparty, snapshots));
   }
   return status;
 }
@@ -105,7 +119,8 @@ ManagementPlane::QuerySessionStatus(std::uint64_t session_id) const -> base::Res
   if (counterparty == nullptr) {
     return base::Status::NotFound("session was not found");
   }
-  return BuildSessionStatus(*counterparty);
+  const auto snapshots = impl_->engine->QuerySessionSnapshots();
+  return BuildSessionStatus(*counterparty, snapshots);
 }
 
 auto

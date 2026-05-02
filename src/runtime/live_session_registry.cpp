@@ -101,6 +101,18 @@ LiveSessionRegistry::LoadSnapshot(std::uint64_t session_id) const -> base::Resul
 }
 
 auto
+LiveSessionRegistry::LoadAllSnapshots() const -> std::vector<session::SessionSnapshot>
+{
+  std::lock_guard lock(mutex_);
+  std::vector<session::SessionSnapshot> result;
+  result.reserve(snapshots_.size());
+  for (const auto& [id, snapshot] : snapshots_) {
+    result.push_back(snapshot);
+  }
+  return result;
+}
+
+auto
 LiveSessionRegistry::RegisterSubscriber(std::uint64_t session_id, std::size_t queue_capacity)
   -> base::Result<session::SessionSubscription>
 {

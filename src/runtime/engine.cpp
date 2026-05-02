@@ -200,6 +200,8 @@ struct Engine::Impl
   std::unordered_map<std::uint64_t, CounterpartyConfig> counterparties_;
   LoadedContractMap contracts_;
   std::optional<SessionFactory> session_factory_;
+  std::optional<SessionSnapshotProvider> session_snapshot_provider_;
+  std::optional<HaStateSnapshot> last_applied_ha_snapshot_;
   mutable std::mutex managed_queue_runner_mutex_;
   std::unordered_map<const void*, ManagedQueueRunnerSlot> managed_queue_runners_;
   ProfileRegistry profiles_;
@@ -214,6 +216,8 @@ struct Engine::Impl
 #define counterparties_ impl_->counterparties_
 #define contracts_ impl_->contracts_
 #define session_factory_ impl_->session_factory_
+#define session_snapshot_provider_ impl_->session_snapshot_provider_
+#define last_applied_ha_snapshot_ impl_->last_applied_ha_snapshot_
 #define managed_queue_runner_mutex_ impl_->managed_queue_runner_mutex_
 #define managed_queue_runners_ impl_->managed_queue_runners_
 #define profiles_ impl_->profiles_
@@ -869,6 +873,33 @@ Engine::SetSessionFactory(SessionFactory factory)
 }
 
 void
+Engine::SetSessionSnapshotProvider(SessionSnapshotProvider provider)
+{
+  session_snapshot_provider_ = std::move(provider);
+}
+
+auto
+Engine::QuerySessionSnapshots() const -> std::vector<session::SessionSnapshot>
+{
+  if (session_snapshot_provider_.has_value()) {
+    return (*session_snapshot_provider_)();
+  }
+  return {};
+}
+
+void
+Engine::SetLastAppliedHaSnapshot(HaStateSnapshot snapshot)
+{
+  last_applied_ha_snapshot_ = std::move(snapshot);
+}
+
+auto
+Engine::last_applied_ha_snapshot() const -> const HaStateSnapshot*
+{
+  return last_applied_ha_snapshot_.has_value() ? &*last_applied_ha_snapshot_ : nullptr;
+}
+
+void
 WhitelistSessionFactory::Allow(std::string_view begin_string,
                                std::string_view sender_comp_id,
                                const CounterpartyConfig& config_template)
@@ -937,6 +968,8 @@ WhitelistSessionFactory::operator()(const session::SessionKey& key) const -> bas
 #undef runtime_
 #undef counterparties_
 #undef session_factory_
+#undef session_snapshot_provider_
+#undef last_applied_ha_snapshot_
 #undef managed_queue_runner_mutex_
 #undef managed_queue_runners_
 #undef profiles_

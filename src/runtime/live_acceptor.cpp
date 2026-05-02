@@ -1,5 +1,6 @@
 #include "nimblefix/advanced/live_acceptor.h"
 
+#include <algorithm>
 #include <atomic>
 #include <cerrno>
 #include <chrono>
@@ -535,6 +536,9 @@ LiveAcceptor::LiveAcceptor(Engine* engine, Options options)
 {
   impl_->engine = engine;
   impl_->options = std::move(options);
+  if (impl_->engine != nullptr) {
+    impl_->engine->SetSessionSnapshotProvider([this]() { return LoadAllSessionSnapshots(); });
+  }
 }
 
 LiveAcceptor::~LiveAcceptor()
@@ -555,6 +559,44 @@ auto
 LiveAcceptor::completed_session_count() const -> std::size_t
 {
   return impl_->completed_sessions.load(std::memory_order_relaxed);
+}
+
+auto
+LiveAcceptor::LoadAllSessionSnapshots() const -> std::vector<session::SessionSnapshot>
+{
+  std::lock_guard lock(impl_->control_mutex);
+  std::vector<session::SessionSnapshot> result;
+  result.reserve(impl_->session_snapshots.size());
+  for (const auto& [id, snapshot] : impl_->session_snapshots) {
+    result.push_back(snapshot);
+  }
+  return result;
+}
+
+auto
+LiveAcceptor::FindAppliedSequenceState(std::uint64_t session_id) const -> const SessionSequenceState*
+{
+  if (impl_->engine == nullptr) {
+    return nullptr;
+  }
+  const auto* snapshot = impl_->engine->last_applied_ha_snapshot();
+  if (snapshot == nullptr) {
+    return nullptr;
+  }
+  const auto it = std::find_if(snapshot->sessions.begin(), snapshot->sessions.end(), [&](const auto& state) {
+    return state.session_id == session_id;
+  });
+  return it == snapshot->sessions.end() ? nullptr : &*it;
+}
+
+auto
+LiveAcceptor::RestoreAppliedSequenceState(ActiveSession& session) const -> base::Status
+{
+  const auto* state = FindAppliedSequenceState(session.counterparty.session.session_id);
+  if (state == nullptr || !session.protocol.has_value()) {
+    return base::Status::Ok();
+  }
+  return session.protocol->mutable_session().RestoreSequenceState(state->next_inbound_seq, state->next_outbound_seq);
 }
 
 #define engine_ impl_->engine
@@ -1884,6 +1926,10 @@ LiveAcceptor::BindConnectionFromLogon(WorkerShardState& shard,
   }
 
   auto session_state = std::move(active_session).value();
+  auto restore_status = RestoreAppliedSequenceState(*session_state);
+  if (!restore_status.ok()) {
+    return restore_status;
+  }
   session_state->routed_worker_id = ResolveWorkerId(session_state->worker_id);
 
   auto* target_shard = FindWorkerShard(session_state->routed_worker_id);

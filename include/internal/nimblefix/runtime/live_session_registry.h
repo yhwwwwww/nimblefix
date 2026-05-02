@@ -9,9 +9,9 @@
 #include <unordered_set>
 #include <vector>
 
+#include "nimblefix/advanced/session_handle.h"
 #include "nimblefix/base/result.h"
 #include "nimblefix/base/status.h"
-#include "nimblefix/advanced/session_handle.h"
 
 namespace nimble::runtime {
 
@@ -30,6 +30,7 @@ public:
 
   auto UpdateSnapshot(session::SessionSnapshot snapshot) -> void;
   [[nodiscard]] auto LoadSnapshot(std::uint64_t session_id) const -> base::Result<session::SessionSnapshot>;
+  [[nodiscard]] auto LoadAllSnapshots() const -> std::vector<session::SessionSnapshot>;
 
   auto RegisterSubscriber(std::uint64_t session_id, std::size_t queue_capacity)
     -> base::Result<session::SessionSubscription>;
