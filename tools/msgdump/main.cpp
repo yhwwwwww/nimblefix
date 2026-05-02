@@ -156,6 +156,22 @@ ParseDirection(std::string_view token) -> std::optional<DirectionFilter>
 }
 
 [[nodiscard]] auto
+ParseTagValue(std::string_view token) -> std::optional<std::pair<std::uint32_t, std::string>>
+{
+  const auto equals = token.find('=');
+  if (equals == std::string_view::npos || equals == 0U) {
+    return std::nullopt;
+  }
+  std::uint32_t tag = 0U;
+  try {
+    tag = static_cast<std::uint32_t>(std::stoul(std::string(token.substr(0U, equals))));
+  } catch (...) {
+    return std::nullopt;
+  }
+  return std::pair<std::uint32_t, std::string>{ tag, std::string(token.substr(equals + 1U)) };
+}
+
+[[nodiscard]] auto
 ParseOptions(int argc, char** argv) -> std::optional<Options>
 {
   Options options;
@@ -186,7 +202,12 @@ ParseOptions(int argc, char** argv) -> std::optional<Options>
       continue;
     }
     if (arg == "--tag-value" && index + 1 < argc) {
-      options.dump.filter.tag_value = argv[++index];
+      auto parsed_tag_value = ParseTagValue(argv[++index]);
+      if (!parsed_tag_value.has_value()) {
+        return std::nullopt;
+      }
+      options.dump.filter.tag = parsed_tag_value->first;
+      options.dump.filter.tag_value = std::move(parsed_tag_value->second);
       continue;
     }
     if (arg == "--seq-from" && index + 1 < argc) {
@@ -303,8 +324,8 @@ main(int argc, char** argv)
   }
 
   const auto seq_from = options.dump.filter.seq_from.value_or(1U);
-  const auto out_seq_to = options.dump.filter.seq_to.value_or(
-    recovery.value().next_out_seq == 0U ? 0U : recovery.value().next_out_seq - 1U);
+  const auto out_seq_to =
+    options.dump.filter.seq_to.value_or(recovery.value().next_out_seq == 0U ? 0U : recovery.value().next_out_seq - 1U);
   const auto in_seq_to =
     options.dump.filter.seq_to.value_or(recovery.value().next_in_seq == 0U ? 0U : recovery.value().next_in_seq - 1U);
 
