@@ -104,6 +104,7 @@ file(GLOB NIMBLEFIX_LIBRARY_SOURCES CONFIGURE_DEPENDS
     "${PROJECT_SOURCE_DIR}/src/message/*.cpp"
     "${PROJECT_SOURCE_DIR}/src/codec/*.cpp"
     "${PROJECT_SOURCE_DIR}/src/transport/*.cpp"
+    "${PROJECT_SOURCE_DIR}/src/tools/*.cpp"
     "${PROJECT_SOURCE_DIR}/src/tools/msgdump/*.cpp"
 )
 
@@ -212,6 +213,11 @@ if(NIMBLEFIX_BUILD_TOOLS)
         "${PROJECT_SOURCE_DIR}/tools/router/*.cpp"
     )
     nimblefix_add_binary(nimblefix-router ${NIMBLEFIX_ROUTER_SOURCES})
+
+    file(GLOB NIMBLEFIX_SCHEMA_OPTIMIZER_SOURCES CONFIGURE_DEPENDS
+        "${PROJECT_SOURCE_DIR}/tools/schema-optimizer/*.cpp"
+    )
+    nimblefix_add_binary(nimblefix-schema-optimizer ${NIMBLEFIX_SCHEMA_OPTIMIZER_SOURCES})
 endif()
 
 if(NIMBLEFIX_BUILD_FUZZERS)
