@@ -70,6 +70,17 @@ HasDiagnosticField(const nimble::runtime::ConfigValidationResult& result,
 }
 
 auto
+HasExpectedActual(const nimble::runtime::ConfigValidationResult& result,
+                  std::string_view field_path,
+                  std::string_view expected,
+                  std::string_view actual) -> bool
+{
+  return std::any_of(result.errors.begin(), result.errors.end(), [&](const auto& error) {
+    return error.field_path == field_path && error.expected_value == expected && error.actual_value == actual;
+  });
+}
+
+auto
 OptionalTimeEquals(const std::optional<nimble::runtime::SessionTimeOfDay>& left,
                    const std::optional<nimble::runtime::SessionTimeOfDay>& right) -> bool
 {
@@ -624,6 +635,101 @@ TEST_CASE("config validation warnings", "[runtime-config]")
   REQUIRE(!warning_only.has_errors());
   REQUIRE(warning_only.has_warnings());
   REQUIRE(warning_only.first_error_status().ok());
+}
+
+TEST_CASE("structured config validation populates expected and actual fields", "[runtime-config]")
+{
+  SECTION("worker_count must be positive")
+  {
+    nimble::runtime::EngineConfig config;
+    config.worker_count = 0U;
+
+    const auto result = nimble::runtime::ValidateEngineConfigFull(config);
+    REQUIRE(HasExpectedActual(result, "worker_count", "> 0", "0"));
+  }
+
+  SECTION("ring trace capacity must be positive")
+  {
+    nimble::runtime::EngineConfig config;
+    config.trace_mode = nimble::runtime::TraceMode::kRing;
+    config.trace_capacity = 0U;
+
+    const auto result = nimble::runtime::ValidateEngineConfigFull(config);
+    REQUIRE(HasExpectedActual(result, "trace_capacity", "> 0", "0"));
+  }
+
+  SECTION("counterparty session_id must be positive")
+  {
+    nimble::runtime::EngineConfig config;
+    config.profile_artifacts.push_back("profile.nfa");
+    config.counterparties.push_back(
+      nimble::runtime::CounterpartyConfigBuilder::Initiator(
+        "bad-session-id", 0U, nimble::session::SessionKey::ForInitiator("BUY", "SELL"), 4400U)
+        .build());
+
+    const auto result = nimble::runtime::ValidateEngineConfigFull(config);
+    REQUIRE(HasExpectedActual(result, "counterparties[0].session.session_id", "> 0", "0"));
+  }
+
+  SECTION("duplicate session_id reports duplicate actual value")
+  {
+    nimble::runtime::EngineConfig config;
+    config.profile_artifacts.push_back("profile.nfa");
+    config.counterparties.push_back(
+      nimble::runtime::CounterpartyConfigBuilder::Initiator(
+        "session-a", 77U, nimble::session::SessionKey::ForInitiator("BUY-A", "SELL"), 4400U)
+        .build());
+    config.counterparties.push_back(
+      nimble::runtime::CounterpartyConfigBuilder::Initiator(
+        "session-b", 77U, nimble::session::SessionKey::ForInitiator("BUY-B", "SELL"), 4400U)
+        .build());
+
+    const auto result = nimble::runtime::ValidateEngineConfigFull(config);
+    REQUIRE(HasExpectedActual(result, "counterparties[1].session.session_id", "unique session_id", "77"));
+  }
+
+  SECTION("reconnect backoff warning reports compared values")
+  {
+    nimble::runtime::EngineConfig config;
+    config.profile_artifacts.push_back("profile.nfa");
+    config.counterparties.push_back(
+      nimble::runtime::CounterpartyConfigBuilder::Initiator(
+        "reconnect-warning", 88U, nimble::session::SessionKey::ForInitiator("BUY", "SELL"), 4400U)
+        .reconnect(5000U, 1000U, 3U)
+        .build());
+
+    const auto result = nimble::runtime::ValidateEngineConfigFull(config);
+    REQUIRE(HasExpectedActual(result, "counterparties[0].reconnect_enabled", "<= 1000", "5000"));
+  }
+
+  SECTION("day cut hour range reports invalid hour")
+  {
+    nimble::runtime::EngineConfig config;
+    config.profile_artifacts.push_back("profile.nfa");
+    config.counterparties.push_back(
+      nimble::runtime::CounterpartyConfigBuilder::Initiator(
+        "bad-day-cut", 99U, nimble::session::SessionKey::ForInitiator("BUY", "SELL"), 4400U)
+        .build());
+    config.counterparties.front().day_cut = nimble::session::DayCutConfig{
+      .mode = nimble::session::DayCutMode::kFixedUtcTime,
+      .reset_hour = 25,
+      .reset_minute = 0,
+    };
+
+    const auto result = nimble::runtime::ValidateEngineConfigFull(config);
+    REQUIRE(HasExpectedActual(result, "counterparties[0].day_cut.reset_hour", "0-23", "25"));
+  }
+}
+
+TEST_CASE("structured config validation summary includes expected and actual fields", "[runtime-config]")
+{
+  nimble::runtime::EngineConfig config;
+  config.worker_count = 0U;
+
+  const auto result = nimble::runtime::ValidateEngineConfigFull(config);
+  const auto summary = result.summary();
+  REQUIRE(summary.find("worker_count: engine worker_count must be positive (expected: > 0, actual: 0)") !=
+          std::string::npos);
 }
 
 TEST_CASE("ConfigToText round-trip", "[runtime-config]")

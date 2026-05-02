@@ -594,6 +594,10 @@ struct ConfigError
   base::ErrorCode code{ base::ErrorCode::kInvalidArgument };
   /// Human-readable description.
   std::string message;
+  /// Expected value or constraint description (empty when not applicable).
+  std::string expected_value;
+  /// Actual value found in the config (empty when not applicable).
+  std::string actual_value;
 };
 
 /// Result of structured config validation that collects ALL diagnostics.
