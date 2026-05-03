@@ -12,10 +12,13 @@ nimblefix/
 ├── codec/         FIX message parsing and encoding
 ├── message/       Message data model (builder, view, typed view)
 ├── profile/       Protocol profile loading, dictionary, artifact format
-├── session/       Session state machine, admin protocol, recovery
+├── session/       Session state machine, admin protocol, recovery, validation
 ├── store/         Message persistence (memory, mmap, durable batch)
 ├── transport/     TCP socket I/O and optional TLS record I/O
-└── runtime/       Engine orchestration, workers, pollers, metrics, trace
+├── runtime/       Engine orchestration, workers, pollers, metrics, trace,
+│                  HA, diagnostics, management, warmup, dynamic config,
+│                  connection strategy, message log, session schedule, router
+└── tools/         Schema optimizer, message dump utilities
 ```
 
 ### Dependency Graph
@@ -28,6 +31,10 @@ runtime ──► session ──► codec ──► message ──► profile
    └──► transport ──► base
    └──► store
    └──► profile
+
+tools ──► profile
+      └── codec
+      └── base
 ```
 
 Modules depend downward only. `base` has no FIX-specific dependencies. `transport` and `store` are independent of each other and of higher-level FIX semantics.
@@ -553,6 +560,120 @@ Queue overflow handling is explicit through `queue_full_policy` (`kCloseSession`
 **MetricsRegistry**: Counters and gauges for connections, messages, errors, sequence gaps.
 
 **TraceRecorder**: Ring-buffer of timestamped trace events (session state transitions, protocol events, timer firings). Enabled via `trace_mode = kRing`.
+
+---
+
+### 9. Router (public include: `nimblefix/runtime/router.h`)
+
+Expression-based message routing for FIX proxy/bridge deployments.
+
+| Type | Role |
+|------|------|
+| `RoutingTable` | Ordered rule set that evaluates inbound messages and selects a target session |
+| `RoutingRule` | One rule: criterion + action + optional transform + load balancer config |
+| `RoutingExpression` | Parsed tag-based expression (`55==AAPL AND 49!=BUY`) |
+| `ForwardingBridgeConfig` | Session-to-session forwarding bridge with optional `OnBehalfOfCompID` |
+| `MessageTransform` | Field-level mutations applied before forwarding (set, remove, add, copy) |
+| `LoadBalancerConfig` | Round-robin, sticky, or fixed target selection across a session pool |
+
+Routing criteria: `kAll`, `kMsgType`, `kExpression`, `kCustom` (predicate function).
+Actions: `kForward`, `kDrop`, `kReject`.
+
+### 10. Tools (public include: `nimblefix/tools/`)
+
+Library-level utilities exposed as public headers for tooling integrations.
+
+| Type | Role |
+|------|------|
+| `SchemaOptimizer` | Analyze tag usage from live FIX traffic and generate a trimmed `.nfd` dictionary |
+| `MessageDump` | Format raw FIX messages as human-readable text or JSON, with filtering by MsgType/tag/sequence |
+
+### 11. Advanced Subsystems (public include: `nimblefix/runtime/`)
+
+These runtime-layer subsystems extend the core engine with production operational capabilities:
+
+**High Availability** (`ha.h`):
+
+| Type | Role |
+|------|------|
+| `HaConfig` | HA configuration: role, heartbeat interval, suspect/dead thresholds, failover policy |
+| `HaRole` | `kSolo`, `kPrimary`, `kStandby` |
+| `HaStateSnapshot` | Serializable snapshot of session state for cross-node replication |
+| `HaCoordinator` | Monitors peer health, triggers failover, replicates state via user-provided callbacks |
+
+**Dynamic Configuration** (`dynamic_config.h`):
+
+| Type | Role |
+|------|------|
+| `ConfigDelta` | Diff between two `EngineConfig` snapshots |
+| `ConfigChangeKind` | `kAddCounterparty`, `kRemoveCounterparty`, `kModifyCounterparty`, `kAddListener`, `kRemoveListener`, `kModifyListener`, `kEngineFieldChanged` |
+| `ApplyConfigResult` | Per-change outcome: applied, skipped (requires restart), or failed |
+| `ComputeConfigDelta()` | Compute the structural diff between old and new config |
+
+`Engine::ApplyConfig(new_config)` applies the delta without full restart.
+
+**Warmup** (`warmup.h`):
+
+| Type | Role |
+|------|------|
+| `WarmupConfig` | Steps, time budget, timing report flag |
+| `WarmupStep` | One warmup action: encode, parse, round-trip, touch-profile, or dry-send |
+| `WarmupAction` | `kEncode`, `kParse`, `kRoundTrip`, `kTouchProfile`, `kDrySend` |
+| `RunWarmup()` | Execute the warmup sequence and return per-step timing |
+
+**Diagnostics** (`diagnostics.h`):
+
+| Type | Role |
+|------|------|
+| `DiagnosticsMonitor` | Periodic health snapshot collector accessible via `Engine::diagnostics()` |
+| `DiagnosticsSink` | Abstract sink interface for health data output |
+| `JsonDiagnosticsSink` | JSON-formatted health output |
+| `TextDiagnosticsSink` | Human-readable text health output |
+| `EngineHealthSnapshot` | Point-in-time metrics: worker count, sessions, message counts, parse/checksum failures, resend/gap counts, uptime |
+
+**Management Plane** (`management.h`):
+
+| Type | Role |
+|------|------|
+| `ManagementPlane` | Execute administrative commands against a running engine |
+| `ManagementCommand` | `kQueryStatus`, `kQuerySession`, `kForceDisconnect`, `kTriggerDayCut`, `kResetSequences`, `kToggleApplicationMessages` |
+| `ManagedSessionStatus` | Per-session snapshot: state, sequences, profile, store mode, reconnect status |
+| `EngineManagementStatus` | Engine-wide snapshot: boot state, worker count, sessions, profiles, listeners, uptime |
+
+**Message Log** (`message_log.h`):
+
+| Type | Role |
+|------|------|
+| `MessageLog` | Collection of stored FIX message entries for a session |
+| `MessageLogEntry` | One stored message: session ID, sequence, timestamp, direction, payload |
+| `ReplayController` | Replay stored messages at configurable speed: `kMaxSpeed`, `kRealTime`, `kStep` |
+| `ExportMessageLog()` | Extract message history from a session store |
+
+**Connection Strategy** (`connection_strategy.h`):
+
+| Type | Role |
+|------|------|
+| `ConnectionStrategy` | Abstract interface for custom reconnect logic |
+| `ConnectionEndpoint` | Host + port pair for an alternate connection target |
+| `ConnectionContext` | Reconnect context: consecutive failures, last connected duration, primary/alternate endpoints |
+| `ConnectionDecision` | Strategy output: delay, next endpoint, or give-up signal |
+
+**Session Schedule** (`session_schedule.h`):
+
+| Type | Role |
+|------|------|
+| `SessionScheduleConfig` | Time windows, day-of-week bounds, logon/logout windows, multi-segment support |
+| `SessionScheduleSegment` | One segment within a multi-segment schedule |
+| `IsSessionActive()` | Check whether a session should be active at a given timestamp |
+| `QueryScheduleStatus()` | Return detailed schedule state for a session |
+
+**Validation Callback** (`nimblefix/session/validation_callback.h`):
+
+Per-session pluggable validation hook. Install via `CounterpartyConfig::validation_callback`. Called during inbound message processing after codec validation but before application dispatch, allowing custom rejection logic.
+
+**Timestamp Resolution** (`nimblefix/codec/timestamp_resolution.h`):
+
+Per-session SendingTime precision control: `kSeconds`, `kMilliseconds`, `kMicroseconds`, `kNanoseconds`. Set via `CounterpartyConfig::timestamp_resolution`.
 
 ---
 

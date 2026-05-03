@@ -285,6 +285,30 @@ These headers remain public because public signatures depend on them or advanced
 - `nimblefix/session/session_snapshot.h`
 - `nimblefix/session/transport_profile.h`
 - `nimblefix/session/validation_policy.h`
+- `nimblefix/runtime/ha.h`
+- `nimblefix/runtime/dynamic_config.h`
+- `nimblefix/runtime/warmup.h`
+- `nimblefix/runtime/diagnostics.h`
+- `nimblefix/runtime/management.h`
+- `nimblefix/runtime/message_log.h`
+- `nimblefix/runtime/connection_strategy.h`
+- `nimblefix/runtime/session_schedule.h`
+- `nimblefix/runtime/router.h`
+- `nimblefix/runtime/io_backend.h`
+- `nimblefix/session/validation_callback.h`
+- `nimblefix/session/session_key.h`
+- `nimblefix/session/session_send_envelope.h`
+- `nimblefix/session/encoded_frame.h`
+- `nimblefix/codec/timestamp_resolution.h`
+- `nimblefix/codec/raw_passthrough.h`
+- `nimblefix/codec/compiled_decoder.h`
+- `nimblefix/store/session_store.h`
+- `nimblefix/transport/transport_connection.h`
+- `nimblefix/advanced/typed_message_view.h`
+- `nimblefix/advanced/live_acceptor.h`
+- `nimblefix/advanced/live_initiator.h`
+- `nimblefix/tools/schema_optimizer.h`
+- `nimblefix/tools/message_dump.h`
 
 Everything under `include/internal/nimblefix/` remains repository-private.
 
@@ -297,3 +321,63 @@ Everything under `include/internal/nimblefix/` remains repository-private.
 - Do not assume `kBound` means the session is ready for business traffic. Wait for `OnSessionActive()` unless you intentionally need pre-activation behavior.
 - Do not call `Engine::LoadProfiles()` and then treat `Boot()` as a no-op. `Boot()` reloads profiles and resets runtime state.
 - Do not assume `accept_unknown_sessions = true` is enough by itself. Unknown Logons still need a `SessionFactory`.
+
+## Subsystem Headers
+
+These headers expose production operational subsystems built on top of the core engine. None of them are required for basic initiator/acceptor usage — include them only when you need the specific capability.
+
+### High Availability (`nimblefix/runtime/ha.h`)
+
+`HaConfig` configures active/standby behavior. `HaCoordinator` monitors peer health and triggers failover. State replication uses user-provided `HaStateReplicator` and `HaStateReceiver` callbacks. `Engine::SetLastAppliedHaSnapshot()` stages an HA snapshot that runtime sessions apply at boot.
+
+### Dynamic Configuration (`nimblefix/runtime/dynamic_config.h`)
+
+`Engine::ApplyConfig(new_config)` computes a `ConfigDelta` against the booted config and applies changes without full restart. New counterparties are registered, removed ones are unregistered, and modifiable fields are updated in-place. Changes that require a restart are reported as skipped in `ApplyConfigResult`.
+
+### Warmup (`nimblefix/runtime/warmup.h`)
+
+`RunWarmup(engine, config)` executes a sequence of `WarmupStep` actions (encode, parse, round-trip, touch-profile, dry-send) within a configurable time budget. Designed to pre-warm codec paths and profile memory before the first live message.
+
+### Diagnostics (`nimblefix/runtime/diagnostics.h`)
+
+`Engine::diagnostics()` returns a `DiagnosticsMonitor` that collects `EngineHealthSnapshot` data (worker count, session count, message throughput, parse/checksum failures, resend/gap counts, uptime). Attach a `DiagnosticsSink` (or use `JsonDiagnosticsSink` / `TextDiagnosticsSink`) for output.
+
+### Management Plane (`nimblefix/runtime/management.h`)
+
+`ManagementPlane` executes `ManagementCommand` operations against a running engine: query status, query individual sessions, force disconnect, trigger day-cut, reset sequences, toggle application message availability. Returns `ManagementCommandResult` with `EngineManagementStatus` or `ManagedSessionStatus`.
+
+### Message Log (`nimblefix/runtime/message_log.h`)
+
+`ExportMessageLog()` extracts stored FIX messages from a session store. `ReplayController` replays them at `kMaxSpeed`, `kRealTime`, or `kStep` pace. `MessageLogEntry` carries session ID, sequence, timestamp, direction, and raw payload.
+
+### Connection Strategy (`nimblefix/runtime/connection_strategy.h`)
+
+`ConnectionStrategy` is the abstract interface for custom initiator reconnect logic. Set via `CounterpartyConfig::connection_strategy`. The default exponential-backoff behavior applies when no custom strategy is installed. `CounterpartyConfig::alternate_endpoints` provides failover targets.
+
+### Message Routing (`nimblefix/runtime/router.h`)
+
+`RoutingTable` evaluates inbound messages against priority-ordered `RoutingRule` entries. Rules match by `kAll`, `kMsgType`, `kExpression` (parsed tag expressions like `55==AAPL AND 49!=BUY`), or `kCustom` (predicate function). Actions: `kForward`, `kDrop`, `kReject`. Optional `LoadBalancerConfig` supports round-robin and sticky target selection. `MessageTransform` applies field-level mutations before forwarding.
+
+### Session Schedule (`nimblefix/runtime/session_schedule.h`)
+
+Schedule helpers operate on `SessionScheduleConfig` from `CounterpartyConfig::session_schedule`. They determine whether a session should be active at a given timestamp, considering start/end times, day-of-week bounds, logon/logout windows, and multi-segment schedules. `Engine::QueryScheduleStatus()` exposes this for operational queries.
+
+### Schema Optimizer (`nimblefix/tools/schema_optimizer.h`)
+
+`AnalyzeMessages()` builds tag-usage statistics from live FIX traffic. `GenerateTrimmedNfd()` produces a minimal `.nfd` dictionary that includes only observed tags. `EstimateLayoutSizes()` reports per-message-type `FixedLayout` memory savings from the trimmed schema.
+
+### Message Dump (`nimblefix/tools/message_dump.h`)
+
+`FormatFixReadable()` and `FormatFixJson()` convert raw FIX byte streams into human-readable formats. `MatchesFilter()` checks messages against `DumpFilter` criteria (MsgType, tag presence, tag value, sequence range).
+
+### Validation Callback (`nimblefix/session/validation_callback.h`)
+
+Per-session pluggable hook installed via `CounterpartyConfig::validation_callback`. Called during inbound processing after codec validation but before application dispatch, allowing custom accept/reject logic without modifying `ValidationPolicy`.
+
+### Timestamp Resolution (`nimblefix/codec/timestamp_resolution.h`)
+
+`TimestampResolution` enum controls per-session SendingTime precision: `kSeconds`, `kMilliseconds` (default), `kMicroseconds`, `kNanoseconds`. Set via `CounterpartyConfig::timestamp_resolution`.
+
+### I/O Backend (`nimblefix/runtime/io_backend.h`)
+
+`IoBackend` enum selects the Linux I/O multiplexing backend: `kEpoll` (default) or `kIoUring`. Set via `EngineConfig::io_backend`.

@@ -193,6 +193,26 @@ $BIN_DIR/nimblefix-tests --list-tags
 | `[soak-multiworker]` | Multi-worker soak test |
 | `[reset-seq]` | Sequence reset behavior |
 | `[timer-deadline]` | Timer deadline semantics |
+| `[ha]` | High availability coordinator |
+| `[dynamic-config]` | Dynamic config apply and delta |
+| `[warmup]` | Warmup sequence |
+| `[diagnostics]` | Diagnostics monitor and sinks |
+| `[diagnostics-backlog]` | Backlog diagnostics |
+| `[management]` | Management plane commands |
+| `[message-log]` | Message log export and replay |
+| `[router]` | Message routing and forwarding |
+| `[schema-optimizer]` | Schema usage analysis and trimming |
+| `[message-dump]` | Message formatting and filtering |
+| `[session-schedule]` | Session schedule gating |
+| `[session-key]` | Session key construction |
+| `[contract-sidecar]` | Orchestra contract sidecar |
+| `[orchestra-import]` | Orchestra XML import |
+| `[connection-strategy]` | Connection strategy and failover |
+| `[validation-policy]` | Validation policy configuration |
+| `[typed-runtime]` | Typed runtime dispatch |
+| `[generated-api]` | Generated typed API |
+| `[tls]` | TLS transport |
+| `[namespace]` | Namespace smoke tests |
 
 ### Test Utilities
 

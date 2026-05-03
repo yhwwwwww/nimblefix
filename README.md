@@ -59,6 +59,19 @@ NimbleFIX was designed to answer: *what if every design decision optimized for t
 | **Observability** | Built-in metrics registry and ring-buffer trace recorder |
 | **Soak testing** | Fault injection harness (gaps, duplicates, reorders, disconnects) |
 | **Fuzz testing** | libFuzzer harnesses for codec, config, and dictionary inputs |
+| **High availability** | Active/standby HA with configurable failover, heartbeat monitoring, and state replication |
+| **Dynamic config** | Hot-reload counterparties, listeners, and engine fields without full restart via `ApplyConfig()` |
+| **Warmup** | Pre-warm codec and profile paths at startup to reduce first-message latency jitter |
+| **Diagnostics** | Engine health snapshots with pluggable sinks (JSON, text) via `DiagnosticsMonitor` |
+| **Management plane** | Query engine/session status, force disconnect, trigger day-cut, reset sequences at runtime |
+| **Message log** | Export and replay stored FIX messages with configurable speed (max, real-time, step) |
+| **Connection strategy** | Pluggable reconnect strategies with alternate endpoint failover |
+| **Message routing** | Expression-based routing table with load balancing, field transforms, and forwarding bridges |
+| **Session schedule** | Time-window session gating with logon/logout windows, day-of-week, and multi-segment schedules |
+| **Schema optimizer** | Analyze live traffic to trim unused tags and estimate FixedLayout memory savings |
+| **Message dump** | Format and filter raw FIX messages as human-readable text or JSON |
+| **Timestamp resolution** | Per-session configurable SendingTime precision: seconds, milliseconds, microseconds, or nanoseconds |
+| **Validation callbacks** | Per-session pluggable validation hooks for custom inbound message checks |
 
 ## How NimbleFIX Differs from QuickFIX
 
@@ -223,7 +236,7 @@ Most applications only need these direct includes:
 - `nimblefix/store/mmap_store.h`
 - `nimblefix/store/durable_batch_store.h`
 
-Advanced consumers can add `nimblefix/advanced/runtime_application.h`, `nimblefix/advanced/engine.h`, `nimblefix/advanced/message_builder.h`, `nimblefix/advanced/fixed_layout_writer.h`, `nimblefix/advanced/encoded_application_message.h`, `nimblefix/advanced/session_handle.h`, `nimblefix/session/admin_protocol.h`, `nimblefix/session/resend_recovery.h`, `nimblefix/runtime/sharded_runtime.h`, `nimblefix/runtime/metrics.h`, and `nimblefix/runtime/trace.h` as needed. The complete exported header policy is documented in [docs/public-api.md](docs/public-api.md).
+Advanced consumers can add `nimblefix/advanced/runtime_application.h`, `nimblefix/advanced/engine.h`, `nimblefix/advanced/message_builder.h`, `nimblefix/advanced/fixed_layout_writer.h`, `nimblefix/advanced/encoded_application_message.h`, `nimblefix/advanced/session_handle.h`, `nimblefix/session/admin_protocol.h`, `nimblefix/session/resend_recovery.h`, `nimblefix/runtime/sharded_runtime.h`, `nimblefix/runtime/metrics.h`, `nimblefix/runtime/trace.h`, `nimblefix/runtime/ha.h`, `nimblefix/runtime/dynamic_config.h`, `nimblefix/runtime/warmup.h`, `nimblefix/runtime/diagnostics.h`, `nimblefix/runtime/management.h`, `nimblefix/runtime/message_log.h`, `nimblefix/runtime/connection_strategy.h`, `nimblefix/runtime/session_schedule.h`, `nimblefix/runtime/router.h`, `nimblefix/runtime/io_backend.h`, `nimblefix/session/validation_callback.h`, `nimblefix/codec/timestamp_resolution.h`, `nimblefix/tools/schema_optimizer.h`, and `nimblefix/tools/message_dump.h` as needed. The complete exported header policy is documented in [docs/public-api.md](docs/public-api.md).
 
 ---
 
@@ -626,6 +639,8 @@ auto OnNewOrderSingle(nimble::runtime::InlineSession<Profile>& session,
 | `io_backend` | enum | `kEpoll` | `kEpoll` or `kIoUring` (Linux I/O backend) |
 | `accept_unknown_sessions` | bool | false | Allow `SessionFactory` to handle unknown inbound Logons after static counterparties fail to match |
 | `listeners` | list | — | TCP listener configurations (acceptor only) |
+| `backlog_warn_threshold_ms` | uint32 | 5000 | Log a warning when a session's inbound backlog exceeds this threshold (ms) |
+| `backlog_warn_throttle_ms` | uint32 | 1000 | Minimum interval between backlog warnings for the same session (ms) |
 | `counterparties` | list | — | Pre-configured session counterparties |
 
 ### ListenerConfig
@@ -654,7 +669,7 @@ auto OnNewOrderSingle(nimble::runtime::InlineSession<Profile>& session,
 | `application_messages_available` | bool | true | When false, known application messages are answered with `BusinessMessageReject(380=4)` |
 | `store_mode` | enum | `kMemory` | `kMemory`, `kMmap`, or `kDurableBatch` |
 | `store_path` | path | — | Directory for mmap/durable store files |
-| `recovery_mode` | enum | `kMemoryOnly` | `kMemoryOnly`, `kWarmRestart`, or `kColdStart` |
+| `recovery_mode` | enum | `kMemoryOnly` | `kMemoryOnly`, `kWarmRestart`, `kColdStart`, or `kNoRecovery` |
 | `dispatch_mode` | enum | `kInline` | `kInline` (callback on worker thread) or `kQueueDecoupled` (SPSC queue) |
 | `validation_policy` | policy | `Strict()` | `Strict()`, `Compatible()`, `Permissive()`, or `RawPassThrough()` |
 | `reconnect_enabled` | bool | false | Enable initiator auto-reconnect |
@@ -675,6 +690,12 @@ auto OnNewOrderSingle(nimble::runtime::InlineSession<Profile>& session,
 | `day_cut` | struct | — | Day-cut mode and timing for sequence reset |
 | `tls_client` | TlsClientConfig | disabled | Optional TLS client policy for initiator connections |
 | `acceptor_transport_security` | enum | `kAny` | Accept-side requirement: any, plain-only, or TLS-only |
+| `sending_time_threshold_seconds` | uint32 | 0 | Maximum allowed clock drift in SendingTime (0 = disabled) |
+| `warmup_message_count` | uint32 | 0 | Number of warmup messages to pre-encode at session startup |
+| `timestamp_resolution` | enum | `kMilliseconds` | SendingTime precision: `kSeconds`, `kMilliseconds`, `kMicroseconds`, or `kNanoseconds` |
+| `validation_callback` | shared_ptr | — | Optional per-session callback for custom inbound message validation |
+| `connection_strategy` | shared_ptr | — | Optional pluggable reconnect strategy (overrides exponential backoff) |
+| `alternate_endpoints` | list | — | Failover endpoints for initiator reconnect (used by connection strategy) |
 
 ### TLS Runtime Config
 
@@ -875,10 +896,12 @@ For exact measurement boundaries, per-metric start/end points, and flow diagrams
 - [docs/architecture.md](docs/architecture.md) — Internal architecture, module dependency graph, data flow diagrams, threading model details
 - [docs/development.md](docs/development.md) — Development guide, testing, `.nfd` format specification, profiling, stress/fuzz testing, extending the engine
 - [bench/README.md](bench/README.md) — Benchmark infrastructure, measurement boundaries, full result tables
+- [docs/public-api.md](docs/public-api.md) — Public API guide, lifecycle contract, typed session boundaries, minimum config requirements
+- [docs/design.md](docs/design.md) — Original design notes (Chinese)
 
 ## Project Status
 
-NimbleFIX is under active development. The core engine, session management, codec, and persistence layers are implemented and tested (206 test cases, 2760+ assertions). The hot-path encode pipeline continues to be optimized toward the design targets.
+NimbleFIX is under active development. The core engine, session management, codec, and persistence layers are implemented and tested (403 test cases, 5200+ assertions). The hot-path encode pipeline continues to be optimized toward the design targets.
 
 ## License
 
