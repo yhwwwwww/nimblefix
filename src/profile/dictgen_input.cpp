@@ -167,7 +167,7 @@ ParseFieldRules(std::string_view token) -> base::Result<std::vector<FieldRule>>
 
     FieldRule rule;
     rule.tag = tag.value();
-    const auto mode = Trim(item.substr(colon + 1));
+    const auto mode = Trim(std::string_view(item).substr(colon + 1));
     if (mode == "r" || mode == "R") {
       rule.flags = static_cast<std::uint32_t>(FieldRuleFlags::kRequired);
     } else if (mode == "o" || mode == "O") {

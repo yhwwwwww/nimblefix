@@ -1,4 +1,4 @@
-#include "nimblefix/advanced/fixed_layout_writer.h"
+#include "nimblefix/message/fixed_layout_writer.h"
 
 #include <algorithm>
 #include <array>

@@ -1,15 +1,21 @@
 #include <catch2/catch_test_macros.hpp>
 
+#include <memory>
+
 #include "nimblefix/codec/fix_tags.h"
 #include "test_support.h"
 
 TEST_CASE("normalized-dictionary", "[normalized-dictionary]")
 {
-  auto view_result = nimble::tests::LoadFix44DictionaryView();
-  if (!view_result.ok()) {
-    SKIP("FIX44 artifact not available: " << view_result.status().message());
+  // Heap-allocate to avoid GCC 16 stack-protector false positive with 20KB+
+  // NormalizedDictionaryView on stack (passes with Clang; standalone main()).
+  auto view_result =
+    std::make_unique<nimble::base::Result<nimble::profile::NormalizedDictionaryView>>(
+      nimble::tests::LoadFix44DictionaryView());
+  if (!view_result->ok()) {
+    SKIP("FIX44 artifact not available: " << view_result->status().message());
   }
-  auto& view = view_result.value();
+  auto& view = view_result->value();
 
   REQUIRE(view.field_count() > 100U);
   REQUIRE(view.message_count() > 50U);

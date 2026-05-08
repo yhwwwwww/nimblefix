@@ -468,6 +468,13 @@ MessageBuilder::set_boolean(std::uint32_t tag, bool value) -> MessageBuilder&
 }
 
 auto
+MessageBuilder::add_string(std::uint32_t tag, std::string_view value) -> MessageBuilder&
+{
+  data_.fields.push_back(FieldValue{ .tag = tag, .value = std::string(value) });
+  return *this;
+}
+
+auto
 MessageBuilder::reserve_fields(std::size_t count) -> MessageBuilder&
 {
   data_.fields.reserve(count);
@@ -802,6 +809,35 @@ MessageView::field_at(std::size_t index) const -> std::optional<FieldView>
 }
 
 auto
+MessageView::raw_field_at(std::size_t index) const -> std::optional<RawFieldView>
+{
+  if (data_ != nullptr) {
+    if (index >= data_->fields.size()) {
+      return std::nullopt;
+    }
+    const auto& field = data_->fields[index];
+    std::string_view value;
+    std::visit(
+      [&](const auto& val) {
+        using T = std::decay_t<decltype(val)>;
+        if constexpr (std::is_same_v<T, std::string>) {
+          value = val;
+        }
+      },
+      field.value);
+    return RawFieldView{ .tag = field.tag, .value = value };
+  }
+  if (parsed_ == nullptr || parsed_entry_ == nullptr) {
+    return std::nullopt;
+  }
+  const auto* slot = NthParsedField(*parsed_, *parsed_entry_, index);
+  if (slot == nullptr) {
+    return std::nullopt;
+  }
+  return RawFieldView{ .tag = slot->tag, .value = ParsedSlotText(*parsed_, *slot) };
+}
+
+auto
 MessageView::group_count() const -> std::size_t
 {
   if (data_ != nullptr) {
@@ -893,7 +929,19 @@ MessageView::find_field(std::uint32_t tag) const -> const FieldValue*
 auto
 MessageView::has_field(std::uint32_t tag) const -> bool
 {
-  return find_field_view(tag).has_value();
+  if (data_ != nullptr) {
+    if (FindField(data_->fields, tag) != nullptr) {
+      return true;
+    }
+    return tag == codec::tags::kMsgType && !data_->msg_type.empty();
+  }
+  if (parsed_ == nullptr || parsed_entry_ == nullptr) {
+    return false;
+  }
+  if (FindParsedField(*parsed_, *parsed_entry_, tag) != nullptr) {
+    return true;
+  }
+  return tag == codec::tags::kMsgType && !parsed_msg_type_.empty();
 }
 
 auto

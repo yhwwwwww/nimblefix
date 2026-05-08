@@ -7,7 +7,7 @@
 #include "fix44_api.h"
 #include "nimblefix/codec/fix_codec.h"
 #include "nimblefix/codec/fix_tags.h"
-#include "nimblefix/advanced/fixed_layout_writer.h"
+#include "nimblefix/message/fixed_layout_writer.h"
 #include "nimblefix/advanced/message_builder.h"
 
 #include "test_support.h"
@@ -19,7 +19,7 @@ namespace {
 using namespace nimble::generated::profile_4400;
 
 auto
-PopulateGeneratedOrderForBackendCompare(NewOrderSingle* order) -> void
+PopulateGeneratedOrderForBackendCompare(NewOrderSingleBuilder* order) -> void
 {
   REQUIRE(order != nullptr);
   order->clear();
@@ -402,7 +402,7 @@ TEST_CASE("generated-api-matches-raw-fixed-layout-writer", "[message-api][genera
   nimble::codec::EncodeBuffer raw_buf;
   REQUIRE(raw.encode_to_buffer(dictionary.value(), options, &raw_buf).ok());
 
-  NewOrderSingle typed;
+  NewOrderSingleBuilder typed;
   PopulateGeneratedOrderForBackendCompare(&typed);
   typed.add_party()
     .party_id("PTY1")

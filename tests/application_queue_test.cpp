@@ -1,11 +1,14 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <atomic>
+#include <cstddef>
 #include <thread>
 
+#include "fix44_api.h"
 #include "nimblefix/codec/fix_tags.h"
 #include "nimblefix/advanced/message_builder.h"
 #include "nimblefix/advanced/runtime_application.h"
+#include "nimblefix/runtime/session.h"
 #include "nimblefix/runtime/live_runtime_support.h"
 
 #include "test_support.h"
@@ -367,6 +370,40 @@ TEST_CASE("application-queue", "[application-queue]")
       { .sender_sub_id = "DESK-2" });
     REQUIRE(borrowed.code() == nimble::base::ErrorCode::kInvalidArgument);
     REQUIRE(sink->encoded_enqueued() == 1U);
+  }
+
+  SECTION("typed send populates generated builder and extras")
+  {
+    auto sink = std::make_shared<EncodedCommandSink>();
+    nimble::session::SessionHandle handle(4004U, 0U, sink);
+    nimble::runtime::Session<nimble::generated::profile_4400::Profile> session(handle);
+
+    auto status = session.send<nimble::generated::profile_4400::NewOrderSingle>(
+      [](auto& order) {
+        order.cl_ord_id("ORD-TYPED")
+          .symbol("AAPL")
+          .side(nimble::generated::profile_4400::Side::Buy)
+          .transact_time("20260406-12:00:00.000")
+          .order_qty(100)
+          .ord_type(nimble::generated::profile_4400::OrdType::Limit);
+        order.template set_tag<9001>(std::int32_t{ 7 });
+        order.template set_tag<9002>(42U);
+        order.template set_tag<9003>(std::string_view("RAW"));
+      },
+      { .header_fragment = "50=DESK-TYPED\x01", .body_fragment = "9004=TAIL\x01" });
+
+    REQUIRE(status.ok());
+    REQUIRE(sink->encoded_enqueued() == 1U);
+    const auto encoded = sink->last_encoded_view();
+    CHECK(encoded.msg_type == nimble::generated::profile_4400::NewOrderSingle::kMsgType);
+    CHECK(encoded.extras.header_fragment == "50=DESK-TYPED\x01");
+    CHECK(encoded.extras.body_fragment == "9004=TAIL\x01");
+
+    const auto body = std::string_view(reinterpret_cast<const char*>(encoded.body.data()), encoded.body.size());
+    CHECK(body.find("11=ORD-TYPED\x01") != std::string_view::npos);
+    CHECK(body.find("9001=7\x01") != std::string_view::npos);
+    CHECK(body.find("9002=42\x01") != std::string_view::npos);
+    CHECK(body.find("9003=RAW\x01") != std::string_view::npos);
   }
 
   SECTION("single-producer send fast-fail")

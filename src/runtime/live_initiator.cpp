@@ -2429,7 +2429,10 @@ LiveInitiator::DrainWorkerCommands(std::uint32_t worker_id, std::uint64_t timest
     auto outbound =
       command->kind == OutboundCommandKind::kSendEncodedApplication
         ? connection->session->protocol->SendEncodedApplication(
-            command->encoded_message, timestamp_ns, command->envelope.view())
+            command->encoded_message,
+            timestamp_ns,
+            command->envelope.view(),
+            command->encoded_message.view().extras)
         : connection->session->protocol->SendApplication(command->message, timestamp_ns, command->envelope.view());
     if (!outbound.ok()) {
       return outbound.status();

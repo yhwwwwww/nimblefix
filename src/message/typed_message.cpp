@@ -95,6 +95,10 @@ ValidateRequiredRules(const profile::NormalizedDictionaryView& dictionary,
       return MissingRequiredField(rule.tag, missing_tag);
     }
 
+    if (!dictionary.is_group_count_tag(rule.tag)) {
+      continue;
+    }
+
     const auto group = message.group(rule.tag);
     if (!group.has_value()) {
       continue;

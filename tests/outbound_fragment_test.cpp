@@ -7,7 +7,7 @@
 #include "fix44_api.h"
 #include "nimblefix/codec/fix_codec.h"
 #include "nimblefix/codec/fix_tags.h"
-#include "nimblefix/advanced/fixed_layout_writer.h"
+#include "nimblefix/message/fixed_layout_writer.h"
 #include "nimblefix/advanced/message_builder.h"
 
 #include "test_support.h"
@@ -215,7 +215,7 @@ TEST_CASE("encoded fragments drive generated api end-to-end", "[fix-codec][outbo
                                     "1=ACC-77\x01"
                                     "9999=TAIL\x01");
 
-  NewOrderSingle order;
+  NewOrderSingleBuilder order;
   order.cl_ord_id("ORD-42")
     .symbol("AAPL")
     .side(Side::Buy)

@@ -138,16 +138,16 @@ struct SessionHeaderView
 
 struct EncodeOptions
 {
-  std::string begin_string{ "FIX.4.4" };
-  std::string sender_comp_id;
+  std::string_view begin_string{ "FIX.4.4" };
+  std::string_view sender_comp_id;
   // Optional per-message session envelope fields. Leave empty to omit tags
   // 50/57.
-  std::string sender_sub_id;
-  std::string target_comp_id;
-  std::string target_sub_id;
+  std::string_view sender_sub_id;
+  std::string_view target_comp_id;
+  std::string_view target_sub_id;
   std::string_view on_behalf_of_comp_id;
   std::string_view deliver_to_comp_id;
-  std::string default_appl_ver_id;
+  std::string_view default_appl_ver_id;
   // Optional per-message ApplVerID(1128) for FIXT.1.1 mixed-version sessions.
   // Leave empty to omit; DefaultApplVerID(1137) Logon behavior is unchanged.
   std::string_view appl_ver_id;

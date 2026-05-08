@@ -33,8 +33,7 @@ namespace nimble::message {
 ///
 /// Performance: this is a convenience API. Field and group lookups are linear,
 /// and string setters copy into owned storage. For generated business flows,
-/// prefer generated message objects. For raw fixed-layout hot paths, prefer
-/// `FixedLayoutWriter`.
+/// prefer the typed `runtime::Session<Profile>::send<Msg>(...)` API.
 ///
 /// Lifetime: the builder is valid only while the root `MessageBuilder` remains
 /// alive. It is not thread-safe.
@@ -142,8 +141,7 @@ private:
 ///
 /// Performance: field/group upserts are linear scans and string setters copy
 /// into owned storage. `reset()` preserves capacity and group shells for reuse,
-/// which is efficient for medium-rate paths. For raw hot loops with a stable
-/// schema, prefer `FixedLayoutWriter`.
+/// which is efficient for medium-rate dynamic/raw paths.
 ///
 /// Lifetime: `view()` and any `GroupEntryBuilder` returned from this object
 /// borrow `data_` and become invalid after `build()` or destruction.
@@ -220,6 +218,12 @@ public:
   auto set(std::uint32_t tag, char value) -> MessageBuilder& { return set_char(tag, value); }
   auto set(std::uint32_t tag, double value) -> MessageBuilder& { return set_float(tag, value); }
   auto set(std::uint32_t tag, bool value) -> MessageBuilder& { return set_boolean(tag, value); }
+
+  /// Append a string field without replacing any existing field that has the same tag.
+  ///
+  /// This is intended for generated compile-time raw extras where encoded-message
+  /// materialization must match direct body encoding semantics.
+  auto add_string(std::uint32_t tag, std::string_view value) -> MessageBuilder&;
 
   /// Reserve scalar-field capacity.
   ///

@@ -19,7 +19,7 @@ using namespace nimble::generated::profile_4400;
 namespace {
 
 auto
-PopulateGeneratedOrder(NewOrderSingle* order, std::string_view account, std::string_view cl_ord_id) -> void
+PopulateGeneratedOrder(NewOrderSingleBuilder* order, std::string_view account, std::string_view cl_ord_id) -> void
 {
   REQUIRE(order != nullptr);
   order->clear();
@@ -33,7 +33,7 @@ PopulateGeneratedOrder(NewOrderSingle* order, std::string_view account, std::str
 }
 
 auto
-AddGeneratedPartyWithNestedSubId(NewOrderSingle* order) -> void
+AddGeneratedPartyWithNestedSubId(NewOrderSingleBuilder* order) -> void
 {
   REQUIRE(order != nullptr);
   auto& party = order->add_party();
@@ -93,7 +93,7 @@ AssertGeneratedOrderView(const NewOrderSingleView& view) -> void
 }
 
 auto
-EncodeGeneratedOrder(const NewOrderSingle& order,
+EncodeGeneratedOrder(const NewOrderSingleBuilder& order,
                      const nimble::profile::NormalizedDictionaryView& dictionary,
                      const nimble::codec::EncodeOptions& options,
                      nimble::codec::EncodeBuffer* buffer) -> nimble::base::Status
@@ -115,7 +115,7 @@ TEST_CASE("generated-api-scalar-fields", "[message-api][generated-api]")
   auto dictionary_view = nimble::tests::LoadFix44DictionaryViewOrSkip();
   auto dictionary = nimble::base::Result<nimble::profile::NormalizedDictionaryView>(std::move(dictionary_view));
 
-  NewOrderSingle order;
+  NewOrderSingleBuilder order;
   PopulateGeneratedOrder(&order, "ACC-1", "ORD-001");
 
   nimble::codec::EncodeOptions options;
@@ -144,7 +144,7 @@ TEST_CASE("generated-api-with-groups", "[message-api][generated-api]")
   auto dictionary_view = nimble::tests::LoadFix44DictionaryViewOrSkip();
   auto dictionary = nimble::base::Result<nimble::profile::NormalizedDictionaryView>(std::move(dictionary_view));
 
-  NewOrderSingle order;
+  NewOrderSingleBuilder order;
   PopulateGeneratedOrder(&order, "ACC-1", "ORD-001");
   order.add_party()
     .party_id("PTY1")
@@ -182,7 +182,7 @@ TEST_CASE("generated-api-clear-and-reuse", "[message-api][generated-api]")
   auto dictionary_view = nimble::tests::LoadFix44DictionaryViewOrSkip();
   auto dictionary = nimble::base::Result<nimble::profile::NormalizedDictionaryView>(std::move(dictionary_view));
 
-  NewOrderSingle order;
+  NewOrderSingleBuilder order;
 
   nimble::codec::EncodeOptions options;
   options.begin_string = "FIX.4.4";
@@ -223,7 +223,7 @@ TEST_CASE("generated-inbound-view-supports-owned-and-parsed-messages", "[message
   auto dictionary_view = nimble::tests::LoadFix44DictionaryViewOrSkip();
   auto dictionary = nimble::base::Result<nimble::profile::NormalizedDictionaryView>(std::move(dictionary_view));
 
-  NewOrderSingle order;
+  NewOrderSingleBuilder order;
   PopulateGeneratedOrder(&order, "ACC-1", "ORD-001");
   AddGeneratedPartyWithNestedSubId(&order);
 

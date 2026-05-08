@@ -1,5 +1,6 @@
 #include <catch2/catch_test_macros.hpp>
 
+#include <cstddef>
 #include <string>
 
 #include "fix44_api.h"
@@ -13,9 +14,9 @@ namespace {
 using namespace nimble::generated::profile_4400;
 
 auto
-BuildGeneratedOrder() -> NewOrderSingle
+BuildGeneratedOrder() -> NewOrderSingleBuilder
 {
-  NewOrderSingle order;
+  NewOrderSingleBuilder order;
   order.account("ACC-1")
     .cl_ord_id("ORD-001")
     .symbol("AAPL")
@@ -164,6 +165,49 @@ TEST_CASE("generated EncodeBody matches ToMessage application body bytes", "[typ
   const auto encoded_body = body_buffer.data();
   const auto materialized_body = ApplicationBodyFromFrame(buffer.text());
   CHECK(encoded_body == materialized_body);
+}
+
+TEST_CASE("generated set_tag appends raw extras consistently", "[typed-message]")
+{
+  auto dictionary_view = nimble::tests::LoadFix44DictionaryViewOrSkip();
+  auto dictionary = nimble::base::Result<nimble::profile::NormalizedDictionaryView>(std::move(dictionary_view));
+
+  auto order = BuildGeneratedOrder();
+  order.set_tag<9001>(std::int32_t{ 7 });
+  order.set_tag<9002>(42U);
+  order.set_tag<9003>(true);
+  order.set_tag<9004>('Z');
+  order.set_tag<9005>(12.5);
+  order.set_tag<9006>(std::string_view("RAW-EXTRA"));
+
+  auto owned_message = order.ToMessage();
+  REQUIRE(owned_message.ok());
+
+  nimble::codec::EncodeOptions options;
+  options.begin_string = "FIX.4.4";
+  options.sender_comp_id = "BUY";
+  options.target_comp_id = "SELL";
+  options.msg_seq_num = 2U;
+  options.sending_time = "20260406-12:00:01.000";
+
+  nimble::codec::EncodeBuffer buffer;
+  auto encode_status = nimble::codec::EncodeFixMessageToBuffer(owned_message.value(), dictionary.value(), options, &buffer);
+  REQUIRE(encode_status.ok());
+
+  nimble::generated::detail::BodyEncodeBuffer body_buffer;
+  auto body_status = order.EncodeBody(body_buffer);
+  REQUIRE(body_status.ok());
+
+  const auto encoded_body = body_buffer.data();
+  const auto materialized_body = ApplicationBodyFromFrame(buffer.text());
+  CHECK(encoded_body == materialized_body);
+
+  CHECK(encoded_body.find("9001=7\x01") != std::string_view::npos);
+  CHECK(encoded_body.find("9002=42\x01") != std::string_view::npos);
+  CHECK(encoded_body.find("9003=Y\x01") != std::string_view::npos);
+  CHECK(encoded_body.find("9004=Z\x01") != std::string_view::npos);
+  CHECK(encoded_body.find("9005=12.5\x01") != std::string_view::npos);
+  CHECK(encoded_body.find("9006=RAW-EXTRA\x01") != std::string_view::npos);
 }
 
 TEST_CASE("generated typed view surfaces bind and enum parse errors", "[typed-message]")

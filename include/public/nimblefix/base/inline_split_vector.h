@@ -167,6 +167,16 @@ public:
     overflow_.push_back(std::move(value));
   }
 
+  template<typename... Args>
+  auto emplace_back(Args&&... args) -> T&
+  {
+    if (inline_size_ < InlineCapacity) {
+      inline_storage_[inline_size_] = T(std::forward<Args>(args)...);
+      return inline_storage_[inline_size_++];
+    }
+    return overflow_.emplace_back(std::forward<Args>(args)...);
+  }
+
   [[nodiscard]] auto front() -> T& { return (*this)[0U]; }
 
   [[nodiscard]] auto front() const -> const T& { return (*this)[0U]; }

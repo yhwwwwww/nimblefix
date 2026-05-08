@@ -1,9 +1,11 @@
 #include "nimblefix/profile/builder_codegen.h"
 
+#include "nimblefix/codec/fix_tags.h"
+
 #include <algorithm>
 #include <cctype>
-#include <functional>
 #include <fstream>
+#include <functional>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -37,8 +39,7 @@ CamelToSnake(std::string_view name) -> std::string
   const auto TokenizeIdentifierWords = [](std::string_view text) {
     auto CountLowercaseRun = [](std::string_view value, std::size_t offset) {
       std::size_t count = 0U;
-      while (offset + count < value.size() &&
-             std::islower(static_cast<unsigned char>(value[offset + count])) != 0) {
+      while (offset + count < value.size() && std::islower(static_cast<unsigned char>(value[offset + count])) != 0) {
         ++count;
       }
       return count;
@@ -65,8 +66,7 @@ CamelToSnake(std::string_view name) -> std::string
       if (!current.empty()) {
         const auto prev = current.back();
         bool boundary = false;
-        if (std::islower(static_cast<unsigned char>(prev)) != 0 &&
-            std::isupper(static_cast<unsigned char>(ch)) != 0) {
+        if (std::islower(static_cast<unsigned char>(prev)) != 0 && std::isupper(static_cast<unsigned char>(ch)) != 0) {
           boundary = true;
         } else if (std::isdigit(static_cast<unsigned char>(prev)) != 0 &&
                    std::isalpha(static_cast<unsigned char>(ch)) != 0) {
@@ -496,7 +496,7 @@ QualifiedFieldStorageType(ValueType type) -> std::string_view
   switch (type) {
     case ValueType::kString:
     case ValueType::kTimestamp:
-      return "std::string";
+      return "std::string_view";
     case ValueType::kInt:
       return "std::int64_t";
     case ValueType::kChar:
@@ -508,7 +508,7 @@ QualifiedFieldStorageType(ValueType type) -> std::string_view
     case ValueType::kUnknown:
       break;
   }
-  return "std::string";
+  return "std::string_view";
 }
 
 auto
@@ -579,6 +579,39 @@ BodyEncodeAppendMethod(ValueType type) -> std::string_view
       break;
   }
   return "append_string_field";
+}
+
+auto
+ShapeScalarKind(ValueType type) -> std::string_view
+{
+  switch (type) {
+    case ValueType::kString:
+    case ValueType::kTimestamp:
+      return "detail::ScalarKind::kString";
+    case ValueType::kInt:
+      return "detail::ScalarKind::kInt";
+    case ValueType::kChar:
+      return "detail::ScalarKind::kChar";
+    case ValueType::kFloat:
+      return "detail::ScalarKind::kFloat";
+    case ValueType::kBoolean:
+      return "detail::ScalarKind::kBool";
+    case ValueType::kUnknown:
+      break;
+  }
+  return "detail::ScalarKind::kString";
+}
+
+auto
+ShapePresence(const FieldRule& rule) -> std::string_view
+{
+  return rule.required() ? "detail::Presence::kAlways" : "detail::Presence::kOptional";
+}
+
+auto
+ShouldSkipShapeRule(std::uint32_t tag) -> bool
+{
+  return codec::tags::IsAggregateSessionEnvelopeTag(tag);
 }
 
 auto
@@ -767,7 +800,7 @@ EmitSetterStorageStatement(const FieldDef& field, std::string_view field_member)
     switch (field.value_type) {
       case ValueType::kString:
       case ValueType::kTimestamp:
-        out << field_member << "_ = std::string(ToWire(value));";
+        out << field_member << "_ = ToWire(value);";
         return out.str();
       case ValueType::kChar:
       case ValueType::kInt:
@@ -781,7 +814,7 @@ EmitSetterStorageStatement(const FieldDef& field, std::string_view field_member)
   }
 
   if (IsStringLike(field.value_type)) {
-    out << field_member << "_ = std::string(value);";
+    out << field_member << "_ = value;";
   } else {
     out << field_member << "_ = value;";
   }
@@ -931,6 +964,199 @@ EmitRequiredFieldMetadata(std::ostringstream& out,
 }
 
 auto
+ShapeMessageVariableName(const MessageDef& message) -> std::string
+{
+  return "k" + MakeIdentifier(message.name);
+}
+
+auto
+ShapeGroupPathName(const GroupDef& group) -> std::string
+{
+  if (!group.name.empty()) {
+    return CamelToSnake(group.name);
+  }
+  return "group_" + std::to_string(group.count_tag);
+}
+
+auto
+ReserveShapeArrayName(std::unordered_map<std::string, std::size_t>& used_names,
+                      std::string candidate,
+                      std::uint32_t tag) -> std::string
+{
+  if (used_names.emplace(candidate, 1U).second) {
+    return candidate;
+  }
+
+  auto disambiguated = candidate + "_" + std::to_string(tag);
+  if (used_names.emplace(disambiguated, 1U).second) {
+    return disambiguated;
+  }
+
+  auto& collision_count = used_names[candidate];
+  for (;;) {
+    ++collision_count;
+    disambiguated = candidate + "_" + std::to_string(tag) + "_" + std::to_string(collision_count);
+    if (used_names.emplace(disambiguated, 1U).second) {
+      return disambiguated;
+    }
+  }
+}
+
+auto
+ShapeGroupArrayName(std::string_view message_shape_name, const std::vector<std::string>& group_path) -> std::string
+{
+  std::string name = std::string(message_shape_name);
+  for (const auto& group_name : group_path) {
+    name.push_back('_');
+    name.append(group_name);
+  }
+  name.append("_entry");
+  return name;
+}
+
+auto
+CountShapeNodes(const std::vector<FieldRule>& rules,
+                const std::unordered_map<std::uint32_t, const FieldDef*>& field_by_tag,
+                const std::unordered_map<std::uint32_t, const GroupDef*>& group_by_tag) -> std::size_t
+{
+  std::size_t count = 0U;
+  for (const auto& rule : rules) {
+    if (ShouldSkipShapeRule(rule.tag)) {
+      continue;
+    }
+    if (group_by_tag.count(rule.tag) != 0U || field_by_tag.count(rule.tag) != 0U) {
+      ++count;
+    }
+  }
+  return count;
+}
+
+auto
+EmitShapeNodeArray(std::ostringstream& out,
+                   std::string_view array_name,
+                   const std::vector<FieldRule>& rules,
+                   const std::unordered_map<std::uint32_t, const FieldDef*>& field_by_tag,
+                   const std::unordered_map<std::uint32_t, const GroupDef*>& group_by_tag,
+                   std::unordered_map<std::string, std::size_t>& used_array_names,
+                   std::string_view message_shape_name,
+                   const std::vector<std::string>& group_path) -> void
+{
+  struct NestedGroupShape
+  {
+    std::uint32_t count_tag{ 0U };
+    std::string entry_array_name;
+    std::size_t entry_count{ 0U };
+  };
+
+  std::vector<NestedGroupShape> nested_groups;
+  nested_groups.reserve(rules.size());
+
+  for (const auto& rule : rules) {
+    if (ShouldSkipShapeRule(rule.tag)) {
+      continue;
+    }
+
+    const auto group_it = group_by_tag.find(rule.tag);
+    if (group_it == group_by_tag.end()) {
+      continue;
+    }
+
+    const auto& group = *group_it->second;
+    const auto entry_count = CountShapeNodes(group.field_rules, field_by_tag, group_by_tag);
+    std::string entry_array_name;
+    if (entry_count != 0U) {
+      auto nested_path = group_path;
+      nested_path.push_back(ShapeGroupPathName(group));
+      entry_array_name =
+        ReserveShapeArrayName(used_array_names, ShapeGroupArrayName(message_shape_name, nested_path), group.count_tag);
+      EmitShapeNodeArray(out,
+                         entry_array_name,
+                         group.field_rules,
+                         field_by_tag,
+                         group_by_tag,
+                         used_array_names,
+                         message_shape_name,
+                         nested_path);
+    }
+    nested_groups.push_back(NestedGroupShape{
+      .count_tag = group.count_tag,
+      .entry_array_name = std::move(entry_array_name),
+      .entry_count = entry_count,
+    });
+  }
+
+  out << "inline constexpr detail::BodyNode " << array_name << "[] = {\n";
+  std::size_t nested_group_index = 0U;
+  for (const auto& rule : rules) {
+    if (ShouldSkipShapeRule(rule.tag)) {
+      continue;
+    }
+
+    const auto group_it = group_by_tag.find(rule.tag);
+    if (group_it != group_by_tag.end()) {
+      const auto& group = *group_it->second;
+      const auto& nested = nested_groups[nested_group_index++];
+      out << "  { detail::BodyNode::Kind::kGroup, " << group.count_tag << "U, {}, {}, " << group.delimiter_tag << "U, ";
+      if (nested.entry_count == 0U) {
+        out << "nullptr, 0U";
+      } else {
+        out << nested.entry_array_name << ", " << nested.entry_count << "U";
+      }
+      out << " },\n";
+      continue;
+    }
+
+    const auto field_it = field_by_tag.find(rule.tag);
+    if (field_it == field_by_tag.end()) {
+      continue;
+    }
+
+    const auto& field = *field_it->second;
+    out << "  { detail::BodyNode::Kind::kScalar, " << field.tag << "U, " << ShapeScalarKind(field.value_type) << ", "
+        << ShapePresence(rule) << ", 0U, nullptr, 0U },\n";
+  }
+  out << "};\n\n";
+}
+
+auto
+EmitMessageShapeData(std::ostringstream& out,
+                     const NormalizedDictionary& dictionary,
+                     const std::unordered_map<std::uint32_t, const FieldDef*>& field_by_tag,
+                     const std::unordered_map<std::uint32_t, const GroupDef*>& group_by_tag) -> void
+{
+  out << "namespace shape_data {\n\n";
+  std::unordered_map<std::string, std::size_t> used_array_names;
+
+  for (const auto& message : dictionary.messages) {
+    const auto shape_name = ShapeMessageVariableName(message);
+    const auto body_count = CountShapeNodes(message.field_rules, field_by_tag, group_by_tag);
+    const auto body_array_name = shape_name + "_body";
+
+    if (body_count != 0U) {
+      used_array_names.emplace(body_array_name, 1U);
+      EmitShapeNodeArray(
+        out, body_array_name, message.field_rules, field_by_tag, group_by_tag, used_array_names, shape_name, {});
+    }
+
+    out << "inline constexpr detail::MessageShape " << shape_name << " = {\n"
+        << "  " << dictionary.schema_hash << "ULL,\n"
+        << "  \"" << EmitStringLiteral(message.msg_type) << "\",\n";
+    if (body_count == 0U) {
+      out << "  nullptr,\n"
+          << "  0U,\n";
+    } else {
+      out << "  " << body_array_name << ",\n"
+          << "  static_cast<std::uint32_t>(std::size(" << body_array_name << ")),\n";
+    }
+    out << "  nullptr,\n"
+        << "  0U,\n"
+        << "};\n\n";
+  }
+
+  out << "} // namespace shape_data\n\n";
+}
+
+auto
 EmitProfileSupport(std::ostringstream& out, const NormalizedDictionary& dictionary) -> void
 {
   (void)dictionary;
@@ -962,8 +1188,8 @@ EmitEnums(std::ostringstream& out, const NormalizedDictionary& dictionary) -> vo
     out << "enum class " << enum_name << " : " << EnumUnderlyingType(field.value_type) << " {\n";
     for (std::uint16_t index = 0U; index < field.enum_values.size(); ++index) {
       const auto& enum_entry = field.enum_values[index];
-      out << "  " << EnumValueName(enum_entry.name) << " = "
-          << EmitEnumValueLiteral(field, enum_entry.value, index) << ",\n";
+      out << "  " << EnumValueName(enum_entry.name) << " = " << EmitEnumValueLiteral(field, enum_entry.value, index)
+          << ",\n";
     }
     out << "};\n\n";
 
@@ -974,8 +1200,8 @@ EmitEnums(std::ostringstream& out, const NormalizedDictionary& dictionary) -> vo
       if (index != 0U) {
         out << ", ";
       }
-      out << "detail::EnumWireEntry<" << enum_name << ", " << wire_type << ">{ " << enum_name << "::"
-          << EnumValueName(enum_entry.name) << ", ";
+      out << "detail::EnumWireEntry<" << enum_name << ", " << wire_type << ">{ " << enum_name
+          << "::" << EnumValueName(enum_entry.name) << ", ";
       if (field.value_type == ValueType::kString || field.value_type == ValueType::kTimestamp) {
         out << "\"" << EmitStringLiteral(enum_entry.value) << "\"";
       } else {
@@ -997,7 +1223,8 @@ EmitEnums(std::ostringstream& out, const NormalizedDictionary& dictionary) -> vo
 }
 
 auto
-EmitProfileStruct(std::ostringstream& out, const NormalizedDictionary& dictionary, std::string_view namespace_name) -> void
+EmitProfileStruct(std::ostringstream& out, const NormalizedDictionary& dictionary, std::string_view namespace_name)
+  -> void
 {
   out << "class Handler;\n"
       << "class Dispatcher;\n\n"
@@ -1036,7 +1263,8 @@ EmitGroupEntryType(std::ostringstream& out,
           << "    " << nested_name << "_.emplace_back();\n"
           << "    return " << nested_name << "_.back();\n"
           << "  }\n\n"
-          << "  [[nodiscard]] auto " << nested_name << "() const -> const std::vector<" << entry_type << ">& {\n"
+          << "  [[nodiscard]] auto " << nested_name << "() const -> const base::InlineSplitVector<" << entry_type
+          << ", 4>& {\n"
           << "    return " << nested_name << "_;\n"
           << "  }\n\n";
       continue;
@@ -1063,8 +1291,8 @@ EmitGroupEntryType(std::ostringstream& out,
       const auto nested_name = context_group_names.at(nested_it->second->count_tag).plural_snake;
       if (rule.required()) {
         out << "    if (" << nested_name << "_.empty()) {\n"
-            << "      return detail::MissingRequiredField(\"" << EmitStringLiteral(group.name)
-            << "\", \"" << EmitStringLiteral(nested_it->second->name) << "\");\n"
+            << "      return detail::MissingRequiredField(\"" << EmitStringLiteral(group.name) << "\", \""
+            << EmitStringLiteral(nested_it->second->name) << "\");\n"
             << "    }\n";
       }
       out << "    for (const auto& entry : " << nested_name << "_) {\n"
@@ -1085,8 +1313,8 @@ EmitGroupEntryType(std::ostringstream& out,
     }
     const auto field_name = FieldMethodName(*it->second);
     out << "    if (!has_" << field_name << "_) {\n"
-        << "      return detail::MissingRequiredField(\"" << EmitStringLiteral(group.name)
-        << "\", \"" << EmitStringLiteral(it->second->name) << "\");\n"
+        << "      return detail::MissingRequiredField(\"" << EmitStringLiteral(group.name) << "\", \""
+        << EmitStringLiteral(it->second->name) << "\");\n"
         << "    }\n";
   }
   out << "    return base::Status::Ok();\n"
@@ -1142,8 +1370,7 @@ EmitGroupEntryType(std::ostringstream& out,
       const auto& nested_group = *nested_it->second;
       const auto nested_name = context_group_names.at(nested_group.count_tag).plural_snake;
       out << "    if (!" << nested_name << "_.empty()) {\n"
-          << "      buffer.append_count_field(\"" << nested_group.count_tag << "=\", " << nested_name
-          << "_.size());\n"
+          << "      buffer.append_count_field(\"" << nested_group.count_tag << "=\", " << nested_name << "_.size());\n"
           << "      for (const auto& entry : " << nested_name << "_) {\n"
           << "        auto status = entry.EncodeBody(buffer);\n"
           << "        if (!status.ok()) {\n"
@@ -1173,8 +1400,7 @@ EmitGroupEntryType(std::ostringstream& out,
     const auto nested_it = group_by_tag.find(rule.tag);
     if (nested_it != group_by_tag.end()) {
       const auto& nested_names = context_group_names.at(nested_it->second->count_tag);
-      out << "  std::vector<" << nested_names.entry_type << "> " << nested_names.plural_snake
-          << "_;\n";
+      out << "  base::InlineSplitVector<" << nested_names.entry_type << ", 4> " << nested_names.plural_snake << "_;\n";
       continue;
     }
 
@@ -1191,21 +1417,22 @@ EmitGroupEntryType(std::ostringstream& out,
 }
 
 auto
-EmitOutboundMessageType(std::ostringstream& out,
+EmitOutboundBuilderType(std::ostringstream& out,
                         const MessageDef& message,
                         const std::unordered_map<std::uint32_t, const FieldDef*>& field_by_tag,
                         const std::unordered_map<std::uint32_t, const GroupDef*>& group_by_tag,
                         const std::unordered_map<std::uint32_t, GroupApiNames>& group_api_names) -> void
 {
   const auto context_group_names = BuildContextGroupApiNames(message.field_rules, group_api_names, group_by_tag);
-  const auto class_name = message.name;
+  const auto class_name = message.name + "Builder";
   out << "class " << class_name << " {\n"
       << "public:\n"
       << "  static constexpr std::string_view kMsgType = \"" << EmitStringLiteral(message.msg_type) << "\";\n";
   EmitRequiredFieldMetadata(out, message.field_rules, field_by_tag, group_by_tag);
   out << "\n"
       << "  auto clear() -> void {\n"
-      << "    presence_.clear();\n";
+      << "    presence_.clear();\n"
+      << "    raw_extras_.clear();\n";
   for (const auto& rule : message.field_rules) {
     if (group_by_tag.count(rule.tag) != 0U) {
       const auto* group = group_by_tag.at(rule.tag);
@@ -1218,11 +1445,7 @@ EmitOutboundMessageType(std::ostringstream& out,
     }
     const auto field_name = FieldMethodName(*it->second);
     out << "    has_" << field_name << "_ = false;\n";
-    if (IsStringLike(it->second->value_type)) {
-      out << "    " << field_name << "_.clear();\n";
-    } else {
-      out << "    " << field_name << "_ = {};\n";
-    }
+    out << "    " << field_name << "_ = {};\n";
   }
   out << "  }\n\n";
 
@@ -1240,7 +1463,8 @@ EmitOutboundMessageType(std::ostringstream& out,
           << "    presence_.set(" << rule_index << "U);\n"
           << "    return " << group_name << "_.back();\n"
           << "  }\n\n"
-          << "  [[nodiscard]] auto " << group_name << "() const -> const std::vector<" << entry_type << ">& {\n"
+          << "  [[nodiscard]] auto " << group_name << "() const -> const base::InlineSplitVector<" << entry_type
+          << ", 4>& {\n"
           << "    return " << group_name << "_;\n"
           << "  }\n\n";
       continue;
@@ -1259,6 +1483,37 @@ EmitOutboundMessageType(std::ostringstream& out,
         << "    return *this;\n"
         << "  }\n\n";
   }
+
+  out << "  template<std::uint32_t Tag>\n"
+      << "  auto set_tag(std::string_view value) -> " << class_name << "& {\n"
+      << "    raw_extras_.emplace_back(Tag, std::string(value));\n"
+      << "    return *this;\n"
+      << "  }\n\n"
+      << "  template<std::uint32_t Tag>\n"
+      << "  auto set_tag(auto value) -> " << class_name
+      << "& requires(std::integral<decltype(value)> && !std::same_as<decltype(value), char> && "
+         "!std::same_as<decltype(value), bool>) {\n"
+      << "    raw_extras_.emplace_back(Tag, std::to_string(value));\n"
+      << "    return *this;\n"
+      << "  }\n\n"
+      << "  template<std::uint32_t Tag>\n"
+      << "  auto set_tag(double value) -> " << class_name << "& {\n"
+      << "    std::array<char, 32> buf{};\n"
+      << "    const auto [ptr, ec] = std::to_chars(buf.data(), buf.data() + buf.size(), value, "
+         "std::chars_format::general, 12);\n"
+      << "    raw_extras_.emplace_back(Tag, ec == std::errc() ? std::string(buf.data(), ptr) : std::string());\n"
+      << "    return *this;\n"
+      << "  }\n\n"
+      << "  template<std::uint32_t Tag>\n"
+      << "  auto set_tag(char value) -> " << class_name << "& {\n"
+      << "    raw_extras_.emplace_back(Tag, std::string(1, value));\n"
+      << "    return *this;\n"
+      << "  }\n\n"
+      << "  template<std::uint32_t Tag>\n"
+      << "  auto set_tag(bool value) -> " << class_name << "& {\n"
+      << "    raw_extras_.emplace_back(Tag, std::string(1, value ? 'Y' : 'N'));\n"
+      << "    return *this;\n"
+      << "  }\n\n";
 
   out << "  [[nodiscard]] auto validate() const -> base::Status {\n"
       << "    auto status = detail::ValidateRequiredFields(\"" << EmitStringLiteral(message.name)
@@ -1310,7 +1565,8 @@ EmitOutboundMessageType(std::ostringstream& out,
           << "        builder,\n"
           << "        " << group.count_tag << "U,\n"
           << "        " << group_name << "_,\n"
-          << "        [](auto& group_entry, const auto& entry) -> base::Status { return entry.AppendTo(group_entry); });\n"
+          << "        [](auto& group_entry, const auto& entry) -> base::Status { return entry.AppendTo(group_entry); "
+             "});\n"
           << "        if (!status.ok()) {\n"
           << "          return status;\n"
           << "        }\n"
@@ -1327,7 +1583,10 @@ EmitOutboundMessageType(std::ostringstream& out,
         << "      detail::AddField(builder, " << field_it->second->tag << "U, " << field_name << "_);\n"
         << "    }\n";
   }
-  out << "    return base::Status::Ok();\n"
+  out << "    for (const auto& [tag, value] : raw_extras_) {\n"
+      << "      builder.add_string(tag, value);\n"
+      << "    }\n"
+      << "    return base::Status::Ok();\n"
       << "    });\n"
       << "  }\n\n";
 
@@ -1364,7 +1623,16 @@ EmitOutboundMessageType(std::ostringstream& out,
         << "      buffer." << append_method << "(\"" << field.tag << "=\", " << field_name << "_);\n"
         << "    }\n";
   }
-  out << "    return base::Status::Ok();\n"
+  out << "    for (const auto& [tag, value] : raw_extras_) {\n"
+      << "      std::array<char, 16> tag_buf{};\n"
+      << "      const auto [ptr, ec] = std::to_chars(tag_buf.data(), tag_buf.data() + tag_buf.size(), tag);\n"
+      << "      if (ec == std::errc()) {\n"
+      << "        std::string prefix(tag_buf.data(), ptr);\n"
+      << "        prefix.push_back('=');\n"
+      << "        buffer.append_string_field(prefix, value);\n"
+      << "      }\n"
+      << "    }\n"
+      << "    return base::Status::Ok();\n"
       << "  }\n\n";
 
   out << "private:\n";
@@ -1372,8 +1640,7 @@ EmitOutboundMessageType(std::ostringstream& out,
     const auto group_it = group_by_tag.find(rule.tag);
     if (group_it != group_by_tag.end()) {
       const auto& group_names = context_group_names.at(group_it->second->count_tag);
-      out << "  std::vector<" << group_names.entry_type << "> " << group_names.plural_snake
-          << "_;\n";
+      out << "  base::InlineSplitVector<" << group_names.entry_type << ", 4> " << group_names.plural_snake << "_;\n";
       continue;
     }
     const auto field_it = field_by_tag.find(rule.tag);
@@ -1385,7 +1652,20 @@ EmitOutboundMessageType(std::ostringstream& out,
         << "  bool has_" << field_name << "_{ false };\n";
   }
   out << "  detail::FieldPresence<kFieldCount> presence_{};\n";
+  out << "  std::vector<std::pair<std::uint32_t, std::string>> raw_extras_;\n";
   out << "};\n\n";
+}
+
+auto
+EmitOutboundMarkerType(std::ostringstream& out, const MessageDef& message) -> void
+{
+  const auto class_name = message.name + "Builder";
+  out << "struct " << message.name << " {\n"
+      << "  static constexpr std::string_view kMsgType = \"" << EmitStringLiteral(message.msg_type) << "\";\n"
+      << "  using Builder = " << class_name << ";\n"
+      << "  static constexpr const detail::MessageShape& kShape = shape_data::" << ShapeMessageVariableName(message)
+      << ";\n"
+      << "};\n\n";
 }
 
 auto
@@ -1442,8 +1722,7 @@ EmitGroupViewType(std::ostringstream& out,
           << "    return view_." << getter << "(" << field.tag << "U);\n"
           << "  }\n\n";
     } else {
-      out << "  [[nodiscard]] auto " << method_name << "() const -> " << ViewRawReturnType(field.value_type)
-          << " {\n"
+      out << "  [[nodiscard]] auto " << method_name << "() const -> " << ViewRawReturnType(field.value_type) << " {\n"
           << "    return view_." << getter << "(" << field.tag << "U);\n"
           << "  }\n\n";
     }
@@ -1521,8 +1800,7 @@ EmitInboundViewType(std::ostringstream& out,
           << "    return view_." << getter << "(" << field.tag << "U);\n"
           << "  }\n\n";
     } else {
-      out << "  [[nodiscard]] auto " << method_name << "() const -> " << ViewRawReturnType(field.value_type)
-          << " {\n"
+      out << "  [[nodiscard]] auto " << method_name << "() const -> " << ViewRawReturnType(field.value_type) << " {\n"
           << "    return view_." << getter << "(" << field.tag << "U);\n"
           << "  }\n\n";
     }
@@ -1586,7 +1864,8 @@ EmitHandlerAndDispatcher(std::ostringstream& out, const NormalizedDictionary& di
 } // namespace
 
 auto
-GenerateCppApiHeader(const NormalizedDictionary& dictionary, std::string_view namespace_name) -> base::Result<std::string>
+GenerateCppApiHeader(const NormalizedDictionary& dictionary, std::string_view namespace_name)
+  -> base::Result<std::string>
 {
   const auto ns = namespace_name.empty() ? DefaultNamespaceName(dictionary) : std::string(namespace_name);
   const auto field_by_tag = FieldByTag(dictionary);
@@ -1596,6 +1875,7 @@ GenerateCppApiHeader(const NormalizedDictionary& dictionary, std::string_view na
 
   std::ostringstream out;
   out << "#pragma once\n\n"
+      << "#include <charconv>\n"
       << "#include <cstdint>\n"
       << "#include <optional>\n"
       << "#include <string>\n"
@@ -1603,15 +1883,18 @@ GenerateCppApiHeader(const NormalizedDictionary& dictionary, std::string_view na
       << "#include <array>\n"
       << "#include <utility>\n"
       << "#include <vector>\n\n"
+      << "#include \"nimblefix/base/inline_split_vector.h\"\n"
       << "#include \"nimblefix/base/result.h\"\n"
       << "#include \"nimblefix/base/status.h\"\n"
       << "#include \"nimblefix/generated/detail/api_support.h\"\n"
+      << "#include \"nimblefix/generated/detail/message_shape.h\"\n"
       << "#include \"nimblefix/message/message_view.h\"\n"
       << "#include \"nimblefix/runtime/application.h\"\n"
       << "#include \"nimblefix/runtime/session.h\"\n\n"
       << "// Generated by nimblefix-dictgen --cpp-api. Do not edit.\n\n"
       << "namespace " << ns << " {\n\n"
-      << "namespace detail = ::nimble::generated::detail;\n\n";
+      << "namespace detail = ::nimble::generated::detail;\n"
+      << "namespace base = ::nimble::base;\n\n";
 
   EmitProfileStruct(out, dictionary, ns);
   EmitTagConstants(out, dictionary);
@@ -1625,7 +1908,11 @@ GenerateCppApiHeader(const NormalizedDictionary& dictionary, std::string_view na
     EmitGroupViewType(out, *group, field_by_tag, group_by_tag, group_api_names);
   }
   for (const auto& message : dictionary.messages) {
-    EmitOutboundMessageType(out, message, field_by_tag, group_by_tag, group_api_names);
+    EmitOutboundBuilderType(out, message, field_by_tag, group_by_tag, group_api_names);
+  }
+  EmitMessageShapeData(out, dictionary, field_by_tag, group_by_tag);
+  for (const auto& message : dictionary.messages) {
+    EmitOutboundMarkerType(out, message);
   }
   for (const auto& message : dictionary.messages) {
     EmitInboundViewType(out, message, field_by_tag, group_by_tag, group_api_names);

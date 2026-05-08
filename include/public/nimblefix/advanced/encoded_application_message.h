@@ -9,6 +9,7 @@
 #include <string_view>
 #include <vector>
 
+#include "nimblefix/codec/fix_codec.h"
 #include "nimblefix/session/encoded_frame.h"
 
 namespace nimble::session {
@@ -68,6 +69,7 @@ struct EncodedApplicationMessageView
 {
   std::string_view msg_type;
   std::span<const std::byte> body;
+  codec::EncodedOutboundExtrasView extras;
 
   [[nodiscard]] auto valid() const -> bool { return !msg_type.empty(); }
 };
@@ -80,6 +82,7 @@ struct EncodedApplicationMessage
 {
   std::string msg_type;
   EncodedApplicationBytes body;
+  codec::EncodedOutboundExtras extras;
 
   EncodedApplicationMessage() = default;
 
@@ -97,6 +100,7 @@ struct EncodedApplicationMessage
     return EncodedApplicationMessageView{
       .msg_type = msg_type,
       .body = body.view(),
+      .extras = extras.view(),
     };
   }
 
@@ -140,7 +144,14 @@ public:
     if (!view.valid()) {
       return Borrow(view);
     }
-    return Take(EncodedApplicationMessage(view.msg_type, view.body));
+    EncodedApplicationMessage copy(view.msg_type, view.body);
+    if (!view.extras.empty()) {
+      copy.extras = codec::EncodedOutboundExtras{
+        .header_fragment = std::string(view.extras.header_fragment),
+        .body_fragment = std::string(view.extras.body_fragment),
+      };
+    }
+    return Take(std::move(copy));
   }
 
   [[nodiscard]] auto valid() const -> bool

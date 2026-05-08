@@ -236,6 +236,19 @@ public:
   [[nodiscard]] auto find_message(std::string_view msg_type) const -> const MessageDefRecord*;
   [[nodiscard]] auto find_group(std::uint32_t count_tag) const -> const GroupDefRecord*;
 
+  /// O(1) check whether a tag is a group count tag.  Uses a 1024-bit
+  /// bitmap for tags 0..1023 (covers all standard FIX group count tags)
+  /// and falls back to find_group() for rare tags >= 1024.
+  [[nodiscard]] auto is_group_count_tag(std::uint32_t tag) const -> bool
+  {
+    if (tag < kGroupBitmapBits) {
+      return (group_count_tag_bitmap_[tag / 64U] & (std::uint64_t{ 1 } << (tag % 64U))) != 0U;
+    }
+    return find_group(tag) != nullptr;
+  }
+
+  [[nodiscard]] auto is_enum_value_allowed(const FieldDefRecord& field_def, std::string_view value) const -> bool;
+
   [[nodiscard]] auto message_rule_allows_tag(const MessageDefRecord& record, std::uint32_t tag) const -> bool;
   [[nodiscard]] auto group_rule_allows_tag(const GroupDefRecord& record, std::uint32_t tag) const -> bool;
   [[nodiscard]] auto message_rule_index(const MessageDefRecord& record, std::uint32_t tag) const -> int;
@@ -275,6 +288,8 @@ private:
 
   static constexpr std::size_t kDirectLookupSize = 10000;
   static constexpr std::uint16_t kNoEntry = 0xFFFFU;
+  static constexpr std::size_t kGroupBitmapBits = 1024;
+  static constexpr std::size_t kGroupBitmapWords = kGroupBitmapBits / 64;
 
   LoadedProfile profile_;
   StringTableView string_table_;
@@ -297,6 +312,18 @@ private:
   /// kDirectLookupSize. Falls back to binary search on field_index_ for tags >=
   /// kDirectLookupSize.
   std::array<std::uint16_t, kDirectLookupSize> field_direct_lookup_;
+
+  std::array<std::uint64_t, kGroupBitmapWords> group_count_tag_bitmap_{};
+
+  /// Precomputed enum bitmaps for fast O(1) single-char enum validation.
+  /// Indexed by field_def slot. For fields whose enum values are all single
+  /// characters (the common case in FIX), stores a 256-bit bitmap for O(1) lookup.
+  struct EnumCharBitmap
+  {
+    std::array<std::uint8_t, 32> bits{}; ///< bitmap[ch/8] & (1<<(ch%8)) = allowed
+    bool all_single_char{ false };       ///< true → use bitmap, false → linear fallback
+  };
+  std::vector<EnumCharBitmap> enum_bitmaps_;
 };
 
 } // namespace nimble::profile

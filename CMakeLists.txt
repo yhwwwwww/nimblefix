@@ -172,6 +172,11 @@ target_link_libraries(nimblefix-xml2nfd PRIVATE nimblefix nimblefix-thirdparty-p
 nimblefix_add_internal_headers(nimblefix-xml2nfd)
 
 if(NIMBLEFIX_BUILD_TOOLS)
+    file(GLOB NIMBLEFIX_USAGEGEN_SOURCES CONFIGURE_DEPENDS
+        "${PROJECT_SOURCE_DIR}/tools/usagegen/*.cpp"
+    )
+    nimblefix_add_binary(nimblefix-usagegen ${NIMBLEFIX_USAGEGEN_SOURCES})
+
     file(GLOB NIMBLEFIX_ORCHESTRA_IMPORT_SOURCES CONFIGURE_DEPENDS
         "${PROJECT_SOURCE_DIR}/tools/orchestra-import/*.cpp"
     )

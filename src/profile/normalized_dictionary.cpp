@@ -161,6 +161,17 @@ NormalizedDictionaryView::FromProfile(LoadedProfile profile) -> base::Result<Nor
     });
   }
 
+  // Build group count-tag bitmap for O(1) is_group_count_tag() queries.
+  {
+    view.group_count_tag_bitmap_.fill(0U);
+    for (const auto& group : group_defs.entries()) {
+      const auto tag = group.count_tag;
+      if (tag < kGroupBitmapBits) {
+        view.group_count_tag_bitmap_[tag / 64U] |= (std::uint64_t{ 1 } << (tag % 64U));
+      }
+    }
+  }
+
   // Build message type index sorted by msg_type for binary search.
   {
     const auto& entries = view.message_defs_.entries();
@@ -214,6 +225,42 @@ NormalizedDictionaryView::FromProfile(LoadedProfile profile) -> base::Result<Nor
       const auto tag = entries[i].tag;
       if (tag < kDirectLookupSize && i <= std::numeric_limits<std::uint16_t>::max()) {
         view.field_direct_lookup_[tag] = static_cast<std::uint16_t>(i);
+      }
+    }
+  }
+
+  // Build per-field enum char bitmaps for O(1) single-char enum validation.
+  {
+    const auto& field_entries = view.field_defs_.entries();
+    const auto enum_vals = view.enum_values_.entries();
+    view.enum_bitmaps_.resize(field_entries.size());
+    for (std::size_t i = 0; i < field_entries.size(); ++i) {
+      const auto& field = field_entries[i];
+      if (field.enum_count == 0U) {
+        continue;
+      }
+      const auto begin = static_cast<std::size_t>(field.enum_offset);
+      const auto count = static_cast<std::size_t>(field.enum_count);
+      if (begin >= enum_vals.size()) {
+        continue;
+      }
+      const auto end = std::min(begin + count, enum_vals.size());
+      bool all_single = true;
+      for (std::size_t idx = begin; idx < end; ++idx) {
+        const auto val = view.string_table_.string_at(enum_vals[idx].value_offset);
+        if (!val.has_value() || val->size() != 1U) {
+          all_single = false;
+          break;
+        }
+      }
+      if (all_single) {
+        auto& bitmap = view.enum_bitmaps_[i];
+        bitmap.all_single_char = true;
+        for (std::size_t idx = begin; idx < end; ++idx) {
+          const auto val = view.string_table_.string_at(enum_vals[idx].value_offset);
+          const auto ch = static_cast<std::uint8_t>((*val)[0]);
+          bitmap.bits[ch >> 3U] |= static_cast<std::uint8_t>(1U << (ch & 7U));
+        }
       }
     }
   }
@@ -319,6 +366,39 @@ auto
 NormalizedDictionaryView::group_field_rules(const GroupDefRecord& record) const -> std::span<const FieldRuleRecord>
 {
   return group_field_rules_.entries().subspan(record.first_field_rule, record.field_rule_count);
+}
+
+auto
+NormalizedDictionaryView::is_enum_value_allowed(const FieldDefRecord& field_def, std::string_view value) const -> bool
+{
+  if (field_def.enum_count == 0U || value.empty()) {
+    return true;
+  }
+
+  const auto field_index =
+    static_cast<std::size_t>(&field_def - field_defs_.entries().data());
+  if (field_index < enum_bitmaps_.size() && enum_bitmaps_[field_index].all_single_char) {
+    if (value.size() != 1U) {
+      return false;
+    }
+    const auto ch = static_cast<std::uint8_t>(value[0]);
+    return (enum_bitmaps_[field_index].bits[ch >> 3U] & (1U << (ch & 7U))) != 0U;
+  }
+
+  const auto enum_vals = enum_values_.entries();
+  const auto begin = static_cast<std::size_t>(field_def.enum_offset);
+  const auto count = static_cast<std::size_t>(field_def.enum_count);
+  if (begin >= enum_vals.size()) {
+    return true;
+  }
+  const auto end = std::min(begin + count, enum_vals.size());
+  for (std::size_t index = begin; index < end; ++index) {
+    const auto allowed = string_table_.string_at(enum_vals[index].value_offset);
+    if (allowed.has_value() && *allowed == value) {
+      return true;
+    }
+  }
+  return false;
 }
 
 } // namespace nimble::profile

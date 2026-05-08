@@ -486,6 +486,9 @@ public:
   /// \return Borrowed raw group view when the underlying storage is parsed and
   /// the group exists.
   [[nodiscard]] auto raw_group(std::uint32_t count_tag) const -> std::optional<RawGroupView>;
+
+  [[nodiscard]] auto raw_field_at(std::size_t index) const -> std::optional<RawFieldView>;
+
   /// Check the quick cache before falling back to the full hash lookup.
   [[nodiscard]] auto find_quick_cached(std::uint32_t tag) const -> std::optional<FieldView>;
 

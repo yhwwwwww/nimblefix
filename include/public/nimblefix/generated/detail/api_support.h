@@ -5,6 +5,7 @@
 #include <charconv>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <optional>
 #include <span>
 #include <string>
@@ -302,55 +303,69 @@ inline auto DispatchToHandler(message::MessageView message,
 /// bypassing MessageBuilder and OwnedMessage materialization. The buffer
 /// contents are passed to EncodedApplicationMessage for session-managed
 /// header/trailer wrapping.
+///
+/// Uses inline storage (768 bytes) to avoid heap allocation for typical FIX
+/// messages. Falls back to std::string for oversized bodies.
 class BodyEncodeBuffer
 {
-public:
-  auto clear() -> void { data_.clear(); }
+  static constexpr std::size_t kInlineCapacity = 768;
 
-  auto reserve(std::size_t capacity) -> void { data_.reserve(capacity); }
+public:
+  auto clear() -> void
+  {
+    size_ = 0;
+    overflow_.clear();
+  }
+
+  auto reserve(std::size_t capacity) -> void
+  {
+    if (capacity > kInlineCapacity && overflow_.empty()) {
+      overflow_.reserve(capacity);
+    }
+  }
 
   auto append_string_field(std::string_view prefix, std::string_view value) -> void
   {
-    data_.append(prefix);
-    data_.append(value);
-    data_.push_back('\x01');
+    raw_append(prefix);
+    raw_append(value);
+    raw_push_back('\x01');
   }
 
   auto append_int_field(std::string_view prefix, std::int64_t value) -> void
   {
-    data_.append(prefix);
+    raw_append(prefix);
     std::array<char, 20> buf{};
     const auto [ptr, ec] = std::to_chars(buf.data(), buf.data() + buf.size(), value);
     if (ec == std::errc()) {
-      data_.append(buf.data(), static_cast<std::size_t>(ptr - buf.data()));
+      raw_append(std::string_view(buf.data(), static_cast<std::size_t>(ptr - buf.data())));
     }
-    data_.push_back('\x01');
+    raw_push_back('\x01');
   }
 
   auto append_char_field(std::string_view prefix, char value) -> void
   {
-    data_.append(prefix);
-    data_.push_back(value);
-    data_.push_back('\x01');
+    raw_append(prefix);
+    raw_push_back(value);
+    raw_push_back('\x01');
   }
 
   auto append_float_field(std::string_view prefix, double value) -> void
   {
-    data_.append(prefix);
+    raw_append(prefix);
     std::array<char, 32> buf{};
     const auto [ptr, ec] =
       std::to_chars(buf.data(), buf.data() + buf.size(), value, std::chars_format::general, 12);
     if (ec == std::errc()) {
-      data_.append(buf.data(), static_cast<std::size_t>(ptr - buf.data()));
+      raw_append(std::string_view(buf.data(), static_cast<std::size_t>(ptr - buf.data())));
     }
-    data_.push_back('\x01');
+    raw_push_back('\x01');
   }
 
   auto append_bool_field(std::string_view prefix, bool value) -> void
   {
-    data_.append(prefix);
-    data_.push_back(value ? 'Y' : 'N');
-    data_.push_back('\x01');
+    raw_append(prefix);
+    raw_push_back(value ? 'Y' : 'N');
+    raw_push_back('\x01');
   }
 
   auto append_count_field(std::string_view prefix, std::size_t count) -> void
@@ -358,15 +373,60 @@ public:
     append_int_field(prefix, static_cast<std::int64_t>(count));
   }
 
-  [[nodiscard]] auto data() const -> std::string_view { return data_; }
+  [[nodiscard]] auto data() const -> std::string_view
+  {
+    if (!overflow_.empty()) {
+      return overflow_;
+    }
+    return std::string_view(inline_storage_.data(), size_);
+  }
 
   [[nodiscard]] auto bytes() const -> std::span<const std::byte>
   {
-    return std::span<const std::byte>(reinterpret_cast<const std::byte*>(data_.data()), data_.size());
+    if (!overflow_.empty()) {
+      return std::span<const std::byte>(reinterpret_cast<const std::byte*>(overflow_.data()), overflow_.size());
+    }
+    return std::span<const std::byte>(reinterpret_cast<const std::byte*>(inline_storage_.data()), size_);
   }
 
 private:
-  std::string data_;
+  auto raw_append(std::string_view sv) -> void
+  {
+    if (!overflow_.empty()) {
+      overflow_.append(sv);
+      return;
+    }
+    if (size_ + sv.size() > kInlineCapacity) {
+      spill_to_overflow();
+      overflow_.append(sv);
+      return;
+    }
+    std::memcpy(inline_storage_.data() + size_, sv.data(), sv.size());
+    size_ += sv.size();
+  }
+
+  auto raw_push_back(char c) -> void
+  {
+    if (!overflow_.empty()) {
+      overflow_.push_back(c);
+      return;
+    }
+    if (size_ >= kInlineCapacity) {
+      spill_to_overflow();
+      overflow_.push_back(c);
+      return;
+    }
+    inline_storage_[size_++] = c;
+  }
+
+  auto spill_to_overflow() -> void
+  {
+    overflow_.assign(inline_storage_.data(), size_);
+  }
+
+  std::array<char, kInlineCapacity> inline_storage_{};
+  std::size_t size_{ 0 };
+  std::string overflow_;
 };
 
 } // namespace nimble::generated::detail
