@@ -61,24 +61,23 @@ public:
 
     const auto match = matcher_.Match(order);
 
-    ExecutionReport report;
-    report.order_id("QUEUE-ORDER")
-      .exec_id("QUEUE-EXEC")
-      .exec_type(match.exec_type)
-      .ord_status(match.status)
-      .side(side.value())
-      .leaves_qty(match.leaves_qty)
-      .cum_qty(match.cum_qty)
-      .avg_px(match.avg_px);
+    return session.send<ExecutionReport>([&](auto& report) {
+      report.order_id("QUEUE-ORDER")
+        .exec_id("QUEUE-EXEC")
+        .exec_type(match.exec_type)
+        .ord_status(match.status)
+        .side(side.value())
+        .leaves_qty(match.leaves_qty)
+        .cum_qty(match.cum_qty)
+        .avg_px(match.avg_px);
 
-    if (auto cl_ord_id = order.cl_ord_id(); cl_ord_id.has_value()) {
-      report.cl_ord_id(*cl_ord_id);
-    }
-    if (auto symbol = order.symbol(); symbol.has_value()) {
-      report.symbol(*symbol);
-    }
-
-    return session.send(std::move(report));
+      if (auto cl_ord_id = order.cl_ord_id(); cl_ord_id.has_value()) {
+        report.cl_ord_id(*cl_ord_id);
+      }
+      if (auto symbol = order.symbol(); symbol.has_value()) {
+        report.symbol(*symbol);
+      }
+    });
   }
 
 private:

@@ -450,15 +450,13 @@ All benchmark entrypoints intentionally consume the pinned QuickFIX 4.4 inputs, 
 
 | Boundary | NimbleFIX metric | QuickFIX metric | What it means |
 |----------|----------------|-----------------|---------------|
-| header sniff | `peek` | — | NimbleFIX-only header extraction before full decode |
-| object → wire | `encode` | `quickfix-encode-buffer` | closest shared encode boundary; both sides reuse an output buffer |
-| object → wire (fresh string) | — | `quickfix-encode` | QuickFIX-only serializer path that returns a fresh string |
+| send API | `send` | `quickfix-send` | `session.send<Msg>(populate)` — user-facing send API entry point through command enqueue |
+| session outbound | `outbound` | `quickfix-outbound` | session outbound path — sequence allocation, encode, store write |
+| session inbound | `inbound` | `quickfix-inbound` | decode + session/admin rules + store interaction on an inbound app frame |
 | wire → object | `parse` | `quickfix-parse` | full frame parse back into each engine's object/view model |
-| session inbound | `session-inbound` | `quickfix-session-inbound` | decode + session/admin rules + store interaction on an inbound app frame |
-| session outbound | `session-outbound` | — | `AdminProtocol::SendApplication(...)` — send path including session envelope, store, and encode |
-| session outbound (pre-encoded) | `session-outbound-pre-encoded` | — | `SendEncodedApplication(...)` — same path but business body already serialized |
 | replay | `replay` | `quickfix-replay` | ResendRequest handling across `replay_span=128` stored messages |
-| TCP round-trip | `loopback-roundtrip` | `quickfix-loopback` | full userspace-to-kernel-to-userspace message RTT |
+| TCP round-trip | `loopback` | `quickfix-loopback` | full userspace-to-kernel-to-userspace message RTT |
+| header sniff | `peek` | — | NimbleFIX-only header extraction before full decode |
 
 ### Instrumentation
 

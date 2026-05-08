@@ -56,7 +56,6 @@ commands:
     nimblefix     Run NimbleFIX benchmark against build/bench/quickfix_FIX44.nfa
     nimblefix-nfd Run NimbleFIX benchmark against build/bench/quickfix_FIX44.nfd
   quickfix      Run QuickFIX comparison benchmark (parse, encode, session-inbound, replay, loopback)
-  builder       Run the FIX44 encode-focused NimbleFIX benchmark variant
   compare       Run the default NimbleFIX and QuickFIX comparison suites side by side
 
 environment overrides:
@@ -506,13 +505,6 @@ run_nimblefix_nfd() {
     "$NIMBLEFIX_BENCH_BIN" --dictionary "$QUICKFIX_NFD" "$@"
 }
 
-run_builder() {
-    resolve_paths
-    build_nimblefix_tools
-    prepare_quickfix_dictionary
-    "$NIMBLEFIX_BENCH_BIN" --artifact "$QUICKFIX_NFA" "$@"
-}
-
 run_quickfix() {
     resolve_paths
     build_quickfix_bench
@@ -550,19 +542,6 @@ case "$command_name" in
             set -- --iterations 100000 --replay 1000 --replay-span 128 --loopback 1000
         fi
         run_quickfix "$@"
-        ;;
-    builder)
-        builder_args=("$@")
-        if ! has_flag "--iterations" "${builder_args[@]}"; then
-            builder_args+=(--iterations 100000)
-        fi
-        if ! has_flag "--loopback" "${builder_args[@]}"; then
-            builder_args+=(--loopback 0)
-        fi
-        if ! has_flag "--replay" "${builder_args[@]}"; then
-            builder_args+=(--replay 0)
-        fi
-        run_builder "${builder_args[@]}"
         ;;
     compare)
         if [ "$#" -ne 0 ]; then

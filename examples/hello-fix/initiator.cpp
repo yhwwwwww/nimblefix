@@ -19,36 +19,34 @@ constexpr auto kSessionId = 1U;
 constexpr auto kHeartbeatIntervalSeconds = 30U;
 
 // Demonstrates the generated-first initiator path: lifecycle callbacks receive a
-// typed Session<Profile>, outbound orders are generated API objects, and sends use
-// session.send(std::move(order)) rather than raw builders or tag-level code.
+  // typed Session<Profile>, outbound orders are populated through the generated
+  // send<Msg> API, and no raw builders or tag-level code are needed.
 class OrderSender final : public Handler
 {
 public:
   auto OnSessionActive(nimble::runtime::Session<Profile>& session) -> nimble::base::Status override
   {
-    NewOrderSingle buy_order;
-    buy_order.cl_ord_id("HELLO-FIX-001")
-      .symbol("AAPL")
-      .side(Side::Buy)
-      .transact_time("20260429-09:30:00.000")
-      .order_qty(100)
-      .ord_type(OrdType::Limit)
-      .price(150.25);
-
-    auto status = session.send(std::move(buy_order));
+    auto status = session.send<NewOrderSingle>([](auto& buy_order) {
+      buy_order.cl_ord_id("HELLO-FIX-001")
+        .symbol("AAPL")
+        .side(Side::Buy)
+        .transact_time("20260429-09:30:00.000")
+        .order_qty(100)
+        .ord_type(OrdType::Limit)
+        .price(150.25);
+    });
     if (!status.ok()) {
       return status;
     }
 
-    NewOrderSingle sell_order;
-    sell_order.cl_ord_id("HELLO-FIX-002")
-      .symbol("MSFT")
-      .side(Side::Sell)
-      .transact_time("20260429-09:30:01.000")
-      .order_qty(50)
-      .ord_type(OrdType::Market);
-
-    return session.send(std::move(sell_order));
+    return session.send<NewOrderSingle>([](auto& sell_order) {
+      sell_order.cl_ord_id("HELLO-FIX-002")
+        .symbol("MSFT")
+        .side(Side::Sell)
+        .transact_time("20260429-09:30:01.000")
+        .order_qty(50)
+        .ord_type(OrdType::Market);
+    });
   }
 
   auto OnExecutionReport(nimble::runtime::InlineSession<Profile>&, ExecutionReportView exec)

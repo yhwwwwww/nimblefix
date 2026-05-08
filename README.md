@@ -45,8 +45,8 @@ NimbleFIX was designed to answer: *what if every design decision optimized for t
 
 | Feature | Details |
 |---------|---------|
-| **Codec latency** | Current FIX44 compare run: 130 ns header peek (p50), 511 ns full parse (p50), 371 ns typed writer encode (p50) |
-| **Low allocation pressure** | Current compare run: encode/parse/session/replay all at 0 alloc/op; loopback at 3 alloc/op |
+| **Codec latency** | Current FIX44 compare run: 130 ns header peek (p50), 511 ns full parse (p50) |
+| **Low allocation pressure** | Current compare run: parse/inbound/replay all at 0 alloc/op; loopback at 3 alloc/op |
 | **Session management** | Full Logon/Logout/Heartbeat/TestRequest/ResendRequest/SequenceReset |
 | **Repeating groups** | Nested groups fully supported via dictionary metadata |
 | **Reconnect with backoff** | Configurable exponential backoff with jitter for initiator reconnect |
@@ -236,7 +236,7 @@ Most applications only need these direct includes:
 - `nimblefix/store/mmap_store.h`
 - `nimblefix/store/durable_batch_store.h`
 
-Advanced consumers can add `nimblefix/advanced/runtime_application.h`, `nimblefix/advanced/engine.h`, `nimblefix/advanced/message_builder.h`, `nimblefix/advanced/fixed_layout_writer.h`, `nimblefix/advanced/encoded_application_message.h`, `nimblefix/advanced/session_handle.h`, `nimblefix/session/admin_protocol.h`, `nimblefix/session/resend_recovery.h`, `nimblefix/runtime/sharded_runtime.h`, `nimblefix/runtime/metrics.h`, `nimblefix/runtime/trace.h`, `nimblefix/runtime/ha.h`, `nimblefix/runtime/dynamic_config.h`, `nimblefix/runtime/warmup.h`, `nimblefix/runtime/diagnostics.h`, `nimblefix/runtime/management.h`, `nimblefix/runtime/message_log.h`, `nimblefix/runtime/connection_strategy.h`, `nimblefix/runtime/session_schedule.h`, `nimblefix/runtime/router.h`, `nimblefix/runtime/io_backend.h`, `nimblefix/session/validation_callback.h`, `nimblefix/codec/timestamp_resolution.h`, `nimblefix/tools/schema_optimizer.h`, and `nimblefix/tools/message_dump.h` as needed. The complete exported header policy is documented in [docs/public-api.md](docs/public-api.md).
+Advanced consumers can add `nimblefix/advanced/runtime_application.h`, `nimblefix/advanced/engine.h`, `nimblefix/advanced/message_builder.h`, `nimblefix/advanced/encoded_application_message.h`, `nimblefix/advanced/session_handle.h`, `nimblefix/session/admin_protocol.h`, `nimblefix/session/resend_recovery.h`, `nimblefix/runtime/sharded_runtime.h`, `nimblefix/runtime/metrics.h`, `nimblefix/runtime/trace.h`, `nimblefix/runtime/ha.h`, `nimblefix/runtime/dynamic_config.h`, `nimblefix/runtime/warmup.h`, `nimblefix/runtime/diagnostics.h`, `nimblefix/runtime/management.h`, `nimblefix/runtime/message_log.h`, `nimblefix/runtime/connection_strategy.h`, `nimblefix/runtime/session_schedule.h`, `nimblefix/runtime/router.h`, `nimblefix/runtime/io_backend.h`, `nimblefix/session/validation_callback.h`, `nimblefix/codec/timestamp_resolution.h`, `nimblefix/tools/schema_optimizer.h`, and `nimblefix/tools/message_dump.h` as needed. `FixedLayoutWriter` is internal-only. The complete exported header policy is documented in [docs/public-api.md](docs/public-api.md).
 
 ---
 
@@ -291,7 +291,7 @@ For normal business flows, use generated `--cpp-api` message objects together wi
 Lower-level escape hatches remain available, but they are not the primary business API:
 
 - **Dynamic/raw message construction** — For tooling, protocol bridges, or schema-agnostic flows under `nimblefix/advanced/`.
-- **Manual fixed-layout encode control** — For integrations that intentionally manage dictionary/layout details themselves under `nimblefix/advanced/`.
+- **Fixed-layout encode backend** — `FixedLayoutWriter` is repository-internal; external code should use generated `send<Msg>` or the supported dynamic/raw builders instead.
 
 ### Raw MessageView
 
@@ -324,6 +324,7 @@ Controls how strict the codec is during decode:
 | `nimblefix-fuzz-codec` | libFuzzer harness for codec and admin protocol |
 | `nimblefix-fuzz-config` | libFuzzer harness for `.nfcfg` config parser |
 | `nimblefix-fuzz-dictgen` | libFuzzer harness for `.nfd` dictionary parser |
+| `nimblefix-usagegen` | Scan `send<Msg>(populate, extras)` call sites, generate canonical `MessageShape` keys, deduplicate, and output specialized send-site analysis |
 | `nimblefix-interop-runner` | Bidirectional interoperability scenario runner |
 
 ### Compile a Profile
@@ -390,15 +391,15 @@ class MyApp final : public Handler {
 public:
     auto OnSessionActive(nimble::runtime::Session<Profile>& session)
         -> nimble::base::Status override {
-        NewOrderSingle order;
-        order.cl_ord_id("ORD-001")
-            .symbol("AAPL")
-            .side(Side::Buy)
-            .transact_time("20260429-09:30:00.000")
-            .order_qty(100)
-            .ord_type(OrdType::Limit)
-            .price(150.25);
-        return session.send(std::move(order));
+        return session.send<NewOrderSingle>([](auto& order) {
+            order.cl_ord_id("ORD-001")
+                .symbol("AAPL")
+                .side(Side::Buy)
+                .transact_time("20260429-09:30:00.000")
+                .order_qty(100)
+                .ord_type(OrdType::Limit)
+                .price(150.25);
+        });
     }
 
     auto OnExecutionReport(nimble::runtime::InlineSession<Profile>&,
@@ -475,22 +476,22 @@ class MyApp final : public Handler {
 public:
     auto OnNewOrderSingle(nimble::runtime::InlineSession<Profile>& session,
                           NewOrderSingleView order) -> nimble::base::Status override {
-        ExecutionReport report;
-        report.order_id("ORD-001")
-            .exec_id("EXEC-001")
-            .exec_type(ExecType::New)
-            .ord_status(OrdStatus::New)
-            .side(order.side().value())
-            .leaves_qty(order.order_qty().value_or(0))
-            .cum_qty(0)
-            .avg_px(0.0);
-        if (auto cl_ord_id = order.cl_ord_id(); cl_ord_id.has_value()) {
-            report.cl_ord_id(*cl_ord_id);
-        }
-        if (auto symbol = order.symbol(); symbol.has_value()) {
-            report.symbol(*symbol);
-        }
-        return session.send(std::move(report));
+        return session.send<ExecutionReport>([&](auto& report) {
+            report.order_id("ORD-001")
+                .exec_id("EXEC-001")
+                .exec_type(ExecType::New)
+                .ord_status(OrdStatus::New)
+                .side(order.side().value())
+                .leaves_qty(order.order_qty().value_or(0))
+                .cum_qty(0)
+                .avg_px(0.0);
+            if (auto cl_ord_id = order.cl_ord_id(); cl_ord_id.has_value()) {
+                report.cl_ord_id(*cl_ord_id);
+            }
+            if (auto symbol = order.symbol(); symbol.has_value()) {
+                report.symbol(*symbol);
+            }
+        });
     }
 };
 
@@ -601,16 +602,16 @@ auto OnNewOrderSingle(nimble::runtime::InlineSession<Profile>& session,
         }
     }
 
-    ExecutionReport report;
-    report.order_id("ORD-001")
-        .exec_id("EXEC-001")
-        .exec_type(ExecType::New)
-        .ord_status(OrdStatus::New)
-        .side(order.side().value())
-        .leaves_qty(order.order_qty().value_or(0))
-        .cum_qty(0)
-        .avg_px(0.0);
-    return session.send(std::move(report));
+    return session.send<ExecutionReport>([&](auto& report) {
+        report.order_id("ORD-001")
+            .exec_id("EXEC-001")
+            .exec_type(ExecType::New)
+            .ord_status(OrdStatus::New)
+            .side(order.side().value())
+            .leaves_qty(order.order_qty().value_or(0))
+            .cum_qty(0)
+            .avg_px(0.0);
+    });
 }
 ```
 
@@ -788,7 +789,7 @@ Underneath, the same single-producer command bridge still applies. Advanced raw-
 
 ```cpp
 session.snapshot();
-session.send(std::move(order));
+session.send<NewOrderSingle>([](auto& order) { /* populate order */ });
 ```
 
 ### Application Callback Modes
@@ -838,7 +839,7 @@ QuickFIX is still the reference implementation most teams already know and alrea
 - Default compare args: `--iterations 100000 --loopback 1000 --replay 1000 --replay-span 128`
 - Dictionary lineage: QuickFIX `bench/vendor/quickfix/spec/FIX44.xml` → `nimblefix-xml2nfd` → `build/bench/quickfix_FIX44.nfd` → `nimblefix-dictgen` → `build/bench/quickfix_FIX44.nfa`
 - Business fixture: one neutral FIX44 `NewOrderSingle` with a single `NoPartyIDs=1` group entry
-- Encode fairness: both engines pin `SendingTime` to the fixture timestamp so the encode tiers measure object-to-wire work, not per-iteration clock formatting
+- Timing fairness: both engines pin `SendingTime` to a fixture timestamp so latency measurements exclude per-iteration clock formatting
 - Allocation tracking: global `operator new` interception counts heap allocations per iteration
 - CPU counters: Linux `perf_event_open` feeds cache-miss and branch-miss columns when available
 
@@ -855,11 +856,12 @@ QuickFIX is still the reference implementation most teams already know and alrea
 
 | Boundary | NimbleFIX metric | QuickFIX metric | NimbleFIX p50 | NimbleFIX p95 | QuickFIX p50 | QuickFIX p95 | NimbleFIX alloc/op | QuickFIX alloc/op |
 |----------|----------------|-----------------|-------------|-------------|--------------|--------------|------------------|-------------------|
-| object → wire (reused buffer) | `encode` | `quickfix-encode-buffer` | 371 ns | 401 ns | 1.24 us | 1.43 us | 0 | 29 |
+| user encode | `encode` | `quickfix-encode` | — | — | — | — | — | — |
+| session outbound | `outbound` | `quickfix-outbound` | — | — | — | — | — | — |
 | wire → object | `parse` | `quickfix-parse` | 511 ns | 521 ns | 1.29 us | 1.33 us | 0 | 20 |
-| session inbound | `session-inbound` | `quickfix-session-inbound` | 1.65 us | 1.94 us | 2.38 us | 2.75 us | 0 | 18 |
+| session inbound | `inbound` | `quickfix-inbound` | 1.65 us | 1.94 us | 2.38 us | 2.75 us | 0 | 18 |
 | replay (`replay_span=128`) | `replay` | `quickfix-replay` | 15.66 us | 16.81 us | 231.20 us | 269.07 us | 0 | 4117 |
-| TCP loopback round-trip | `loopback-roundtrip` | `quickfix-loopback` | 17.58 us | 20.75 us | 20.55 us | 24.68 us | 3 | 77 |
+| TCP loopback round-trip | `loopback` | `quickfix-loopback` | 17.58 us | 20.75 us | 20.55 us | 24.68 us | 3 | 77 |
 
 #### NimbleFIX-Only Tier
 
@@ -869,10 +871,10 @@ QuickFIX is still the reference implementation most teams already know and alrea
 
 Key observations:
 
-- NimbleFIX currently leads every shared tier in the checked-in side-by-side run: about 3.3x on object-to-wire encode, 2.5x on parse, 1.4x on session-inbound, 14.8x on replay, and 1.2x on loopback RTT.
+- NimbleFIX currently leads every shared tier in the checked-in side-by-side run: about 2.5x on parse, 1.4x on inbound, 14.8x on replay, and 1.2x on loopback RTT.
 - The replay gap is the largest structural difference: NimbleFIX re-encodes from store state with 0 alloc/op, while QuickFIX replay allocates about 4,117 times per measured iteration.
 - Loopback remains the closest tier because both engines are partly bounded by the same Linux TCP floor once the message leaves userspace.
-- `quickfix-encode` (fresh string) is still printed by the benchmark, but `quickfix-encode-buffer` is the tighter apples-to-apples comparison with NimbleFIX's reused `EncodeBuffer` path.
+- `outbound` is now a paired cross-engine metric (NimbleFIX `outbound` vs QuickFIX `quickfix-outbound`); `peek` remains NimbleFIX-only.
 
 ### Run Benchmarks Yourself
 
@@ -881,7 +883,6 @@ Key observations:
 ./bench/bench.sh nimblefix        # NimbleFIX main suite (artifact)
 ./bench/bench.sh nimblefix-nfd    # NimbleFIX suite (direct .nfd loading)
 ./bench/bench.sh quickfix       # QuickFIX comparison
-./bench/bench.sh builder        # Object-to-wire compare only
 ./bench/bench.sh compare        # Full cross-engine comparison
 ```
 

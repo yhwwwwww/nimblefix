@@ -135,20 +135,22 @@ group|453|448|Parties|0|448:r,447:r,452:r
 
 The main application representation is now generated-first:
 
-**Generated outbound object** — Business-facing writable message:
+**Generated outbound send surface** — Business-facing typed send site:
+
+Each `send<Msg>(populate, extras)` call is a self-contained send site; the runtime constructs the builder, runs the populate lambda, encodes the static core (schema-known fields in canonical order), appends raw-static extras (compile-time `set_tag<Tag>()` values), then appends hybrid extras (`SendExtras::body_fragment`), and hands the result to `AdminProtocol` for session framing.
 
 ```cpp
-fix44::NewOrderSingle order;
-order.cl_ord_id("ORD-001")
-    .symbol("AAPL")
-    .side(fix44::Side::Buy)
-    .order_qty(100)
-    .ord_type(fix44::OrdType::Limit);
-order.add_party()
-    .party_id("PARTY-A")
-    .party_id_source(fix44::PartyIdSource::Proprietary)
-    .party_role(fix44::PartyRole::ClientId);
-auto message = order.ToMessage();
+session.send<fix44::NewOrderSingle>([&](auto& order) {
+    order.cl_ord_id("ORD-001")
+        .symbol("AAPL")
+        .side(fix44::Side::Buy)
+        .order_qty(100)
+        .ord_type(fix44::OrdType::Limit);
+    order.add_party()
+        .party_id("PARTY-A")
+        .party_id_source(fix44::PartyIdSource::Proprietary)
+        .party_role(fix44::PartyRole::ClientId);
+}, { .body_fragment = runtime_extras });
 ```
 
 **Generated inbound view** — Business-facing typed read path:
@@ -170,22 +172,7 @@ auto entry = group->entry(0);           // → GroupEntryView
 auto party_id = entry.get_string(448);  // → optional<string_view>
 ```
 
-**`FixedLayoutWriter`** — Advanced/internal hot-path encoder with pre-computed O(1) slot mapping:
-
-```cpp
-// Build layout once at startup
-auto layout = FixedLayout::Build(dictionary, "D").value();
-
-// Per-message (hot path):
-FixedLayoutWriter writer(layout);
-writer.set_string(11, "ORD-001");       // O(1) slot write
-writer.set_int(38, 100);
-writer.add_group_entry(453)
-    .set_string(448, "PARTY-A");
-writer.encode_to_buffer(dictionary, options, &buffer);
-```
-
-`FixedLayout::Build()` pre-computes tag → slot index mappings. `FixedLayoutWriter` writes directly to pre-allocated slots at known offsets — no hash map lookups, no field-list scanning. The runtime and generated `ToMessage()` path can still reuse that backend internally; applications only need it when they intentionally choose the advanced raw surface.
+**`FixedLayoutWriter`** — Internal-only hot-path encoder with pre-computed O(1) slot mapping. `FixedLayoutWriter` is repository-internal; the public send surface is `session.send<Msg>(populate, extras)`. The generated `Builder::EncodeBody()` path reuses `FixedLayoutWriter` internally, but external consumers should not depend on it.
 
 **Internal storage**: Fields use a `FieldSlot` linked-list structure within a flat buffer. Groups track entry boundaries via a small frame stack matched against dictionary group definitions.
 
@@ -713,7 +700,7 @@ flowchart LR
     CMD --> WORKER["owning session worker"]
     WORKER --> SEQ["SessionCore::AllocateOutboundSeq()"]
     SEQ --> SEND["AdminProtocol::SendApplication()"]
-    SEND --> ENC["FixedLayoutWriter / FrameEncodeTemplate / EncodeFixMessageToBuffer()"]
+    SEND --> ENC["Builder::EncodeBody / FrameEncodeTemplate / EncodeFixMessageToBuffer()"]
     ENC --> STORE["SessionStore::SaveOutbound()"]
     STORE --> TX["TcpConnection::Send*()"]
     TX --> WIRE["bytes on wire"]
@@ -721,7 +708,7 @@ flowchart LR
 
 Step-by-step:
 
-1. Application code typically builds a generated outbound object and sends it through `Session<Profile>`. Advanced/raw integrations can still send `Message` through `SessionHandle`.
+1. Application code calls `session.send<Msg>(populate, extras)` which runs the populate lambda against a typed builder, encodes the static core plus raw-static extras, appends hybrid extras, and hands the encoded body to `AdminProtocol` for session framing. Advanced/raw integrations can still send through `SessionHandle`.
 2. If the caller is not already on the owner thread, the send request is pushed into the worker's command queue and the worker is woken up.
 3. The owning worker allocates the next outbound sequence number through `SessionCore`.
 4. `AdminProtocol::SendApplication()` applies FIX-session fields, chooses the encode path, and materializes the outbound frame.

@@ -34,24 +34,23 @@ public:
       return side.status();
     }
 
-    ExecutionReport report;
-    report.order_id("HELLO-FIX-ORDER")
-      .exec_id("HELLO-FIX-EXEC")
-      .exec_type(ExecType::New)
-      .ord_status(OrdStatus::New)
-      .side(side.value())
-      .leaves_qty(order.order_qty().value_or(0.0))
-      .cum_qty(0.0)
-      .avg_px(0.0);
+    return session.send<ExecutionReport>([&](auto& report) {
+      report.order_id("HELLO-FIX-ORDER")
+        .exec_id("HELLO-FIX-EXEC")
+        .exec_type(ExecType::New)
+        .ord_status(OrdStatus::New)
+        .side(side.value())
+        .leaves_qty(order.order_qty().value_or(0.0))
+        .cum_qty(0.0)
+        .avg_px(0.0);
 
-    if (auto cl_ord_id = order.cl_ord_id(); cl_ord_id.has_value()) {
-      report.cl_ord_id(*cl_ord_id);
-    }
-    if (auto symbol = order.symbol(); symbol.has_value()) {
-      report.symbol(*symbol);
-    }
-
-    return session.send(std::move(report));
+      if (auto cl_ord_id = order.cl_ord_id(); cl_ord_id.has_value()) {
+        report.cl_ord_id(*cl_ord_id);
+      }
+      if (auto symbol = order.symbol(); symbol.has_value()) {
+        report.symbol(*symbol);
+      }
+    });
   }
 };
 

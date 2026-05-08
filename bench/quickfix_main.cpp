@@ -38,7 +38,6 @@ using bench_support::BenchmarkMeasurement;
 using bench_support::BenchmarkResult;
 using bench_support::BuildFix44BusinessOrder;
 using bench_support::Fix44BusinessOrder;
-using bench_support::ReportMetric;
 
 auto
 PrintUsage() -> void
@@ -109,12 +108,6 @@ BuildSampleFrame(const Fix44BusinessOrder& business_order, const FIX::UtcTimeSta
   auto sample = BuildOrderFromBusinessObject(business_order);
   ApplyBenchmarkHeader(&sample, 1U, sending_time);
   return sample.toString();
-}
-
-auto
-ReportQuickFixMetric(const std::string& label, const BenchmarkResult& result) -> void
-{
-  ReportMetric(label, result, 44);
 }
 
 using bench_support::LabeledResult;
@@ -210,26 +203,6 @@ RunParseBenchmark(const FIX::DataDictionary& dictionary, const std::string& samp
   }
   measurement.Finish(result);
   static_cast<void>(parse_sink);
-  return result;
-}
-
-auto
-RunEncodeBenchmark(const Fix44BusinessOrder& business_order,
-                   const FIX::UtcTimeStamp& sending_time,
-                   std::uint32_t iterations) -> BenchmarkResult
-{
-  BenchmarkResult result;
-  result.samples_ns.reserve(iterations);
-  BenchmarkMeasurement measurement;
-  for (std::uint32_t index = 0; index < iterations; ++index) {
-    const auto started = std::chrono::steady_clock::now();
-    auto order = BuildOrderFromBusinessObject(business_order);
-    ApplyBenchmarkHeader(&order, index + 1U, sending_time);
-    const auto encoded = order.toString();
-    static_cast<void>(encoded);
-    result.samples_ns.push_back(bench_support::DurationNs(started, std::chrono::steady_clock::now()));
-  }
-  measurement.Finish(result);
   return result;
 }
 
@@ -392,6 +365,60 @@ RunQFSessionInboundBenchmark(const FIX::DataDictionary& /*dictionary*/,
     result.samples_ns.push_back(bench_support::DurationNs(started, std::chrono::steady_clock::now()));
     // Drain any incidental outbound admin frames outside timing.
     acceptor_resp.clear();
+  }
+  measurement.Finish(result);
+
+  return result;
+}
+
+auto
+RunQFOutboundBenchmark(const FIX::DataDictionary& /*dictionary*/,
+                       const std::filesystem::path& xml_path,
+                       const Fix44BusinessOrder& business_order,
+                       std::uint32_t iterations) -> BenchmarkResult
+{
+  FIX::MemoryStoreFactory store_factory;
+  NullApplication app;
+
+  FIX::DataDictionaryProvider dict_provider;
+  auto shared_dict = std::make_shared<FIX::DataDictionary>(xml_path.string());
+  dict_provider.addTransportDataDictionary(FIX::BeginString("FIX.4.4"), shared_dict);
+
+  FIX::UtcTimeOnly midnight(0, 0, 0);
+  FIX::TimeRange always(midnight, midnight);
+
+  BufferedResponder initiator_resp;
+  BufferedResponder acceptor_resp;
+
+  FIX::Session initiator_session([]() { return FIX::UtcTimeStamp::now(); },
+                                 app,
+                                 store_factory,
+                                 FIX::SessionID("FIX.4.4", "BUY", "SELL"),
+                                 dict_provider,
+                                 always,
+                                 30,
+                                 nullptr);
+
+  FIX::Session acceptor_session([]() { return FIX::UtcTimeStamp::now(); },
+                                app,
+                                store_factory,
+                                FIX::SessionID("FIX.4.4", "SELL", "BUY"),
+                                dict_provider,
+                                always,
+                                0,
+                                nullptr);
+
+  DoInProcessLogon(initiator_session, acceptor_session, initiator_resp, acceptor_resp);
+
+  BenchmarkResult result;
+  result.samples_ns.reserve(iterations);
+  BenchmarkMeasurement measurement;
+  for (std::uint32_t i = 0; i < iterations; ++i) {
+    const auto started = std::chrono::steady_clock::now();
+    auto order = BuildOrderFromBusinessObject(business_order);
+    initiator_session.send(order);
+    result.samples_ns.push_back(bench_support::DurationNs(started, std::chrono::steady_clock::now()));
+    initiator_resp.clear();
   }
   measurement.Finish(result);
 
@@ -867,21 +894,22 @@ main(int argc, char** argv)
   const auto fixed_sending_time = ToQuickFixTimestamp(business_order.transact_time);
   const auto sample_frame = BuildSampleFrame(business_order, fixed_sending_time);
 
-  std::cout << "quickfix encode uses fixed SendingTime; quickfix-encode and "
-               "quickfix-encode-buffer share the same serializer\n";
+  std::cout << "quickfix benchmarks use fixed SendingTime; buffer-reuse serializer\n";
 
-  const auto encode_result = RunEncodeBenchmark(business_order, fixed_sending_time, iterations);
+  const auto send_result = RunEncodeBufferBenchmark(business_order, fixed_sending_time, iterations);
+
+  auto outbound_result = RunQFOutboundBenchmark(dictionary, xml_path, business_order, iterations);
+
+  auto inbound_result =
+    RunQFSessionInboundBenchmark(dictionary, xml_path, business_order, fixed_sending_time, iterations);
 
   const auto parse_result = RunParseBenchmark(dictionary, sample_frame, iterations);
 
-  auto session_inbound =
-    RunQFSessionInboundBenchmark(dictionary, xml_path, business_order, fixed_sending_time, iterations);
-
-  // --- Shared benchmarks (aligned with NimbleFIX compare order) ---
   std::vector<LabeledResult> results;
-  results.push_back({ "quickfix-encode", encode_result });
+  results.push_back({ "quickfix-encode", send_result });
+  results.push_back({ "quickfix-outbound", outbound_result });
+  results.push_back({ "quickfix-inbound", inbound_result });
   results.push_back({ "quickfix-parse", parse_result });
-  results.push_back({ "quickfix-session-inbound", session_inbound });
 
   if (replay_iterations > 0U) {
     auto replay =
@@ -897,10 +925,6 @@ main(int argc, char** argv)
   } else {
     std::cout << "quickfix-loopback skipped: --loopback 0\n";
   }
-
-  // --- QuickFIX-only benchmarks ---
-  const auto encode_buffer_result = RunEncodeBufferBenchmark(business_order, fixed_sending_time, iterations);
-  results.push_back({ "quickfix-encode-buffer", encode_buffer_result });
 
   bench_support::PrintResultTable(results);
   return 0;

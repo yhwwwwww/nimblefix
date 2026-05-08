@@ -227,7 +227,7 @@ GeneratedPartyRole(std::int64_t wire) -> fix44::PartyRole
 auto
 BuildNewOrder(const NewOrderFields& req) -> nimble::message::Message
 {
-  fix44::NewOrderSingle order;
+  fix44::NewOrderSingleBuilder order;
   order.account(req.account)
     .cl_ord_id(req.cl_ord_id)
     .currency(req.currency)
@@ -254,7 +254,7 @@ BuildNewOrder(const NewOrderFields& req) -> nimble::message::Message
 auto
 BuildCancelOrder(const CancelOrderFields& req) -> nimble::message::Message
 {
-  fix44::OrderCancelRequest cancel;
+  fix44::OrderCancelRequestBuilder cancel;
   cancel.account(req.account)
     .cl_ord_id(req.cl_ord_id)
     .orig_cl_ord_id(req.orig_cl_ord_id)
@@ -281,7 +281,7 @@ BuildExecReportNew(nimble::message::MessageView order, std::uint32_t exec_id) ->
 {
   const auto inbound = fix44::NewOrderSingleView::Bind(order).value();
 
-  fix44::ExecutionReport report;
+  fix44::ExecutionReportBuilder report;
   report.order_id(std::string("O") + std::to_string(exec_id))
     .exec_id(std::string("E") + std::to_string(exec_id))
     .exec_type(fix44::ExecType::New)
@@ -312,7 +312,7 @@ BuildExecReportCanceled(nimble::message::MessageView cancel_req, std::uint32_t e
 {
   const auto inbound = fix44::OrderCancelRequestView::Bind(cancel_req).value();
 
-  fix44::ExecutionReport report;
+  fix44::ExecutionReportBuilder report;
   report.order_id(std::string("O") + std::to_string(exec_id))
     .exec_id(std::string("E") + std::to_string(exec_id))
     .exec_type(fix44::ExecType::Canceled)
