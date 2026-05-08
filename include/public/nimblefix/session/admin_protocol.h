@@ -22,6 +22,16 @@
 #include "nimblefix/session/validation_callback.h"
 #include "nimblefix/session/validation_policy.h"
 
+#ifndef NIMBLEFIX_BENCH_PROFILE_NOW
+#define NIMBLEFIX_BENCH_PROFILE_NOW() 0ULL
+#define NIMBLEFIX_BENCH_PROFILE_NOW_DEFINED_LOCALLY 1
+#endif
+
+#ifndef NIMBLEFIX_BENCH_PROFILE_ADD
+#define NIMBLEFIX_BENCH_PROFILE_ADD(field, delta) ((void)(delta))
+#define NIMBLEFIX_BENCH_PROFILE_ADD_DEFINED_LOCALLY 1
+#endif
+
 namespace nimble::profile {
 
 class NormalizedDictionaryView;
@@ -449,8 +459,11 @@ struct ProtocolEvent
   /// \param raw Borrowed raw frame bytes to copy and pin.
   auto AdoptParsedApplicationMessage(message::ParsedMessage parsed, std::span<const std::byte> raw) -> void
   {
+    [[maybe_unused]] const auto copy_started = NIMBLEFIX_BENCH_PROFILE_NOW();
     std::vector<std::byte> owned_raw;
     owned_raw.assign(raw.begin(), raw.end());
+    [[maybe_unused]] const auto copy_finished = NIMBLEFIX_BENCH_PROFILE_NOW();
+    NIMBLEFIX_BENCH_PROFILE_ADD(adopt_copy_raw_ns, copy_finished - copy_started);
     AdoptParsedApplicationMessage(std::move(parsed), std::move(owned_raw));
   }
 
@@ -460,20 +473,44 @@ struct ProtocolEvent
   /// \param raw Owned raw frame bytes that back parser string views.
   auto AdoptParsedApplicationMessage(message::ParsedMessage parsed, std::vector<std::byte> raw) -> void
   {
+    [[maybe_unused]] const auto prelude_started = NIMBLEFIX_BENCH_PROFILE_NOW();
     if (application_messages.size() != 1U) {
+      NIMBLEFIX_BENCH_PROFILE_ADD(adopt_prelude_ns, NIMBLEFIX_BENCH_PROFILE_NOW() - prelude_started);
       return;
     }
     auto& message = application_messages.front();
     if (!message.valid() || message.owns_storage()) {
+      NIMBLEFIX_BENCH_PROFILE_ADD(adopt_prelude_ns, NIMBLEFIX_BENCH_PROFILE_NOW() - prelude_started);
       return;
     }
+    [[maybe_unused]] const auto prelude_finished = NIMBLEFIX_BENCH_PROFILE_NOW();
+    NIMBLEFIX_BENCH_PROFILE_ADD(adopt_prelude_ns, prelude_finished - prelude_started);
 
+    [[maybe_unused]] const auto emplace_started = NIMBLEFIX_BENCH_PROFILE_NOW();
     owned_application_message_.emplace();
+    [[maybe_unused]] const auto emplace_finished = NIMBLEFIX_BENCH_PROFILE_NOW();
+    NIMBLEFIX_BENCH_PROFILE_ADD(adopt_emplace_ns, emplace_finished - emplace_started);
+
+    [[maybe_unused]] const auto raw_move_started = NIMBLEFIX_BENCH_PROFILE_NOW();
     owned_application_message_->raw = std::move(raw);
+    [[maybe_unused]] const auto raw_move_finished = NIMBLEFIX_BENCH_PROFILE_NOW();
+    NIMBLEFIX_BENCH_PROFILE_ADD(adopt_raw_move_ns, raw_move_finished - raw_move_started);
+
+    [[maybe_unused]] const auto rebind_started = NIMBLEFIX_BENCH_PROFILE_NOW();
     parsed.RebindRaw(
       std::span<const std::byte>(owned_application_message_->raw.data(), owned_application_message_->raw.size()));
+    [[maybe_unused]] const auto rebind_finished = NIMBLEFIX_BENCH_PROFILE_NOW();
+    NIMBLEFIX_BENCH_PROFILE_ADD(adopt_rebind_ns, rebind_finished - rebind_started);
+
+    [[maybe_unused]] const auto parsed_move_started = NIMBLEFIX_BENCH_PROFILE_NOW();
     owned_application_message_->parsed = std::move(parsed);
+    [[maybe_unused]] const auto parsed_move_finished = NIMBLEFIX_BENCH_PROFILE_NOW();
+    NIMBLEFIX_BENCH_PROFILE_ADD(adopt_parsed_move_ns, parsed_move_finished - parsed_move_started);
+
+    [[maybe_unused]] const auto reborrow_started = NIMBLEFIX_BENCH_PROFILE_NOW();
     message = message::MessageRef::Borrow(owned_application_message_->parsed.view());
+    [[maybe_unused]] const auto reborrow_finished = NIMBLEFIX_BENCH_PROFILE_NOW();
+    NIMBLEFIX_BENCH_PROFILE_ADD(adopt_reborrow_ns, reborrow_finished - reborrow_started);
   }
 
 private:
@@ -499,6 +536,16 @@ private:
 
   std::optional<OwnedApplicationMessage> owned_application_message_;
 };
+
+#ifdef NIMBLEFIX_BENCH_PROFILE_NOW_DEFINED_LOCALLY
+#undef NIMBLEFIX_BENCH_PROFILE_NOW
+#undef NIMBLEFIX_BENCH_PROFILE_NOW_DEFINED_LOCALLY
+#endif
+
+#ifdef NIMBLEFIX_BENCH_PROFILE_ADD_DEFINED_LOCALLY
+#undef NIMBLEFIX_BENCH_PROFILE_ADD
+#undef NIMBLEFIX_BENCH_PROFILE_ADD_DEFINED_LOCALLY
+#endif
 
 /// Static configuration for one session admin state machine.
 ///
@@ -639,8 +686,9 @@ public:
   /// \param envelope Optional `50/57` header overrides.
   /// \return Finalized outbound frame on success, otherwise an error status.
   auto SendEncodedApplication(const EncodedApplicationMessage& message,
-                              std::uint64_t timestamp_ns,
-                              SessionSendEnvelopeView envelope = {}) -> base::Result<EncodedFrame>;
+                               std::uint64_t timestamp_ns,
+                               SessionSendEnvelopeView envelope = {},
+                               codec::EncodedOutboundExtrasView extras = {}) -> base::Result<EncodedFrame>;
 
   /// Finalize one borrowed pre-encoded application body into a full FIX frame.
   ///
@@ -649,8 +697,9 @@ public:
   /// \param envelope Optional `50/57` header overrides.
   /// \return Finalized outbound frame on success, otherwise an error status.
   auto SendEncodedApplication(EncodedApplicationMessageView message,
-                              std::uint64_t timestamp_ns,
-                              SessionSendEnvelopeView envelope = {}) -> base::Result<EncodedFrame>;
+                               std::uint64_t timestamp_ns,
+                               SessionSendEnvelopeView envelope = {},
+                               codec::EncodedOutboundExtrasView extras = {}) -> base::Result<EncodedFrame>;
 
   /// Finalize one owned-or-borrowed pre-encoded application body into a full FIX frame.
   ///
@@ -659,8 +708,9 @@ public:
   /// \param envelope Optional `50/57` header overrides.
   /// \return Finalized outbound frame on success, otherwise an error status.
   auto SendEncodedApplication(const EncodedApplicationMessageRef& message,
-                              std::uint64_t timestamp_ns,
-                              SessionSendEnvelopeView envelope = {}) -> base::Result<EncodedFrame>;
+                               std::uint64_t timestamp_ns,
+                               SessionSendEnvelopeView envelope = {},
+                               codec::EncodedOutboundExtrasView extras = {}) -> base::Result<EncodedFrame>;
 
   /// Begin a graceful Logout sequence.
   ///
@@ -723,7 +773,8 @@ private:
                    std::uint16_t extra_record_flags,
                    std::uint32_t seq_override = 0,
                    std::string_view orig_sending_time = {},
-                   SessionSendEnvelopeView envelope = {}) -> base::Result<EncodedFrame>;
+                   SessionSendEnvelopeView envelope = {},
+                   codec::EncodedOutboundExtrasView extras = {}) -> base::Result<EncodedFrame>;
   auto FinalizeEncodedFrame(std::string_view msg_type,
                             bool admin,
                             std::uint64_t timestamp_ns,

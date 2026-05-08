@@ -1,3 +1,7 @@
+#define NIMBLEFIX_BENCH_PROFILE_NOW() ::nimble::bench_profile::NowNs()
+#define NIMBLEFIX_BENCH_PROFILE_ADD(field, delta) ::nimble::bench_profile::GetInboundProfile().field += (delta)
+
+#include "../../bench/inbound_profile.h"
 #include "nimblefix/session/admin_protocol.h"
 
 #include <algorithm>
@@ -423,42 +427,17 @@ FindFieldValue(message::MessageView view, std::uint32_t tag) -> std::optional<st
 }
 
 auto
-FieldValueAllowedByEnum(const profile::NormalizedDictionaryView& dictionary,
-                        const profile::FieldDefRecord& field_def,
-                        std::string_view value) -> bool
-{
-  if (field_def.enum_count == 0U || value.empty()) {
-    return true;
-  }
-
-  const auto enum_values = dictionary.enum_values();
-  const auto begin = static_cast<std::size_t>(field_def.enum_offset);
-  const auto count = static_cast<std::size_t>(field_def.enum_count);
-  if (begin >= enum_values.size()) {
-    return true;
-  }
-
-  const auto end = std::min(begin + count, enum_values.size());
-  for (std::size_t index = begin; index < end; ++index) {
-    const auto allowed = dictionary.string_at(enum_values[index].value_offset);
-    if (allowed.has_value() && *allowed == value) {
-      return true;
-    }
-  }
-  return false;
-}
-
-auto
 FindEnumValidationIssueInView(const profile::NormalizedDictionaryView& dictionary, message::MessageView view)
   -> std::optional<codec::ValidationIssue>
 {
   for (std::size_t index = 0U; index < view.field_count(); ++index) {
-    const auto field = view.field_at(index);
+    const auto field = view.raw_field_at(index);
     if (!field.has_value()) {
       continue;
     }
     const auto* field_def = dictionary.find_field(field->tag);
-    if (field_def == nullptr || FieldValueAllowedByEnum(dictionary, *field_def, field->string_value)) {
+    if (field_def == nullptr || field_def->enum_count == 0U ||
+        dictionary.is_enum_value_allowed(*field_def, field->value)) {
       continue;
     }
     return codec::ValidationIssue{
@@ -625,8 +604,9 @@ AdminPhaseViolationText(SessionState state, std::string_view msg_type) -> std::o
 
 auto
 EncodePreEncodedApplicationToBuffer(EncodedApplicationMessageView message,
-                                    const codec::EncodeOptions& options,
-                                    codec::EncodeBuffer* buffer) -> base::Status
+                                     const codec::EncodeOptions& options,
+                                     codec::EncodedOutboundExtrasView extras,
+                                     codec::EncodeBuffer* buffer) -> base::Status
 {
   if (buffer == nullptr) {
     return base::Status::InvalidArgument("encode buffer is null");
@@ -711,8 +691,18 @@ EncodePreEncodedApplicationToBuffer(EncodedApplicationMessageView message,
   if (!options.deliver_to_comp_id.empty()) {
     append_string_field(kDeliverToCompIDPrefix, options.deliver_to_comp_id);
   }
+
+  // --- hybrid append-only ordering contract ---
+  // header_fragment → pre-encoded body (static core + raw-static extras) → body_fragment
+  // No mid-insertion or reordering; see SendExtras doc in runtime/session.h.
+  if (!extras.header_fragment.empty()) {
+    out.append(extras.header_fragment);
+  }
   if (!message.body.empty()) {
     out.append(reinterpret_cast<const char*>(message.body.data()), message.body.size());
+  }
+  if (!extras.body_fragment.empty()) {
+    out.append(extras.body_fragment);
   }
 
   const auto body_length = static_cast<std::uint32_t>(out.size() - body_start);
@@ -1322,7 +1312,8 @@ AdminProtocol::EncodeFrame(EncodedApplicationMessageView message,
                            std::uint16_t extra_record_flags,
                            std::uint32_t seq_override,
                            std::string_view orig_sending_time,
-                           SessionSendEnvelopeView envelope) -> base::Result<EncodedFrame>
+                           SessionSendEnvelopeView envelope,
+                           codec::EncodedOutboundExtrasView extras) -> base::Result<EncodedFrame>
 {
   encode_buffer_.clear();
 
@@ -1347,7 +1338,10 @@ AdminProtocol::EncodeFrame(EncodedApplicationMessageView message,
   options.poss_dup = poss_dup;
   ApplySessionSendEnvelope(&options, envelope);
 
-  auto encoded_status = EncodePreEncodedApplicationToBuffer(message, options, &encode_buffer_);
+  if (extras.empty()) {
+    extras = message.extras;
+  }
+  auto encoded_status = EncodePreEncodedApplicationToBuffer(message, options, extras, &encode_buffer_);
   if (!encoded_status.ok()) {
     return encoded_status;
   }
@@ -1364,7 +1358,6 @@ AdminProtocol::FinalizeEncodedFrame(std::string_view msg_type,
                                     std::uint16_t extra_record_flags,
                                     std::uint32_t seq_num) -> base::Result<EncodedFrame>
 {
-
   EncodedFrame encoded_frame;
   encoded_frame.bytes.assign(encode_buffer_.bytes());
   encoded_frame.msg_type = std::string(msg_type);
@@ -1387,6 +1380,7 @@ AdminProtocol::FinalizeEncodedFrame(std::string_view msg_type,
     const auto body_offset = ComputeBodyStartOffset(encoded_frame.bytes.view());
 
     const auto snapshot = session_.Snapshot();
+
     status = store_->SaveOutboundViewAndRecoveryState(
       store::MessageRecordView{
         .session_id = session_.session_id(),
@@ -1404,6 +1398,7 @@ AdminProtocol::FinalizeEncodedFrame(std::string_view msg_type,
         .last_outbound_ns = snapshot.last_outbound_ns,
         .active = snapshot.state != SessionState::kDisconnected,
       });
+
     if (!status.ok()) {
       return status;
     }
@@ -1790,12 +1785,19 @@ AdminProtocol::OnInbound(std::span<const std::byte> frame, std::uint64_t timesta
 auto
 AdminProtocol::OnInbound(std::vector<std::byte>&& frame, std::uint64_t timestamp_ns) -> base::Result<ProtocolEvent>
 {
+  auto& prof = bench_profile::GetInboundProfile();
+  const auto t0 = bench_profile::NowNs();
+
   auto decode_status = codec::DecodeFixMessageView(std::span<const std::byte>(frame.data(), frame.size()),
                                                    dictionary_,
                                                    decode_table_,
                                                    &inbound_decode_scratch_,
                                                    codec::kFixSoh,
                                                    config_.validation_policy.verify_checksum);
+
+  const auto t1 = bench_profile::NowNs();
+  prof.decode_ns += bench_profile::DiffNs(t0, t1);
+
   if (!decode_status.ok()) {
     if (!ShouldIgnoreInboundDecodeFailure(decode_status)) {
       return decode_status;
@@ -1822,6 +1824,9 @@ AdminProtocol::OnInbound(std::vector<std::byte>&& frame, std::uint64_t timestamp
     return event;
   }
   auto event = OnInbound(inbound_decode_scratch_, timestamp_ns);
+
+  const auto t2 = bench_profile::NowNs();
+
   if (!event.ok()) {
     return event.status();
   }
@@ -1833,10 +1838,16 @@ AdminProtocol::OnInbound(std::vector<std::byte>&& frame, std::uint64_t timestamp
   } else {
     event.value().MaterializeApplicationMessages();
   }
+
+  const auto t3 = bench_profile::NowNs();
+  prof.adopt_ns += bench_profile::DiffNs(t2, t3);
+
   auto drain_status = DrainDeferredGapFrames(timestamp_ns, &event.value());
-  if (!drain_status.ok()) {
-    return drain_status;
-  }
+
+  const auto t4 = bench_profile::NowNs();
+  prof.drain_deferred_ns += bench_profile::DiffNs(t3, t4);
+  ++prof.count;
+
   return std::move(event).value();
 }
 
@@ -1844,6 +1855,9 @@ auto
 AdminProtocol::OnInbound(const codec::DecodedMessageView& decoded, std::uint64_t timestamp_ns)
   -> base::Result<ProtocolEvent>
 {
+  auto& prof = bench_profile::GetInboundProfile();
+  const auto i0 = bench_profile::NowNs();
+
   ProtocolEvent event;
 
   auto status = EnsureInitialized();
@@ -1860,6 +1874,9 @@ AdminProtocol::OnInbound(const codec::DecodedMessageView& decoded, std::uint64_t
   const bool acceptor_config_logon_reset =
     is_logon && !config_.session.is_initiator && config_.reset_seq_num_on_logon && !inbound_logon_reset;
   auto snapshot_before = session_.Snapshot();
+
+  const auto i1 = bench_profile::NowNs();
+  prof.session_snapshot_ns += bench_profile::DiffNs(i0, i1);
 
   std::uint32_t ref_tag_id = 0U;
   std::uint32_t reject_reason = 0U;
@@ -1963,6 +1980,9 @@ AdminProtocol::OnInbound(const codec::DecodedMessageView& decoded, std::uint64_t
     return reject_then_logout(
       kSendingTime, kSessionRejectSendingTimeAccuracyProblem, "SendingTime is outside the configured tolerance");
   }
+
+  const auto i2 = bench_profile::NowNs();
+  prof.validate_comp_ids_ns += bench_profile::DiffNs(i1, i2);
 
   if (is_logon && config_.refresh_on_logon) {
     status = RefreshSessionStateFromStore();
@@ -2172,6 +2192,10 @@ AdminProtocol::OnInbound(const codec::DecodedMessageView& decoded, std::uint64_t
   if (session_.ConsumeResendCompleted()) {
     outstanding_test_request_id_.clear();
   }
+
+  const auto i3 = bench_profile::NowNs();
+  prof.observe_seq_ns += bench_profile::DiffNs(i2, i3);
+
   if (!status.ok()) {
     if (decoded.header.msg_seq_num > snapshot_before.next_in_seq && phase_violation_text.has_value()) {
       status = session_.RecordInboundActivity(timestamp_ns);
@@ -2204,6 +2228,9 @@ AdminProtocol::OnInbound(const codec::DecodedMessageView& decoded, std::uint64_t
   if (!status.ok()) {
     return status;
   }
+
+  const auto i4 = bench_profile::NowNs();
+  prof.record_liveness_ns += bench_profile::DiffNs(i3, i4);
 
   if (phase_violation_text.has_value()) {
     return send_phase_violation_logout(*phase_violation_text);
@@ -2407,6 +2434,9 @@ AdminProtocol::OnInbound(const codec::DecodedMessageView& decoded, std::uint64_t
     return RejectInbound(decoded, ref_tag_id, reject_reason, std::move(reject_text), timestamp_ns, false);
   }
 
+  const auto i5 = bench_profile::NowNs();
+  prof.validate_app_msg_ns += bench_profile::DiffNs(i4, i5);
+
   event.application_messages.push_back(message::MessageRef::Borrow(decoded.message.view()));
   if (HasBoolean(view, kPossResend)) {
     event.poss_resend = true;
@@ -2584,16 +2614,18 @@ AdminProtocol::SendApplication(const message::MessageRef& message,
 
 auto
 AdminProtocol::SendEncodedApplication(const EncodedApplicationMessage& message,
-                                      std::uint64_t timestamp_ns,
-                                      SessionSendEnvelopeView envelope) -> base::Result<EncodedFrame>
+                                       std::uint64_t timestamp_ns,
+                                       SessionSendEnvelopeView envelope,
+                                       codec::EncodedOutboundExtrasView extras) -> base::Result<EncodedFrame>
 {
-  return SendEncodedApplication(message.view(), timestamp_ns, envelope);
+  return SendEncodedApplication(message.view(), timestamp_ns, envelope, extras);
 }
 
 auto
 AdminProtocol::SendEncodedApplication(EncodedApplicationMessageView message,
-                                      std::uint64_t timestamp_ns,
-                                      SessionSendEnvelopeView envelope) -> base::Result<EncodedFrame>
+                                       std::uint64_t timestamp_ns,
+                                       SessionSendEnvelopeView envelope,
+                                       codec::EncodedOutboundExtrasView extras) -> base::Result<EncodedFrame>
 {
   auto status = EnsureInitialized();
   if (!status.ok()) {
@@ -2603,15 +2635,16 @@ AdminProtocol::SendEncodedApplication(EncodedApplicationMessageView message,
   if (session_.state() != SessionState::kActive && session_.state() != SessionState::kAwaitingLogout) {
     return base::Status::InvalidArgument("cannot send application payload on an inactive FIX session");
   }
-  return EncodeFrame(message, false, timestamp_ns, true, false, true, 0U, 0U, {}, envelope);
+  return EncodeFrame(message, false, timestamp_ns, true, false, true, 0U, 0U, {}, envelope, extras);
 }
 
 auto
 AdminProtocol::SendEncodedApplication(const EncodedApplicationMessageRef& message,
-                                      std::uint64_t timestamp_ns,
-                                      SessionSendEnvelopeView envelope) -> base::Result<EncodedFrame>
+                                       std::uint64_t timestamp_ns,
+                                       SessionSendEnvelopeView envelope,
+                                       codec::EncodedOutboundExtrasView extras) -> base::Result<EncodedFrame>
 {
-  return SendEncodedApplication(message.view(), timestamp_ns, envelope);
+  return SendEncodedApplication(message.view(), timestamp_ns, envelope, extras);
 }
 
 auto

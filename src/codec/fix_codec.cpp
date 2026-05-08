@@ -1975,6 +1975,7 @@ CurrentUtcTimestamp(UtcTimestampBuffer* buffer, TimestampResolution resolution) 
       break;
     }
   }
+
   return buffer->view();
 }
 

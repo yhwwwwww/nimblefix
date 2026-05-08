@@ -505,14 +505,17 @@ public:
                        std::uint64_t timestamp_ns,
                        SessionSendEnvelopeView envelope = {}) -> base::Result<EncodedFrame>;
   auto SendEncodedApplication(const EncodedApplicationMessage& message,
-                              std::uint64_t timestamp_ns,
-                              SessionSendEnvelopeView envelope = {}) -> base::Result<EncodedFrame>;
+                               std::uint64_t timestamp_ns,
+                               SessionSendEnvelopeView envelope = {},
+                               codec::EncodedOutboundExtrasView extras = {}) -> base::Result<EncodedFrame>;
   auto SendEncodedApplication(EncodedApplicationMessageView message,
-                              std::uint64_t timestamp_ns,
-                              SessionSendEnvelopeView envelope = {}) -> base::Result<EncodedFrame>;
+                               std::uint64_t timestamp_ns,
+                               SessionSendEnvelopeView envelope = {},
+                               codec::EncodedOutboundExtrasView extras = {}) -> base::Result<EncodedFrame>;
   auto SendEncodedApplication(const EncodedApplicationMessageRef& message,
-                              std::uint64_t timestamp_ns,
-                              SessionSendEnvelopeView envelope = {}) -> base::Result<EncodedFrame>;
+                               std::uint64_t timestamp_ns,
+                               SessionSendEnvelopeView envelope = {},
+                               codec::EncodedOutboundExtrasView extras = {}) -> base::Result<EncodedFrame>;
   auto BeginLogout(std::string text, std::uint64_t timestamp_ns) -> base::Result<EncodedFrame>;
   auto ReserveReplayStorage(std::size_t frame_count) -> void;
 
@@ -564,7 +567,8 @@ private:
                    std::uint16_t extra_record_flags,
                    std::uint32_t seq_override = 0,
                    std::string_view orig_sending_time = {},
-                   SessionSendEnvelopeView envelope = {}) -> base::Result<EncodedFrame>;
+                   SessionSendEnvelopeView envelope = {},
+                   codec::EncodedOutboundExtrasView extras = {}) -> base::Result<EncodedFrame>;
   auto FinalizeEncodedFrame(std::string_view msg_type,
                             bool admin,
                             std::uint64_t timestamp_ns,
