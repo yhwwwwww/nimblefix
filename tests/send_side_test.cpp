@@ -18,6 +18,9 @@
 #include "nimblefix/codec/fix_tags.h"
 #include "nimblefix/generated/detail/api_support.h"
 #include "nimblefix/generated/detail/message_shape.h"
+#include "nimblefix/message/message_ref.h"
+#include "nimblefix/runtime/detail/typed_runtime_application.h"
+#include "nimblefix/runtime/profile_binding.h"
 #include "nimblefix/runtime/session.h"
 #include "nimblefix/session/admin_protocol.h"
 #include "nimblefix/store/memory_store.h"
@@ -222,6 +225,91 @@ private:
   std::uint64_t encoded_enqueued_{ 0U };
   nimble::session::EncodedApplicationMessageRef last_encoded_message_{};
 };
+
+class RecordingShapeDispatchApp final : public sample::Handler
+{
+public:
+  auto OnNewOrderSingle(nimble::runtime::InlineSession<sample::Profile>& session, sample::NewOrderSingleView view)
+    -> nimble::base::Status override
+  {
+    (void)session;
+    ++order_count;
+    last_cl_ord_id = view.cl_ord_id().value_or(std::string_view{});
+    return nimble::base::Status::Ok();
+  }
+
+  int order_count{ 0 };
+  std::string last_cl_ord_id;
+};
+
+static constexpr generated_detail::BodyNode kUsageNewOrderSingleBody[] = {
+  generated_detail::BodyNode{ generated_detail::BodyNode::Kind::kScalar,
+                              sample::Tag::ClOrdID,
+                              generated_detail::ScalarKind::kString,
+                              generated_detail::Presence::kAlways,
+                              0U,
+                              nullptr,
+                              0U },
+  generated_detail::BodyNode{ generated_detail::BodyNode::Kind::kScalar,
+                              sample::Tag::Symbol,
+                              generated_detail::ScalarKind::kString,
+                              generated_detail::Presence::kAlways,
+                              0U,
+                              nullptr,
+                              0U },
+  generated_detail::BodyNode{ generated_detail::BodyNode::Kind::kScalar,
+                              sample::Tag::Side,
+                              generated_detail::ScalarKind::kChar,
+                              generated_detail::Presence::kAlways,
+                              0U,
+                              nullptr,
+                              0U },
+  generated_detail::BodyNode{ generated_detail::BodyNode::Kind::kScalar,
+                              sample::Tag::TransactTime,
+                              generated_detail::ScalarKind::kString,
+                              generated_detail::Presence::kAlways,
+                              0U,
+                              nullptr,
+                              0U },
+  generated_detail::BodyNode{ generated_detail::BodyNode::Kind::kScalar,
+                              sample::Tag::OrderQty,
+                              generated_detail::ScalarKind::kInt,
+                              generated_detail::Presence::kAlways,
+                              0U,
+                              nullptr,
+                              0U },
+  generated_detail::BodyNode{ generated_detail::BodyNode::Kind::kScalar,
+                              sample::Tag::OrdType,
+                              generated_detail::ScalarKind::kChar,
+                              generated_detail::Presence::kAlways,
+                              0U,
+                              nullptr,
+                              0U },
+  generated_detail::BodyNode{ generated_detail::BodyNode::Kind::kScalar,
+                              sample::Tag::VenueOrderType,
+                              generated_detail::ScalarKind::kString,
+                              generated_detail::Presence::kAlways,
+                              0U,
+                              nullptr,
+                              0U },
+};
+
+static constexpr generated_detail::MessageShape kUsageNewOrderSingleShape{
+  sample::Profile::kSchemaHash, sample::NewOrderSingle::kMsgType, kUsageNewOrderSingleBody, 7U, nullptr, 0U,
+};
+
+static constexpr const generated_detail::MessageShape* kUsageShapes[] = { &kUsageNewOrderSingleShape };
+
+auto
+MakeRuntimeEvent(nimble::message::MessageView view) -> nimble::runtime::RuntimeEvent
+{
+  return nimble::runtime::RuntimeEvent{
+    .kind = nimble::runtime::RuntimeEventKind::kApplicationMessage,
+    .handle = nimble::session::SessionHandle(9901U, 0U),
+    .session_key = nimble::session::SessionKey{ "FIX.4.4", "BUY", "SELL" },
+    .message = nimble::message::MessageRef::Borrow(view),
+  };
+}
 
 } // namespace
 
@@ -488,4 +576,110 @@ TEST_CASE("MessageShape body nodes preserve canonical schema ordering", "[send-s
   CHECK(parties.entry_data[2].tag == sample::Tag::PartyRole);
   CHECK(parties.entry_data[2].scalar_kind == generated_detail::ScalarKind::kInt);
   CHECK(parties.entry_data[2].presence == generated_detail::Presence::kAlways);
+}
+
+TEST_CASE("Shape-aware generated dispatch gates handlers on active message shape",
+          "[send-side][message-shape][generate-runtime]")
+{
+  auto dictionary = nimble::tests::LoadFix44DictionaryViewOrSkip();
+  nimble::runtime::ProfileBinding<sample::Profile> binding(dictionary, kUsageShapes, 1U);
+  auto app = std::make_shared<RecordingShapeDispatchApp>();
+  nimble::runtime::detail::TypedRuntimeApplication<sample::Profile, sample::Handler> runtime_app(&binding, app);
+
+  auto accepted_message = sample::NewOrderSingleBuilder{}
+                            .msg_type(sample::NewOrderSingle::kMsgType)
+                            .cl_ord_id("ORD-SHAPE")
+                            .sender_comp_id("BUY")
+                            .target_comp_id("SELL")
+                            .symbol("AAPL")
+                            .side('1')
+                            .transact_time("20260406-12:00:00.000")
+                            .order_qty(100)
+                            .ord_type('2')
+                            .venue_order_type("LIMIT")
+                            .ToMessage();
+  REQUIRE(accepted_message.ok());
+
+  const auto accepted = runtime_app.OnAppMessage(MakeRuntimeEvent(accepted_message.value().view()));
+  REQUIRE(accepted.ok());
+  CHECK(app->order_count == 1);
+  CHECK(app->last_cl_ord_id == "ORD-SHAPE");
+
+  nimble::message::MessageBuilder missing_usage_builder{ std::string(sample::NewOrderSingle::kMsgType) };
+  missing_usage_builder.set_string(kMsgType, sample::NewOrderSingle::kMsgType)
+    .set_string(sample::Tag::ClOrdID, "ORD-MISSING")
+    .set_string(sample::Tag::SenderCompID, "BUY")
+    .set_string(sample::Tag::TargetCompID, "SELL")
+    .set_string(sample::Tag::Symbol, "AAPL")
+    .set_char(sample::Tag::Side, '1')
+    .set_string(sample::Tag::TransactTime, "20260406-12:00:00.000")
+    .set_int(sample::Tag::OrderQty, 100)
+    .set_char(sample::Tag::OrdType, '2');
+  const auto missing_usage_message = std::move(missing_usage_builder).build();
+
+  const auto missing_usage = runtime_app.OnAppMessage(MakeRuntimeEvent(missing_usage_message.view()));
+  REQUIRE_FALSE(missing_usage.ok());
+  CHECK(missing_usage.code() == nimble::base::ErrorCode::kInvalidArgument);
+  CHECK(app->order_count == 1);
+
+  nimble::message::MessageBuilder missing_dictionary_builder{ std::string(sample::NewOrderSingle::kMsgType) };
+  missing_dictionary_builder.set_string(kMsgType, sample::NewOrderSingle::kMsgType)
+    .set_string(sample::Tag::ClOrdID, "ORD-USAGE")
+    .set_string(sample::Tag::Symbol, "AAPL")
+    .set_char(sample::Tag::Side, '1')
+    .set_string(sample::Tag::TransactTime, "20260406-12:00:00.000")
+    .set_int(sample::Tag::OrderQty, 100)
+    .set_char(sample::Tag::OrdType, '2')
+    .set_string(sample::Tag::VenueOrderType, "LIMIT");
+  const auto missing_dictionary_message = std::move(missing_dictionary_builder).build();
+
+  const auto missing_dictionary = runtime_app.OnAppMessage(MakeRuntimeEvent(missing_dictionary_message.view()));
+  REQUIRE(missing_dictionary.ok());
+  CHECK(app->order_count == 2);
+  CHECK(app->last_cl_ord_id == "ORD-USAGE");
+}
+
+TEST_CASE("ValidateInboundMessageShape rejects zero-count required groups", "[send-side][message-shape]")
+{
+  static constexpr generated_detail::BodyNode kPartyEntryNodes[] = {
+    generated_detail::BodyNode{ generated_detail::BodyNode::Kind::kScalar,
+                                sample::Tag::PartyID,
+                                generated_detail::ScalarKind::kString,
+                                generated_detail::Presence::kAlways,
+                                0U,
+                                nullptr,
+                                0U },
+  };
+  static constexpr generated_detail::BodyNode kBodyNodes[] = {
+    generated_detail::BodyNode{ generated_detail::BodyNode::Kind::kGroup,
+                                sample::Tag::NoPartyIDs,
+                                generated_detail::ScalarKind::kString,
+                                generated_detail::Presence::kAlways,
+                                sample::Tag::PartyID,
+                                kPartyEntryNodes,
+                                1U },
+  };
+  static constexpr generated_detail::MessageShape kRequiredGroupShape{
+    sample::Profile::kSchemaHash, sample::NewOrderSingle::kMsgType, kBodyNodes, 1U, nullptr, 0U,
+  };
+
+  struct NoEnumValidators
+  {
+    static auto Validate(const generated_detail::BodyNode& node, nimble::message::MessageView view)
+      -> nimble::base::Status
+    {
+      (void)node;
+      (void)view;
+      return nimble::base::Status::Ok();
+    }
+  };
+
+  nimble::message::MessageBuilder builder{ std::string(sample::NewOrderSingle::kMsgType) };
+  builder.set_string(kMsgType, sample::NewOrderSingle::kMsgType).reserve_group_entries(sample::Tag::NoPartyIDs, 0U);
+
+  const auto message = std::move(builder).build();
+  const auto status =
+    generated_detail::ValidateInboundMessageShape<NoEnumValidators>(message.view(), kRequiredGroupShape);
+  REQUIRE_FALSE(status.ok());
+  CHECK(status.code() == nimble::base::ErrorCode::kInvalidArgument);
 }

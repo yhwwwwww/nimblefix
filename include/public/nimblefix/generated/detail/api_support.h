@@ -12,9 +12,10 @@
 #include <string_view>
 #include <utility>
 
+#include "nimblefix/advanced/message_builder.h"
 #include "nimblefix/base/result.h"
 #include "nimblefix/base/status.h"
-#include "nimblefix/advanced/message_builder.h"
+#include "nimblefix/generated/detail/message_shape.h"
 #include "nimblefix/message/message_view.h"
 
 namespace nimble::generated::detail {
@@ -62,70 +63,79 @@ private:
 };
 
 template<typename Builder>
-inline auto SetField(Builder& builder, std::uint32_t tag, std::string_view value) -> void
+inline auto
+SetField(Builder& builder, std::uint32_t tag, std::string_view value) -> void
 {
   builder.set_string(tag, value);
 }
 
 template<typename Builder>
-inline auto AddField(Builder& builder, std::uint32_t tag, std::string_view value) -> void
+inline auto
+AddField(Builder& builder, std::uint32_t tag, std::string_view value) -> void
 {
   SetField(builder, tag, value);
 }
 
 template<typename Builder>
-inline auto SetField(Builder& builder, std::uint32_t tag, std::int64_t value) -> void
+inline auto
+SetField(Builder& builder, std::uint32_t tag, std::int64_t value) -> void
 {
   builder.set_int(tag, value);
 }
 
 template<typename Builder>
-inline auto AddField(Builder& builder, std::uint32_t tag, std::int64_t value) -> void
+inline auto
+AddField(Builder& builder, std::uint32_t tag, std::int64_t value) -> void
 {
   SetField(builder, tag, value);
 }
 
 template<typename Builder>
-inline auto SetField(Builder& builder, std::uint32_t tag, char value) -> void
+inline auto
+SetField(Builder& builder, std::uint32_t tag, char value) -> void
 {
   builder.set_char(tag, value);
 }
 
 template<typename Builder>
-inline auto AddField(Builder& builder, std::uint32_t tag, char value) -> void
+inline auto
+AddField(Builder& builder, std::uint32_t tag, char value) -> void
 {
   SetField(builder, tag, value);
 }
 
 template<typename Builder>
-inline auto SetField(Builder& builder, std::uint32_t tag, double value) -> void
+inline auto
+SetField(Builder& builder, std::uint32_t tag, double value) -> void
 {
   builder.set_float(tag, value);
 }
 
 template<typename Builder>
-inline auto AddField(Builder& builder, std::uint32_t tag, double value) -> void
+inline auto
+AddField(Builder& builder, std::uint32_t tag, double value) -> void
 {
   SetField(builder, tag, value);
 }
 
 template<typename Builder>
-inline auto SetField(Builder& builder, std::uint32_t tag, bool value) -> void
+inline auto
+SetField(Builder& builder, std::uint32_t tag, bool value) -> void
 {
   builder.set_boolean(tag, value);
 }
 
 template<typename Builder>
-inline auto AddField(Builder& builder, std::uint32_t tag, bool value) -> void
+inline auto
+AddField(Builder& builder, std::uint32_t tag, bool value) -> void
 {
   SetField(builder, tag, value);
 }
 
 template<class Builder, class Entries, class AppendEntry>
-inline auto AppendGroupEntries(Builder& builder,
-                               std::uint32_t count_tag,
-                               const Entries& entries,
-                               AppendEntry&& append_entry) -> base::Status
+inline auto
+AppendGroupEntries(Builder& builder, std::uint32_t count_tag, const Entries& entries, AppendEntry&& append_entry)
+  -> base::Status
 {
   if (entries.empty()) {
     return base::Status::Ok();
@@ -144,10 +154,11 @@ inline auto AppendGroupEntries(Builder& builder,
 }
 
 template<class BuildFields>
-inline auto BuildOwnedMessage(std::string_view msg_type,
-                              std::size_t scalar_field_count,
-                              std::size_t group_count,
-                              BuildFields&& build_fields) -> base::Result<message::Message>
+inline auto
+BuildOwnedMessage(std::string_view msg_type,
+                  std::size_t scalar_field_count,
+                  std::size_t group_count,
+                  BuildFields&& build_fields) -> base::Result<message::Message>
 {
   message::MessageBuilder builder{ std::string(msg_type) };
   builder.reserve_fields(scalar_field_count).reserve_groups(group_count);
@@ -158,27 +169,32 @@ inline auto BuildOwnedMessage(std::string_view msg_type,
   return std::move(builder).build();
 }
 
-inline auto MissingRequiredField(std::string_view owner_name, std::string_view field_name) -> base::Status
+inline auto
+MissingRequiredField(std::string_view owner_name, std::string_view field_name) -> base::Status
 {
-  return base::Status::InvalidArgument(std::string(owner_name) + " is missing required field " + std::string(field_name));
+  return base::Status::InvalidArgument(std::string(owner_name) + " is missing required field " +
+                                       std::string(field_name));
 }
 
-inline auto MissingField(std::uint32_t tag) -> base::Status
+inline auto
+MissingField(std::uint32_t tag) -> base::Status
 {
   return base::Status::NotFound("missing field " + std::to_string(tag));
 }
 
 template<typename Enum>
-inline auto EnumParseError(std::string_view field_name) -> base::Status
+inline auto
+EnumParseError(std::string_view field_name) -> base::Status
 {
   return base::Status::FormatError(std::string("unknown enum value for field ") + std::string(field_name));
 }
 
 template<std::size_t FieldCount>
-inline auto ValidateRequiredFields(std::string_view owner_name,
-                                   const FieldPresence<FieldCount>& presence,
-                                   const RequiredFieldMask<FieldCount>& required_fields,
-                                   const std::array<std::string_view, FieldCount>& field_names) -> base::Status
+inline auto
+ValidateRequiredFields(std::string_view owner_name,
+                       const FieldPresence<FieldCount>& presence,
+                       const RequiredFieldMask<FieldCount>& required_fields,
+                       const std::array<std::string_view, FieldCount>& field_names) -> base::Status
 {
   const auto missing = presence.first_missing(required_fields);
   if (!missing.has_value()) {
@@ -195,7 +211,8 @@ struct EnumWireEntry
 };
 
 template<typename Enum, typename Wire, std::size_t N>
-[[nodiscard]] constexpr auto EnumToWire(Enum value, const std::array<EnumWireEntry<Enum, Wire>, N>& entries) -> Wire
+[[nodiscard]] constexpr auto
+EnumToWire(Enum value, const std::array<EnumWireEntry<Enum, Wire>, N>& entries) -> Wire
 {
   for (const auto& entry : entries) {
     if (entry.value == value) {
@@ -206,8 +223,8 @@ template<typename Enum, typename Wire, std::size_t N>
 }
 
 template<typename Enum, typename Wire, std::size_t N>
-[[nodiscard]] constexpr auto TryParseEnum(Wire wire, const std::array<EnumWireEntry<Enum, Wire>, N>& entries)
-  -> std::optional<Enum>
+[[nodiscard]] constexpr auto
+TryParseEnum(Wire wire, const std::array<EnumWireEntry<Enum, Wire>, N>& entries) -> std::optional<Enum>
 {
   for (const auto& entry : entries) {
     if (entry.wire == wire) {
@@ -218,7 +235,8 @@ template<typename Enum, typename Wire, std::size_t N>
 }
 
 template<typename ViewType>
-inline auto ValidateMsgType(message::MessageView view, std::string_view expected) -> base::Result<ViewType>
+inline auto
+ValidateMsgType(message::MessageView view, std::string_view expected) -> base::Result<ViewType>
 {
   if (!view.valid()) {
     return base::Status::InvalidArgument("message view is invalid");
@@ -230,16 +248,63 @@ inline auto ValidateMsgType(message::MessageView view, std::string_view expected
 }
 
 template<typename ViewType>
-inline auto BindMessageView(message::MessageView view, std::string_view expected) -> base::Result<ViewType>
+inline auto
+BindMessageView(message::MessageView view, std::string_view expected) -> base::Result<ViewType>
 {
   return ValidateMsgType<ViewType>(view, expected);
 }
 
+inline auto
+MissingRequiredShapeField(const MessageShape& shape, std::uint32_t tag) -> base::Status
+{
+  return base::Status::InvalidArgument("message shape " + std::string(shape.msg_type) + " is missing required field " +
+                                       std::to_string(tag));
+}
+
+inline auto
+ShapeScalarPresent(message::MessageView message, const BodyNode& node) -> bool
+{
+  switch (node.scalar_kind) {
+    case ScalarKind::kString:
+      return message.get_string(node.tag).has_value();
+    case ScalarKind::kInt:
+      return message.get_int(node.tag).has_value();
+    case ScalarKind::kChar:
+      return message.get_char(node.tag).has_value();
+    case ScalarKind::kFloat:
+      return message.get_float(node.tag).has_value();
+    case ScalarKind::kBool:
+      return message.get_boolean(node.tag).has_value();
+  }
+  return false;
+}
+
+inline auto
+ShapeRawFieldPresent(message::MessageView message, const RawStaticField& field) -> bool
+{
+  BodyNode node{};
+  node.kind = BodyNode::Kind::kScalar;
+  node.tag = field.tag;
+  node.scalar_kind = field.kind;
+  node.presence = field.presence;
+  return ShapeScalarPresent(message, node);
+}
+
+inline auto
+MessageHasShapeNode(message::MessageView message, const BodyNode& node) -> bool
+{
+  if (node.is_scalar()) {
+    return ShapeScalarPresent(message, node);
+  }
+
+  const auto group = message.group(node.tag);
+  return group.has_value() && group->size() != 0U;
+}
+
 template<typename Enum, typename Wire, typename Parser>
-inline auto ParseRequiredEnumField(const std::optional<Wire>& raw,
-                                   std::uint32_t tag,
-                                   std::string_view field_name,
-                                   Parser parser) -> base::Result<Enum>
+inline auto
+ParseRequiredEnumField(const std::optional<Wire>& raw, std::uint32_t tag, std::string_view field_name, Parser parser)
+  -> base::Result<Enum>
 {
   if (!raw.has_value()) {
     return MissingField(tag);
@@ -251,7 +316,85 @@ inline auto ParseRequiredEnumField(const std::optional<Wire>& raw,
   return *parsed;
 }
 
-inline auto GroupSize(message::GroupView group) -> std::size_t
+template<std::uint32_t Id>
+struct InboundEnumValidator
+{
+  static auto Validate(std::uint32_t tag, std::string_view value) -> base::Status
+  {
+    (void)tag;
+    (void)value;
+    return base::Status::Ok();
+  }
+};
+
+template<class ValidatorSet>
+inline auto
+ValidateInboundShapeNodes(message::MessageView message,
+                          const MessageShape& shape,
+                          const BodyNode* nodes,
+                          std::uint32_t node_count) -> base::Status
+{
+  for (std::uint32_t index = 0U; index < node_count; ++index) {
+    const auto& node = nodes[index];
+    const auto present = MessageHasShapeNode(message, node);
+    if (node.presence == Presence::kAlways && !present) {
+      return MissingRequiredShapeField(shape, node.tag);
+    }
+
+    if (node.is_scalar()) {
+      const auto validation = ValidatorSet::Validate(node, message);
+      if (!validation.ok()) {
+        return validation;
+      }
+      continue;
+    }
+
+    if (!present || node.entry_data == nullptr || node.entry_count == 0U) {
+      continue;
+    }
+
+    const auto group = message.group(node.tag);
+    if (!group.has_value()) {
+      continue;
+    }
+    for (std::size_t entry_index = 0U; entry_index < group->size(); ++entry_index) {
+      auto status =
+        ValidateInboundShapeNodes<ValidatorSet>((*group)[entry_index], shape, node.entry_data, node.entry_count);
+      if (!status.ok()) {
+        return status;
+      }
+    }
+  }
+  return base::Status::Ok();
+}
+
+template<class ValidatorSet>
+inline auto
+ValidateInboundMessageShape(message::MessageView message, const MessageShape& shape) -> base::Status
+{
+  if (!message.valid()) {
+    return base::Status::InvalidArgument("message view is invalid");
+  }
+  if (!shape.msg_type.empty() && message.msg_type() != shape.msg_type) {
+    return base::Status::InvalidArgument(std::string("expected MsgType=") + std::string(shape.msg_type));
+  }
+
+  auto status = ValidateInboundShapeNodes<ValidatorSet>(message, shape, shape.body_data, shape.body_count);
+  if (!status.ok()) {
+    return status;
+  }
+
+  for (std::uint32_t index = 0U; index < shape.raw_extras_count; ++index) {
+    const auto& field = shape.raw_extras_data[index];
+    if (field.presence == Presence::kAlways && !ShapeRawFieldPresent(message, field)) {
+      return MissingRequiredShapeField(shape, field.tag);
+    }
+  }
+  return base::Status::Ok();
+}
+
+inline auto
+GroupSize(message::GroupView group) -> std::size_t
 {
   return group.valid() ? group.size() : 0U;
 }
@@ -285,15 +428,97 @@ template<class Handler, class Session, class View>
 using DispatchHandlerMethod = base::Status (Handler::*)(Session&, View);
 
 template<class View, class Handler, class Session>
-inline auto DispatchToHandler(message::MessageView message,
-                              Session& session,
-                              Handler& handler,
-                              DispatchHandlerMethod<Handler, Session, View> method) -> base::Status
+inline auto
+DispatchToHandler(message::MessageView message,
+                  Session& session,
+                  Handler& handler,
+                  DispatchHandlerMethod<Handler, Session, View> method) -> base::Status
 {
   auto bound = View::Bind(message);
   if (!bound.ok()) {
     return bound.status();
   }
+  return (handler.*method)(session, std::move(bound).value());
+}
+
+template<class View, class Handler, class Session, class ValidatorSet>
+inline auto
+DispatchToHandler(message::MessageView message,
+                  Session& session,
+                  Handler& handler,
+                  DispatchHandlerMethod<Handler, Session, View> method,
+                  const MessageShape& shape,
+                  ValidatorSet) -> base::Status
+{
+  auto bound = View::Bind(message);
+  if (!bound.ok()) {
+    return bound.status();
+  }
+  auto validation = ValidateInboundMessageShape<ValidatorSet>(message, shape);
+  if (!validation.ok()) {
+    return validation;
+  }
+  return (handler.*method)(session, std::move(bound).value());
+}
+
+template<class View, class Handler, class Session>
+inline auto
+DispatchToHandler(message::MessageView message,
+                  Session& session,
+                  Handler& handler,
+                  DispatchHandlerMethod<Handler, Session, View> method,
+                  const MessageShape& shape) -> base::Status
+{
+  struct NoEnumValidators
+  {
+    static auto Validate(const BodyNode& node, message::MessageView view) -> base::Status
+    {
+      (void)node;
+      (void)view;
+      return base::Status::Ok();
+    }
+  };
+  return DispatchToHandler<View>(message, session, handler, method, shape, NoEnumValidators{});
+}
+
+template<class View, class Handler, class Session, class ValidatorSet>
+inline auto
+DispatchToHandlerUsingUsageShapes(message::MessageView message,
+                                  Session& session,
+                                  Handler& handler,
+                                  DispatchHandlerMethod<Handler, Session, View> method,
+                                  const MessageShape* const* usage_shapes,
+                                  std::uint32_t usage_shape_count,
+                                  std::string_view expected_msg_type,
+                                  ValidatorSet) -> base::Status
+{
+  auto bound = View::Bind(message);
+  if (!bound.ok()) {
+    return bound.status();
+  }
+
+  bool found_usage_shape = false;
+  auto first_failure = base::Status::Ok();
+  for (std::uint32_t index = 0U; index < usage_shape_count; ++index) {
+    const auto* shape = usage_shapes == nullptr ? nullptr : usage_shapes[index];
+    if (shape == nullptr || shape->msg_type != expected_msg_type) {
+      continue;
+    }
+
+    found_usage_shape = true;
+    auto validation = ValidateInboundMessageShape<ValidatorSet>(message, *shape);
+    if (validation.ok()) {
+      return (handler.*method)(session, std::move(bound).value());
+    }
+    if (first_failure.ok()) {
+      first_failure = std::move(validation);
+    }
+  }
+
+  if (found_usage_shape) {
+    return first_failure.ok() ? base::Status::InvalidArgument("usage shape validation failed") : first_failure;
+  }
+
   return (handler.*method)(session, std::move(bound).value());
 }
 
@@ -353,8 +578,7 @@ public:
   {
     raw_append(prefix);
     std::array<char, 32> buf{};
-    const auto [ptr, ec] =
-      std::to_chars(buf.data(), buf.data() + buf.size(), value, std::chars_format::general, 12);
+    const auto [ptr, ec] = std::to_chars(buf.data(), buf.data() + buf.size(), value, std::chars_format::general, 12);
     if (ec == std::errc()) {
       raw_append(std::string_view(buf.data(), static_cast<std::size_t>(ptr - buf.data())));
     }
@@ -419,10 +643,7 @@ private:
     inline_storage_[size_++] = c;
   }
 
-  auto spill_to_overflow() -> void
-  {
-    overflow_.assign(inline_storage_.data(), size_);
-  }
+  auto spill_to_overflow() -> void { overflow_.assign(inline_storage_.data(), size_); }
 
   std::array<char, kInlineCapacity> inline_storage_{};
   std::size_t size_{ 0 };

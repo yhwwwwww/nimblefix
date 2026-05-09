@@ -140,7 +140,8 @@ public:
     -> base::Result<SessionScheduleStatus>;
   [[nodiscard]] auto FindListenerConfig(std::string_view name) const -> const ListenerConfig*;
   template<class Profile>
-  auto Bind() const -> base::Result<ProfileBinding<Profile>>;
+  auto Bind(const generated::detail::MessageShape* const* usage_shapes = nullptr,
+            std::uint32_t usage_shape_count = 0U) const -> base::Result<ProfileBinding<Profile>>;
   auto LoadDictionaryView(std::uint64_t profile_id) const -> base::Result<profile::NormalizedDictionaryView>;
   auto ResolveInboundSession(const codec::SessionHeader& header) const -> base::Result<ResolvedCounterparty>;
   auto ResolveInboundSession(const codec::SessionHeaderView& header) const -> base::Result<ResolvedCounterparty>;
@@ -175,7 +176,8 @@ private:
 
 template<class Profile>
 auto
-Engine::Bind() const -> base::Result<ProfileBinding<Profile>>
+Engine::Bind(const generated::detail::MessageShape* const* usage_shapes, std::uint32_t usage_shape_count) const
+  -> base::Result<ProfileBinding<Profile>>
 {
   auto dictionary = LoadDictionaryView(Profile::kProfileId);
   if (!dictionary.ok()) {
@@ -190,7 +192,7 @@ Engine::Bind() const -> base::Result<ProfileBinding<Profile>>
     return base::Status::VersionMismatch("schema_hash mismatch between generated API and runtime profile");
   }
 
-  return ProfileBinding<Profile>(std::move(dictionary).value());
+  return ProfileBinding<Profile>(std::move(dictionary).value(), usage_shapes, usage_shape_count);
 }
 
 } // namespace nimble::runtime
