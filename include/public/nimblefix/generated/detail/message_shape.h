@@ -36,6 +36,25 @@ struct BodyNode
   const BodyNode* entry_data{};
   std::uint32_t entry_count{};
 
+  constexpr BodyNode() = default;
+
+  constexpr BodyNode(Kind node_kind,
+                     std::uint32_t node_tag,
+                     ScalarKind node_scalar_kind,
+                     Presence node_presence,
+                     std::uint32_t node_delimiter_tag,
+                     const BodyNode* node_entry_data,
+                     std::uint32_t node_entry_count)
+    : kind(node_kind)
+    , tag(node_tag)
+    , scalar_kind(node_scalar_kind)
+    , presence(node_presence)
+    , delimiter_tag(node_delimiter_tag)
+    , entry_data(node_entry_data)
+    , entry_count(node_entry_count)
+  {
+  }
+
   [[nodiscard]] constexpr auto is_scalar() const -> bool { return kind == Kind::kScalar; }
   [[nodiscard]] constexpr auto is_group() const -> bool { return kind == Kind::kGroup; }
 };

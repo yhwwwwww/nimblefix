@@ -1096,7 +1096,8 @@ EmitShapeNodeArray(std::ostringstream& out,
     if (group_it != group_by_tag.end()) {
       const auto& group = *group_it->second;
       const auto& nested = nested_groups[nested_group_index++];
-      out << "  { detail::BodyNode::Kind::kGroup, " << group.count_tag << "U, {}, {}, " << group.delimiter_tag << "U, ";
+      out << "  detail::BodyNode{ detail::BodyNode::Kind::kGroup, " << group.count_tag << "U, {}, "
+          << ShapePresence(rule) << ", " << group.delimiter_tag << "U, ";
       if (nested.entry_count == 0U) {
         out << "nullptr, 0U";
       } else {
@@ -1112,8 +1113,8 @@ EmitShapeNodeArray(std::ostringstream& out,
     }
 
     const auto& field = *field_it->second;
-    out << "  { detail::BodyNode::Kind::kScalar, " << field.tag << "U, " << ShapeScalarKind(field.value_type) << ", "
-        << ShapePresence(rule) << ", 0U, nullptr, 0U },\n";
+    out << "  detail::BodyNode{ detail::BodyNode::Kind::kScalar, " << field.tag << "U, "
+        << ShapeScalarKind(field.value_type) << ", " << ShapePresence(rule) << ", 0U, nullptr, 0U },\n";
   }
   out << "};\n\n";
 }
@@ -1819,9 +1820,16 @@ EmitHandlerAndDispatcher(std::ostringstream& out, const NormalizedDictionary& di
 {
   out << "class Dispatcher {\n"
       << "public:\n"
+      << "  constexpr Dispatcher(const detail::MessageShape* const* usage_shapes = nullptr,\n"
+      << "                       std::uint32_t usage_shape_count = 0U)\n"
+      << "    : usage_shapes_(usage_shapes)\n"
+      << "    , usage_shape_count_(usage_shape_count) {}\n"
       << "  auto Dispatch(runtime::InlineSession<Profile>& session,\n"
       << "                message::MessageView message,\n"
       << "                Handler& handler) const -> base::Status;\n"
+      << "private:\n"
+      << "  const detail::MessageShape* const* usage_shapes_{ nullptr };\n"
+      << "  std::uint32_t usage_shape_count_{ 0U };\n"
       << "};\n\n";
 
   out << "class Handler : public runtime::Application<Profile> {\n"
@@ -1853,8 +1861,22 @@ EmitHandlerAndDispatcher(std::ostringstream& out, const NormalizedDictionary& di
       << "  }\n";
   for (const auto& message : dictionary.messages) {
     out << "  if (message.msg_type() == \"" << EmitStringLiteral(message.msg_type) << "\") {\n"
-        << "    return detail::DispatchToHandler<" << message.name << "View>(\n"
-        << "      message, session, handler, &Handler::On" << message.name << ");\n"
+        << "    struct NoEnumValidators {\n"
+        << "      static auto Validate(const detail::BodyNode& node, message::MessageView view) -> base::Status {\n"
+        << "        (void)node;\n"
+        << "        (void)view;\n"
+        << "        return base::Status::Ok();\n"
+        << "      }\n"
+        << "    };\n"
+        << "    return detail::DispatchToHandlerUsingUsageShapes<" << message.name << "View>(\n"
+        << "      message,\n"
+        << "      session,\n"
+        << "      handler,\n"
+        << "      &Handler::On" << message.name << ",\n"
+        << "      usage_shapes_,\n"
+        << "      usage_shape_count_,\n"
+        << "      \"" << EmitStringLiteral(message.msg_type) << "\",\n"
+        << "      NoEnumValidators{});\n"
         << "  }\n";
   }
   out << "  return handler.OnUnknownMessage(session, message);\n"

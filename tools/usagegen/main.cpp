@@ -1069,8 +1069,9 @@ EmitShapeHeader(std::ostream& out, std::string_view namespace_name, const std::v
     if (!shape.body_nodes.empty()) {
       out << "inline constexpr detail::BodyNode " << prefix << "Body[] = {\n";
       for (const auto& node : shape.body_nodes) {
-        out << "  { detail::BodyNode::Kind::kScalar, " << node.tag << "U, " << ScalarKindLiteral(node.scalar_kind)
-            << ", " << PresenceLiteral(node.presence) << ", 0U, nullptr, 0U },\n";
+        out << "  detail::BodyNode{ detail::BodyNode::Kind::kScalar, " << node.tag << "U, "
+            << ScalarKindLiteral(node.scalar_kind) << ", " << PresenceLiteral(node.presence)
+            << ", 0U, nullptr, 0U },\n";
       }
       out << "};\n";
     }
