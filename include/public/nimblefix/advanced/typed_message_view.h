@@ -38,6 +38,9 @@ public:
     return TypedMessageView(&dictionary, message, message_def);
   }
 
+  // Dictionary-scoped helper validation for tooling and advanced dynamic-schema
+  // flows. This does not define the generated runtime inbound acceptance gate;
+  // usage-only runtime validation is driven by generated MessageShape dispatch.
   [[nodiscard]] auto validate_required_fields(std::uint32_t* missing_tag = nullptr) const -> base::Status;
   [[nodiscard]] auto get_string(std::uint32_t tag) const -> std::optional<std::string_view>;
   [[nodiscard]] auto get_timestamp(std::uint32_t tag) const -> std::optional<std::string_view>;

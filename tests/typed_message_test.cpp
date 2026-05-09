@@ -4,6 +4,7 @@
 #include <string>
 
 #include "fix44_api.h"
+#include "nimblefix/advanced/typed_message_view.h"
 #include "nimblefix/base/status.h"
 #include "nimblefix/codec/fix_codec.h"
 
@@ -92,7 +93,9 @@ ApplicationBodyFromFrame(std::string_view frame) -> std::string_view
   const auto msg_type_end = frame.find('\x01', msg_type_pos);
   REQUIRE(msg_type_end != std::string_view::npos);
 
-  constexpr std::string_view kSendingTimePrefix{ "\x01" "52=", 4U };
+  constexpr std::string_view kSendingTimePrefix{ "\x01"
+                                                 "52=",
+                                                 4U };
   const auto sending_time_pos = frame.find(kSendingTimePrefix, msg_type_end);
   REQUIRE(sending_time_pos != std::string_view::npos);
   const auto sending_time_end = frame.find('\x01', sending_time_pos + 1U);
@@ -127,7 +130,8 @@ TEST_CASE("generated typed view binds owned and parsed fix44 messages", "[typed-
   options.sending_time = "20260406-12:00:01.000";
 
   nimble::codec::EncodeBuffer buffer;
-  auto encode_status = nimble::codec::EncodeFixMessageToBuffer(owned_message.value(), dictionary.value(), options, &buffer);
+  auto encode_status =
+    nimble::codec::EncodeFixMessageToBuffer(owned_message.value(), dictionary.value(), options, &buffer);
   REQUIRE(encode_status.ok());
 
   auto decoded = nimble::codec::DecodeFixMessageView(buffer.bytes(), dictionary.value());
@@ -155,7 +159,8 @@ TEST_CASE("generated EncodeBody matches ToMessage application body bytes", "[typ
   options.sending_time = "20260406-12:00:01.000";
 
   nimble::codec::EncodeBuffer buffer;
-  auto encode_status = nimble::codec::EncodeFixMessageToBuffer(owned_message.value(), dictionary.value(), options, &buffer);
+  auto encode_status =
+    nimble::codec::EncodeFixMessageToBuffer(owned_message.value(), dictionary.value(), options, &buffer);
   REQUIRE(encode_status.ok());
 
   nimble::generated::detail::BodyEncodeBuffer body_buffer;
@@ -191,7 +196,8 @@ TEST_CASE("generated set_tag appends raw extras consistently", "[typed-message]"
   options.sending_time = "20260406-12:00:01.000";
 
   nimble::codec::EncodeBuffer buffer;
-  auto encode_status = nimble::codec::EncodeFixMessageToBuffer(owned_message.value(), dictionary.value(), options, &buffer);
+  auto encode_status =
+    nimble::codec::EncodeFixMessageToBuffer(owned_message.value(), dictionary.value(), options, &buffer);
   REQUIRE(encode_status.ok());
 
   nimble::generated::detail::BodyEncodeBuffer body_buffer;
@@ -222,9 +228,9 @@ TEST_CASE("generated typed view surfaces bind and enum parse errors", "[typed-me
   REQUIRE(!wrong_bind.ok());
   CHECK(wrong_bind.status().code() == nimble::base::ErrorCode::kInvalidArgument);
 
-  const auto frame = nimble::tests::EncodeFixFrame(
-    "35=D|49=BUY|56=SELL|11=ORD-001|55=AAPL|54=?|60=20260406-12:00:00.000|38=100|40=2|"
-    "453=1|448=PTY1|447=?|452=1|802=1|523=SUB1|803=999|");
+  const auto frame =
+    nimble::tests::EncodeFixFrame("35=D|49=BUY|56=SELL|11=ORD-001|55=AAPL|54=?|60=20260406-12:00:00.000|38=100|40=2|"
+                                  "453=1|448=PTY1|447=?|452=1|802=1|523=SUB1|803=999|");
   auto decoded = nimble::codec::DecodeFixMessageView(frame, dictionary.value());
   REQUIRE(decoded.ok());
   auto bound = NewOrderSingleView::Bind(decoded.value().message.view());
@@ -257,4 +263,23 @@ TEST_CASE("generated typed view surfaces bind and enum parse errors", "[typed-me
   CHECK(sub_id_type.status().code() == nimble::base::ErrorCode::kFormatError);
   REQUIRE(sub_id_view.party_sub_id_type_raw().has_value());
   CHECK(sub_id_view.party_sub_id_type_raw().value() == 999);
+}
+
+TEST_CASE("TypedMessageView dictionary-required validation remains auxiliary", "[typed-message]")
+{
+  auto dictionary = nimble::tests::LoadFix44DictionaryViewOrSkip();
+
+  const auto frame =
+    nimble::tests::EncodeFixFrame("35=D|49=BUY|56=SELL|55=AAPL|54=1|60=20260406-12:00:00.000|38=100|40=1|");
+  auto decoded = nimble::codec::DecodeFixMessageView(frame, dictionary);
+  REQUIRE(decoded.ok());
+
+  auto typed = nimble::message::TypedMessageView::Bind(dictionary, decoded.value().message.view());
+  REQUIRE(typed.ok());
+
+  std::uint32_t missing_tag = 0U;
+  auto status = typed.value().validate_required_fields(&missing_tag);
+  REQUIRE_FALSE(status.ok());
+  CHECK(status.code() == nimble::base::ErrorCode::kInvalidArgument);
+  CHECK(missing_tag == 11U);
 }
