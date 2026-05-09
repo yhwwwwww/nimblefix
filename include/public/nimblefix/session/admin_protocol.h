@@ -686,9 +686,9 @@ public:
   /// \param envelope Optional `50/57` header overrides.
   /// \return Finalized outbound frame on success, otherwise an error status.
   auto SendEncodedApplication(const EncodedApplicationMessage& message,
-                               std::uint64_t timestamp_ns,
-                               SessionSendEnvelopeView envelope = {},
-                               codec::EncodedOutboundExtrasView extras = {}) -> base::Result<EncodedFrame>;
+                              std::uint64_t timestamp_ns,
+                              SessionSendEnvelopeView envelope = {},
+                              codec::EncodedOutboundExtrasView extras = {}) -> base::Result<EncodedFrame>;
 
   /// Finalize one borrowed pre-encoded application body into a full FIX frame.
   ///
@@ -697,9 +697,9 @@ public:
   /// \param envelope Optional `50/57` header overrides.
   /// \return Finalized outbound frame on success, otherwise an error status.
   auto SendEncodedApplication(EncodedApplicationMessageView message,
-                               std::uint64_t timestamp_ns,
-                               SessionSendEnvelopeView envelope = {},
-                               codec::EncodedOutboundExtrasView extras = {}) -> base::Result<EncodedFrame>;
+                              std::uint64_t timestamp_ns,
+                              SessionSendEnvelopeView envelope = {},
+                              codec::EncodedOutboundExtrasView extras = {}) -> base::Result<EncodedFrame>;
 
   /// Finalize one owned-or-borrowed pre-encoded application body into a full FIX frame.
   ///
@@ -708,9 +708,9 @@ public:
   /// \param envelope Optional `50/57` header overrides.
   /// \return Finalized outbound frame on success, otherwise an error status.
   auto SendEncodedApplication(const EncodedApplicationMessageRef& message,
-                               std::uint64_t timestamp_ns,
-                               SessionSendEnvelopeView envelope = {},
-                               codec::EncodedOutboundExtrasView extras = {}) -> base::Result<EncodedFrame>;
+                              std::uint64_t timestamp_ns,
+                              SessionSendEnvelopeView envelope = {},
+                              codec::EncodedOutboundExtrasView extras = {}) -> base::Result<EncodedFrame>;
 
   /// Begin a graceful Logout sequence.
   ///
@@ -817,6 +817,21 @@ private:
                                   std::uint32_t* reject_reason,
                                   std::string* text) const -> bool;
   auto EnsureInitialized() const -> base::Status;
+  auto HandleInboundDecodeFailure(const base::Status& decode_status, std::uint64_t timestamp_ns)
+    -> base::Result<ProtocolEvent>;
+  auto ConsumeExpectedInboundBeforeReject(const codec::DecodedMessageView& decoded,
+                                          SessionSnapshot snapshot_before,
+                                          std::uint64_t timestamp_ns) -> base::Status;
+  auto BuildPhaseViolationLogout(std::string text,
+                                 SessionSnapshot snapshot_before,
+                                 std::string_view msg_type,
+                                 std::uint64_t timestamp_ns) -> base::Result<ProtocolEvent>;
+  auto CommitInboundPersistence(const codec::DecodedMessageView& decoded, std::uint64_t timestamp_ns) -> base::Status;
+  auto ProcessInboundLogon(const codec::DecodedMessageView& decoded,
+                           SessionSnapshot snapshot_before,
+                           std::uint64_t timestamp_ns) -> base::Result<ProtocolEvent>;
+  auto ProcessInboundApplication(const codec::DecodedMessageView& decoded, std::uint64_t timestamp_ns)
+    -> base::Result<ProtocolEvent>;
   auto DrainDeferredGapFrames(std::uint64_t timestamp_ns, ProtocolEvent* event) -> base::Status;
 
   struct Impl;

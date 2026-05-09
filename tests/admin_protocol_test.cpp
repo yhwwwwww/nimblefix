@@ -2553,15 +2553,8 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
                                       "D|452=7|55=AAPL|");
     auto event = protocol.OnInbound(inbound, 10U);
     REQUIRE(event.ok());
-    REQUIRE(event.value().outbound_frames.size() == 1U);
-    REQUIRE(event.value().application_messages.empty());
-
-    auto decoded = nimble::codec::DecodeFixMessage(event.value().outbound_frames.front().bytes, dictionary.value());
-    REQUIRE(decoded.ok());
-    REQUIRE(decoded.value().header.msg_type == "3");
-    REQUIRE(decoded.value().message.view().get_int(kRefTagID).value() == kClOrdID);
-    REQUIRE(decoded.value().message.view().get_string(kRefMsgType).value() == "D");
-    REQUIRE(decoded.value().message.view().get_int(kRejectReason).value() == 1);
+    REQUIRE(event.value().outbound_frames.empty());
+    REQUIRE(event.value().application_messages.size() == 1U);
   }
 
   {
@@ -2765,15 +2758,8 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
 
     auto event = protocol.OnInbound(inbound.value(), 10U);
     REQUIRE(event.ok());
-    REQUIRE(event.value().outbound_frames.size() == 1U);
-    REQUIRE(event.value().application_messages.empty());
-
-    auto decoded = nimble::codec::DecodeFixMessage(event.value().outbound_frames.front().bytes, dictionary.value());
-    REQUIRE(decoded.ok());
-    REQUIRE(decoded.value().header.msg_type == "3");
-    REQUIRE(decoded.value().message.view().get_int(kRefTagID).value() == kClOrdID);
-    REQUIRE(decoded.value().message.view().get_string(kRefMsgType).value() == "D");
-    REQUIRE(decoded.value().message.view().get_int(kRejectReason).value() == 1);
+    REQUIRE(event.value().outbound_frames.empty());
+    REQUIRE(event.value().application_messages.size() == 1U);
   }
 
   {
@@ -2809,15 +2795,8 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
 
     auto event = protocol.OnInbound(inbound.value(), 10U);
     REQUIRE(event.ok());
-    REQUIRE(event.value().outbound_frames.size() == 1U);
-    REQUIRE(event.value().application_messages.empty());
-
-    auto decoded = nimble::codec::DecodeFixMessage(event.value().outbound_frames.front().bytes, dictionary.value());
-    REQUIRE(decoded.ok());
-    REQUIRE(decoded.value().header.msg_type == "3");
-    REQUIRE(decoded.value().message.view().get_int(kRefTagID).value() == kClOrdID);
-    REQUIRE(decoded.value().message.view().get_string(kRefMsgType).value() == "D");
-    REQUIRE(decoded.value().message.view().get_int(kRejectReason).value() == 1);
+    REQUIRE(event.value().outbound_frames.empty());
+    REQUIRE(event.value().application_messages.size() == 1U);
   }
 
   {
@@ -3950,7 +3929,7 @@ TEST_CASE("admin protocol validation policy controls malformed fields", "[admin-
   }
 
   const auto inbound = InboundApplicationFrame("35=D|34=2|49=BUY|56=SELL|52=20260402-12:00:00.000|11=ORD1|55="
-                                               "AAPL|54=X|60=20260402-12:00:00.000|40=1|");
+                                               "AAPL|54=BUY|60=20260402-12:00:00.000|40=1|");
 
   {
     auto policy = nimble::session::ValidationPolicy::Permissive();
@@ -3982,12 +3961,13 @@ TEST_CASE("admin protocol validation policy controls malformed fields", "[admin-
     REQUIRE(callback->warning_count == 1U);
     REQUIRE(callback->last_session_id == 6105U);
     REQUIRE(callback->last_tag == kSide);
-    REQUIRE(callback->last_value == "X");
+    REQUIRE(callback->last_value == "BUY");
     REQUIRE(callback->last_msg_type == "D");
   }
 }
 
-TEST_CASE("admin protocol validation policy controls enum validation", "[admin-protocol][validation-policy]")
+TEST_CASE("admin protocol no longer rejects application enum values via dictionary gate",
+          "[admin-protocol][validation-policy]")
 {
   auto dictionary = nimble::tests::LoadFix44DictionaryView();
   if (!dictionary.ok()) {
@@ -4007,7 +3987,7 @@ TEST_CASE("admin protocol validation policy controls enum validation", "[admin-p
 
     auto event = protocol.OnInbound(inbound, 10U);
     REQUIRE(event.ok());
-    RequireSessionReject(dictionary.value(), event.value(), kSide);
+    RequireAcceptedApplication(std::move(event).value());
   }
 
   {
@@ -4023,6 +4003,55 @@ TEST_CASE("admin protocol validation policy controls enum validation", "[admin-p
     REQUIRE(event.ok());
     RequireAcceptedApplication(std::move(event).value());
   }
+}
+
+TEST_CASE("admin protocol no longer rejects missing dictionary-required application fields",
+          "[admin-protocol][validation-policy]")
+{
+  auto dictionary = nimble::tests::LoadFix44DictionaryView();
+  if (!dictionary.ok()) {
+    SKIP("FIX44 artifact not available: " << dictionary.status().message());
+  }
+
+  const auto inbound = InboundApplicationFrame("35=D|34=2|49=BUY|56=SELL|52=20260402-12:00:00.000|55=AAPL|54=1|"
+                                               "60=20260402-12:00:00.000|40=1|");
+
+  {
+    auto policy = nimble::session::ValidationPolicy::Strict();
+    nimble::store::MemorySessionStore store;
+    nimble::session::AdminProtocol protocol(
+      MakeAcceptorProtocolConfig(6108U, dictionary.value(), policy), dictionary.value(), &store);
+    REQUIRE(protocol.OnTransportConnected(1U).ok());
+    REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
+
+    auto event = protocol.OnInbound(inbound, 10U);
+    REQUIRE(event.ok());
+    RequireAcceptedApplication(std::move(event).value());
+  }
+}
+
+TEST_CASE("admin protocol no longer applies hard-coded application semantic rejects",
+          "[admin-protocol][validation-policy]")
+{
+  auto dictionary = nimble::tests::LoadFix44DictionaryView();
+  if (!dictionary.ok()) {
+    SKIP("FIX44 artifact not available: " << dictionary.status().message());
+  }
+
+  const auto inbound = InboundApplicationFrame("35=D|34=2|49=BUY|56=SELL|52=20260402-12:00:00.000|11=ORD1|55=AAPL|54=1|"
+                                               "60=20260402-12:00:00.000|40=2|");
+
+  nimble::store::MemorySessionStore store;
+  nimble::session::AdminProtocol protocol(
+    MakeAcceptorProtocolConfig(6110U, dictionary.value(), nimble::session::ValidationPolicy::Strict()),
+    dictionary.value(),
+    &store);
+  REQUIRE(protocol.OnTransportConnected(1U).ok());
+  REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
+
+  auto event = protocol.OnInbound(inbound, 10U);
+  REQUIRE(event.ok());
+  RequireAcceptedApplication(std::move(event).value());
 }
 
 TEST_CASE("FIXT.1.1 logon includes DefaultApplVerID", "[fix50]")

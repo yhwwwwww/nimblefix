@@ -29,6 +29,9 @@ namespace {
 using namespace nimble::codec::tags;
 
 constexpr std::uint64_t kNanosPerSecond = 1'000'000'000ULL;
+constexpr std::array<std::uint32_t, 10> kFractionalNsScale = {
+  1U, 100'000'000U, 10'000'000U, 1'000'000U, 100'000U, 10'000U, 1'000U, 100U, 10U, 1U,
+};
 constexpr std::uint64_t kTestRequestGraceDivisor = 5U;
 constexpr std::uint32_t kSessionRejectInvalidTagNumber = 0U;
 constexpr std::uint32_t kSessionRejectRequiredTagMissing = 1U;
@@ -156,10 +159,7 @@ ParseFixUtcTimestampNs(std::string_view text) -> std::optional<std::uint64_t>
       }
       parsed_fraction = parsed_fraction * 10U + static_cast<unsigned>(ch - '0');
     }
-    for (std::size_t index = fractional.size(); index < 9U; ++index) {
-      parsed_fraction *= 10U;
-    }
-    fractional_ns = parsed_fraction;
+    fractional_ns = parsed_fraction * kFractionalNsScale[fractional.size()];
   }
 
   using namespace std::chrono;
@@ -304,94 +304,64 @@ ShouldRejectValidationIssue(const ValidationPolicy& policy,
                             std::string_view issue_value,
                             ValidationCallback* callback) -> bool
 {
+  const auto accept = [&] {
+    NotifyValidationWarning(session_id, issue, msg_type, callback);
+    return false;
+  };
+
   switch (issue.kind) {
     case codec::ValidationIssueKind::kUnknownField:
     case codec::ValidationIssueKind::kFieldNotAllowed:
       switch (policy.unknown_field_action) {
         case UnknownFieldAction::kIgnore:
-          NotifyValidationWarning(session_id, issue, msg_type, callback);
-          return false;
+          return accept();
         case UnknownFieldAction::kLogAndProcess:
           if (callback != nullptr && !callback->OnUnknownField(session_id, issue.tag, issue_value, msg_type)) {
             return true;
           }
-          NotifyValidationWarning(session_id, issue, msg_type, callback);
-          return false;
+          return accept();
         case UnknownFieldAction::kReject:
         default:
-          if (policy.reject_unknown_fields) {
-            return true;
-          }
-          NotifyValidationWarning(session_id, issue, msg_type, callback);
-          return false;
+          return policy.reject_unknown_fields ? true : accept();
       }
     case codec::ValidationIssueKind::kTagSpecifiedWithoutAValue:
-      if (policy.reject_tag_without_value) {
-        return true;
-      }
-      NotifyValidationWarning(session_id, issue, msg_type, callback);
-      return false;
+      return policy.reject_tag_without_value ? true : accept();
     case codec::ValidationIssueKind::kIncorrectDataFormatForValue:
       switch (policy.malformed_field_action) {
         case MalformedFieldAction::kIgnore:
-          NotifyValidationWarning(session_id, issue, msg_type, callback);
-          return false;
+          return accept();
         case MalformedFieldAction::kLog:
           if (callback != nullptr &&
               !callback->OnMalformedField(session_id, issue.tag, issue_value, msg_type, issue.text)) {
             return true;
           }
-          NotifyValidationWarning(session_id, issue, msg_type, callback);
-          return false;
+          return accept();
         case MalformedFieldAction::kReject:
         default:
-          if (policy.reject_incorrect_data_format) {
-            return true;
-          }
-          NotifyValidationWarning(session_id, issue, msg_type, callback);
-          return false;
+          return policy.reject_incorrect_data_format ? true : accept();
       }
     case codec::ValidationIssueKind::kTagSpecifiedOutOfRequiredOrder:
-      if (policy.reject_fields_out_of_order) {
-        return true;
-      }
-      NotifyValidationWarning(session_id, issue, msg_type, callback);
-      return false;
+      return policy.reject_fields_out_of_order ? true : accept();
     case codec::ValidationIssueKind::kDuplicateField:
-      if (policy.reject_duplicate_fields) {
-        return true;
-      }
-      NotifyValidationWarning(session_id, issue, msg_type, callback);
-      return false;
+      return policy.reject_duplicate_fields ? true : accept();
     case codec::ValidationIssueKind::kRepeatingGroupFieldsOutOfRequiredOrder:
-      if (policy.reject_fields_out_of_order) {
-        return true;
-      }
-      NotifyValidationWarning(session_id, issue, msg_type, callback);
-      return false;
+      return policy.reject_fields_out_of_order ? true : accept();
     case codec::ValidationIssueKind::kIncorrectNumInGroupCount:
-      if (policy.reject_invalid_group_structure) {
-        return true;
-      }
-      NotifyValidationWarning(session_id, issue, msg_type, callback);
-      return false;
+      return policy.reject_invalid_group_structure ? true : accept();
     case codec::ValidationIssueKind::kEnumValueNotAllowed:
       if (!policy.validate_enum_values) {
-        NotifyValidationWarning(session_id, issue, msg_type, callback);
-        return false;
+        return accept();
       }
       // Route enum violations through malformed_field_action when not kReject.
       switch (policy.malformed_field_action) {
         case MalformedFieldAction::kIgnore:
-          NotifyValidationWarning(session_id, issue, msg_type, callback);
-          return false;
+          return accept();
         case MalformedFieldAction::kLog:
           if (callback != nullptr &&
               !callback->OnMalformedField(session_id, issue.tag, issue_value, msg_type, issue.text)) {
             return true;
           }
-          NotifyValidationWarning(session_id, issue, msg_type, callback);
-          return false;
+          return accept();
         case MalformedFieldAction::kReject:
         default:
           return true;
@@ -580,8 +550,8 @@ ApplySessionSendEnvelope(codec::EncodeOptions* options, SessionSendEnvelopeView 
   if (options == nullptr) {
     return;
   }
-  options->sender_sub_id = std::string(envelope.sender_sub_id);
-  options->target_sub_id = std::string(envelope.target_sub_id);
+  options->sender_sub_id = envelope.sender_sub_id;
+  options->target_sub_id = envelope.target_sub_id;
 }
 
 auto
@@ -604,9 +574,9 @@ AdminPhaseViolationText(SessionState state, std::string_view msg_type) -> std::o
 
 auto
 EncodePreEncodedApplicationToBuffer(EncodedApplicationMessageView message,
-                                     const codec::EncodeOptions& options,
-                                     codec::EncodedOutboundExtrasView extras,
-                                     codec::EncodeBuffer* buffer) -> base::Status
+                                    const codec::EncodeOptions& options,
+                                    codec::EncodedOutboundExtrasView extras,
+                                    codec::EncodeBuffer* buffer) -> base::Status
 {
   if (buffer == nullptr) {
     return base::Status::InvalidArgument("encode buffer is null");
@@ -824,29 +794,11 @@ AdminProtocol::mutable_session() -> SessionCore&
   return *impl_->session_;
 }
 
-#define config_ impl_->config_
-#define dictionary_ (*impl_->dictionary_)
-#define store_ impl_->store_
-#define session_ (*impl_->session_)
-#define outstanding_test_request_id_ impl_->outstanding_test_request_id_
-#define logout_sent_ impl_->logout_sent_
-#define test_request_sent_ns_ impl_->test_request_sent_ns_
-#define logout_sent_ns_ impl_->logout_sent_ns_
-#define initialization_error_ impl_->initialization_error_
-#define encode_templates_ impl_->encode_templates_
-#define decode_table_ impl_->decode_table_
-#define inbound_decode_scratch_ impl_->inbound_decode_scratch_
-#define encode_buffer_ impl_->encode_buffer_
-#define replay_range_buffer_ impl_->replay_range_buffer_
-#define replay_frame_buffers_ impl_->replay_frame_buffers_
-#define replay_frame_buffer_cursor_ impl_->replay_frame_buffer_cursor_
-#define deferred_gap_frames_ impl_->deferred_gap_frames_
-
 auto
 AdminProtocol::EnsureInitialized() const -> base::Status
 {
-  if (initialization_error_.has_value()) {
-    return *initialization_error_;
+  if (impl_->initialization_error_.has_value()) {
+    return *impl_->initialization_error_;
   }
   return base::Status::Ok();
 }
@@ -857,18 +809,18 @@ AdminProtocol::ResolveEncodeTemplate(std::string_view msg_type) -> const codec::
   if (msg_type.empty()) {
     return nullptr;
   }
-  return encode_templates_.find(msg_type);
+  return impl_->encode_templates_.find(msg_type);
 }
 
 auto
 AdminProtocol::PersistRecoveryState() -> base::Status
 {
-  if (store_ == nullptr) {
+  if (impl_->store_ == nullptr) {
     return base::Status::Ok();
   }
 
-  const auto snapshot = session_.Snapshot();
-  return store_->SaveRecoveryState(store::SessionRecoveryState{
+  const auto snapshot = impl_->session_->Snapshot();
+  return impl_->store_->SaveRecoveryState(store::SessionRecoveryState{
     .session_id = snapshot.session_id,
     .next_in_seq = snapshot.next_in_seq,
     .next_out_seq = snapshot.next_out_seq,
@@ -881,38 +833,38 @@ AdminProtocol::PersistRecoveryState() -> base::Status
 auto
 AdminProtocol::RefreshSessionStateFromStore() -> base::Status
 {
-  if (store_ == nullptr) {
+  if (impl_->store_ == nullptr) {
     return base::Status::Ok();
   }
 
-  auto status = store_->Refresh();
+  auto status = impl_->store_->Refresh();
   if (!status.ok()) {
     return status;
   }
 
-  auto recovery = store_->LoadRecoveryState(session_.session_id());
+  auto recovery = impl_->store_->LoadRecoveryState(impl_->session_->session_id());
   if (!recovery.ok()) {
     if (recovery.status().code() == base::ErrorCode::kNotFound) {
-      return session_.RestoreSequenceState(1U, 1U);
+      return impl_->session_->RestoreSequenceState(1U, 1U);
     }
     return recovery.status();
   }
 
-  return session_.RestoreSequenceState(recovery.value().next_in_seq, recovery.value().next_out_seq);
+  return impl_->session_->RestoreSequenceState(recovery.value().next_in_seq, recovery.value().next_out_seq);
 }
 
 auto
 AdminProtocol::ResetSessionState(std::uint32_t next_in_seq, std::uint32_t next_out_seq, bool reset_store)
   -> base::Status
 {
-  if (reset_store && store_ != nullptr) {
-    auto status = store_->ResetSession(session_.session_id());
+  if (reset_store && impl_->store_ != nullptr) {
+    auto status = impl_->store_->ResetSession(impl_->session_->session_id());
     if (!status.ok()) {
       return status;
     }
   }
 
-  auto status = session_.RestoreSequenceState(next_in_seq, next_out_seq);
+  auto status = impl_->session_->RestoreSequenceState(next_in_seq, next_out_seq);
   if (!status.ok()) {
     return status;
   }
@@ -949,46 +901,47 @@ AdminProtocol::ValidateCompIds(const codec::DecodedMessageView& decoded,
                                bool* disconnect) const -> bool
 {
   const bool is_logon = decoded.header.msg_type == "A";
-  if (!config_.begin_string.empty() && decoded.header.begin_string != config_.begin_string) {
+  if (!impl_->config_.begin_string.empty() && decoded.header.begin_string != impl_->config_.begin_string) {
     *ref_tag_id = kBeginString;
     *reject_reason = kSessionRejectValueIncorrect;
     *text = "unexpected BeginString on inbound frame";
     *disconnect = true;
     return false;
   }
-  if (config_.validation_policy.enforce_comp_ids && !config_.target_comp_id.empty() &&
-      decoded.header.sender_comp_id != config_.target_comp_id) {
+  if (impl_->config_.validation_policy.enforce_comp_ids && !impl_->config_.target_comp_id.empty() &&
+      decoded.header.sender_comp_id != impl_->config_.target_comp_id) {
     *ref_tag_id = kSenderCompID;
     *reject_reason = kSessionRejectCompIdProblem;
     *text = "unexpected SenderCompID on inbound frame";
     *disconnect = true;
     return false;
   }
-  if (config_.validation_policy.enforce_comp_ids && !config_.sender_comp_id.empty() &&
-      decoded.header.target_comp_id != config_.sender_comp_id) {
+  if (impl_->config_.validation_policy.enforce_comp_ids && !impl_->config_.sender_comp_id.empty() &&
+      decoded.header.target_comp_id != impl_->config_.sender_comp_id) {
     *ref_tag_id = kTargetCompID;
     *reject_reason = kSessionRejectCompIdProblem;
     *text = "unexpected TargetCompID on inbound frame";
     *disconnect = true;
     return false;
   }
-  if (is_logon && config_.validation_policy.require_default_appl_ver_id_on_logon &&
-      config_.transport_profile.requires_default_appl_ver_id && decoded.header.default_appl_ver_id.empty()) {
+  if (is_logon && impl_->config_.validation_policy.require_default_appl_ver_id_on_logon &&
+      impl_->config_.transport_profile.requires_default_appl_ver_id && decoded.header.default_appl_ver_id.empty()) {
     *ref_tag_id = kDefaultApplVerID;
     *reject_reason = kSessionRejectRequiredTagMissing;
     *text = "FIXT.1.1 logon requires DefaultApplVerID";
     *disconnect = true;
     return false;
   }
-  if (is_logon && config_.validation_policy.require_default_appl_ver_id_on_logon &&
-      !config_.default_appl_ver_id.empty() && decoded.header.default_appl_ver_id != config_.default_appl_ver_id) {
+  if (is_logon && impl_->config_.validation_policy.require_default_appl_ver_id_on_logon &&
+      !impl_->config_.default_appl_ver_id.empty() &&
+      decoded.header.default_appl_ver_id != impl_->config_.default_appl_ver_id) {
     *ref_tag_id = kDefaultApplVerID;
     *reject_reason = kSessionRejectValueIncorrect;
     *text = "unexpected DefaultApplVerID on inbound frame";
     *disconnect = true;
     return false;
   }
-  if (!is_logon && config_.transport_profile.transport_and_app_version_decoupled &&
+  if (!is_logon && impl_->config_.transport_profile.transport_and_app_version_decoupled &&
       !decoded.header.appl_ver_id.empty()) {
     // Message-level ApplVerID(1128) selects the application version for mixed-version FIXT.1.1 sessions.
     // It is intentionally parsed and exposed, not enforced against the session
@@ -1000,7 +953,7 @@ AdminProtocol::ValidateCompIds(const codec::DecodedMessageView& decoded,
 auto
 AdminProtocol::ValidatePossDup(const codec::DecodedMessageView& decoded) const -> base::Status
 {
-  if (!config_.validation_policy.require_orig_sending_time_on_poss_dup) {
+  if (!impl_->config_.validation_policy.require_orig_sending_time_on_poss_dup) {
     return base::Status::Ok();
   }
   if (!decoded.header.poss_dup) {
@@ -1030,11 +983,11 @@ AdminProtocol::ValidateAdministrativeMessage(const codec::DecodedMessageView& de
     return false;
   }
 
-  auto* validation_callback = config_.validation_callback.get();
+  auto* validation_callback = impl_->config_.validation_callback.get();
   if (decoded.validation_issue.present() &&
-      ShouldRejectValidationIssue(config_.validation_policy,
+      ShouldRejectValidationIssue(impl_->config_.validation_policy,
                                   decoded.validation_issue,
-                                  config_.session.session_id,
+                                  impl_->config_.session.session_id,
                                   decoded.header.msg_type,
                                   FindFieldValue(view, decoded.validation_issue.tag).value_or(std::string_view{}),
                                   validation_callback)) {
@@ -1045,11 +998,12 @@ AdminProtocol::ValidateAdministrativeMessage(const codec::DecodedMessageView& de
     return false;
   }
 
-  auto enum_issue = FindEnumValidationIssue(config_.validation_policy, validation_callback, dictionary_, decoded);
+  auto enum_issue =
+    FindEnumValidationIssue(impl_->config_.validation_policy, validation_callback, *impl_->dictionary_, decoded);
   if (enum_issue.has_value() &&
-      ShouldRejectValidationIssue(config_.validation_policy,
+      ShouldRejectValidationIssue(impl_->config_.validation_policy,
                                   *enum_issue,
-                                  config_.session.session_id,
+                                  impl_->config_.session.session_id,
                                   decoded.header.msg_type,
                                   FindFieldValue(view, enum_issue->tag).value_or(std::string_view{}),
                                   validation_callback)) {
@@ -1157,9 +1111,9 @@ AdminProtocol::ValidateApplicationMessage(const codec::DecodedMessageView& decod
     return false;
   }
 
-  const auto* message_def = dictionary_.find_message(decoded.header.msg_type);
+  const auto* message_def = impl_->dictionary_->find_message(decoded.header.msg_type);
   if (message_def == nullptr) {
-    if (!config_.validation_policy.require_known_app_message_type) {
+    if (!impl_->config_.validation_policy.require_known_app_message_type) {
       return true;
     }
     *ref_tag_id = kMsgType;
@@ -1168,11 +1122,11 @@ AdminProtocol::ValidateApplicationMessage(const codec::DecodedMessageView& decod
     return false;
   }
 
-  auto* validation_callback = config_.validation_callback.get();
+  auto* validation_callback = impl_->config_.validation_callback.get();
   if (decoded.validation_issue.present() &&
-      ShouldRejectValidationIssue(config_.validation_policy,
+      ShouldRejectValidationIssue(impl_->config_.validation_policy,
                                   decoded.validation_issue,
-                                  config_.session.session_id,
+                                  impl_->config_.session.session_id,
                                   decoded.header.msg_type,
                                   FindFieldValue(view, decoded.validation_issue.tag).value_or(std::string_view{}),
                                   validation_callback)) {
@@ -1182,11 +1136,12 @@ AdminProtocol::ValidateApplicationMessage(const codec::DecodedMessageView& decod
     return false;
   }
 
-  auto enum_issue = FindEnumValidationIssue(config_.validation_policy, validation_callback, dictionary_, decoded);
+  auto enum_issue =
+    FindEnumValidationIssue(impl_->config_.validation_policy, validation_callback, *impl_->dictionary_, decoded);
   if (enum_issue.has_value() &&
-      ShouldRejectValidationIssue(config_.validation_policy,
+      ShouldRejectValidationIssue(impl_->config_.validation_policy,
                                   *enum_issue,
-                                  config_.session.session_id,
+                                  impl_->config_.session.session_id,
                                   decoded.header.msg_type,
                                   FindFieldValue(view, enum_issue->tag).value_or(std::string_view{}),
                                   validation_callback)) {
@@ -1196,11 +1151,11 @@ AdminProtocol::ValidateApplicationMessage(const codec::DecodedMessageView& decod
     return false;
   }
 
-  if (!config_.validation_policy.require_required_fields_on_app_messages) {
+  if (!impl_->config_.validation_policy.require_required_fields_on_app_messages) {
     return true;
   }
 
-  auto typed = message::TypedMessageView::FromParts(dictionary_, decoded.message.view(), message_def);
+  auto typed = message::TypedMessageView::FromParts(*impl_->dictionary_, decoded.message.view(), message_def);
 
   std::uint32_t missing_tag = 0U;
   auto status = typed.validate_required_fields(&missing_tag);
@@ -1217,8 +1172,8 @@ AdminProtocol::ValidateApplicationMessage(const codec::DecodedMessageView& decod
 auto
 AdminProtocol::ReserveReplayStorage(std::size_t frame_count) -> void
 {
-  replay_range_buffer_.records.reserve(frame_count);
-  for (auto& replay_frames : replay_frame_buffers_) {
+  impl_->replay_range_buffer_.records.reserve(frame_count);
+  for (auto& replay_frames : impl_->replay_frame_buffers_) {
     if (!replay_frames) {
       continue;
     }
@@ -1262,11 +1217,11 @@ AdminProtocol::EncodeFrame(message::MessageView message,
                            std::string_view orig_sending_time,
                            SessionSendEnvelopeView envelope) -> base::Result<EncodedFrame>
 {
-  encode_buffer_.clear();
+  impl_->encode_buffer_.clear();
 
   std::uint32_t seq_num = seq_override;
   if (allocate_seq) {
-    auto allocated = session_.AllocateOutboundSeq();
+    auto allocated = impl_->session_->AllocateOutboundSeq();
     if (!allocated.ok()) {
       return allocated.status();
     }
@@ -1274,13 +1229,13 @@ AdminProtocol::EncodeFrame(message::MessageView message,
   }
 
   codec::EncodeOptions options;
-  options.begin_string = config_.begin_string;
-  options.sender_comp_id = config_.sender_comp_id;
-  options.target_comp_id = config_.target_comp_id;
-  options.default_appl_ver_id = config_.default_appl_ver_id;
+  options.begin_string = impl_->config_.begin_string;
+  options.sender_comp_id = impl_->config_.sender_comp_id;
+  options.target_comp_id = impl_->config_.target_comp_id;
+  options.default_appl_ver_id = impl_->config_.default_appl_ver_id;
   options.appl_ver_id = envelope.appl_ver_id;
   options.orig_sending_time = orig_sending_time;
-  options.timestamp_resolution = config_.timestamp_resolution;
+  options.timestamp_resolution = impl_->config_.timestamp_resolution;
   options.msg_seq_num = seq_num;
   options.poss_dup = poss_dup;
   ApplySessionSendEnvelope(&options, envelope);
@@ -1288,12 +1243,12 @@ AdminProtocol::EncodeFrame(message::MessageView message,
   const auto msg_type = message.msg_type();
   auto encoded_status = [&]() -> base::Status {
     if (const auto* template_encoder = ResolveEncodeTemplate(msg_type); template_encoder != nullptr) {
-      auto templated = template_encoder->EncodeToBuffer(message, options, &encode_buffer_);
+      auto templated = template_encoder->EncodeToBuffer(message, options, &impl_->encode_buffer_);
       if (templated.ok()) {
         return templated;
       }
     }
-    return codec::EncodeFixMessageToBuffer(message, dictionary_, options, &encode_buffer_);
+    return codec::EncodeFixMessageToBuffer(message, *impl_->dictionary_, options, &impl_->encode_buffer_);
   }();
   if (!encoded_status.ok()) {
     return encoded_status;
@@ -1315,11 +1270,11 @@ AdminProtocol::EncodeFrame(EncodedApplicationMessageView message,
                            SessionSendEnvelopeView envelope,
                            codec::EncodedOutboundExtrasView extras) -> base::Result<EncodedFrame>
 {
-  encode_buffer_.clear();
+  impl_->encode_buffer_.clear();
 
   std::uint32_t seq_num = seq_override;
   if (allocate_seq) {
-    auto allocated = session_.AllocateOutboundSeq();
+    auto allocated = impl_->session_->AllocateOutboundSeq();
     if (!allocated.ok()) {
       return allocated.status();
     }
@@ -1327,13 +1282,13 @@ AdminProtocol::EncodeFrame(EncodedApplicationMessageView message,
   }
 
   codec::EncodeOptions options;
-  options.begin_string = config_.begin_string;
-  options.sender_comp_id = config_.sender_comp_id;
-  options.target_comp_id = config_.target_comp_id;
-  options.default_appl_ver_id = config_.default_appl_ver_id;
+  options.begin_string = impl_->config_.begin_string;
+  options.sender_comp_id = impl_->config_.sender_comp_id;
+  options.target_comp_id = impl_->config_.target_comp_id;
+  options.default_appl_ver_id = impl_->config_.default_appl_ver_id;
   options.appl_ver_id = envelope.appl_ver_id;
   options.orig_sending_time = orig_sending_time;
-  options.timestamp_resolution = config_.timestamp_resolution;
+  options.timestamp_resolution = impl_->config_.timestamp_resolution;
   options.msg_seq_num = seq_num;
   options.poss_dup = poss_dup;
   ApplySessionSendEnvelope(&options, envelope);
@@ -1341,7 +1296,7 @@ AdminProtocol::EncodeFrame(EncodedApplicationMessageView message,
   if (extras.empty()) {
     extras = message.extras;
   }
-  auto encoded_status = EncodePreEncodedApplicationToBuffer(message, options, extras, &encode_buffer_);
+  auto encoded_status = EncodePreEncodedApplicationToBuffer(message, options, extras, &impl_->encode_buffer_);
   if (!encoded_status.ok()) {
     return encoded_status;
   }
@@ -1359,16 +1314,16 @@ AdminProtocol::FinalizeEncodedFrame(std::string_view msg_type,
                                     std::uint32_t seq_num) -> base::Result<EncodedFrame>
 {
   EncodedFrame encoded_frame;
-  encoded_frame.bytes.assign(encode_buffer_.bytes());
+  encoded_frame.bytes.assign(impl_->encode_buffer_.bytes());
   encoded_frame.msg_type = std::string(msg_type);
   encoded_frame.admin = admin;
 
-  auto status = session_.RecordOutboundActivity(timestamp_ns);
+  auto status = impl_->session_->RecordOutboundActivity(timestamp_ns);
   if (!status.ok()) {
     return status;
   }
 
-  if (persist && store_ != nullptr) {
+  if (persist && impl_->store_ != nullptr) {
     std::uint16_t flags = extra_record_flags;
     if (admin) {
       flags |= MessageRecordFlagValue(store::MessageRecordFlags::kAdmin);
@@ -1379,11 +1334,11 @@ AdminProtocol::FinalizeEncodedFrame(std::string_view msg_type,
 
     const auto body_offset = ComputeBodyStartOffset(encoded_frame.bytes.view());
 
-    const auto snapshot = session_.Snapshot();
+    const auto snapshot = impl_->session_->Snapshot();
 
-    status = store_->SaveOutboundViewAndRecoveryState(
+    status = impl_->store_->SaveOutboundViewAndRecoveryState(
       store::MessageRecordView{
-        .session_id = session_.session_id(),
+        .session_id = impl_->session_->session_id(),
         .seq_num = seq_num,
         .timestamp_ns = timestamp_ns,
         .flags = flags,
@@ -1417,12 +1372,13 @@ AdminProtocol::BuildLogonFrame(std::uint64_t timestamp_ns, bool reset_seq_num) -
 {
   auto builder = BuildAdminMessage("A");
   builder.set_int(kEncryptMethod, 0)
-    .set_int(kHeartBtInt, static_cast<std::int64_t>(config_.heartbeat_interval_seconds));
+    .set_int(kHeartBtInt, static_cast<std::int64_t>(impl_->config_.heartbeat_interval_seconds));
   if (reset_seq_num) {
     builder.set_boolean(kResetSeqNumFlag, true);
   }
-  if (config_.send_next_expected_msg_seq_num && config_.transport_profile.supports_next_expected_msg_seq_num) {
-    const auto snapshot = session_.Snapshot();
+  if (impl_->config_.send_next_expected_msg_seq_num &&
+      impl_->config_.transport_profile.supports_next_expected_msg_seq_num) {
+    const auto snapshot = impl_->session_->Snapshot();
     builder.set_int(kNextExpectedMsgSeqNum, static_cast<std::int64_t>(snapshot.next_in_seq));
   }
   return EncodeFrame(std::move(builder).build(), true, timestamp_ns, true, false, true, 0U);
@@ -1545,11 +1501,11 @@ AdminProtocol::ReplayOutbound(std::uint32_t begin_seq,
   }
 
   frames->clear();
-  if (store_ == nullptr) {
+  if (impl_->store_ == nullptr) {
     return base::Status::Ok();
   }
 
-  const auto snapshot = session_.Snapshot();
+  const auto snapshot = impl_->session_->Snapshot();
   const auto bounded_end = (end_seq == 0U || end_seq >= snapshot.next_out_seq) ? snapshot.next_out_seq - 1U : end_seq;
   if (bounded_end < begin_seq || bounded_end == 0U) {
     return base::Status::Ok();
@@ -1557,7 +1513,8 @@ AdminProtocol::ReplayOutbound(std::uint32_t begin_seq,
 
   frames->reserve(static_cast<std::size_t>(bounded_end - begin_seq + 1U));
 
-  auto status = store_->LoadOutboundRangeViews(session_.session_id(), begin_seq, bounded_end, &replay_range_buffer_);
+  auto status = impl_->store_->LoadOutboundRangeViews(
+    impl_->session_->session_id(), begin_seq, bounded_end, &impl_->replay_range_buffer_);
   if (!status.ok()) {
     return status;
   }
@@ -1565,18 +1522,18 @@ AdminProtocol::ReplayOutbound(std::uint32_t begin_seq,
   // Pre-build replay options — only seq_num and orig_sending_time change per
   // message.
   codec::UtcTimestampBuffer ts_buf;
-  const auto sending_time = codec::CurrentUtcTimestamp(&ts_buf, config_.timestamp_resolution);
+  const auto sending_time = codec::CurrentUtcTimestamp(&ts_buf, impl_->config_.timestamp_resolution);
 
   codec::ReplayOptions replay_opts;
-  replay_opts.sender_comp_id = config_.sender_comp_id;
-  replay_opts.target_comp_id = config_.target_comp_id;
-  replay_opts.begin_string = config_.begin_string;
-  replay_opts.default_appl_ver_id = config_.default_appl_ver_id;
+  replay_opts.sender_comp_id = impl_->config_.sender_comp_id;
+  replay_opts.target_comp_id = impl_->config_.target_comp_id;
+  replay_opts.begin_string = impl_->config_.begin_string;
+  replay_opts.default_appl_ver_id = impl_->config_.default_appl_ver_id;
   replay_opts.sending_time = sending_time;
 
   std::uint32_t seq = begin_seq;
   std::size_t record_index = 0U;
-  const auto& records = replay_range_buffer_.records;
+  const auto& records = impl_->replay_range_buffer_.records;
   while (seq <= bounded_end) {
     const store::MessageRecordView* record = nullptr;
     if (record_index < records.size() && records[record_index].seq_num == seq) {
@@ -1634,14 +1591,14 @@ AdminProtocol::ReplayOutbound(std::uint32_t begin_seq,
 auto
 AdminProtocol::AcquireReplayFrameBuffer() -> std::shared_ptr<ProtocolFrameList>
 {
-  for (std::size_t attempt = 0U; attempt < replay_frame_buffers_.size(); ++attempt) {
-    const auto index = (replay_frame_buffer_cursor_ + attempt) % replay_frame_buffers_.size();
-    auto& replay_frames = replay_frame_buffers_[index];
+  for (std::size_t attempt = 0U; attempt < impl_->replay_frame_buffers_.size(); ++attempt) {
+    const auto index = (impl_->replay_frame_buffer_cursor_ + attempt) % impl_->replay_frame_buffers_.size();
+    auto& replay_frames = impl_->replay_frame_buffers_[index];
     if (!replay_frames || replay_frames.use_count() != 1U) {
       continue;
     }
 
-    replay_frame_buffer_cursor_ = index;
+    impl_->replay_frame_buffer_cursor_ = index;
     replay_frames->clear();
     return replay_frames;
   }
@@ -1659,14 +1616,14 @@ AdminProtocol::OnTransportConnected(std::uint64_t timestamp_ns) -> base::Result<
     return status;
   }
 
-  if (config_.refresh_on_logon) {
+  if (impl_->config_.refresh_on_logon) {
     status = RefreshSessionStateFromStore();
     if (!status.ok()) {
       return status;
     }
   }
 
-  status = session_.OnTransportConnected();
+  status = impl_->session_->OnTransportConnected();
   if (!status.ok()) {
     return status;
   }
@@ -1675,23 +1632,23 @@ AdminProtocol::OnTransportConnected(std::uint64_t timestamp_ns) -> base::Result<
     return status;
   }
 
-  if (!config_.session.is_initiator) {
+  if (!impl_->config_.session.is_initiator) {
     return event;
   }
 
-  if (config_.reset_seq_num_on_logon) {
+  if (impl_->config_.reset_seq_num_on_logon) {
     status = ResetSessionState(1U, 1U, true);
     if (!status.ok()) {
       return status;
     }
   }
 
-  status = session_.BeginLogon();
+  status = impl_->session_->BeginLogon();
   if (!status.ok()) {
     return status;
   }
 
-  auto logon = BuildLogonFrame(timestamp_ns, config_.reset_seq_num_on_logon);
+  auto logon = BuildLogonFrame(timestamp_ns, impl_->config_.reset_seq_num_on_logon);
   if (!logon.ok()) {
     return logon.status();
   }
@@ -1707,17 +1664,18 @@ AdminProtocol::OnTransportClosed() -> base::Status
     return status;
   }
 
-  const auto state_before_close = session_.state();
-  const bool reset_for_logout = config_.reset_seq_num_on_logout && state_before_close == SessionState::kAwaitingLogout;
+  const auto state_before_close = impl_->session_->state();
+  const bool reset_for_logout =
+    impl_->config_.reset_seq_num_on_logout && state_before_close == SessionState::kAwaitingLogout;
   const bool reset_for_disconnect =
-    config_.reset_seq_num_on_disconnect && state_before_close != SessionState::kAwaitingLogout;
+    impl_->config_.reset_seq_num_on_disconnect && state_before_close != SessionState::kAwaitingLogout;
 
-  outstanding_test_request_id_.clear();
-  logout_sent_ = false;
-  test_request_sent_ns_ = 0U;
-  logout_sent_ns_ = 0U;
-  deferred_gap_frames_.clear();
-  status = session_.OnTransportClosed();
+  impl_->outstanding_test_request_id_.clear();
+  impl_->logout_sent_ = false;
+  impl_->test_request_sent_ns_ = 0U;
+  impl_->logout_sent_ns_ = 0U;
+  impl_->deferred_gap_frames_.clear();
+  status = impl_->session_->OnTransportClosed();
   if (!status.ok()) {
     return status;
   }
@@ -1729,48 +1687,274 @@ AdminProtocol::OnTransportClosed() -> base::Status
 }
 
 auto
+AdminProtocol::ConsumeExpectedInboundBeforeReject(const codec::DecodedMessageView& decoded,
+                                                  SessionSnapshot snapshot_before,
+                                                  std::uint64_t timestamp_ns) -> base::Status
+{
+  const auto state = impl_->session_->state();
+  if (state != SessionState::kActive && state != SessionState::kAwaitingLogout &&
+      state != SessionState::kResendProcessing) {
+    return base::Status::Ok();
+  }
+  if (decoded.header.msg_seq_num != snapshot_before.next_in_seq) {
+    return base::Status::Ok();
+  }
+
+  auto observe_status = impl_->session_->ObserveInboundSeq(decoded.header.msg_seq_num);
+  if (!observe_status.ok()) {
+    return observe_status;
+  }
+  if (impl_->session_->ConsumeResendCompleted()) {
+    impl_->outstanding_test_request_id_.clear();
+  }
+
+  observe_status = impl_->session_->RecordInboundActivity(timestamp_ns);
+  if (!observe_status.ok()) {
+    return observe_status;
+  }
+  return PersistRecoveryState();
+}
+
+auto
+AdminProtocol::BuildPhaseViolationLogout(std::string text,
+                                         SessionSnapshot snapshot_before,
+                                         std::string_view msg_type,
+                                         std::uint64_t timestamp_ns) -> base::Result<ProtocolEvent>
+{
+  ProtocolEvent phase_event;
+  phase_event.errors.push_back(text);
+  if (!impl_->config_.session.is_initiator && snapshot_before.state == SessionState::kConnected && msg_type != "A") {
+    phase_event.disconnect = true;
+    return phase_event;
+  }
+  auto logout = BeginLogout(std::move(text), timestamp_ns);
+  if (!logout.ok()) {
+    return logout.status();
+  }
+  phase_event.outbound_frames.push_back(std::move(logout).value());
+  phase_event.disconnect = true;
+  return phase_event;
+}
+
+auto
+AdminProtocol::CommitInboundPersistence(const codec::DecodedMessageView& decoded, std::uint64_t timestamp_ns)
+  -> base::Status
+{
+  auto activity_status = impl_->session_->RecordInboundActivity(timestamp_ns);
+  if (!activity_status.ok()) {
+    return activity_status;
+  }
+
+  if (impl_->store_ != nullptr) {
+    std::uint16_t inbound_flags = 0U;
+    if (IsAdminMessage(decoded.header.msg_type)) {
+      inbound_flags |= MessageRecordFlagValue(store::MessageRecordFlags::kAdmin);
+    }
+    if (decoded.header.poss_dup) {
+      inbound_flags |= MessageRecordFlagValue(store::MessageRecordFlags::kPossDup);
+    }
+    const auto snapshot = impl_->session_->Snapshot();
+    return impl_->store_->SaveInboundViewAndRecoveryState(
+      store::MessageRecordView{
+        .session_id = impl_->session_->session_id(),
+        .seq_num = decoded.header.msg_seq_num,
+        .timestamp_ns = timestamp_ns,
+        .flags = inbound_flags,
+        .payload = decoded.raw,
+      },
+      store::SessionRecoveryState{
+        .session_id = snapshot.session_id,
+        .next_in_seq = snapshot.next_in_seq,
+        .next_out_seq = snapshot.next_out_seq,
+        .last_inbound_ns = snapshot.last_inbound_ns,
+        .last_outbound_ns = snapshot.last_outbound_ns,
+        .active = snapshot.state != SessionState::kDisconnected,
+      });
+  }
+
+  return PersistRecoveryState();
+}
+
+auto
+AdminProtocol::ProcessInboundLogon(const codec::DecodedMessageView& decoded,
+                                   SessionSnapshot snapshot_before,
+                                   std::uint64_t timestamp_ns) -> base::Result<ProtocolEvent>
+{
+  ProtocolEvent event;
+  const auto view = decoded.message.view();
+
+  const auto inbound_next_expected = view.get_int(kNextExpectedMsgSeqNum);
+  const bool inbound_reset = HasBoolean(view, kResetSeqNumFlag);
+  if (inbound_reset) {
+    const auto snapshot = impl_->session_->Snapshot();
+    const auto next_out = impl_->config_.session.is_initiator ? snapshot.next_out_seq : 1U;
+    auto status = ResetSessionState(decoded.header.msg_seq_num + 1U, next_out, false);
+    if (!status.ok()) {
+      return status;
+    }
+  }
+
+  const auto pre_logon_next_out = impl_->session_->Snapshot().next_out_seq;
+  if (inbound_next_expected.has_value() && inbound_next_expected.value() <= 0) {
+    auto logout = BeginLogout("received invalid NextExpectedMsgSeqNum on Logon", timestamp_ns);
+    if (!logout.ok()) {
+      return logout.status();
+    }
+    event.outbound_frames.push_back(std::move(logout).value());
+    event.disconnect = true;
+    return event;
+  }
+  if (inbound_next_expected.has_value() &&
+      static_cast<std::uint64_t>(inbound_next_expected.value()) > static_cast<std::uint64_t>(pre_logon_next_out)) {
+    auto logout = BeginLogout("counterparty requested unsent outbound sequence range", timestamp_ns);
+    if (!logout.ok()) {
+      return logout.status();
+    }
+    event.outbound_frames.push_back(std::move(logout).value());
+    event.disconnect = true;
+    return event;
+  }
+
+  if (!impl_->config_.session.is_initiator) {
+    auto response = BuildLogonFrame(timestamp_ns, impl_->config_.reset_seq_num_on_logon || inbound_reset);
+    if (!response.ok()) {
+      return response.status();
+    }
+    event.outbound_frames.push_back(std::move(response).value());
+  }
+
+  auto status = impl_->session_->OnLogonAccepted();
+  if (!status.ok()) {
+    return status;
+  }
+  status = PersistRecoveryState();
+  if (!status.ok()) {
+    return status;
+  }
+  event.session_active = true;
+  if (inbound_next_expected.has_value()) {
+    status = ReplayCounterpartyExpectedRange(
+      static_cast<std::uint32_t>(inbound_next_expected.value()), pre_logon_next_out, timestamp_ns, &event);
+    if (!status.ok()) {
+      return status;
+    }
+  }
+  return event;
+}
+
+auto
+AdminProtocol::ProcessInboundApplication(const codec::DecodedMessageView& decoded, std::uint64_t timestamp_ns)
+  -> base::Result<ProtocolEvent>
+{
+  ProtocolEvent event;
+
+  if (impl_->session_->state() != SessionState::kActive && impl_->session_->state() != SessionState::kAwaitingLogout &&
+      impl_->session_->state() != SessionState::kResendProcessing) {
+    return base::Status::InvalidArgument("application message received before session activation");
+  }
+
+  std::uint32_t ref_tag_id = 0U;
+  std::uint32_t reject_reason = 0U;
+  std::string reject_text;
+
+  const auto build_business_reject = [&](std::uint32_t business_reject_reason,
+                                         std::string text) -> base::Result<ProtocolEvent> {
+    ProtocolEvent business_reject_event;
+    auto builder = BuildAdminMessage("j");
+    builder.set_int(kRefSeqNum, static_cast<std::int64_t>(decoded.header.msg_seq_num));
+    builder.set_string(kRefMsgType, std::string(decoded.message.view().msg_type()));
+    builder.set_int(kBusinessRejectReasonTag, static_cast<std::int64_t>(business_reject_reason));
+    if (!text.empty()) {
+      builder.set_string(kText, std::move(text));
+    }
+    auto frame = EncodeFrame(std::move(builder).build(), true, timestamp_ns, true, false, true, 0U);
+    if (!frame.ok()) {
+      return frame.status();
+    }
+    business_reject_event.outbound_frames.push_back(std::move(frame).value());
+    if (business_reject_reason == kBusinessRejectUnsupportedMessageType ||
+        business_reject_reason == kBusinessRejectApplicationNotAvailable) {
+      business_reject_event.warnings.push_back(text);
+    } else {
+      business_reject_event.errors.push_back(text);
+    }
+    return business_reject_event;
+  };
+
+  if (const auto business_reject_reason =
+        ResolveApplicationBusinessRejectReason(impl_->config_, *impl_->dictionary_, decoded);
+      business_reject_reason.has_value()) {
+    const auto text = business_reject_reason.value() == kBusinessRejectApplicationNotAvailable
+                        ? std::string("application handling is not available for this session")
+                        : std::string("application message type is not supported for this session");
+    return build_business_reject(business_reject_reason.value(), text);
+  }
+  if (const auto conditional_business_reject = ResolveConditionalApplicationBusinessReject(decoded);
+      conditional_business_reject.has_value()) {
+    return build_business_reject(conditional_business_reject->reason, conditional_business_reject->text);
+  }
+  if (!ValidateApplicationMessage(decoded, &ref_tag_id, &reject_reason, &reject_text)) {
+    return RejectInbound(decoded, ref_tag_id, reject_reason, std::move(reject_text), timestamp_ns, false);
+  }
+
+  const auto view = decoded.message.view();
+  event.application_messages.push_back(message::MessageRef::Borrow(view));
+  if (HasBoolean(view, kPossResend)) {
+    event.poss_resend = true;
+  }
+  return event;
+}
+
+auto
+AdminProtocol::HandleInboundDecodeFailure(const base::Status& decode_status, std::uint64_t timestamp_ns)
+  -> base::Result<ProtocolEvent>
+{
+  if (!ShouldIgnoreInboundDecodeFailure(decode_status)) {
+    return decode_status;
+  }
+  auto status = EnsureInitialized();
+  if (!status.ok()) {
+    return status;
+  }
+  // Official session warning cases treat malformed inbound frames as ignored warnings.
+  status = impl_->session_->RecordInboundActivity(timestamp_ns);
+  if (!status.ok()) {
+    return status;
+  }
+  status = PersistRecoveryState();
+  if (!status.ok()) {
+    return status;
+  }
+  ProtocolEvent event;
+  if (decode_status.message().empty()) {
+    event.warnings.push_back("malformed inbound frame ignored");
+  } else {
+    event.warnings.push_back(std::string(decode_status.message()));
+  }
+  return event;
+}
+
+auto
 AdminProtocol::OnInbound(std::span<const std::byte> frame, std::uint64_t timestamp_ns) -> base::Result<ProtocolEvent>
 {
   auto decode_status = codec::DecodeFixMessageView(frame,
-                                                   dictionary_,
-                                                   decode_table_,
-                                                   &inbound_decode_scratch_,
+                                                   *impl_->dictionary_,
+                                                   impl_->decode_table_,
+                                                   &impl_->inbound_decode_scratch_,
                                                    codec::kFixSoh,
-                                                   config_.validation_policy.verify_checksum);
+                                                   impl_->config_.validation_policy.verify_checksum);
   if (!decode_status.ok()) {
-    if (!ShouldIgnoreInboundDecodeFailure(decode_status)) {
-      return decode_status;
-    }
-    auto status = EnsureInitialized();
-    if (!status.ok()) {
-      return status;
-    }
-    // Official session warning cases treat malformed inbound frames as ignored warnings.
-    status = session_.RecordInboundActivity(timestamp_ns);
-    if (!status.ok()) {
-      return status;
-    }
-    status = PersistRecoveryState();
-    if (!status.ok()) {
-      return status;
-    }
-    ProtocolEvent event;
-    if (decode_status.message().empty()) {
-      event.warnings.push_back("malformed inbound frame ignored");
-    } else {
-      event.warnings.push_back(std::string(decode_status.message()));
-    }
-    return event;
+    return HandleInboundDecodeFailure(decode_status, timestamp_ns);
   }
-  auto event = OnInbound(inbound_decode_scratch_, timestamp_ns);
+  auto event = OnInbound(impl_->inbound_decode_scratch_, timestamp_ns);
   if (!event.ok()) {
     return event.status();
   }
   if (event.value().application_messages.size() == 1U) {
     auto& message = event.value().application_messages.front();
     if (message.valid() && !message.owns_storage()) {
-      event.value().AdoptParsedApplicationMessage(std::move(inbound_decode_scratch_.message),
-                                                  inbound_decode_scratch_.raw);
+      event.value().AdoptParsedApplicationMessage(std::move(impl_->inbound_decode_scratch_.message),
+                                                  impl_->inbound_decode_scratch_.raw);
     }
   } else {
     event.value().MaterializeApplicationMessages();
@@ -1789,41 +1973,19 @@ AdminProtocol::OnInbound(std::vector<std::byte>&& frame, std::uint64_t timestamp
   const auto t0 = bench_profile::NowNs();
 
   auto decode_status = codec::DecodeFixMessageView(std::span<const std::byte>(frame.data(), frame.size()),
-                                                   dictionary_,
-                                                   decode_table_,
-                                                   &inbound_decode_scratch_,
+                                                   *impl_->dictionary_,
+                                                   impl_->decode_table_,
+                                                   &impl_->inbound_decode_scratch_,
                                                    codec::kFixSoh,
-                                                   config_.validation_policy.verify_checksum);
+                                                   impl_->config_.validation_policy.verify_checksum);
 
   const auto t1 = bench_profile::NowNs();
   prof.decode_ns += bench_profile::DiffNs(t0, t1);
 
   if (!decode_status.ok()) {
-    if (!ShouldIgnoreInboundDecodeFailure(decode_status)) {
-      return decode_status;
-    }
-    auto status = EnsureInitialized();
-    if (!status.ok()) {
-      return status;
-    }
-    // Official session warning cases treat malformed inbound frames as ignored warnings.
-    status = session_.RecordInboundActivity(timestamp_ns);
-    if (!status.ok()) {
-      return status;
-    }
-    status = PersistRecoveryState();
-    if (!status.ok()) {
-      return status;
-    }
-    ProtocolEvent event;
-    if (decode_status.message().empty()) {
-      event.warnings.push_back("malformed inbound frame ignored");
-    } else {
-      event.warnings.push_back(std::string(decode_status.message()));
-    }
-    return event;
+    return HandleInboundDecodeFailure(decode_status, timestamp_ns);
   }
-  auto event = OnInbound(inbound_decode_scratch_, timestamp_ns);
+  auto event = OnInbound(impl_->inbound_decode_scratch_, timestamp_ns);
 
   const auto t2 = bench_profile::NowNs();
 
@@ -1833,7 +1995,7 @@ AdminProtocol::OnInbound(std::vector<std::byte>&& frame, std::uint64_t timestamp
   if (event.value().application_messages.size() == 1U) {
     auto& message = event.value().application_messages.front();
     if (message.valid() && !message.owns_storage()) {
-      event.value().AdoptParsedApplicationMessage(std::move(inbound_decode_scratch_.message), std::move(frame));
+      event.value().AdoptParsedApplicationMessage(std::move(impl_->inbound_decode_scratch_.message), std::move(frame));
     }
   } else {
     event.value().MaterializeApplicationMessages();
@@ -1872,8 +2034,8 @@ AdminProtocol::OnInbound(const codec::DecodedMessageView& decoded, std::uint64_t
   const bool inbound_gap_fill = is_sequence_reset && HasBoolean(view, kGapFillFlag);
   const bool inbound_logon_reset = is_logon && HasBoolean(view, kResetSeqNumFlag);
   const bool acceptor_config_logon_reset =
-    is_logon && !config_.session.is_initiator && config_.reset_seq_num_on_logon && !inbound_logon_reset;
-  auto snapshot_before = session_.Snapshot();
+    is_logon && !impl_->config_.session.is_initiator && impl_->config_.reset_seq_num_on_logon && !inbound_logon_reset;
+  auto snapshot_before = impl_->session_->Snapshot();
 
   const auto i1 = bench_profile::NowNs();
   prof.session_snapshot_ns += bench_profile::DiffNs(i0, i1);
@@ -1882,30 +2044,6 @@ AdminProtocol::OnInbound(const codec::DecodedMessageView& decoded, std::uint64_t
   std::uint32_t reject_reason = 0U;
   std::string reject_text;
   bool disconnect = false;
-  const auto consume_expected_inbound_before_reject = [&]() -> base::Status {
-    const auto state = session_.state();
-    if (state != SessionState::kActive && state != SessionState::kAwaitingLogout &&
-        state != SessionState::kResendProcessing) {
-      return base::Status::Ok();
-    }
-    if (decoded.header.msg_seq_num != snapshot_before.next_in_seq) {
-      return base::Status::Ok();
-    }
-
-    auto observe_status = session_.ObserveInboundSeq(decoded.header.msg_seq_num);
-    if (!observe_status.ok()) {
-      return observe_status;
-    }
-    if (session_.ConsumeResendCompleted()) {
-      outstanding_test_request_id_.clear();
-    }
-
-    observe_status = session_.RecordInboundActivity(timestamp_ns);
-    if (!observe_status.ok()) {
-      return observe_status;
-    }
-    return PersistRecoveryState();
-  };
   const auto reject_then_logout =
     [&](std::uint32_t ref_tag_id, std::uint32_t reject_reason, std::string text) -> base::Result<ProtocolEvent> {
     auto reject_event = RejectInbound(decoded, ref_tag_id, reject_reason, text, timestamp_ns, false);
@@ -1921,18 +2059,18 @@ AdminProtocol::OnInbound(const codec::DecodedMessageView& decoded, std::uint64_t
     return reject_event;
   };
   if (!ValidateCompIds(decoded, &ref_tag_id, &reject_reason, &reject_text, &disconnect)) {
-    status = consume_expected_inbound_before_reject();
+    status = ConsumeExpectedInboundBeforeReject(decoded, snapshot_before, timestamp_ns);
     if (!status.ok()) {
       return status;
     }
     if (disconnect && reject_reason == kSessionRejectCompIdProblem) {
       if (snapshot_before.state == SessionState::kConnected && is_logon &&
           decoded.header.msg_seq_num == snapshot_before.next_in_seq) {
-        status = session_.ObserveInboundSeq(decoded.header.msg_seq_num);
+        status = impl_->session_->ObserveInboundSeq(decoded.header.msg_seq_num);
         if (!status.ok()) {
           return status;
         }
-        status = session_.RecordInboundActivity(timestamp_ns);
+        status = impl_->session_->RecordInboundActivity(timestamp_ns);
         if (!status.ok()) {
           return status;
         }
@@ -1948,7 +2086,7 @@ AdminProtocol::OnInbound(const codec::DecodedMessageView& decoded, std::uint64_t
 
   status = ValidatePossDup(decoded);
   if (!status.ok()) {
-    auto consume_status = consume_expected_inbound_before_reject();
+    auto consume_status = ConsumeExpectedInboundBeforeReject(decoded, snapshot_before, timestamp_ns);
     if (!consume_status.ok()) {
       return consume_status;
     }
@@ -1961,7 +2099,7 @@ AdminProtocol::OnInbound(const codec::DecodedMessageView& decoded, std::uint64_t
   }
   if (decoded.header.poss_dup && !decoded.header.orig_sending_time.empty() && !decoded.header.sending_time.empty() &&
       decoded.header.orig_sending_time > decoded.header.sending_time) {
-    auto consume_status = consume_expected_inbound_before_reject();
+    auto consume_status = ConsumeExpectedInboundBeforeReject(decoded, snapshot_before, timestamp_ns);
     if (!consume_status.ok()) {
       return consume_status;
     }
@@ -1972,8 +2110,9 @@ AdminProtocol::OnInbound(const codec::DecodedMessageView& decoded, std::uint64_t
                          timestamp_ns,
                          decoded.header.msg_type == "A");
   }
-  if (SendingTimeOutsideThreshold(decoded.header.sending_time, timestamp_ns, config_.sending_time_threshold_seconds)) {
-    auto consume_status = consume_expected_inbound_before_reject();
+  if (SendingTimeOutsideThreshold(
+        decoded.header.sending_time, timestamp_ns, impl_->config_.sending_time_threshold_seconds)) {
+    auto consume_status = ConsumeExpectedInboundBeforeReject(decoded, snapshot_before, timestamp_ns);
     if (!consume_status.ok()) {
       return consume_status;
     }
@@ -1984,7 +2123,7 @@ AdminProtocol::OnInbound(const codec::DecodedMessageView& decoded, std::uint64_t
   const auto i2 = bench_profile::NowNs();
   prof.validate_comp_ids_ns += bench_profile::DiffNs(i1, i2);
 
-  if (is_logon && config_.refresh_on_logon) {
+  if (is_logon && impl_->config_.refresh_on_logon) {
     status = RefreshSessionStateFromStore();
     if (!status.ok()) {
       return status;
@@ -1992,70 +2131,19 @@ AdminProtocol::OnInbound(const codec::DecodedMessageView& decoded, std::uint64_t
   }
 
   if (inbound_logon_reset || acceptor_config_logon_reset) {
-    const auto next_out_seq = config_.session.is_initiator ? snapshot_before.next_out_seq : 1U;
-    status = ResetSessionState(1U, next_out_seq, !config_.session.is_initiator);
+    const auto next_out_seq = impl_->config_.session.is_initiator ? snapshot_before.next_out_seq : 1U;
+    status = ResetSessionState(1U, next_out_seq, !impl_->config_.session.is_initiator);
     if (!status.ok()) {
       return status;
     }
-    snapshot_before = session_.Snapshot();
+    snapshot_before = impl_->session_->Snapshot();
   }
 
   const auto phase_violation_text = AdminPhaseViolationText(snapshot_before.state, msg_type);
-  const auto send_phase_violation_logout = [&](std::string text) -> base::Result<ProtocolEvent> {
-    ProtocolEvent phase_event;
-    phase_event.errors.push_back(text);
-    if (!config_.session.is_initiator && snapshot_before.state == SessionState::kConnected && msg_type != "A") {
-      phase_event.disconnect = true;
-      return phase_event;
-    }
-    auto logout = BeginLogout(std::move(text), timestamp_ns);
-    if (!logout.ok()) {
-      return logout.status();
-    }
-    phase_event.outbound_frames.push_back(std::move(logout).value());
-    phase_event.disconnect = true;
-    return phase_event;
-  };
 
-  const auto record_inbound_liveness = [&]() -> base::Status {
-    auto activity_status = session_.RecordInboundActivity(timestamp_ns);
-    if (!activity_status.ok()) {
-      return activity_status;
-    }
-
-    if (store_ != nullptr) {
-      std::uint16_t inbound_flags = 0U;
-      if (IsAdminMessage(decoded.header.msg_type)) {
-        inbound_flags |= MessageRecordFlagValue(store::MessageRecordFlags::kAdmin);
-      }
-      if (decoded.header.poss_dup) {
-        inbound_flags |= MessageRecordFlagValue(store::MessageRecordFlags::kPossDup);
-      }
-      const auto snapshot = session_.Snapshot();
-      return store_->SaveInboundViewAndRecoveryState(
-        store::MessageRecordView{
-          .session_id = session_.session_id(),
-          .seq_num = decoded.header.msg_seq_num,
-          .timestamp_ns = timestamp_ns,
-          .flags = inbound_flags,
-          .payload = decoded.raw,
-        },
-        store::SessionRecoveryState{
-          .session_id = snapshot.session_id,
-          .next_in_seq = snapshot.next_in_seq,
-          .next_out_seq = snapshot.next_out_seq,
-          .last_inbound_ns = snapshot.last_inbound_ns,
-          .last_outbound_ns = snapshot.last_outbound_ns,
-          .active = snapshot.state != SessionState::kDisconnected,
-        });
-    }
-
-    return PersistRecoveryState();
-  };
-
-  if (phase_violation_text.has_value() && !config_.session.is_initiator &&
+  if (phase_violation_text.has_value() && !impl_->config_.session.is_initiator &&
       snapshot_before.state == SessionState::kConnected && msg_type != "A") {
-    status = session_.RecordInboundActivity(timestamp_ns);
+    status = impl_->session_->RecordInboundActivity(timestamp_ns);
     if (!status.ok()) {
       return status;
     }
@@ -2099,16 +2187,16 @@ AdminProtocol::OnInbound(const codec::DecodedMessageView& decoded, std::uint64_t
       }
 
       if (new_seq_num > snapshot_before.next_in_seq) {
-        status = session_.AdvanceInboundExpectedSeq(new_seq_num);
+        status = impl_->session_->AdvanceInboundExpectedSeq(new_seq_num);
         if (!status.ok()) {
           return status;
         }
-        if (session_.ConsumeResendCompleted()) {
-          outstanding_test_request_id_.clear();
+        if (impl_->session_->ConsumeResendCompleted()) {
+          impl_->outstanding_test_request_id_.clear();
         }
       }
 
-      status = record_inbound_liveness();
+      status = CommitInboundPersistence(decoded, timestamp_ns);
       if (!status.ok()) {
         return status;
       }
@@ -2116,14 +2204,14 @@ AdminProtocol::OnInbound(const codec::DecodedMessageView& decoded, std::uint64_t
     }
 
     if (decoded.header.poss_dup) {
-      status = record_inbound_liveness();
+      status = CommitInboundPersistence(decoded, timestamp_ns);
       if (!status.ok()) {
         return status;
       }
       return event;
     }
-    if (!config_.validation_policy.reject_on_stale_msg_seq_num) {
-      status = record_inbound_liveness();
+    if (!impl_->config_.validation_policy.reject_on_stale_msg_seq_num) {
+      status = CommitInboundPersistence(decoded, timestamp_ns);
       if (!status.ok()) {
         return status;
       }
@@ -2155,16 +2243,16 @@ AdminProtocol::OnInbound(const codec::DecodedMessageView& decoded, std::uint64_t
     }
 
     if (new_seq_num > snapshot_before.next_in_seq) {
-      status = session_.AdvanceInboundExpectedSeq(new_seq_num);
+      status = impl_->session_->AdvanceInboundExpectedSeq(new_seq_num);
       if (!status.ok()) {
         return status;
       }
-      if (session_.ConsumeResendCompleted()) {
-        outstanding_test_request_id_.clear();
+      if (impl_->session_->ConsumeResendCompleted()) {
+        impl_->outstanding_test_request_id_.clear();
       }
     }
 
-    status = record_inbound_liveness();
+    status = CommitInboundPersistence(decoded, timestamp_ns);
     if (!status.ok()) {
       return status;
     }
@@ -2174,7 +2262,7 @@ AdminProtocol::OnInbound(const codec::DecodedMessageView& decoded, std::uint64_t
     }
 
     if (phase_violation_text.has_value()) {
-      return send_phase_violation_logout(*phase_violation_text);
+      return BuildPhaseViolationLogout(*phase_violation_text, snapshot_before, msg_type, timestamp_ns);
     }
 
     ref_tag_id = 0U;
@@ -2188,9 +2276,9 @@ AdminProtocol::OnInbound(const codec::DecodedMessageView& decoded, std::uint64_t
     return event;
   }
 
-  status = session_.ObserveInboundSeq(decoded.header.msg_seq_num);
-  if (session_.ConsumeResendCompleted()) {
-    outstanding_test_request_id_.clear();
+  status = impl_->session_->ObserveInboundSeq(decoded.header.msg_seq_num);
+  if (impl_->session_->ConsumeResendCompleted()) {
+    impl_->outstanding_test_request_id_.clear();
   }
 
   const auto i3 = bench_profile::NowNs();
@@ -2198,18 +2286,18 @@ AdminProtocol::OnInbound(const codec::DecodedMessageView& decoded, std::uint64_t
 
   if (!status.ok()) {
     if (decoded.header.msg_seq_num > snapshot_before.next_in_seq && phase_violation_text.has_value()) {
-      status = session_.RecordInboundActivity(timestamp_ns);
+      status = impl_->session_->RecordInboundActivity(timestamp_ns);
       if (!status.ok()) {
         return status;
       }
-      return send_phase_violation_logout(*phase_violation_text);
+      return BuildPhaseViolationLogout(*phase_violation_text, snapshot_before, msg_type, timestamp_ns);
     }
-    if (decoded.header.msg_seq_num > snapshot_before.next_in_seq && session_.pending_resend().has_value()) {
-      status = session_.RecordInboundActivity(timestamp_ns);
+    if (decoded.header.msg_seq_num > snapshot_before.next_in_seq && impl_->session_->pending_resend().has_value()) {
+      status = impl_->session_->RecordInboundActivity(timestamp_ns);
       if (!status.ok()) {
         return status;
       }
-      const auto& pending = *session_.pending_resend();
+      const auto& pending = *impl_->session_->pending_resend();
       auto resend = BuildResendRequestFrame(pending.begin_seq, pending.end_seq, timestamp_ns);
       if (!resend.ok()) {
         return resend.status();
@@ -2218,13 +2306,13 @@ AdminProtocol::OnInbound(const codec::DecodedMessageView& decoded, std::uint64_t
       // Queue the gap-triggering message for deferred replay after the gap
       // is fully filled.  The message has seq > expected and cannot be
       // processed yet, but will be lost if not saved here.
-      deferred_gap_frames_.emplace_back(decoded.raw.begin(), decoded.raw.end());
+      impl_->deferred_gap_frames_.emplace_back(decoded.raw.begin(), decoded.raw.end());
       return event;
     }
     return status;
   }
 
-  status = record_inbound_liveness();
+  status = CommitInboundPersistence(decoded, timestamp_ns);
   if (!status.ok()) {
     return status;
   }
@@ -2233,7 +2321,7 @@ AdminProtocol::OnInbound(const codec::DecodedMessageView& decoded, std::uint64_t
   prof.record_liveness_ns += bench_profile::DiffNs(i3, i4);
 
   if (phase_violation_text.has_value()) {
-    return send_phase_violation_logout(*phase_violation_text);
+    return BuildPhaseViolationLogout(*phase_violation_text, snapshot_before, msg_type, timestamp_ns);
   }
 
   ref_tag_id = 0U;
@@ -2245,70 +2333,14 @@ AdminProtocol::OnInbound(const codec::DecodedMessageView& decoded, std::uint64_t
   }
 
   if (msg_type == "A") {
-    const auto inbound_next_expected = view.get_int(kNextExpectedMsgSeqNum);
-    const bool inbound_reset = HasBoolean(view, kResetSeqNumFlag);
-    if (inbound_reset) {
-      const auto snapshot = session_.Snapshot();
-      const auto next_out = config_.session.is_initiator ? snapshot.next_out_seq : 1U;
-      status = ResetSessionState(decoded.header.msg_seq_num + 1U, next_out, false);
-      if (!status.ok()) {
-        return status;
-      }
-    }
-
-    const auto pre_logon_next_out = session_.Snapshot().next_out_seq;
-    if (inbound_next_expected.has_value() && inbound_next_expected.value() <= 0) {
-      auto logout = BeginLogout("received invalid NextExpectedMsgSeqNum on Logon", timestamp_ns);
-      if (!logout.ok()) {
-        return logout.status();
-      }
-      event.outbound_frames.push_back(std::move(logout).value());
-      event.disconnect = true;
-      return event;
-    }
-    if (inbound_next_expected.has_value() &&
-        static_cast<std::uint64_t>(inbound_next_expected.value()) > static_cast<std::uint64_t>(pre_logon_next_out)) {
-      auto logout = BeginLogout("counterparty requested unsent outbound sequence range", timestamp_ns);
-      if (!logout.ok()) {
-        return logout.status();
-      }
-      event.outbound_frames.push_back(std::move(logout).value());
-      event.disconnect = true;
-      return event;
-    }
-
-    if (!config_.session.is_initiator) {
-      auto response = BuildLogonFrame(timestamp_ns, config_.reset_seq_num_on_logon || inbound_reset);
-      if (!response.ok()) {
-        return response.status();
-      }
-      event.outbound_frames.push_back(std::move(response).value());
-    }
-
-    status = session_.OnLogonAccepted();
-    if (!status.ok()) {
-      return status;
-    }
-    status = PersistRecoveryState();
-    if (!status.ok()) {
-      return status;
-    }
-    event.session_active = true;
-    if (inbound_next_expected.has_value()) {
-      status = ReplayCounterpartyExpectedRange(
-        static_cast<std::uint32_t>(inbound_next_expected.value()), pre_logon_next_out, timestamp_ns, &event);
-      if (!status.ok()) {
-        return status;
-      }
-    }
-    return event;
+    return ProcessInboundLogon(decoded, snapshot_before, timestamp_ns);
   }
 
   if (msg_type == "0") {
     const auto test_request_id = GetStringView(view, kTestReqID);
-    if (!test_request_id.empty() && test_request_id == outstanding_test_request_id_) {
-      outstanding_test_request_id_.clear();
-      test_request_sent_ns_ = 0U;
+    if (!test_request_id.empty() && test_request_id == impl_->outstanding_test_request_id_) {
+      impl_->outstanding_test_request_id_.clear();
+      impl_->test_request_sent_ns_ = 0U;
     }
     return event;
   }
@@ -2349,7 +2381,7 @@ AdminProtocol::OnInbound(const codec::DecodedMessageView& decoded, std::uint64_t
       return RejectInbound(decoded, kNewSeqNo, reject_reason, std::move(reject_text), timestamp_ns, false);
     }
 
-    const auto snapshot = session_.Snapshot();
+    const auto snapshot = impl_->session_->Snapshot();
     if (new_seq_num < snapshot.next_in_seq) {
       return RejectInbound(decoded,
                            kNewSeqNo,
@@ -2359,7 +2391,7 @@ AdminProtocol::OnInbound(const codec::DecodedMessageView& decoded, std::uint64_t
                            false);
     }
 
-    status = session_.AdvanceInboundExpectedSeq(new_seq_num);
+    status = impl_->session_->AdvanceInboundExpectedSeq(new_seq_num);
     if (!status.ok()) {
       return status;
     }
@@ -2371,7 +2403,7 @@ AdminProtocol::OnInbound(const codec::DecodedMessageView& decoded, std::uint64_t
   }
 
   if (msg_type == "5") {
-    if (session_.state() != SessionState::kAwaitingLogout) {
+    if (impl_->session_->state() != SessionState::kAwaitingLogout) {
       auto response = BeginLogout({}, timestamp_ns);
       if (!response.ok()) {
         return response.status();
@@ -2388,60 +2420,10 @@ AdminProtocol::OnInbound(const codec::DecodedMessageView& decoded, std::uint64_t
     return event;
   }
 
-  if (session_.state() != SessionState::kActive && session_.state() != SessionState::kAwaitingLogout &&
-      session_.state() != SessionState::kResendProcessing) {
-    return base::Status::InvalidArgument("application message received before session activation");
-  }
-
-  ref_tag_id = 0U;
-  reject_reason = 0U;
-  reject_text.clear();
-  const auto build_business_reject = [&](std::uint32_t business_reject_reason,
-                                         std::string text) -> base::Result<ProtocolEvent> {
-    ProtocolEvent business_reject_event;
-    auto builder = BuildAdminMessage("j");
-    builder.set_int(kRefSeqNum, static_cast<std::int64_t>(decoded.header.msg_seq_num));
-    builder.set_string(kRefMsgType, std::string(decoded.message.view().msg_type()));
-    builder.set_int(kBusinessRejectReasonTag, static_cast<std::int64_t>(business_reject_reason));
-    if (!text.empty()) {
-      builder.set_string(kText, std::move(text));
-    }
-    auto frame = EncodeFrame(std::move(builder).build(), true, timestamp_ns, true, false, true, 0U);
-    if (!frame.ok()) {
-      return frame.status();
-    }
-    business_reject_event.outbound_frames.push_back(std::move(frame).value());
-    if (business_reject_reason == kBusinessRejectUnsupportedMessageType ||
-        business_reject_reason == kBusinessRejectApplicationNotAvailable) {
-      business_reject_event.warnings.push_back(text);
-    } else {
-      business_reject_event.errors.push_back(text);
-    }
-    return business_reject_event;
-  };
-  if (const auto business_reject_reason = ResolveApplicationBusinessRejectReason(config_, dictionary_, decoded);
-      business_reject_reason.has_value()) {
-    const auto text = business_reject_reason.value() == kBusinessRejectApplicationNotAvailable
-                        ? std::string("application handling is not available for this session")
-                        : std::string("application message type is not supported for this session");
-    return build_business_reject(business_reject_reason.value(), text);
-  }
-  if (const auto conditional_business_reject = ResolveConditionalApplicationBusinessReject(decoded);
-      conditional_business_reject.has_value()) {
-    return build_business_reject(conditional_business_reject->reason, conditional_business_reject->text);
-  }
-  if (!ValidateApplicationMessage(decoded, &ref_tag_id, &reject_reason, &reject_text)) {
-    return RejectInbound(decoded, ref_tag_id, reject_reason, std::move(reject_text), timestamp_ns, false);
-  }
-
+  auto app_result = ProcessInboundApplication(decoded, timestamp_ns);
   const auto i5 = bench_profile::NowNs();
   prof.validate_app_msg_ns += bench_profile::DiffNs(i4, i5);
-
-  event.application_messages.push_back(message::MessageRef::Borrow(decoded.message.view()));
-  if (HasBoolean(view, kPossResend)) {
-    event.poss_resend = true;
-  }
-  return event;
+  return app_result;
 }
 
 auto
@@ -2454,13 +2436,13 @@ AdminProtocol::OnTimer(std::uint64_t timestamp_ns) -> base::Result<ProtocolEvent
     return status;
   }
 
-  const auto snapshot = session_.Snapshot();
+  const auto snapshot = impl_->session_->Snapshot();
   if (snapshot.state != SessionState::kActive && snapshot.state != SessionState::kAwaitingLogout &&
       snapshot.state != SessionState::kResendProcessing && snapshot.state != SessionState::kPendingLogon) {
     return event;
   }
 
-  const auto interval_ns = std::max<std::uint64_t>(1U, config_.heartbeat_interval_seconds) * kNanosPerSecond;
+  const auto interval_ns = std::max<std::uint64_t>(1U, impl_->config_.heartbeat_interval_seconds) * kNanosPerSecond;
 
   // PendingLogon timeout: disconnect if logon handshake not completed within
   // 2*interval.
@@ -2474,8 +2456,8 @@ AdminProtocol::OnTimer(std::uint64_t timestamp_ns) -> base::Result<ProtocolEvent
 
   // Logout timeout: disconnect if counterparty does not complete logout within
   // one interval.
-  if (snapshot.state == SessionState::kAwaitingLogout && logout_sent_ns_ != 0U &&
-      timestamp_ns > logout_sent_ns_ + interval_ns) {
+  if (snapshot.state == SessionState::kAwaitingLogout && impl_->logout_sent_ns_ != 0U &&
+      timestamp_ns > impl_->logout_sent_ns_ + interval_ns) {
     event.warnings.push_back("Logout acknowledgement timeout");
     event.disconnect = true;
     return event;
@@ -2483,8 +2465,8 @@ AdminProtocol::OnTimer(std::uint64_t timestamp_ns) -> base::Result<ProtocolEvent
 
   // TestRequest timeout: disconnect if no response within one interval of
   // sending TestRequest.
-  if (!outstanding_test_request_id_.empty() && test_request_sent_ns_ != 0U &&
-      timestamp_ns > test_request_sent_ns_ + interval_ns) {
+  if (!impl_->outstanding_test_request_id_.empty() && impl_->test_request_sent_ns_ != 0U &&
+      timestamp_ns > impl_->test_request_sent_ns_ + interval_ns) {
     event.disconnect = true;
     return event;
   }
@@ -2494,10 +2476,10 @@ AdminProtocol::OnTimer(std::uint64_t timestamp_ns) -> base::Result<ProtocolEvent
   // Send TestRequest after HeartBtInt plus the official 20% grace period of
   // inbound silence (only if not already waiting for one).
   if (snapshot.last_inbound_ns != 0U && timestamp_ns > snapshot.last_inbound_ns + test_request_threshold_ns &&
-      outstanding_test_request_id_.empty()) {
-    outstanding_test_request_id_ = std::to_string(timestamp_ns);
-    test_request_sent_ns_ = timestamp_ns;
-    auto test_request = BuildTestRequestFrame(timestamp_ns, outstanding_test_request_id_);
+      impl_->outstanding_test_request_id_.empty()) {
+    impl_->outstanding_test_request_id_ = std::to_string(timestamp_ns);
+    impl_->test_request_sent_ns_ = timestamp_ns;
+    auto test_request = BuildTestRequestFrame(timestamp_ns, impl_->outstanding_test_request_id_);
     if (!test_request.ok()) {
       return test_request.status();
     }
@@ -2525,13 +2507,13 @@ AdminProtocol::NextTimerDeadline(std::uint64_t timestamp_ns) const -> std::optio
     return std::nullopt;
   }
 
-  const auto snapshot = session_.Snapshot();
+  const auto snapshot = impl_->session_->Snapshot();
   if (snapshot.state != SessionState::kActive && snapshot.state != SessionState::kAwaitingLogout &&
       snapshot.state != SessionState::kResendProcessing && snapshot.state != SessionState::kPendingLogon) {
     return std::nullopt;
   }
 
-  const auto interval_ns = std::max<std::uint64_t>(1U, config_.heartbeat_interval_seconds) * kNanosPerSecond;
+  const auto interval_ns = std::max<std::uint64_t>(1U, impl_->config_.heartbeat_interval_seconds) * kNanosPerSecond;
   std::optional<std::uint64_t> deadline;
   const auto update_deadline = [&](std::uint64_t candidate_ns) {
     if (!deadline.has_value() || candidate_ns < *deadline) {
@@ -2549,12 +2531,12 @@ AdminProtocol::NextTimerDeadline(std::uint64_t timestamp_ns) const -> std::optio
     return deadline;
   }
 
-  if (snapshot.state == SessionState::kAwaitingLogout && logout_sent_ns_ != 0U) {
-    update_deadline(logout_sent_ns_ + interval_ns);
+  if (snapshot.state == SessionState::kAwaitingLogout && impl_->logout_sent_ns_ != 0U) {
+    update_deadline(impl_->logout_sent_ns_ + interval_ns);
   }
 
-  if (!outstanding_test_request_id_.empty() && test_request_sent_ns_ != 0U) {
-    update_deadline(test_request_sent_ns_ + interval_ns);
+  if (!impl_->outstanding_test_request_id_.empty() && impl_->test_request_sent_ns_ != 0U) {
+    update_deadline(impl_->test_request_sent_ns_ + interval_ns);
   } else if (snapshot.last_inbound_ns != 0U) {
     const auto test_request_threshold_ns = interval_ns + (interval_ns / kTestRequestGraceDivisor);
     update_deadline(snapshot.last_inbound_ns + test_request_threshold_ns);
@@ -2577,15 +2559,7 @@ AdminProtocol::SendApplication(const message::Message& message,
                                std::uint64_t timestamp_ns,
                                SessionSendEnvelopeView envelope) -> base::Result<EncodedFrame>
 {
-  auto status = EnsureInitialized();
-  if (!status.ok()) {
-    return status;
-  }
-
-  if (session_.state() != SessionState::kActive && session_.state() != SessionState::kAwaitingLogout) {
-    return base::Status::InvalidArgument("cannot send application payload on an inactive FIX session");
-  }
-  return EncodeFrame(message, false, timestamp_ns, true, false, true, 0U, 0U, {}, envelope);
+  return SendApplication(message.view(), timestamp_ns, envelope);
 }
 
 auto
@@ -2598,7 +2572,7 @@ AdminProtocol::SendApplication(message::MessageView message,
     return status;
   }
 
-  if (session_.state() != SessionState::kActive && session_.state() != SessionState::kAwaitingLogout) {
+  if (impl_->session_->state() != SessionState::kActive && impl_->session_->state() != SessionState::kAwaitingLogout) {
     return base::Status::InvalidArgument("cannot send application payload on an inactive FIX session");
   }
   return EncodeFrame(message, false, timestamp_ns, true, false, true, 0U, 0U, {}, envelope);
@@ -2614,25 +2588,25 @@ AdminProtocol::SendApplication(const message::MessageRef& message,
 
 auto
 AdminProtocol::SendEncodedApplication(const EncodedApplicationMessage& message,
-                                       std::uint64_t timestamp_ns,
-                                       SessionSendEnvelopeView envelope,
-                                       codec::EncodedOutboundExtrasView extras) -> base::Result<EncodedFrame>
+                                      std::uint64_t timestamp_ns,
+                                      SessionSendEnvelopeView envelope,
+                                      codec::EncodedOutboundExtrasView extras) -> base::Result<EncodedFrame>
 {
   return SendEncodedApplication(message.view(), timestamp_ns, envelope, extras);
 }
 
 auto
 AdminProtocol::SendEncodedApplication(EncodedApplicationMessageView message,
-                                       std::uint64_t timestamp_ns,
-                                       SessionSendEnvelopeView envelope,
-                                       codec::EncodedOutboundExtrasView extras) -> base::Result<EncodedFrame>
+                                      std::uint64_t timestamp_ns,
+                                      SessionSendEnvelopeView envelope,
+                                      codec::EncodedOutboundExtrasView extras) -> base::Result<EncodedFrame>
 {
   auto status = EnsureInitialized();
   if (!status.ok()) {
     return status;
   }
 
-  if (session_.state() != SessionState::kActive && session_.state() != SessionState::kAwaitingLogout) {
+  if (impl_->session_->state() != SessionState::kActive && impl_->session_->state() != SessionState::kAwaitingLogout) {
     return base::Status::InvalidArgument("cannot send application payload on an inactive FIX session");
   }
   return EncodeFrame(message, false, timestamp_ns, true, false, true, 0U, 0U, {}, envelope, extras);
@@ -2640,9 +2614,9 @@ AdminProtocol::SendEncodedApplication(EncodedApplicationMessageView message,
 
 auto
 AdminProtocol::SendEncodedApplication(const EncodedApplicationMessageRef& message,
-                                       std::uint64_t timestamp_ns,
-                                       SessionSendEnvelopeView envelope,
-                                       codec::EncodedOutboundExtrasView extras) -> base::Result<EncodedFrame>
+                                      std::uint64_t timestamp_ns,
+                                      SessionSendEnvelopeView envelope,
+                                      codec::EncodedOutboundExtrasView extras) -> base::Result<EncodedFrame>
 {
   return SendEncodedApplication(message.view(), timestamp_ns, envelope, extras);
 }
@@ -2655,12 +2629,13 @@ AdminProtocol::BeginLogout(std::string text, std::uint64_t timestamp_ns) -> base
     return status;
   }
 
-  if (logout_sent_) {
+  if (impl_->logout_sent_) {
     return base::Status::InvalidArgument("logout already sent");
   }
 
-  if (session_.state() == SessionState::kActive || session_.state() == SessionState::kResendProcessing) {
-    status = session_.BeginLogout();
+  if (impl_->session_->state() == SessionState::kActive ||
+      impl_->session_->state() == SessionState::kResendProcessing) {
+    status = impl_->session_->BeginLogout();
     if (!status.ok()) {
       return status;
     }
@@ -2670,8 +2645,8 @@ AdminProtocol::BeginLogout(std::string text, std::uint64_t timestamp_ns) -> base
   if (!text.empty()) {
     builder.set_string(kText, std::move(text));
   }
-  logout_sent_ = true;
-  logout_sent_ns_ = timestamp_ns;
+  impl_->logout_sent_ = true;
+  impl_->logout_sent_ns_ = timestamp_ns;
   return EncodeFrame(std::move(builder).build(), true, timestamp_ns, true, false, true, 0U);
 }
 
@@ -2680,33 +2655,33 @@ AdminProtocol::DrainDeferredGapFrames(std::uint64_t timestamp_ns, ProtocolEvent*
 {
   // Iterative drain: we process deferred frames one at a time instead of
   // recursing through OnInbound(span, ...).  OnInbound(DecodedMessageView)
-  // may trigger further resends that re-queue into deferred_gap_frames_, but
-  // the loop guard (!session_.pending_resend()) prevents unbounded iteration:
+  // may trigger further resends that re-queue into impl_->deferred_gap_frames_, but
+  // the loop guard (!impl_->session_->pending_resend()) prevents unbounded iteration:
   // a new resend request stops the drain until the resend completes.
   std::size_t index = 0;
-  while (index < deferred_gap_frames_.size() && !session_.pending_resend().has_value()) {
+  while (index < impl_->deferred_gap_frames_.size() && !impl_->session_->pending_resend().has_value()) {
     // Move the frame out; leave a moved-from entry that we skip on cleanup.
-    auto frame = std::move(deferred_gap_frames_[index]);
+    auto frame = std::move(impl_->deferred_gap_frames_[index]);
     ++index;
 
     codec::DecodedMessageView decoded;
     auto decode_status = codec::DecodeFixMessageView(std::span<const std::byte>(frame),
-                                                     dictionary_,
-                                                     decode_table_,
+                                                     *impl_->dictionary_,
+                                                     impl_->decode_table_,
                                                      &decoded,
                                                      codec::kFixSoh,
-                                                     config_.validation_policy.verify_checksum);
+                                                     impl_->config_.validation_policy.verify_checksum);
     if (!decode_status.ok()) {
       continue; // corrupt frame — discard silently
     }
-    if (decoded.header.msg_seq_num < session_.Snapshot().next_in_seq) {
+    if (decoded.header.msg_seq_num < impl_->session_->Snapshot().next_in_seq) {
       continue; // already consumed via the normal resend stream
     }
 
     auto result = OnInbound(decoded, timestamp_ns);
     if (!result.ok()) {
-      deferred_gap_frames_.erase(deferred_gap_frames_.begin(),
-                                 deferred_gap_frames_.begin() + static_cast<std::ptrdiff_t>(index));
+      impl_->deferred_gap_frames_.erase(impl_->deferred_gap_frames_.begin(),
+                                        impl_->deferred_gap_frames_.begin() + static_cast<std::ptrdiff_t>(index));
       return result.status();
     }
     auto& inner = result.value();
@@ -2731,28 +2706,10 @@ AdminProtocol::DrainDeferredGapFrames(std::uint64_t timestamp_ns, ProtocolEvent*
   }
   // Bulk-erase all consumed entries in one O(n) pass.
   if (index > 0) {
-    deferred_gap_frames_.erase(deferred_gap_frames_.begin(),
-                               deferred_gap_frames_.begin() + static_cast<std::ptrdiff_t>(index));
+    impl_->deferred_gap_frames_.erase(impl_->deferred_gap_frames_.begin(),
+                                      impl_->deferred_gap_frames_.begin() + static_cast<std::ptrdiff_t>(index));
   }
   return base::Status::Ok();
 }
-
-#undef config_
-#undef dictionary_
-#undef store_
-#undef session_
-#undef outstanding_test_request_id_
-#undef logout_sent_
-#undef test_request_sent_ns_
-#undef logout_sent_ns_
-#undef initialization_error_
-#undef encode_templates_
-#undef decode_table_
-#undef inbound_decode_scratch_
-#undef encode_buffer_
-#undef replay_range_buffer_
-#undef replay_frame_buffers_
-#undef replay_frame_buffer_cursor_
-#undef deferred_gap_frames_
 
 } // namespace nimble::session
