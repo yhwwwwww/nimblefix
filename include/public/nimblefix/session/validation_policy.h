@@ -58,7 +58,13 @@ struct ValidationPolicy
   bool reject_on_stale_msg_seq_num{ true };
   // Reject application messages whose MsgType is absent from the loaded dictionary.
   bool require_known_app_message_type{ true };
-  // Enforce dictionary-declared required fields for known application messages.
+  // Legacy compatibility knob for dictionary-driven helper validation only.
+  // Runtime inbound acceptance now comes from Layer1 structural checks plus the
+  // active generated usage shape selected by the dispatcher/handler path, not
+  // from full-dictionary required-field gating.
+  //
+  // This flag is therefore auxiliary metadata for advanced tooling and config
+  // diffs, not the main runtime inbound acceptance switch.
   bool require_required_fields_on_app_messages{ true };
   // Reject tags not present in the dictionary for the active message definition.
   bool reject_unknown_fields{ true };
