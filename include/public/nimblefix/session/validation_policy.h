@@ -65,7 +65,7 @@ struct ValidationPolicy
   //
   // This flag is therefore auxiliary metadata for advanced tooling and config
   // diffs, not the main runtime inbound acceptance switch.
-  bool require_required_fields_on_app_messages{ true };
+  bool require_required_fields_on_app_messages{ false };
   // Reject tags not present in the dictionary for the active message definition.
   bool reject_unknown_fields{ true };
   // Reject duplicate scalar tags within the same message or group entry.
@@ -84,7 +84,7 @@ struct ValidationPolicy
   UnknownFieldAction unknown_field_action{ UnknownFieldAction::kReject };
   // Fine-grained malformed field handling (overrides reject_incorrect_data_format when not kReject).
   MalformedFieldAction malformed_field_action{ MalformedFieldAction::kReject };
-  // When false, skip dictionary-declared enum value validation during decode.
+  // When false, skip dictionary-declared enum value validation for session/admin messages.
   bool validate_enum_values{ true };
 
   [[nodiscard]] static auto Strict() -> ValidationPolicy
@@ -96,7 +96,7 @@ struct ValidationPolicy
       .require_orig_sending_time_on_poss_dup = true,
       .reject_on_stale_msg_seq_num = true,
       .require_known_app_message_type = true,
-      .require_required_fields_on_app_messages = true,
+      .require_required_fields_on_app_messages = false,
       .reject_unknown_fields = true,
       .reject_duplicate_fields = true,
       .reject_tag_without_value = true,
@@ -119,7 +119,7 @@ struct ValidationPolicy
       .require_orig_sending_time_on_poss_dup = false,
       .reject_on_stale_msg_seq_num = true,
       .require_known_app_message_type = false,
-      .require_required_fields_on_app_messages = true,
+      .require_required_fields_on_app_messages = false,
       .reject_unknown_fields = false,
       .reject_duplicate_fields = false,
       .reject_tag_without_value = true,

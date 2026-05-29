@@ -17,6 +17,7 @@ option(NIMBLEFIX_BUILD_FUZZERS "Build the standalone fuzz corpus runners" ON)
 option(NIMBLEFIX_BUILD_LIBFUZZER "Build the libFuzzer entrypoint" OFF)
 option(NIMBLEFIX_ENABLE_LIBURING "Enable io_uring when liburing headers and library are available" ON)
 option(NIMBLEFIX_ENABLE_TLS "Enable optional TLS support via OpenSSL" OFF)
+option(NIMBLEFIX_ENABLE_BENCH_PROFILE "Enable benchmark-only inbound phase profiling in the session hot path" OFF)
 
 include(CTest)
 include(GNUInstallDirs)
@@ -124,6 +125,10 @@ target_link_libraries(nimblefix PUBLIC Threads::Threads)
 if(NIMBLEFIX_ENABLE_TLS)
     target_compile_definitions(nimblefix PUBLIC NIMBLEFIX_ENABLE_TLS)
     target_link_libraries(nimblefix PUBLIC OpenSSL::SSL OpenSSL::Crypto)
+endif()
+
+if(NIMBLEFIX_ENABLE_BENCH_PROFILE)
+    target_compile_definitions(nimblefix PRIVATE NIMBLEFIX_ENABLE_BENCH_PROFILE)
 endif()
 
 if(NIMBLEFIX_USE_LIBURING)

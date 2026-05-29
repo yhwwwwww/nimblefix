@@ -8,7 +8,6 @@
 #include <iostream>
 #include <memory>
 #include <new>
-#include <optional>
 
 #include "inbound_profile.h"
 #include <string>
@@ -25,7 +24,6 @@
 #endif
 
 #include "fix44_api.h"
-#include "nimblefix/advanced/message_builder.h"
 #include "nimblefix/codec/compiled_decoder.h"
 #include "nimblefix/codec/fast_int_format.h"
 #include "nimblefix/codec/fix_codec.h"
@@ -74,28 +72,6 @@ LoadDictionary(const std::filesystem::path& artifact_path, std::span<const std::
     return profile.status();
   }
   return nimble::profile::NormalizedDictionaryView::FromProfile(std::move(profile).value());
-}
-
-auto
-PopulateOverlayFallbackBuilder(nimble::message::MessageBuilder& builder,
-                               const Fix44BusinessOrder& order,
-                               std::optional<std::string_view> venue_order_type = std::nullopt) -> void
-{
-  builder.set(35U, "D")
-    .set(11U, order.cl_ord_id)
-    .set(55U, order.symbol)
-    .set(54U, order.side)
-    .set(60U, order.transact_time.text)
-    .set(38U, order.order_qty)
-    .set(40U, order.ord_type);
-  if (order.price.has_value()) {
-    builder.set(44U, order.price.value());
-  }
-  if (venue_order_type.has_value()) {
-    builder.set(5001U, venue_order_type.value());
-  }
-  auto party = builder.add_group_entry(453U);
-  party.set(448U, order.party_id).set(447U, order.party_id_source).set(452U, order.party_role);
 }
 
 class BenchmarkCommandSink final : public nimble::session::SessionCommandSink
@@ -257,27 +233,6 @@ BuildSampleMessage(bool include_price = true) -> nimble::message::Message
 }
 
 auto
-BuildOverlayBenchmarkMessage(const Fix44BusinessOrder& order, std::string_view venue_order_type)
-  -> nimble::message::Message
-{
-  nimble::message::MessageBuilder builder{ "D" };
-  builder.reserve_fields(order.price.has_value() ? 8U : 7U).reserve_groups(1U).reserve_group_entries(453U, 1U);
-  PopulateOverlayFallbackBuilder(builder, order, venue_order_type);
-  return std::move(builder).build();
-}
-
-auto
-BuildSessionBenchmarkMessage(const nimble::profile::NormalizedDictionaryView& dictionary,
-                             const Fix44BusinessOrder& order) -> nimble::message::Message
-{
-  if (dictionary.find_field(5001U) != nullptr) {
-    // Runtime overlays can add venue-specific tags that the checked-in FIX44 generated header does not know about.
-    return BuildOverlayBenchmarkMessage(order, "L");
-  }
-  return BuildFix44MessageFromBusinessOrder(order);
-}
-
-auto
 GeneratedSide(char value) -> nimble::generated::profile_4400::Side
 {
   switch (value) {
@@ -392,6 +347,28 @@ BuildFix44OrderAckFromNewOrder(nimble::message::MessageView order, std::uint32_t
   if (auto symbol = inbound.value().symbol(); symbol.has_value()) {
     ack.symbol(symbol.value());
   }
+  return ack.ToMessage();
+}
+
+auto
+BuildFix44OrderAckFromBusinessOrder(const Fix44BusinessOrder& order, std::uint32_t execution_id)
+  -> nimble::base::Result<nimble::message::Message>
+{
+  const auto order_id = std::string("ORDER-") + std::to_string(execution_id);
+  const auto exec_id = std::string("EXEC-") + std::to_string(execution_id);
+
+  fix44::ExecutionReportBuilder ack;
+  ack.order_id(order_id)
+    .cl_ord_id(order.cl_ord_id)
+    .exec_id(exec_id)
+    .exec_type(fix44::ExecType::New)
+    .ord_status(fix44::OrdStatus::New)
+    .side(GeneratedSide(order.side))
+    .order_qty(order.order_qty)
+    .leaves_qty(order.order_qty)
+    .cum_qty(0.0)
+    .avg_px(0.0)
+    .symbol(order.symbol);
   return ack.ToMessage();
 }
 
@@ -1043,26 +1020,37 @@ RunSessionBenchmark(const nimble::profile::NormalizedDictionaryView& dictionary,
     return status;
   }
 
-  const auto bench_message = BuildSessionBenchmarkMessage(dictionary, BuildFix44BusinessOrder());
+  const auto business_order = BuildFix44BusinessOrder();
   std::vector<std::vector<std::byte>> inbound_frames;
   inbound_frames.reserve(iterations);
   for (std::uint32_t index = 0; index < iterations; ++index) {
-    auto frame = BuildFrame(bench_message, dictionary, begin_string, "BUY", "SELL", default_appl_ver_id, index + 2U);
+    auto bench_message = BuildFix44OrderAckFromBusinessOrder(business_order, index + 1U);
+    if (!bench_message.ok()) {
+      return bench_message.status();
+    }
+    auto frame =
+      BuildFrame(bench_message.value(), dictionary, begin_string, "SELL", "BUY", default_appl_ver_id, index + 2U);
     if (!frame.ok()) {
       return frame.status();
     }
     inbound_frames.push_back(std::move(frame).value());
   }
-  acceptor_store.ReserveAdditionalSessionStorage(421U, inbound_frames.size(), 0U, TotalFrameBytes(inbound_frames));
+  initiator_store.ReserveAdditionalSessionStorage(241U, inbound_frames.size(), 0U, TotalFrameBytes(inbound_frames));
 
   BenchmarkResult result;
   result.samples_ns.reserve(iterations);
   result.work_label = "messages";
 
   BenchmarkMeasurement measurement;
-  for (auto& frame : inbound_frames) {
+  nimble::codec::DecodedMessageView decoded;
+  for (const auto& frame : inbound_frames) {
     const auto started = std::chrono::steady_clock::now();
-    auto event = acceptor.OnInbound(std::move(frame), NowNs());
+    auto decode_status =
+      nimble::codec::DecodeFixMessageView(std::span<const std::byte>(frame.data(), frame.size()), dictionary, &decoded);
+    if (!decode_status.ok()) {
+      return decode_status;
+    }
+    auto event = initiator.OnInbound(decoded, NowNs());
     const auto finished = std::chrono::steady_clock::now();
     if (!event.ok()) {
       return event.status();

@@ -6,13 +6,15 @@
 
 namespace nimble::bench_profile {
 
-inline auto NowNs() -> std::uint64_t
+inline auto
+NowNs() -> std::uint64_t
 {
   return static_cast<std::uint64_t>(
-    std::chrono::steady_clock::now().time_since_epoch().count());
+    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
 }
 
-inline auto DiffNs(std::uint64_t start, std::uint64_t end) -> std::uint64_t
+inline auto
+DiffNs(std::uint64_t start, std::uint64_t end) -> std::uint64_t
 {
   return end - start;
 }
@@ -73,7 +75,8 @@ struct InboundProfile
   }
 };
 
-inline auto GetInboundProfile() -> InboundProfile&
+inline auto
+GetInboundProfile() -> InboundProfile&
 {
   static InboundProfile instance;
   return instance;

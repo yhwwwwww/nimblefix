@@ -10,6 +10,12 @@ option("nimblefix_enable_tls")
     set_description("Enable optional TLS support via OpenSSL")
 option_end()
 
+option("nimblefix_enable_bench_profile")
+    set_default(false)
+    set_showmenu(true)
+    set_description("Enable benchmark-only inbound phase profiling in the session hot path")
+option_end()
+
 if has_config("nimblefix_enable_tls") then
     add_requires("openssl")
 end
@@ -265,6 +271,9 @@ target("nimblefix")
     if has_config("nimblefix_enable_tls") then
         add_packages("openssl", {public = true})
         add_defines("NIMBLEFIX_ENABLE_TLS", {public = true})
+    end
+    if has_config("nimblefix_enable_bench_profile") then
+        add_defines("NIMBLEFIX_ENABLE_BENCH_PROFILE")
     end
     add_files("src/profile/*.cpp", "src/runtime/*.cpp", "src/session/*.cpp", "src/store/*.cpp", "src/message/*.cpp", "src/codec/*.cpp", "src/transport/*.cpp", "src/tools/*.cpp", "src/tools/msgdump/*.cpp")
     if os.isfile("/usr/include/liburing.h") or os.isfile("/usr/local/include/liburing.h") then

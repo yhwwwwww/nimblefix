@@ -33,6 +33,8 @@ xmake build nimblefix-bench
 xmake build nimblefix-quickfix-cpp-bench
 ```
 
+Inbound phase profiling is compile-time off by default because it inserts clock probes into the session hot path. Enable it only for diagnosis with `xmake f -m release --ccache=n --nimblefix_enable_bench_profile=true -y` or CMake `-DNIMBLEFIX_ENABLE_BENCH_PROFILE=ON`; when enabled, `nimblefix-bench` prints the extra inbound breakdown.
+
 Important environment notes:
 
 - `bench.sh` defaults `NIMBLEFIX_XMAKE_CCACHE=n`. This is intentional: Linux xmake builds of the large QuickFIX targets can hit reproducible `.build_cache/... -> .objs/... file busy` failures when compiler cache is enabled.
@@ -61,7 +63,7 @@ flowchart LR
 	OM["START outbound:<br/>before session.send&lt;NewOrderSingle&gt;(populate)"] -->|outbound| OE["END outbound:<br/>SendEncodedApplication returns (session framing + seq alloc + store)"]
 	WF["wire frame bytes"] -->|peek| PH["END peek:<br/>session header view"]
 	WF -->|parse| MV["END parse:<br/>decoded MessageView + validation"]
-	WF["START peek, parse, inbound:<br/>wire frame bytes"] -->|inbound| PE["END inbound:<br/>inbound ProtocolEvent"]
+	IF["START inbound:<br/>ExecutionReport bytes to initiator"] -->|inbound| PE["END inbound:<br/>initiator ProtocolEvent"]
 	RR["START replay:<br/>ResendRequest frame"] -->|replay| RF["END replay:<br/>ProtocolEvent outbound_frames"]
 
 	LS["START loopback:<br/>live initiator submits NewOrderSingle"] -->|session-outbound| LO["END session-outbound / START transport-send:<br/>encoded outbound order frame"] -->|transport-send| TX["END transport-send:<br/>bytes written to TCP socket"] --> AC["acceptor runtime handles order<br/>and sends ExecutionReport"] -->|transport-recv| RX["END transport-recv / START inbound:<br/>ack frame received by initiator"] -->|inbound| LE["END inbound and loopback:<br/>ExecutionReport ack processed"]
@@ -74,8 +76,8 @@ flowchart LR
 flowchart LR
 	BO["START quickfix-encode:<br/>neutral business order fixture"] -->|quickfix-encode| QB["END quickfix-encode:<br/>caller-owned buffer filled (buffer-reuse serializer)"]
 	QO["START quickfix-outbound:<br/>before building order from business object"] -->|quickfix-outbound| QOE["END quickfix-outbound:<br/>Session::send returns (message build + seq alloc + header fill + serialize + store + responder)"]
-	QS["START quickfix-inbound, quickfix-parse:<br/>fresh serialized FIX string"] -->|quickfix-parse| QP["END quickfix-parse:<br/>extracted neutral business order view"]
-	QS -->|quickfix-inbound| QI["END quickfix-inbound:<br/>acceptor Session::next returns"]
+	QS["START quickfix-parse:<br/>fresh serialized FIX string"] -->|quickfix-parse| QP["END quickfix-parse:<br/>extracted neutral business order view"]
+	QIFrame["START quickfix-inbound:<br/>ExecutionReport string to initiator"] -->|quickfix-inbound| QI["END quickfix-inbound:<br/>initiator Session::next returns"]
 	QRR["START quickfix-replay:<br/>ResendRequest string"] -->|quickfix-replay| QR["END quickfix-replay:<br/>Session::next returns; responder frames counted"]
 
 	QLS["START quickfix-loopback:<br/>ThreadedSocketInitiator sends order"] --> QTX["QuickFIX initiator socket send"] --> QAC["ThreadedSocketAcceptor<br/>and QuickFIX session stack"] --> QACK["ExecutionReport generated<br/>and sent back"] --> QLE["END quickfix-loopback:<br/>initiator-side app sees ack"]
@@ -92,7 +94,7 @@ Both engines pin `SendingTime` to a fixture timestamp so the timed regions measu
 |--------|------------------|----------------|------------------|
 | `encode` | immediately before constructing `NewOrderSingleBuilder` and populating fields | after `EncodeFullFrame` writes the complete wire-ready FIX frame into a reused `EncodeBuffer` | message builder construction, field population, body encode (`EncodeBody`), full frame encode (BeginString, BodyLength, MsgType, MsgSeqNum, SenderCompID, TargetCompID, SendingTime, body bytes, Checksum); pinned timestamp, reused buffer — no session state, no sequence allocation, no store |
 | `outbound` | immediately before `session.send<NewOrderSingle>(populate_lambda)` | when `send()` returns after inline processing through `AdminProtocol::SendEncodedApplication` | populate lambda execution, message body encode, session-layer sequence allocation, full frame encode with envelope, store persistence write |
-| `inbound` | immediately before `acceptor.OnInbound(std::move(frame), NowNs())` | when `ProtocolEvent` returns | full inbound decode, sequence validation, admin/session handling, store write, app-message extraction |
+| `inbound` | immediately before decoding a prebuilt `ExecutionReport` frame into a reusable `DecodedMessageView` | when `initiator.OnInbound(decoded, NowNs())` returns | initiator-side live-style inbound decode, sequence validation, session handling, store write, and borrowed app-message extraction |
 | `parse` | immediately before `DecodeFixMessageView(sample_frame)` | when decoded `MessageView` + validation are available | full wire decode, validation, group handling |
 | `replay` | immediately before `acceptor.OnInbound(std::move(resend_request), NowNs())` | when `ProtocolEvent.outbound_frames` returns | ResendRequest handling, store-backed replay generation for `replay_span` messages |
 | `loopback` | immediately before the live initiator submits the `NewOrderSingle` | when the initiator receives the `ExecutionReport` ack | full TCP round-trip, both runtimes, both protocol stacks |
@@ -104,7 +106,7 @@ Both engines pin `SendingTime` to a fixture timestamp so the timed regions measu
 |--------|------------------|----------------|------------------|
 | `quickfix-encode` | immediately before `BuildOrderFromBusinessObject(...)` | after `order.toString(buffer)` fills the caller-owned buffer | QuickFIX object construction plus serialization with a reused output buffer |
 | `quickfix-outbound` | immediately before `BuildOrderFromBusinessObject(...)` | when `Session::send()` returns | application message construction, session header fill, sequence allocation, serialization, store persistence, responder send |
-| `quickfix-inbound` | immediately before `acceptor_session.next(frame, now)` | when `Session::next()` returns | in-process session processing, sequence validation, store interaction; incidental outbound admin is drained outside timing |
+| `quickfix-inbound` | immediately before `initiator_session.next(execution_report_frame, now)` | when `Session::next()` returns | initiator-side in-process session processing, sequence validation, store interaction; incidental outbound admin is drained outside timing |
 | `quickfix-parse` | immediately before `parsed.setString(sample_frame, ...)` | after `ExtractOrderFromQFMessage(parsed)` returns | frame parse plus extraction back into the neutral business-order view |
 | `quickfix-replay` | immediately before `acceptor_session.next(resend_frame, now)` | when `Session::next()` returns | in-process replay generation; emitted replay frames are counted through `BufferedResponder` |
 | `quickfix-loopback` | immediately before the threaded initiator sends the order | when the initiator-side loopback app sees the ack | real TCP round-trip via `ThreadedSocketAcceptor` / `ThreadedSocketInitiator` |
@@ -151,7 +153,9 @@ cmake --build build/cmake/tls-bench --target nimblefix-tls-transport-bench
 
 The benchmark uses the same frame boundary detection and send/gather-send surface that the live runtime uses. If you omit `--cert`, `--key`, or `--ca`, the run intentionally records only the TCP baseline. If the binary was built without TLS support, the TLS leg is skipped explicitly rather than falling back to plaintext.
 
-## Current Side-By-Side Snapshot (2026-04-14)
+## Historical Side-By-Side Snapshot (2026-04-14)
+
+These numbers are a retained environment snapshot. Regenerate them after benchmark-boundary changes before using them as current performance claims.
 
 Command used:
 

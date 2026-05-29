@@ -80,26 +80,28 @@ BuildOrderFromBusinessObject(const Fix44BusinessOrder& order_request) -> FIX44::
 }
 
 auto
-ApplyStaticHeader(FIX44::NewOrderSingle* order) -> void
+ApplyBenchmarkHeader(FIX::Message* message,
+                     std::string_view sender_comp_id,
+                     std::string_view target_comp_id,
+                     std::uint32_t msg_seq_num,
+                     const FIX::UtcTimeStamp& sending_time) -> void
 {
-  if (order == nullptr) {
+  if (message == nullptr) {
     return;
   }
-  order->getHeader().setField(FIX::BeginString(std::string(bench_support::kDefaultBeginString)));
-  order->getHeader().setField(FIX::SenderCompID(std::string(bench_support::kDefaultSenderCompId)));
-  order->getHeader().setField(FIX::TargetCompID(std::string(bench_support::kDefaultTargetCompId)));
+  message->getHeader().setField(FIX::BeginString(std::string(bench_support::kDefaultBeginString)));
+  message->getHeader().setField(FIX::SenderCompID(std::string(sender_comp_id)));
+  message->getHeader().setField(FIX::TargetCompID(std::string(target_comp_id)));
+  message->getHeader().setField(FIX::MsgSeqNum(static_cast<int>(msg_seq_num)));
+  message->getHeader().setField(FIX::SendingTime(sending_time));
 }
 
 auto
 ApplyBenchmarkHeader(FIX44::NewOrderSingle* order, std::uint32_t msg_seq_num, const FIX::UtcTimeStamp& sending_time)
   -> void
 {
-  ApplyStaticHeader(order);
-  if (order == nullptr) {
-    return;
-  }
-  order->getHeader().setField(FIX::MsgSeqNum(static_cast<int>(msg_seq_num)));
-  order->getHeader().setField(FIX::SendingTime(sending_time));
+  ApplyBenchmarkHeader(
+    order, bench_support::kDefaultSenderCompId, bench_support::kDefaultTargetCompId, msg_seq_num, sending_time);
 }
 
 auto
@@ -108,6 +110,27 @@ BuildSampleFrame(const Fix44BusinessOrder& business_order, const FIX::UtcTimeSta
   auto sample = BuildOrderFromBusinessObject(business_order);
   ApplyBenchmarkHeader(&sample, 1U, sending_time);
   return sample.toString();
+}
+
+auto
+BuildExecutionReportFromBusinessObject(const Fix44BusinessOrder& order_request, std::uint32_t execution_id)
+  -> FIX44::ExecutionReport
+{
+  const auto order_id = std::string("ORDER-") + std::to_string(execution_id);
+  const auto exec_id = std::string("EXEC-") + std::to_string(execution_id);
+
+  FIX44::ExecutionReport report(FIX::OrderID(order_id),
+                                FIX::ExecID(exec_id),
+                                FIX::ExecType('0'),
+                                FIX::OrdStatus('0'),
+                                FIX::Side(order_request.side),
+                                FIX::LeavesQty(static_cast<double>(order_request.order_qty)),
+                                FIX::CumQty(0.0),
+                                FIX::AvgPx(0.0));
+  report.set(FIX::ClOrdID(std::string(order_request.cl_ord_id)));
+  report.set(FIX::OrderQty(static_cast<double>(order_request.order_qty)));
+  report.set(FIX::Symbol(std::string(order_request.symbol)));
+  return report;
 }
 
 using bench_support::LabeledResult;
@@ -345,26 +368,28 @@ RunQFSessionInboundBenchmark(const FIX::DataDictionary& /*dictionary*/,
 
   DoInProcessLogon(initiator_session, acceptor_session, initiator_resp, acceptor_resp);
 
-  // Pre-build application message frames. Seqnums start at 2 (logon used seqnum
-  // 1).
+  // Pre-build initiator-side inbound application frames. Seqnums start at 2
+  // because the acceptor Logon used outbound seqnum 1.
   std::vector<std::string> app_frames;
   app_frames.reserve(iterations);
   for (std::uint32_t i = 0; i < iterations; ++i) {
-    auto order = BuildOrderFromBusinessObject(business_order);
-    ApplyBenchmarkHeader(&order, i + 2U, sending_time);
-    app_frames.push_back(order.toString());
+    auto report = BuildExecutionReportFromBusinessObject(business_order, i + 1U);
+    ApplyBenchmarkHeader(&report, "SELL", "BUY", i + 2U, sending_time);
+    app_frames.push_back(report.toString());
   }
 
   const auto now = FIX::UtcTimeStamp::now();
   BenchmarkResult result;
   result.samples_ns.reserve(iterations);
+  result.work_label = "messages";
   BenchmarkMeasurement measurement;
   for (auto& frame : app_frames) {
     const auto started = std::chrono::steady_clock::now();
-    acceptor_session.next(frame, now);
+    initiator_session.next(frame, now);
     result.samples_ns.push_back(bench_support::DurationNs(started, std::chrono::steady_clock::now()));
     // Drain any incidental outbound admin frames outside timing.
-    acceptor_resp.clear();
+    initiator_resp.clear();
+    ++result.work_count;
   }
   measurement.Finish(result);
 

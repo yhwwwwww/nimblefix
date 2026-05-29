@@ -2172,16 +2172,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
       "35=D|34=2|49=BUY|56=SELL|52=20260402-12:00:00.000|11=ORD-14M|55=AAPL|54=1|60=20260402-12:00:00.000|40=2|");
     auto event = protocol.OnInbound(inbound, 10U);
     REQUIRE(event.ok());
-    REQUIRE(event.value().outbound_frames.size() == 1U);
-    REQUIRE(event.value().application_messages.empty());
-    REQUIRE(!event.value().disconnect);
-
-    auto decoded = nimble::codec::DecodeFixMessage(event.value().outbound_frames.front().bytes, dictionary.value());
-    REQUIRE(decoded.ok());
-    REQUIRE(decoded.value().header.msg_type == "j");
-    REQUIRE(decoded.value().message.view().get_string(kRefMsgType).value() == "D");
-    REQUIRE(decoded.value().message.view().get_int(380).value() == 5);
-    REQUIRE(decoded.value().message.view().get_string(kText).value().find("Price") != std::string_view::npos);
+    RequireAcceptedApplication(std::move(event).value());
     REQUIRE(protocol.session().Snapshot().next_in_seq == 3U);
   }
 

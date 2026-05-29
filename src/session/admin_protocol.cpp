@@ -1,7 +1,14 @@
+#if defined(NIMBLEFIX_ENABLE_BENCH_PROFILE)
 #define NIMBLEFIX_BENCH_PROFILE_NOW() ::nimble::bench_profile::NowNs()
 #define NIMBLEFIX_BENCH_PROFILE_ADD(field, delta) ::nimble::bench_profile::GetInboundProfile().field += (delta)
-
+#define NIMBLEFIX_BENCH_PROFILE_INCREMENT() ++::nimble::bench_profile::GetInboundProfile().count
 #include "../../bench/inbound_profile.h"
+#else
+#define NIMBLEFIX_BENCH_PROFILE_NOW() 0ULL
+#define NIMBLEFIX_BENCH_PROFILE_ADD(field, delta) ((void)(delta))
+#define NIMBLEFIX_BENCH_PROFILE_INCREMENT() ((void)0)
+#endif
+
 #include "nimblefix/session/admin_protocol.h"
 
 #include <algorithm>
@@ -50,14 +57,7 @@ constexpr std::uint32_t kSessionRejectIncorrectNumInGroupCount = 16U;
 constexpr std::uint32_t kBusinessRejectReasonTag = 380U;
 constexpr std::uint32_t kBusinessRejectUnsupportedMessageType = 3U;
 constexpr std::uint32_t kBusinessRejectApplicationNotAvailable = 4U;
-constexpr std::uint32_t kBusinessRejectConditionallyRequiredFieldMissing = 5U;
 constexpr std::size_t kInitialEncodeBufferBytes = 1024U;
-
-struct ApplicationBusinessReject
-{
-  std::uint32_t reason{ 0U };
-  std::string text;
-};
 
 auto
 IsAdminMessage(std::string_view msg_type) -> bool
@@ -206,6 +206,10 @@ ResolveApplicationBusinessRejectReason(const AdminProtocolConfig& config,
     return std::nullopt;
   }
 
+  if (config.application_messages_available && config.supported_app_msg_types.empty()) {
+    return std::nullopt;
+  }
+
   if (dictionary.find_message(decoded.header.msg_type) == nullptr) {
     return std::nullopt;
   }
@@ -214,33 +218,12 @@ ResolveApplicationBusinessRejectReason(const AdminProtocolConfig& config,
     return kBusinessRejectApplicationNotAvailable;
   }
 
-  if (config.supported_app_msg_types.empty()) {
-    return std::nullopt;
-  }
-
   const auto supported =
     std::find(config.supported_app_msg_types.begin(), config.supported_app_msg_types.end(), decoded.header.msg_type);
   if (supported != config.supported_app_msg_types.end()) {
     return std::nullopt;
   }
   return kBusinessRejectUnsupportedMessageType;
-}
-
-auto
-ResolveConditionalApplicationBusinessReject(const codec::DecodedMessageView& decoded)
-  -> std::optional<ApplicationBusinessReject>
-{
-  const auto view = decoded.message.view();
-  if (decoded.header.msg_type == "D") {
-    const auto ord_type = view.get_char(kOrdType);
-    if (ord_type.has_value() && ord_type.value() == '2' && !view.has_field(kPrice)) {
-      return ApplicationBusinessReject{
-        .reason = kBusinessRejectConditionallyRequiredFieldMissing,
-        .text = "NewOrderSingle limit orders require Price",
-      };
-    }
-  }
-  return std::nullopt;
 }
 
 auto
@@ -1136,21 +1119,6 @@ AdminProtocol::ValidateApplicationMessage(const codec::DecodedMessageView& decod
     return false;
   }
 
-  auto enum_issue =
-    FindEnumValidationIssue(impl_->config_.validation_policy, validation_callback, *impl_->dictionary_, decoded);
-  if (enum_issue.has_value() &&
-      ShouldRejectValidationIssue(impl_->config_.validation_policy,
-                                  *enum_issue,
-                                  impl_->config_.session.session_id,
-                                  decoded.header.msg_type,
-                                  FindFieldValue(view, enum_issue->tag).value_or(std::string_view{}),
-                                  validation_callback)) {
-    *ref_tag_id = enum_issue->tag;
-    *reject_reason = ValidationIssueRejectReason(*enum_issue);
-    *text = enum_issue->text;
-    return false;
-  }
-
   if (!impl_->config_.validation_policy.require_required_fields_on_app_messages) {
     return true;
   }
@@ -1889,10 +1857,6 @@ AdminProtocol::ProcessInboundApplication(const codec::DecodedMessageView& decode
                         : std::string("application message type is not supported for this session");
     return build_business_reject(business_reject_reason.value(), text);
   }
-  if (const auto conditional_business_reject = ResolveConditionalApplicationBusinessReject(decoded);
-      conditional_business_reject.has_value()) {
-    return build_business_reject(conditional_business_reject->reason, conditional_business_reject->text);
-  }
   if (!ValidateApplicationMessage(decoded, &ref_tag_id, &reject_reason, &reject_text)) {
     return RejectInbound(decoded, ref_tag_id, reject_reason, std::move(reject_text), timestamp_ns, false);
   }
@@ -1969,8 +1933,7 @@ AdminProtocol::OnInbound(std::span<const std::byte> frame, std::uint64_t timesta
 auto
 AdminProtocol::OnInbound(std::vector<std::byte>&& frame, std::uint64_t timestamp_ns) -> base::Result<ProtocolEvent>
 {
-  auto& prof = bench_profile::GetInboundProfile();
-  const auto t0 = bench_profile::NowNs();
+  const auto t0 = NIMBLEFIX_BENCH_PROFILE_NOW();
 
   auto decode_status = codec::DecodeFixMessageView(std::span<const std::byte>(frame.data(), frame.size()),
                                                    *impl_->dictionary_,
@@ -1979,15 +1942,15 @@ AdminProtocol::OnInbound(std::vector<std::byte>&& frame, std::uint64_t timestamp
                                                    codec::kFixSoh,
                                                    impl_->config_.validation_policy.verify_checksum);
 
-  const auto t1 = bench_profile::NowNs();
-  prof.decode_ns += bench_profile::DiffNs(t0, t1);
+  const auto t1 = NIMBLEFIX_BENCH_PROFILE_NOW();
+  NIMBLEFIX_BENCH_PROFILE_ADD(decode_ns, t1 - t0);
 
   if (!decode_status.ok()) {
     return HandleInboundDecodeFailure(decode_status, timestamp_ns);
   }
   auto event = OnInbound(impl_->inbound_decode_scratch_, timestamp_ns);
 
-  const auto t2 = bench_profile::NowNs();
+  const auto t2 = NIMBLEFIX_BENCH_PROFILE_NOW();
 
   if (!event.ok()) {
     return event.status();
@@ -2001,14 +1964,13 @@ AdminProtocol::OnInbound(std::vector<std::byte>&& frame, std::uint64_t timestamp
     event.value().MaterializeApplicationMessages();
   }
 
-  const auto t3 = bench_profile::NowNs();
-  prof.adopt_ns += bench_profile::DiffNs(t2, t3);
+  const auto t3 = NIMBLEFIX_BENCH_PROFILE_NOW();
+  NIMBLEFIX_BENCH_PROFILE_ADD(adopt_ns, t3 - t2);
 
   auto drain_status = DrainDeferredGapFrames(timestamp_ns, &event.value());
 
-  const auto t4 = bench_profile::NowNs();
-  prof.drain_deferred_ns += bench_profile::DiffNs(t3, t4);
-  ++prof.count;
+  const auto t4 = NIMBLEFIX_BENCH_PROFILE_NOW();
+  NIMBLEFIX_BENCH_PROFILE_ADD(drain_deferred_ns, t4 - t3);
 
   return std::move(event).value();
 }
@@ -2017,8 +1979,7 @@ auto
 AdminProtocol::OnInbound(const codec::DecodedMessageView& decoded, std::uint64_t timestamp_ns)
   -> base::Result<ProtocolEvent>
 {
-  auto& prof = bench_profile::GetInboundProfile();
-  const auto i0 = bench_profile::NowNs();
+  const auto i0 = NIMBLEFIX_BENCH_PROFILE_NOW();
 
   ProtocolEvent event;
 
@@ -2037,8 +1998,8 @@ AdminProtocol::OnInbound(const codec::DecodedMessageView& decoded, std::uint64_t
     is_logon && !impl_->config_.session.is_initiator && impl_->config_.reset_seq_num_on_logon && !inbound_logon_reset;
   auto snapshot_before = impl_->session_->Snapshot();
 
-  const auto i1 = bench_profile::NowNs();
-  prof.session_snapshot_ns += bench_profile::DiffNs(i0, i1);
+  const auto i1 = NIMBLEFIX_BENCH_PROFILE_NOW();
+  NIMBLEFIX_BENCH_PROFILE_ADD(session_snapshot_ns, i1 - i0);
 
   std::uint32_t ref_tag_id = 0U;
   std::uint32_t reject_reason = 0U;
@@ -2120,8 +2081,8 @@ AdminProtocol::OnInbound(const codec::DecodedMessageView& decoded, std::uint64_t
       kSendingTime, kSessionRejectSendingTimeAccuracyProblem, "SendingTime is outside the configured tolerance");
   }
 
-  const auto i2 = bench_profile::NowNs();
-  prof.validate_comp_ids_ns += bench_profile::DiffNs(i1, i2);
+  const auto i2 = NIMBLEFIX_BENCH_PROFILE_NOW();
+  NIMBLEFIX_BENCH_PROFILE_ADD(validate_comp_ids_ns, i2 - i1);
 
   if (is_logon && impl_->config_.refresh_on_logon) {
     status = RefreshSessionStateFromStore();
@@ -2281,8 +2242,8 @@ AdminProtocol::OnInbound(const codec::DecodedMessageView& decoded, std::uint64_t
     impl_->outstanding_test_request_id_.clear();
   }
 
-  const auto i3 = bench_profile::NowNs();
-  prof.observe_seq_ns += bench_profile::DiffNs(i2, i3);
+  const auto i3 = NIMBLEFIX_BENCH_PROFILE_NOW();
+  NIMBLEFIX_BENCH_PROFILE_ADD(observe_seq_ns, i3 - i2);
 
   if (!status.ok()) {
     if (decoded.header.msg_seq_num > snapshot_before.next_in_seq && phase_violation_text.has_value()) {
@@ -2317,8 +2278,8 @@ AdminProtocol::OnInbound(const codec::DecodedMessageView& decoded, std::uint64_t
     return status;
   }
 
-  const auto i4 = bench_profile::NowNs();
-  prof.record_liveness_ns += bench_profile::DiffNs(i3, i4);
+  const auto i4 = NIMBLEFIX_BENCH_PROFILE_NOW();
+  NIMBLEFIX_BENCH_PROFILE_ADD(record_liveness_ns, i4 - i3);
 
   if (phase_violation_text.has_value()) {
     return BuildPhaseViolationLogout(*phase_violation_text, snapshot_before, msg_type, timestamp_ns);
@@ -2421,8 +2382,9 @@ AdminProtocol::OnInbound(const codec::DecodedMessageView& decoded, std::uint64_t
   }
 
   auto app_result = ProcessInboundApplication(decoded, timestamp_ns);
-  const auto i5 = bench_profile::NowNs();
-  prof.validate_app_msg_ns += bench_profile::DiffNs(i4, i5);
+  const auto i5 = NIMBLEFIX_BENCH_PROFILE_NOW();
+  NIMBLEFIX_BENCH_PROFILE_ADD(validate_app_msg_ns, i5 - i4);
+  NIMBLEFIX_BENCH_PROFILE_INCREMENT();
   return app_result;
 }
 
