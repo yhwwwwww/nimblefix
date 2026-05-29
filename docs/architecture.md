@@ -71,7 +71,7 @@ Foundation types used everywhere:
 |------|---------|
 | `Status` | Error-or-OK result with message string |
 | `Result<T>` | Either a value or a `Status` error |
-| `SpscQueue<T>` | Lock-free single-producer-single-consumer queue with fixed capacity |
+| `SpscQueue<T>` | Bounded single-producer-single-consumer queue backed by atomic head/tail indexes |
 | `InlineSplitVector<T, N>` | Inline storage for ≤N elements, overflows to heap vector |
 
 > **Note:** `TimerWheel` is included as `nimblefix/runtime/timer_wheel.h`, not from `base/`. It is listed in the Runtime section below.
@@ -100,7 +100,7 @@ Protocol metadata system. NimbleFIX keeps XML out of the hot path, but protocol 
                                          ├── GroupDefs (count_tag → delimiter, member fields)
                                          ├── AdminRules
                                          ├── ValidationRules
-                                         └── LookupTables
+                                         └── Direct field lookup table
 ```
 
 **Key types:**
@@ -110,14 +110,15 @@ Protocol metadata system. NimbleFIX keeps XML out of the hot path, but protocol 
 | `LoadedProfile` | mmap'd view of a `.nfa` binary artifact |
 | `NormalizedDictionaryView` | Read-only accessor over profile sections — field/message/group lookups |
 | `ProfileRegistry` | Holds all loaded profiles for the engine |
-| `ProfileLoader` | Loads `.nfa` files with optional `madvise`/`mlock` page warming; also loads `.nfd` dictionaries directly into memory |
+| `LoadProfileArtifact()` / `LoadProfileFromDictionaryFiles()` | Load `.nfa` files with optional `madvise`/`mlock` page warming, or load `.nfd` dictionaries directly into memory |
 
 **Artifact sections** (`SectionKind` enum):
 
 ```
 kStringTable, kFieldDefs, kMessageDefs, kGroupDefs,
 kAdminRules, kValidationRules, kLookupTables,
-kTemplateDescriptors, kMessageFieldRules, kGroupFieldRules
+kTemplateDescriptors, kMessageFieldRules, kGroupFieldRules,
+kHeaderFieldRules, kTrailerFieldRules, kEnumValues
 ```
 
 **Dictionary input format** (`.nfd`):
@@ -586,7 +587,7 @@ These runtime-layer subsystems extend the core engine with production operationa
 | `HaConfig` | HA configuration: role, heartbeat interval, suspect/dead thresholds, failover policy |
 | `HaRole` | `kSolo`, `kPrimary`, `kStandby` |
 | `HaStateSnapshot` | Serializable snapshot of session state for cross-node replication |
-| `HaCoordinator` | Monitors peer health, triggers failover, replicates state via user-provided callbacks |
+| `HaController` | Monitors peer health, triggers failover, replicates state via user-provided callbacks |
 
 **Dynamic Configuration** (`dynamic_config.h`):
 
@@ -597,7 +598,7 @@ These runtime-layer subsystems extend the core engine with production operationa
 | `ApplyConfigResult` | Per-change outcome: applied, skipped (requires restart), or failed |
 | `ComputeConfigDelta()` | Compute the structural diff between old and new config |
 
-`Engine::ApplyConfig(new_config)` applies the delta without full restart.
+`Engine::ApplyConfig(new_config)` applies supported live changes without full restart. Existing listener sockets are managed by `LiveAcceptor`, so listener config deltas require reopening listeners to affect bound sockets.
 
 **Warmup** (`warmup.h`):
 
@@ -622,8 +623,8 @@ These runtime-layer subsystems extend the core engine with production operationa
 
 | Type | Role |
 |------|------|
-| `ManagementPlane` | Execute administrative commands against a running engine |
-| `ManagementCommand` | `kQueryStatus`, `kQuerySession`, `kForceDisconnect`, `kTriggerDayCut`, `kResetSequences`, `kToggleApplicationMessages` |
+| `ManagementPlane` | Query status and health for a running engine |
+| `ManagementCommand` | Planned command vocabulary: `kQueryStatus`, `kQuerySession`, `kForceDisconnect`, `kTriggerDayCut`, `kResetSequences`, `kToggleApplicationMessages` |
 | `ManagedSessionStatus` | Per-session snapshot: state, sequences, profile, store mode, reconnect status |
 | `EngineManagementStatus` | Engine-wide snapshot: boot state, worker count, sessions, profiles, listeners, uptime |
 
@@ -740,12 +741,15 @@ NimbleFIX does not hide topology decisions. Thread count, callback placement, po
 flowchart TB
     CALLER["caller thread"] -->|worker_count=1| ONE["single worker runtime"]
     CALLER -->|acceptor + worker_count>1| FD["nf-acc-main front-door"]
-    CALLER -->|initiator + worker_count>1| W0["nf-ini-w0"]
-    FD --> W1["nf-acc-w0"]
-    FD --> W2["nf-acc-w1..N"]
-    W0 -->|queue_app_mode=threaded| A0["nf-app-w0"]
-    W1 -->|queue_app_mode=threaded| A1["nf-app-w0"]
-    W2 -->|queue_app_mode=threaded| A2["nf-app-w1..N"]
+    CALLER -->|initiator + worker_count>1| IM["nf-ini-main coordinator"]
+    FD --> AW0["nf-acc-w0"]
+    FD --> AWN["nf-acc-w1..N"]
+    IM --> IW0["nf-ini-w0"]
+    IM --> IWN["nf-ini-w1..N"]
+    AW0 -->|queue_app_mode=threaded| A0["nf-app-w0"]
+    AWN -->|queue_app_mode=threaded| AN["nf-app-w1..N"]
+    IW0 -->|queue_app_mode=threaded| A0
+    IWN -->|queue_app_mode=threaded| AN
 ```
 
 #### Acceptor
@@ -758,10 +762,11 @@ flowchart TB
 
 #### Initiator
 
-Same worker/app structure, minus the front-door thread:
+Multi-worker initiator runs a caller-side coordinator plus worker shards. It has no acceptor front-door socket thread:
 
 | Thread | Name | Count | Role | CPU Pin |
 |--------|------|-------|------|---------|
+| Coordinator | `nf-ini-main` | 1 when `worker_count>1` | Supervise the run loop, terminal status, progress timeout, and reconnect completion | - |
 | Session worker | `nf-ini-w{N}` | `worker_count` | Own sessions: connect, reconnect, decode, sequence, timer, encode, send | `worker_cpu_affinity[N]` |
 | App worker | `nf-app-w{N}` | `worker_count` (if `queue_app_mode=threaded`) | Drain SPSC queues and invoke business callbacks | `app_cpu_affinity[N]` |
 
@@ -774,6 +779,7 @@ When `worker_count=1`, the runtime stays on the caller's thread and does not spa
 | Single-thread initiator | caller thread only | `worker_count=1`, `dispatch_mode=inline` | simplest debugging and deterministic local testing |
 | Single-thread acceptor | caller thread only | `worker_count=1`, `dispatch_mode=inline` | single-session local harnesses and smoke setups |
 | Multi-worker acceptor | `nf-acc-main` + `nf-acc-wN` | `worker_count>1`, `dispatch_mode=inline` | isolate session hot paths without paying a queue hop |
+| Multi-worker initiator | `nf-ini-main` + `nf-ini-wN` | `worker_count>1`, `dispatch_mode=inline` | shard outbound and inbound session work while keeping initiation supervised by the caller thread |
 | Co-scheduled queue runtime | same as above | `dispatch_mode=queue-decoupled`, `queue_app_mode=co-scheduled` | decouple callback lifetime from decode while keeping thread count flat |
 | Threaded queue runtime | workers + `nf-app-wN` | `dispatch_mode=queue-decoupled`, `queue_app_mode=threaded` | protect session workers from blocking business logic |
 
@@ -916,7 +922,7 @@ Core 6:  App worker 2
 
 1. Each `SessionCore` is owned by exactly one worker thread — never shared.
 2. Worker threads never take locks on the hot path.
-3. Cross-thread communication uses `SpscQueue` (lock-free, wait-free).
+3. Cross-thread communication uses bounded, non-blocking `SpscQueue` handoff.
 4. `std::atomic` counters cover metrics and connection counts; no mutex is required there.
 5. `std::mutex` is reserved for cold-path operations such as profile registry updates, metrics snapshots, and managed queue runner setup.
 6. Front-door handoff is the only acceptor cross-thread session transfer.
@@ -958,8 +964,8 @@ Binary format loaded via mmap:
 ├──────────────────────────┤
 │ GroupFieldRules          │  Per-group: tag → required/optional
 ├──────────────────────────┤
-│ LookupTables             │  Hash tables for fast field/message/group lookup
+│ LookupTables             │  Direct tag → field index table
 └──────────────────────────┘
 ```
 
-All sections are offsets into to the same mmap'd buffer — zero-copy, zero-allocation access.
+Artifact sections are borrowed from the same mmap'd buffer. `NormalizedDictionaryView` then builds small in-memory message/group lookup indexes and enum bitmaps for hot-path queries.

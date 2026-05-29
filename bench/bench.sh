@@ -52,7 +52,7 @@ usage() {
 usage: ./bench/bench.sh <command> [args...]
 
 commands:
-  build         Build all benchmark binaries and benchmark input artifacts
+  build         Build the default compare benchmark binaries and input artifacts
     nimblefix     Run NimbleFIX benchmark against build/bench/quickfix_FIX44.nfa
     nimblefix-nfd Run NimbleFIX benchmark against build/bench/quickfix_FIX44.nfd
   quickfix      Run QuickFIX comparison benchmark (parse, encode, session-inbound, replay, loopback)

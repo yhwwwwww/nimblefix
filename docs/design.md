@@ -1,5 +1,10 @@
 # NimbleFIX 设计文档
 
+> Status: design/target architecture. This document is not the authoritative
+> implementation-status reference. For current supported behavior, public API
+> boundaries, and benchmark numbers, use `README.md`, `docs/public-api.md`, and
+> `docs/architecture.md`.
+
 ## 1. 文档目的
 
 本文档定义一个面向低延迟交易场景的 FIX 协议库设计方案。目标是实现一个极速、轻量、可嵌入、可同时作为服务端与客户端使用的 FIX 引擎，并具备完整的 session 管理能力与对 repeating group 的完整支持。

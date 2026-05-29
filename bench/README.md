@@ -45,7 +45,7 @@ Important environment notes:
 
 | Command | Default args | What it is for |
 |---------|--------------|----------------|
-| `build` | none | Build all benchmark binaries and regenerate the FIX44 benchmark artifacts |
+| `build` | none | Build the default compare benchmark binaries and regenerate the FIX44 benchmark artifacts |
 | `nimblefix` | `--iterations 100000 --loopback 1000 --replay 1000` | Main NimbleFIX suite against `quickfix_FIX44.nfa` |
 | `nimblefix-nfd` | `--iterations 30000 --loopback 200 --replay 200` | Same NimbleFIX suite but load the `.nfd` text dictionary directly |
 | `quickfix` | `--iterations 100000 --replay 1000 --replay-span 128 --loopback 1000` | Main QuickFIX comparison suite |
@@ -143,7 +143,7 @@ Build and run:
 cmake -S . -B build/cmake/tls-bench -DCMAKE_BUILD_TYPE=Release -DNIMBLEFIX_ENABLE_TLS=ON
 cmake --build build/cmake/tls-bench --target nimblefix-tls-transport-bench
 
-./build/cmake/tls-bench/nimblefix-tls-transport-bench \
+./build/cmake/tls-bench/bin/nimblefix-tls-transport-bench \
 	--iterations 10000 \
 	--warmup 1000 \
 	--cert /path/to/server-chain.pem \
@@ -153,9 +153,7 @@ cmake --build build/cmake/tls-bench --target nimblefix-tls-transport-bench
 
 The benchmark uses the same frame boundary detection and send/gather-send surface that the live runtime uses. If you omit `--cert`, `--key`, or `--ca`, the run intentionally records only the TCP baseline. If the binary was built without TLS support, the TLS leg is skipped explicitly rather than falling back to plaintext.
 
-## Historical Side-By-Side Snapshot (2026-04-14)
-
-These numbers are a retained environment snapshot. Regenerate them after benchmark-boundary changes before using them as current performance claims.
+## Current Local Side-By-Side Run (2026-05-30)
 
 Command used:
 
@@ -168,48 +166,48 @@ Environment:
 | | |
 |---|---|
 | CPU | AMD Ryzen 7 7840HS with Radeon 780M Graphics |
-| OS | Linux 6.19.10-1-cachyos x86_64 |
-| Compiler | `g++ (GCC) 15.2.1 20260209` |
-| Build helper | `xmake v3.0.8+20260324` |
+| OS | Linux 7.0.9-1-cachyos x86_64 |
+| Compiler | `g++ (GCC) 16.1.1 20260430` |
+| Build helper | `xmake v3.0.9+20260519` |
 
 ### Cross-Engine Summary
 
 | Boundary | NimbleFIX metric | QuickFIX metric | NimbleFIX p50 | NimbleFIX p95 | QuickFIX p50 | QuickFIX p95 | NimbleFIX alloc/op | QuickFIX alloc/op |
 |----------|----------------|-----------------|-------------|-------------|--------------|--------------|------------------|-------------------|
-| user encode | `encode` | `quickfix-encode` | — | — | — | — | — | — |
-| session outbound | `outbound` | `quickfix-outbound` | — | — | — | — | — | — |
-| session inbound | `inbound` | `quickfix-inbound` | 1.65 us | 1.94 us | 2.38 us | 2.75 us | 0 | 18 |
-| wire → object | `parse` | `quickfix-parse` | 511 ns | 521 ns | 1.29 us | 1.33 us | 0 | 20 |
-| replay (`replay_span=128`) | `replay` | `quickfix-replay` | 15.66 us | 16.81 us | 231.20 us | 269.07 us | 0 | 4117 |
-| TCP loopback RTT | `loopback` | `quickfix-loopback` | 17.58 us | 20.75 us | 20.55 us | 24.68 us | 3 | 77 |
+| user encode | `encode` | `quickfix-encode` | 391 ns | 410 ns | 1.41 us | 1.44 us | 0.0 | 29.0 |
+| session outbound | `outbound` | `quickfix-outbound` | 712 ns | 751 ns | 1.70 us | 2.95 us | 1.0 | 33 |
+| session inbound | `inbound` | `quickfix-inbound` | 1.22 us | 1.30 us | 2.46 us | 2.54 us | 0 | 12 |
+| wire → object | `parse` | `quickfix-parse` | 591 ns | 611 ns | 1.48 us | 1.51 us | 0 | 20.0 |
+| replay (`replay_span=128`) | `replay` | `quickfix-replay` | 14.45 us | 15.43 us | 265.54 us | 293.58 us | 0 | 4117.0 |
+| TCP loopback RTT | `loopback` | `quickfix-loopback` | 17.17 us | 18.68 us | 21.86 us | 24.62 us | 3.0 | 77.0 |
 
 #### NimbleFIX-Only
 | Metric | p50 | p95 | p99 | alloc/op | ops/sec | cache/op | branch/op |
 |--------|-----|-----|-----|----------|---------|----------|-----------|
-| `peek` | 130 ns | 141 ns | 141 ns | 0 | 6.58M | 0.0 | 0.0 |
+| `peek` | 100 ns | 101 ns | 101 ns | 0 | 8.65M | 0.0 | 0.0 |
 
 ### NimbleFIX Snapshot
 
 | Metric | p50 | p95 | p99 | alloc/op | ops/sec | cache/op | branch/op |
 |--------|-----|-----|-----|----------|---------|----------|-----------|
-| `encode` | — | — | — | — | — | — | — |
-| `outbound` | — | — | — | — | — | — | — |
-| `inbound` | 1.65 us | 1.94 us | 3.18 us | 0 | 550.9K | 0.4 | 2.1 |
-| `parse` | 511 ns | 521 ns | 531 ns | 0 | 1.88M | 0.0 | 0.0 |
-| `replay` | 15.66 us | 16.81 us | 19.23 us | 0 | 63.0K | 1.5 | 5.3 |
-| `loopback` | 17.58 us | 20.75 us | 25.12 us | 3 | 54.5K | 11.0 | 194.0 |
-| `peek` | 130 ns | 141 ns | 141 ns | 0 | 6.58M | 0.0 | 0.0 |
+| `encode` | 391 ns | 410 ns | 411 ns | 0.0 | 2.34M | 0.0 | 0.0 |
+| `outbound` | 712 ns | 751 ns | 811 ns | 1.0 | 1.33M | 0.4 | 0.1 |
+| `inbound` | 1.22 us | 1.30 us | 2.28 us | 0 | 786.5K | 0.4 | 0.1 |
+| `parse` | 591 ns | 611 ns | 792 ns | 0 | 1.61M | 0.0 | 0.0 |
+| `replay` | 14.45 us | 15.43 us | 17.98 us | 0 | 68.2K | 1.9 | 19.7 |
+| `loopback` | 17.17 us | 18.68 us | 21.17 us | 3.0 | 56.8K | 9.7 | 186.5 |
+| `peek` | 100 ns | 101 ns | 101 ns | 0 | 8.65M | 0.0 | 0.0 |
 
 ### QuickFIX Snapshot
 
 | Metric | p50 | p95 | p99 | alloc/op | ops/sec | cache/op | branch/op |
 |--------|-----|-----|-----|----------|---------|----------|-----------|
-| `quickfix-encode` | — | — | — | — | — | — | — |
-| `quickfix-outbound` | — | — | — | — | — | — | — |
-| `quickfix-inbound` | 2.38 us | 2.75 us | 2.85 us | 18 | 405.3K | 0.3 | 0.2 |
-| `quickfix-parse` | 1.29 us | 1.33 us | 1.34 us | 20 | 723.8K | 0.0 | 0.0 |
-| `quickfix-replay` | 231.20 us | 269.07 us | 272.14 us | 4117 | 4.1K | 17.2 | 242.3 |
-| `quickfix-loopback` | 20.55 us | 24.68 us | 31.02 us | 77 | 46.3K | 30.2 | 19.2 |
+| `quickfix-encode` | 1.41 us | 1.44 us | 1.59 us | 29.0 | 657.2K | 0.0 | 0.0 |
+| `quickfix-outbound` | 1.70 us | 2.95 us | 3.20 us | 33 | 520.9K | 0.1 | 1.9 |
+| `quickfix-inbound` | 2.46 us | 2.54 us | 2.69 us | 12 | 400.4K | 0.4 | 0.1 |
+| `quickfix-parse` | 1.48 us | 1.51 us | 1.52 us | 20.0 | 636.4K | 0.0 | 0.0 |
+| `quickfix-replay` | 265.54 us | 293.58 us | 299.02 us | 4117.0 | 3.7K | 16.6 | 393.6 |
+| `quickfix-loopback` | 21.86 us | 24.62 us | 57.98 us | 77.0 | 43.3K | 24.5 | 19.5 |
 
 ## Metric Fields
 

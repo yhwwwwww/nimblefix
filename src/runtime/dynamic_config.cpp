@@ -1,5 +1,6 @@
 #include "nimblefix/runtime/dynamic_config.h"
 
+#include <cstddef>
 #include <sstream>
 #include <string_view>
 #include <unordered_map>
@@ -114,12 +115,32 @@ SessionTimeEquals(const std::optional<SessionTimeOfDay>& left, const std::option
 auto
 SessionScheduleEquals(const SessionScheduleConfig& left, const SessionScheduleConfig& right) -> bool
 {
+  const auto segments_equal = [&]() {
+    if (left.segments.size() != right.segments.size()) {
+      return false;
+    }
+    for (std::size_t index = 0; index < left.segments.size(); ++index) {
+      const auto& left_segment = left.segments[index];
+      const auto& right_segment = right.segments[index];
+      if (left_segment.use_local_time != right_segment.use_local_time ||
+          !SessionTimeEquals(left_segment.start_time, right_segment.start_time) ||
+          !SessionTimeEquals(left_segment.end_time, right_segment.end_time) ||
+          left_segment.start_day != right_segment.start_day || left_segment.end_day != right_segment.end_day ||
+          !SessionTimeEquals(left_segment.logon_time, right_segment.logon_time) ||
+          !SessionTimeEquals(left_segment.logout_time, right_segment.logout_time) ||
+          left_segment.logon_day != right_segment.logon_day || left_segment.logout_day != right_segment.logout_day) {
+        return false;
+      }
+    }
+    return true;
+  };
+
   return left.use_local_time == right.use_local_time && left.non_stop_session == right.non_stop_session &&
          SessionTimeEquals(left.start_time, right.start_time) && SessionTimeEquals(left.end_time, right.end_time) &&
          left.start_day == right.start_day && left.end_day == right.end_day &&
          SessionTimeEquals(left.logon_time, right.logon_time) &&
          SessionTimeEquals(left.logout_time, right.logout_time) && left.logon_day == right.logon_day &&
-         left.logout_day == right.logout_day;
+         left.logout_day == right.logout_day && segments_equal();
 }
 
 auto

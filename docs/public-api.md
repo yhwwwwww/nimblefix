@@ -52,13 +52,17 @@ The expected startup order is:
 This is the shortest normal path from config to a running initiator on the typed generated API:
 
 ```cpp
+#include <memory>
+
 #include "fix44_api.h"
 #include "nimblefix/runtime/config.h"
 #include "nimblefix/runtime/engine.h"
 #include "nimblefix/runtime/initiator.h"
 #include "nimblefix/runtime/profile_binding.h"
 
-class BuySideApp final : public nimble::generated::profile_4400::Handler {
+using namespace nimble::generated::profile_4400;
+
+class BuySideApp final : public Handler {
 public:
   auto OnSessionActive(nimble::runtime::Session<Profile>& session) -> nimble::base::Status override {
     return session.send<NewOrderSingle>([](auto& order) {
@@ -185,13 +189,17 @@ them once in a canonical place.
 ## Minimal Acceptor Walkthrough
 
 ```cpp
+#include <memory>
+
 #include "fix44_api.h"
 #include "nimblefix/runtime/config.h"
 #include "nimblefix/runtime/acceptor.h"
 #include "nimblefix/runtime/engine.h"
 #include "nimblefix/runtime/profile_binding.h"
 
-class SellSideApp final : public nimble::generated::profile_4400::Handler {
+using namespace nimble::generated::profile_4400;
+
+class SellSideApp final : public Handler {
 public:
   auto OnNewOrderSingle(nimble::runtime::InlineSession<Profile>& session,
                         NewOrderSingleView order) -> nimble::base::Status override {
@@ -364,11 +372,11 @@ These headers expose production operational subsystems built on top of the core 
 
 ### High Availability (`nimblefix/runtime/ha.h`)
 
-`HaConfig` configures active/standby behavior. `HaCoordinator` monitors peer health and triggers failover. State replication uses user-provided `HaStateReplicator` and `HaStateReceiver` callbacks. `Engine::SetLastAppliedHaSnapshot()` stages an HA snapshot that runtime sessions apply at boot.
+`HaConfig` configures active/standby behavior. `HaController` monitors peer health and triggers failover. State replication uses user-provided `HaStateReplicator` and `HaStateReceiver` callbacks. `Engine::SetLastAppliedHaSnapshot()` stages an HA snapshot that runtime sessions apply at boot.
 
 ### Dynamic Configuration (`nimblefix/runtime/dynamic_config.h`)
 
-`Engine::ApplyConfig(new_config)` computes a `ConfigDelta` against the booted config and applies changes without full restart. New counterparties are registered, removed ones are unregistered, and modifiable fields are updated in-place. Changes that require a restart are reported as skipped in `ApplyConfigResult`.
+`Engine::ApplyConfig(new_config)` computes a `ConfigDelta` against the booted config and applies supported live changes without full restart. New counterparties are registered, removed ones are unregistered, and modifiable fields are updated in-place. Existing listener sockets are owned by `LiveAcceptor`; listener config changes are recorded but require reopening listeners to affect bound sockets. Changes that require restart or remove+add are reported as skipped in `ApplyConfigResult`.
 
 ### Warmup (`nimblefix/runtime/warmup.h`)
 
@@ -380,7 +388,7 @@ These headers expose production operational subsystems built on top of the core 
 
 ### Management Plane (`nimblefix/runtime/management.h`)
 
-`ManagementPlane` executes `ManagementCommand` operations against a running engine: query status, query individual sessions, force disconnect, trigger day-cut, reset sequences, toggle application message availability. Returns `ManagementCommandResult` with `EngineManagementStatus` or `ManagedSessionStatus`.
+`ManagementPlane` currently exposes query/status/health helpers for a running engine: engine status, individual session status, all-session status, and health summary. `ManagementCommand` and `ManagementCommandResult` define planned command vocabulary; force disconnect, day-cut trigger, sequence reset, and live application-availability changes are not implemented through `ManagementPlane` yet.
 
 ### Message Log (`nimblefix/runtime/message_log.h`)
 
@@ -416,4 +424,4 @@ Per-session pluggable hook installed via `CounterpartyConfig::validation_callbac
 
 ### I/O Backend (`nimblefix/runtime/io_backend.h`)
 
-`IoBackend` enum selects the Linux I/O multiplexing backend: `kEpoll` (default) or `kIoUring`. Set via `EngineConfig::io_backend`.
+`IoBackend` selects the Linux I/O multiplexing backend: `kEpoll` by default, or `kIoUring` when the build and kernel support it. Use `IsIoBackendAvailable()` / `DetectBestIoBackend()` before choosing `kIoUring` explicitly. Set via `EngineConfig::io_backend`.

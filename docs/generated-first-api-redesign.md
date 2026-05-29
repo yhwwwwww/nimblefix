@@ -1,5 +1,11 @@
 # NimbleFIX Generated-First API 重构设计稿
 
+> Status: archived redesign draft. This document records the motivation and
+> target shape for the generated-first API work. It intentionally contains
+> historical "current state" notes and line references from the time it was
+> written; do not treat it as the authoritative description of today's public
+> API. Use `README.md` and `docs/public-api.md` for current behavior.
+
 本文档定义 NimbleFIX 下一代公共 API 的目标形态。设计基线为：
 
 - 不考虑兼容
@@ -7,7 +13,7 @@
 - runtime 对外以 typed session / typed callbacks / profile bind 为中心
 - tag、layout、buffer、encoded body、borrowed/owned 细节全部下沉到 internal 或 advanced
 
-配套执行计划见 `todo.md`。
+The original execution checklist was tracked outside the checked-in documentation.
 
 ---
 
@@ -39,9 +45,9 @@
 
 证据：
 
-- `src/profile/builder_codegen.cpp:291` 生成类内部直接持有 `message::FixedLayoutWriter`
-- `src/profile/builder_codegen.cpp:348` setter 只是转发到 `writer_.set_*`
-- `src/profile/builder_codegen.cpp:363` group 也是转发到 `writer_.add_group_entry(...)`
+- 当时的 `src/profile/builder_codegen.cpp` 生成类内部直接持有 `message::FixedLayoutWriter`
+- 当时的 setter 只是转发到 `writer_.set_*`
+- 当时的 group 也是转发到 `writer_.add_group_entry(...)`
 
 这意味着：
 
@@ -55,16 +61,16 @@
 
 证据：
 
-- `src/profile/builder_codegen.cpp:528`
-- `include/public/nimblefix/message/message_view.h:480`
+- 当时的 `src/profile/builder_codegen.cpp`
+- 当时的 `include/public/nimblefix/message/message_view.h`
 
 而 `raw_group()` 只对 parser-backed message 有效；owned message 返回空。queue-decoupled 路径会复制消息为 owned message。
 
 证据：
 
-- `src/runtime/live_session_worker.cpp:362`
-- `src/runtime/live_initiator.cpp:1875`
-- `src/runtime/live_acceptor.cpp:2120`
+- 当时的 `src/runtime/live_session_worker.cpp`
+- 当时的 `src/runtime/live_initiator.cpp`
+- 当时的 `src/runtime/live_acceptor.cpp`
 
 因此 generated reader 目前不能作为统一 inbound typed API。
 
@@ -81,8 +87,7 @@
 
 证据：
 
-- `include/public/nimblefix/advanced/session_handle.h:322`
-- `include/public/nimblefix/advanced/session_handle.h:357`
+- 当时的 `include/public/nimblefix/advanced/session_handle.h`
 
 这让应用层必须理解：
 
@@ -858,7 +863,7 @@ generated message object -> typed session send -> generated typed callback
 7. schema mismatch failure path
 8. benchmark against old generated writer path
 
-具体验收矩阵见 `todo.md`。
+The detailed acceptance matrix was tracked outside the checked-in documentation.
 
 ---
 
