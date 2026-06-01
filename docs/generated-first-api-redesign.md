@@ -390,20 +390,15 @@ public:
 
 ### 5.6 generated handler interface
 
-generated header 为该 profile 声明 typed handler 基类。
+generated header 为该 profile 声明紧凑 handler 基类。默认接收面只有一个 raw message callback；需要业务类型分发时，应用类可以按需声明 typed `OnTypedMessage(...)` overload，并在 typed runtime wrapper 中绑定具体应用类型。
 
 ```cpp
 namespace nimble::fix44 {
 
 class Handler : public nimble::runtime::Application<Profile> {
 public:
-  virtual auto OnExecutionReport(nimble::runtime::InlineSession<Profile>&,
-                                 ExecutionReportView) -> base::Status {
-    return base::Status::Ok();
-  }
-
-  virtual auto OnUnknownMessage(nimble::runtime::InlineSession<Profile>&,
-                                message::MessageView) -> base::Status {
+  virtual auto OnMessage(nimble::runtime::InlineSession<Profile>&,
+                         message::MessageView) -> base::Status {
     return base::Status::Ok();
   }
 };
@@ -411,7 +406,7 @@ public:
 } // namespace nimble::fix44
 ```
 
-这样 runtime 不需要知道具体应用派生类型，只需要拿 `Profile::Application` 即可。
+这样只做日志/metrics 的应用不用面对整套 FIX message callback 列表。
 
 ### 5.7 generated dispatcher
 
@@ -422,9 +417,10 @@ namespace nimble::fix44 {
 
 class Dispatcher {
 public:
+  template<class Application>
   auto Dispatch(nimble::runtime::InlineSession<Profile>& session,
                 message::MessageView message,
-                Handler& handler) const -> base::Status;
+                Application& application) const -> base::Status;
 };
 
 } // namespace nimble::fix44
@@ -435,7 +431,8 @@ public:
 - 先按 `msg_type()` 路由
 - 再执行对应 typed view `Bind()`
 - bind 失败返回结构化错误
-- 未知 `MsgType` 走 `OnUnknownMessage`
+- 已知类型优先调用应用类声明的 typed `OnTypedMessage(session, View)` overload
+- 没有 typed overload 或未知 `MsgType` 时走 raw `OnMessage(session, MessageView)`
 
 ---
 
@@ -469,7 +466,7 @@ public:
 } // namespace nimble::runtime
 ```
 
-profile-specific typed app-message callback 由 generated `Handler` 叠加。
+profile-specific app-message 接收由 generated dispatcher 叠加：默认进 raw `Handler::OnMessage()`，具体应用类型可按需声明 typed `OnTypedMessage()` overload。
 
 ### 6.2 `Session<Profile>`
 
@@ -575,11 +572,11 @@ if (!fix44.ok()) {
 ```cpp
 namespace nimble::runtime {
 
-template<class Profile>
+template<class Profile, class Application = typename Profile::Application>
 class Initiator {
 public:
   struct Options {
-    std::shared_ptr<typename Profile::Application> application;
+    std::shared_ptr<Application> application;
   };
 
   Initiator(Engine* engine, ProfileBinding<Profile>* binding, Options options);
@@ -587,11 +584,11 @@ public:
   auto Run() -> base::Status;
 };
 
-template<class Profile>
+template<class Profile, class Application = typename Profile::Application>
 class Acceptor {
 public:
   struct Options {
-    std::shared_ptr<typename Profile::Application> application;
+    std::shared_ptr<Application> application;
   };
 
   Acceptor(Engine* engine, ProfileBinding<Profile>* binding, Options options);
@@ -629,9 +626,9 @@ public:
     return session.send(std::move(order));
   }
 
-  auto OnExecutionReport(nimble::runtime::InlineSession<nimble::fix44::Profile>&,
-                         nimble::fix44::ExecutionReportView exec)
-    -> nimble::base::Status override {
+  auto OnTypedMessage(nimble::runtime::InlineSession<nimble::fix44::Profile>&,
+                      nimble::fix44::ExecutionReportView exec)
+    -> nimble::base::Status {
     auto exec_id = exec.exec_id();
     auto ord_status = exec.ord_status();
     (void)exec_id;
@@ -665,7 +662,7 @@ int main() {
   }
 
   auto app = std::make_shared<App>();
-  nimble::runtime::Initiator<nimble::fix44::Profile> initiator(
+  nimble::runtime::Initiator<nimble::fix44::Profile, App> initiator(
     &engine, &binding.value(), { .application = app });
 
   auto open = initiator.OpenSession(1001, "127.0.0.1", 9876);
@@ -681,9 +678,9 @@ int main() {
 ```cpp
 class SellSideApp final : public nimble::fix44::Handler {
 public:
-  auto OnNewOrderSingle(nimble::runtime::InlineSession<nimble::fix44::Profile>& session,
-                        nimble::fix44::NewOrderSingleView order)
-    -> nimble::base::Status override {
+  auto OnTypedMessage(nimble::runtime::InlineSession<nimble::fix44::Profile>& session,
+                      nimble::fix44::NewOrderSingleView order)
+    -> nimble::base::Status {
     nimble::fix44::ExecutionReport report;
     // fill report...
     return session.send(report);
@@ -744,7 +741,7 @@ wire frame
   -> runtime determines profile binding
   -> binding.dispatcher().Dispatch(...)
   -> generated typed view Bind()
-  -> generated Handler virtual callback
+  -> typed OnTypedMessage(session, View) if present, otherwise raw Handler::OnMessage()
 ```
 
 ### 8.4 shared generated support
@@ -791,7 +788,7 @@ src/generated_support/
 | `SessionHandle::Send*` | `Session<Profile>::send()` / `InlineSession<Profile>::send()` | 删除旧表面 |
 | `--cpp-builders` | `--cpp-api` | 删除 |
 | `--cpp-readers` | `--cpp-api` | 删除 |
-| `ApplicationCallbacks::OnAppMessage(RuntimeEvent)` | generated `Handler::On<Message>()` | 删除主路径 |
+| `ApplicationCallbacks::OnAppMessage(RuntimeEvent)` | generated dispatcher + raw `Handler::OnMessage()` / optional typed `OnTypedMessage()` overload | 删除主路径 |
 | `CounterpartyConfigBuilder` | aggregate init + helper factory | 从主文档移除 |
 
 ---
@@ -803,7 +800,7 @@ src/generated_support/
 1. 用 `dictgen --cpp-api` 生成 profile 头
 2. `Engine::Boot(config)`
 3. `Engine::Bind<Profile>()`
-4. 用 typed `Initiator<Profile>` / `Acceptor<Profile>` + generated `Handler` 编程
+4. 用 typed `Initiator<Profile>` / `Acceptor<Profile>` + generated `Handler` 编程；有 typed `OnTypedMessage()` overload 时绑定 concrete app type
 
 也就是从：
 
@@ -814,7 +811,7 @@ tag -> builder -> layout -> encode -> send variant -> callback -> bind typed vie
 变成：
 
 ```text
-generated message object -> typed session send -> generated typed callback
+generated message object -> typed session send -> generated dispatcher callback
 ```
 
 ---

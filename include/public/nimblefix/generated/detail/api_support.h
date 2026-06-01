@@ -424,6 +424,16 @@ private:
   message::GroupView::Iterator iterator_{};
 };
 
+struct NoEnumValidators
+{
+  static auto Validate(const BodyNode& node, message::MessageView view) -> base::Status
+  {
+    (void)node;
+    (void)view;
+    return base::Status::Ok();
+  }
+};
+
 template<class Handler, class Session, class View>
 using DispatchHandlerMethod = base::Status (Handler::*)(Session&, View);
 
@@ -469,16 +479,58 @@ DispatchToHandler(message::MessageView message,
                   DispatchHandlerMethod<Handler, Session, View> method,
                   const MessageShape& shape) -> base::Status
 {
-  struct NoEnumValidators
-  {
-    static auto Validate(const BodyNode& node, message::MessageView view) -> base::Status
-    {
-      (void)node;
-      (void)view;
-      return base::Status::Ok();
-    }
-  };
   return DispatchToHandler<View>(message, session, handler, method, shape, NoEnumValidators{});
+}
+
+template<class View, class Handler, class Session, class RawDispatch>
+inline auto
+DispatchToApplicationCallback(Handler& handler, Session& session, View view, RawDispatch raw_dispatch) -> base::Status
+{
+  if constexpr (requires { handler.OnTypedMessage(session, view); }) {
+    return handler.OnTypedMessage(session, view);
+  }
+  return raw_dispatch(handler, session, view.raw());
+}
+
+template<class View, class Handler, class Session, class RawDispatch, class ValidatorSet>
+inline auto
+DispatchToApplicationUsingUsageShapes(message::MessageView message,
+                                      Session& session,
+                                      Handler& handler,
+                                      RawDispatch raw_dispatch,
+                                      const MessageShape* const* usage_shapes,
+                                      std::uint32_t usage_shape_count,
+                                      std::string_view expected_msg_type,
+                                      ValidatorSet) -> base::Status
+{
+  auto bound = View::Bind(message);
+  if (!bound.ok()) {
+    return bound.status();
+  }
+
+  bool found_usage_shape = false;
+  auto first_failure = base::Status::Ok();
+  for (std::uint32_t index = 0U; index < usage_shape_count; ++index) {
+    const auto* shape = usage_shapes == nullptr ? nullptr : usage_shapes[index];
+    if (shape == nullptr || shape->msg_type != expected_msg_type) {
+      continue;
+    }
+
+    found_usage_shape = true;
+    auto validation = ValidateInboundMessageShape<ValidatorSet>(message, *shape);
+    if (validation.ok()) {
+      return DispatchToApplicationCallback(handler, session, std::move(bound).value(), raw_dispatch);
+    }
+    if (first_failure.ok()) {
+      first_failure = std::move(validation);
+    }
+  }
+
+  if (found_usage_shape) {
+    return first_failure.ok() ? base::Status::InvalidArgument("usage shape validation failed") : first_failure;
+  }
+
+  return DispatchToApplicationCallback(handler, session, std::move(bound).value(), raw_dispatch);
 }
 
 template<class View, class Handler, class Session, class ValidatorSet>

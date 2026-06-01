@@ -43,7 +43,7 @@ The expected startup order is:
 2. Call `ValidateEngineConfig()` if you want an explicit preflight step.
 3. Call `Engine::Boot()`.
 4. Call `engine.Bind<GeneratedProfile>()`.
-5. Construct typed `runtime::Initiator<Profile>` or `runtime::Acceptor<Profile>`.
+5. Construct typed `runtime::Initiator<Profile>` or `runtime::Acceptor<Profile>`. Use the optional second template parameter, such as `Initiator<Profile, MyApp>`, when the app defines `OnTypedMessage(...)` overloads.
 6. Open sessions or listeners.
 7. Call `Run()`.
 
@@ -76,8 +76,8 @@ public:
     });
   }
 
-  auto OnExecutionReport(nimble::runtime::InlineSession<Profile>&,
-                         ExecutionReportView exec) -> nimble::base::Status override {
+  auto OnTypedMessage(nimble::runtime::InlineSession<Profile>&,
+                      ExecutionReportView exec) -> nimble::base::Status {
     auto exec_id = exec.exec_id_raw();
     auto ord_status = exec.ord_status();
     (void)exec_id;
@@ -116,7 +116,7 @@ if (!binding.ok()) {
 }
 
 auto app = std::make_shared<BuySideApp>();
-nimble::runtime::Initiator<Profile> initiator(&engine, &binding.value(), { .application = app });
+nimble::runtime::Initiator<Profile, BuySideApp> initiator(&engine, &binding.value(), { .application = app });
 
 auto open = initiator.OpenSession(1001U, "127.0.0.1", 9876);
 if (!open.ok()) {
@@ -131,6 +131,7 @@ Notes:
 - `Engine::Bind<Profile>()` validates both `profile_id` and `schema_hash` against the loaded artifact.
 - `runtime::Session<Profile>` is the ordinary-thread send surface.
 - `runtime::InlineSession<Profile>` is the inline callback surface for typed inbound dispatch.
+- For broad logging or metrics, override the generated `Handler::OnMessage(...)` raw callback. Typed handlers such as `OnTypedMessage(session, ExecutionReportView)` are detected only when the runtime wrapper is instantiated with the concrete app type.
 - Generated business sends use `session.send<Msg>(populate, extras)`. The deprecated `send(OutboundMessage&&)` overload is no longer part of the public API.
 - `OpenSession()` may block until the TCP dial succeeds or times out.
 - `OpenSessionAsync()` defers the dial onto the runtime worker loop if the caller cannot block.
@@ -201,8 +202,8 @@ using namespace nimble::generated::profile_4400;
 
 class SellSideApp final : public Handler {
 public:
-  auto OnNewOrderSingle(nimble::runtime::InlineSession<Profile>& session,
-                        NewOrderSingleView order) -> nimble::base::Status override {
+  auto OnTypedMessage(nimble::runtime::InlineSession<Profile>& session,
+                      NewOrderSingleView order) -> nimble::base::Status {
     return session.send<ExecutionReport>([&](auto& report) {
       report.order_id("ORD-001")
         .exec_id("EXEC-001")
@@ -253,7 +254,7 @@ if (!binding.ok()) {
 }
 
 auto app = std::make_shared<SellSideApp>();
-nimble::runtime::Acceptor<Profile> acceptor(&engine, &binding.value(), { .application = app });
+nimble::runtime::Acceptor<Profile, SellSideApp> acceptor(&engine, &binding.value(), { .application = app });
 
 auto open = acceptor.OpenListeners("main");
 if (!open.ok()) {

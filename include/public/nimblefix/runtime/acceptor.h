@@ -8,32 +8,32 @@
 #include <string_view>
 #include <utility>
 
+#include "nimblefix/advanced/live_acceptor.h"
+#include "nimblefix/advanced/runtime_application.h"
 #include "nimblefix/base/result.h"
 #include "nimblefix/base/status.h"
-#include "nimblefix/advanced/runtime_application.h"
 #include "nimblefix/runtime/application.h"
 #include "nimblefix/runtime/detail/typed_runtime_application.h"
-#include "nimblefix/advanced/live_acceptor.h"
 #include "nimblefix/runtime/profile_binding.h"
 #include "nimblefix/runtime/session.h"
 
 namespace nimble::runtime {
 
-template<class Profile>
+template<class Profile, class ApplicationType = typename Profile::Application>
 class Acceptor
 {
 public:
   struct Options
   {
-    std::shared_ptr<typename Profile::Application> application;
+    std::shared_ptr<ApplicationType> application;
     std::chrono::milliseconds poll_timeout{ kDefaultRuntimePollTimeout };
     std::chrono::milliseconds io_timeout{ kDefaultRuntimeIoTimeout };
     std::size_t command_queue_capacity{ kDefaultQueueEventCapacity };
   };
 
   Acceptor(Engine* engine, ProfileBinding<Profile>* binding, Options options)
-    : adapter_(std::make_shared<detail::TypedRuntimeApplication<Profile, typename Profile::Application>>(
-        binding, options.application))
+    : adapter_(
+        std::make_shared<detail::TypedRuntimeApplication<Profile, ApplicationType>>(binding, options.application))
     , runtime_(engine,
                LiveAcceptor::Options{
                  .poll_timeout = options.poll_timeout,
