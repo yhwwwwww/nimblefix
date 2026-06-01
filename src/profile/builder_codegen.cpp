@@ -1824,10 +1824,16 @@ EmitHandlerAndDispatcher(std::ostringstream& out, const NormalizedDictionary& di
       << "                       std::uint32_t usage_shape_count = 0U)\n"
       << "    : usage_shapes_(usage_shapes)\n"
       << "    , usage_shape_count_(usage_shape_count) {}\n"
+      << "  template<class Application>\n"
       << "  auto Dispatch(runtime::InlineSession<Profile>& session,\n"
       << "                message::MessageView message,\n"
-      << "                Handler& handler) const -> base::Status;\n"
+      << "                Application& application) const -> base::Status;\n"
       << "private:\n"
+      << "  template<class View, class Application>\n"
+      << "  auto DispatchKnown(runtime::InlineSession<Profile>& session,\n"
+      << "                     message::MessageView message,\n"
+      << "                     Application& application,\n"
+      << "                     std::string_view msg_type) const -> base::Status;\n"
       << "  const detail::MessageShape* const* usage_shapes_{ nullptr };\n"
       << "  std::uint32_t usage_shape_count_{ 0U };\n"
       << "};\n\n";
@@ -1835,51 +1841,50 @@ EmitHandlerAndDispatcher(std::ostringstream& out, const NormalizedDictionary& di
   out << "class Handler : public runtime::Application<Profile> {\n"
       << "public:\n"
       << "  ~Handler() override = default;\n"
-      << "  virtual auto OnUnknownMessage(runtime::InlineSession<Profile>& session,\n"
-      << "                                message::MessageView message) -> base::Status {\n"
+      << "  virtual auto OnMessage(runtime::InlineSession<Profile>& session,\n"
+      << "                         message::MessageView message) -> base::Status {\n"
       << "    (void)session;\n"
       << "    (void)message;\n"
       << "    return base::Status::Ok();\n"
       << "  }\n";
 
-  for (const auto& message : dictionary.messages) {
-    out << "  virtual auto On" << message.name << "(runtime::InlineSession<Profile>& session, " << message.name
-        << "View view) -> base::Status {\n"
-        << "    (void)session;\n"
-        << "    (void)view;\n"
-        << "    return base::Status::Ok();\n"
-        << "  }\n";
-  }
-
   out << "};\n\n";
 
-  out << "inline auto Dispatcher::Dispatch(runtime::InlineSession<Profile>& session,\n"
-      << "                               message::MessageView message,\n"
-      << "                               Handler& handler) const -> base::Status {\n"
+  out << "template<class Application>\n"
+      << "inline auto Dispatcher::Dispatch(runtime::InlineSession<Profile>& session,\n"
+      << "                                 message::MessageView message,\n"
+      << "                                 Application& application) const -> base::Status {\n"
       << "  if (!message.valid()) {\n"
       << "    return base::Status::InvalidArgument(\"message view is invalid\");\n"
       << "  }\n";
   for (const auto& message : dictionary.messages) {
     out << "  if (message.msg_type() == \"" << EmitStringLiteral(message.msg_type) << "\") {\n"
-        << "    struct NoEnumValidators {\n"
-        << "      static auto Validate(const detail::BodyNode& node, message::MessageView view) -> base::Status {\n"
-        << "        (void)node;\n"
-        << "        (void)view;\n"
-        << "        return base::Status::Ok();\n"
-        << "      }\n"
-        << "    };\n"
-        << "    return detail::DispatchToHandlerUsingUsageShapes<" << message.name << "View>(\n"
-        << "      message,\n"
-        << "      session,\n"
-        << "      handler,\n"
-        << "      &Handler::On" << message.name << ",\n"
-        << "      usage_shapes_,\n"
-        << "      usage_shape_count_,\n"
-        << "      \"" << EmitStringLiteral(message.msg_type) << "\",\n"
-        << "      NoEnumValidators{});\n"
+        << "    return DispatchKnown<" << message.name << "View>(session, message, application, \""
+        << EmitStringLiteral(message.msg_type) << "\");\n"
         << "  }\n";
   }
-  out << "  return handler.OnUnknownMessage(session, message);\n"
+  out << "  return application.OnMessage(session, message);\n"
+      << "}\n\n";
+
+  out << "template<class View, class Application>\n"
+      << "inline auto Dispatcher::DispatchKnown(runtime::InlineSession<Profile>& session,\n"
+      << "                                      message::MessageView message,\n"
+      << "                                      Application& application,\n"
+      << "                                      std::string_view msg_type) const -> base::Status {\n"
+      << "  const auto dispatch_raw = [](auto& target,\n"
+      << "                               auto& active_session,\n"
+      << "                               message::MessageView raw) -> base::Status {\n"
+      << "    return target.OnMessage(active_session, raw);\n"
+      << "  };\n"
+      << "  return detail::DispatchToApplicationUsingUsageShapes<View>(\n"
+      << "    message,\n"
+      << "    session,\n"
+      << "    application,\n"
+      << "    dispatch_raw,\n"
+      << "    usage_shapes_,\n"
+      << "    usage_shape_count_,\n"
+      << "    msg_type,\n"
+      << "    detail::NoEnumValidators{});\n"
       << "}\n\n";
 }
 

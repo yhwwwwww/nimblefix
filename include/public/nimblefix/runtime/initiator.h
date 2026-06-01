@@ -8,31 +8,31 @@
 #include <string>
 #include <utility>
 
-#include "nimblefix/base/status.h"
+#include "nimblefix/advanced/live_initiator.h"
 #include "nimblefix/advanced/runtime_application.h"
+#include "nimblefix/base/status.h"
 #include "nimblefix/runtime/application.h"
 #include "nimblefix/runtime/detail/typed_runtime_application.h"
-#include "nimblefix/advanced/live_initiator.h"
 #include "nimblefix/runtime/profile_binding.h"
 #include "nimblefix/runtime/session.h"
 
 namespace nimble::runtime {
 
-template<class Profile>
+template<class Profile, class ApplicationType = typename Profile::Application>
 class Initiator
 {
 public:
   struct Options
   {
-    std::shared_ptr<typename Profile::Application> application;
+    std::shared_ptr<ApplicationType> application;
     std::chrono::milliseconds poll_timeout{ kDefaultRuntimePollTimeout };
     std::chrono::milliseconds io_timeout{ kDefaultRuntimeIoTimeout };
     std::size_t command_queue_capacity{ kDefaultQueueEventCapacity };
   };
 
   Initiator(Engine* engine, ProfileBinding<Profile>* binding, Options options)
-    : adapter_(std::make_shared<detail::TypedRuntimeApplication<Profile, typename Profile::Application>>(
-        binding, options.application))
+    : adapter_(
+        std::make_shared<detail::TypedRuntimeApplication<Profile, ApplicationType>>(binding, options.application))
     , runtime_(engine,
                LiveInitiator::Options{
                  .poll_timeout = options.poll_timeout,

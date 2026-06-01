@@ -229,8 +229,8 @@ private:
 class RecordingShapeDispatchApp final : public sample::Handler
 {
 public:
-  auto OnNewOrderSingle(nimble::runtime::InlineSession<sample::Profile>& session, sample::NewOrderSingleView view)
-    -> nimble::base::Status override
+  auto OnTypedMessage(nimble::runtime::InlineSession<sample::Profile>& session, sample::NewOrderSingleView view)
+    -> nimble::base::Status
   {
     (void)session;
     ++order_count;
@@ -240,6 +240,49 @@ public:
 
   int order_count{ 0 };
   std::string last_cl_ord_id;
+};
+
+class RecordingTypedAndRawApp final : public sample::Handler
+{
+public:
+  auto OnTypedMessage(nimble::runtime::InlineSession<sample::Profile>& session, sample::NewOrderSingleView view)
+    -> nimble::base::Status
+  {
+    (void)session;
+    ++order_count;
+    last_cl_ord_id = view.cl_ord_id().value_or(std::string_view{});
+    return nimble::base::Status::Ok();
+  }
+
+  auto OnMessage(nimble::runtime::InlineSession<sample::Profile>& session, nimble::message::MessageView message)
+    -> nimble::base::Status override
+  {
+    (void)session;
+    ++raw_count;
+    last_raw_msg_type = std::string(message.msg_type());
+    return nimble::base::Status::Ok();
+  }
+
+  int order_count{ 0 };
+  int raw_count{ 0 };
+  std::string last_cl_ord_id;
+  std::string last_raw_msg_type;
+};
+
+class RecordingMessageLogApp final : public sample::Handler
+{
+public:
+  auto OnMessage(nimble::runtime::InlineSession<sample::Profile>& session, nimble::message::MessageView message)
+    -> nimble::base::Status override
+  {
+    (void)session;
+    ++message_count;
+    last_msg_type = std::string(message.msg_type());
+    return nimble::base::Status::Ok();
+  }
+
+  int message_count{ 0 };
+  std::string last_msg_type;
 };
 
 static constexpr generated_detail::BodyNode kUsageNewOrderSingleBody[] = {
@@ -584,7 +627,8 @@ TEST_CASE("Shape-aware generated dispatch gates handlers on active message shape
   auto dictionary = nimble::tests::LoadFix44DictionaryViewOrSkip();
   nimble::runtime::ProfileBinding<sample::Profile> binding(dictionary, kUsageShapes, 1U);
   auto app = std::make_shared<RecordingShapeDispatchApp>();
-  nimble::runtime::detail::TypedRuntimeApplication<sample::Profile, sample::Handler> runtime_app(&binding, app);
+  nimble::runtime::detail::TypedRuntimeApplication<sample::Profile, RecordingShapeDispatchApp> runtime_app(&binding,
+                                                                                                           app);
 
   auto accepted_message = sample::NewOrderSingleBuilder{}
                             .msg_type(sample::NewOrderSingle::kMsgType)
@@ -637,6 +681,68 @@ TEST_CASE("Shape-aware generated dispatch gates handlers on active message shape
   REQUIRE(missing_dictionary.ok());
   CHECK(app->order_count == 2);
   CHECK(app->last_cl_ord_id == "ORD-USAGE");
+}
+
+TEST_CASE("Generated handler supports one callback for message logging", "[send-side][generate-runtime]")
+{
+  auto dictionary = nimble::tests::LoadFix44DictionaryViewOrSkip();
+  nimble::runtime::ProfileBinding<sample::Profile> binding(dictionary);
+  auto app = std::make_shared<RecordingMessageLogApp>();
+  nimble::runtime::detail::TypedRuntimeApplication<sample::Profile, sample::Handler> runtime_app(&binding, app);
+
+  auto message = sample::NewOrderSingleBuilder{}
+                   .msg_type(sample::NewOrderSingle::kMsgType)
+                   .cl_ord_id("ORD-LOG")
+                   .sender_comp_id("BUY")
+                   .target_comp_id("SELL")
+                   .symbol("AAPL")
+                   .side('1')
+                   .transact_time("20260406-12:00:00.000")
+                   .order_qty(100)
+                   .ord_type('2')
+                   .venue_order_type("LIMIT")
+                   .ToMessage();
+  REQUIRE(message.ok());
+
+  const auto status = runtime_app.OnAppMessage(MakeRuntimeEvent(message.value().view()));
+  REQUIRE(status.ok());
+  CHECK(app->message_count == 1);
+  CHECK(app->last_msg_type == sample::NewOrderSingle::kMsgType);
+}
+
+TEST_CASE("Generated handler supports typed message overloads with raw logging fallback",
+          "[send-side][generate-runtime]")
+{
+  auto dictionary = nimble::tests::LoadFix44DictionaryViewOrSkip();
+  nimble::runtime::ProfileBinding<sample::Profile> binding(dictionary);
+  auto app = std::make_shared<RecordingTypedAndRawApp>();
+  nimble::runtime::detail::TypedRuntimeApplication<sample::Profile, RecordingTypedAndRawApp> runtime_app(&binding, app);
+
+  auto order = sample::NewOrderSingleBuilder{}
+                 .msg_type(sample::NewOrderSingle::kMsgType)
+                 .cl_ord_id("ORD-TYPED")
+                 .sender_comp_id("BUY")
+                 .target_comp_id("SELL")
+                 .symbol("AAPL")
+                 .side('1')
+                 .transact_time("20260406-12:00:00.000")
+                 .order_qty(100)
+                 .ord_type('2')
+                 .venue_order_type("LIMIT")
+                 .ToMessage();
+  REQUIRE(order.ok());
+
+  nimble::message::MessageBuilder heartbeat_builder{ std::string(sample::Heartbeat::kMsgType) };
+  heartbeat_builder.set_string(kMsgType, sample::Heartbeat::kMsgType);
+  const auto heartbeat = std::move(heartbeat_builder).build();
+
+  REQUIRE(runtime_app.OnAppMessage(MakeRuntimeEvent(order.value().view())).ok());
+  REQUIRE(runtime_app.OnAppMessage(MakeRuntimeEvent(heartbeat.view())).ok());
+
+  CHECK(app->order_count == 1);
+  CHECK(app->last_cl_ord_id == "ORD-TYPED");
+  CHECK(app->raw_count == 1);
+  CHECK(app->last_raw_msg_type == sample::Heartbeat::kMsgType);
 }
 
 TEST_CASE("ValidateInboundMessageShape rejects zero-count required groups", "[send-side][message-shape]")

@@ -407,9 +407,9 @@ public:
         });
     }
 
-    auto OnExecutionReport(nimble::runtime::InlineSession<Profile>&,
-                           ExecutionReportView exec)
-        -> nimble::base::Status override {
+    auto OnTypedMessage(nimble::runtime::InlineSession<Profile>&,
+                        ExecutionReportView exec)
+        -> nimble::base::Status {
         auto exec_id = exec.exec_id_raw();
         auto ord_status = exec.ord_status();
         (void)exec_id;
@@ -450,7 +450,7 @@ int main() {
     }
 
     auto app = std::make_shared<MyApp>();
-    nimble::runtime::Initiator<Profile> initiator(&engine, &binding.value(), { .application = app });
+    nimble::runtime::Initiator<Profile, MyApp> initiator(&engine, &binding.value(), { .application = app });
 
     auto open = initiator.OpenSession(1U, "exchange.example.com", 9876);
     if (!open.ok()) {
@@ -481,8 +481,8 @@ using namespace nimble::generated::profile_4400;
 
 class MyApp final : public Handler {
 public:
-    auto OnNewOrderSingle(nimble::runtime::InlineSession<Profile>& session,
-                          NewOrderSingleView order) -> nimble::base::Status override {
+    auto OnTypedMessage(nimble::runtime::InlineSession<Profile>& session,
+                        NewOrderSingleView order) -> nimble::base::Status {
         return session.send<ExecutionReport>([&](auto& report) {
             report.order_id("ORD-001")
                 .exec_id("EXEC-001")
@@ -537,7 +537,7 @@ if (!binding.ok()) {
 }
 
 auto app = std::make_shared<MyApp>();
-nimble::runtime::Acceptor<Profile> acceptor(&engine, &binding.value(), { .application = app });
+nimble::runtime::Acceptor<Profile, MyApp> acceptor(&engine, &binding.value(), { .application = app });
 auto open = acceptor.OpenListeners("main");
 if (!open.ok()) {
     return 1;
@@ -584,7 +584,7 @@ if (!binding.ok()) {
 }
 
 auto app = std::make_shared<MyApp>();
-nimble::runtime::Acceptor<Profile> acceptor(&engine, &binding.value(), { .application = app });
+nimble::runtime::Acceptor<Profile, MyApp> acceptor(&engine, &binding.value(), { .application = app });
 auto open = acceptor.OpenListeners("main");
 if (!open.ok()) {
     return 1;
@@ -594,12 +594,14 @@ return acceptor.Run().ok() ? 0 : 1;
 
 ### Hot-Path Acceptor: Reading Inbound Messages
 
+For broad logging or metrics, override `Handler::OnMessage(...)` with raw `MessageView`. For selective business logic, add `OnTypedMessage(...)` overloads such as `OnTypedMessage(session, NewOrderSingleView)` and bind the runtime wrapper as `Acceptor<Profile, MyApp>` or `Initiator<Profile, MyApp>`.
+
 In the typed handler path, use generated inbound views for normal business logic. Drop to raw `MessageView` only for advanced protocol tooling:
 
 ```cpp
-auto OnNewOrderSingle(nimble::runtime::InlineSession<Profile>& session,
-                      NewOrderSingleView order)
-    -> nimble::base::Status override {
+auto OnTypedMessage(nimble::runtime::InlineSession<Profile>& session,
+                    NewOrderSingleView order)
+    -> nimble::base::Status {
     if (auto parties = order.parties(); parties.has_value()) {
         for (const auto party : *parties) {
             auto party_id = party.party_id();
