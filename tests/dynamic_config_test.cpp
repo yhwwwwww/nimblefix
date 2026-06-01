@@ -223,6 +223,28 @@ TEST_CASE("compute config delta detects timestamp resolution change", "[dynamic-
   REQUIRE(it->description.find("timestamp_resolution") != std::string::npos);
 }
 
+TEST_CASE("compute config delta detects schedule segment changes", "[dynamic-config]")
+{
+  auto current = MakeEngineConfig({ MakeCounterparty(1U, "venue-a") });
+  current.counterparties.front().session_schedule.segments.push_back(nimble::runtime::SessionScheduleSegment{
+    .start_time = nimble::runtime::SessionTimeOfDay{ .hour = 9, .minute = 0, .second = 0 },
+    .end_time = nimble::runtime::SessionTimeOfDay{ .hour = 17, .minute = 0, .second = 0 },
+  });
+  auto proposed = current;
+  proposed.counterparties.front().session_schedule.segments.front().end_time =
+    nimble::runtime::SessionTimeOfDay{ .hour = 18, .minute = 0, .second = 0 };
+
+  const auto delta = nimble::runtime::ComputeConfigDelta(current, proposed);
+
+  REQUIRE(HasChange(delta, nimble::runtime::ConfigChangeKind::kModifyCounterparty, 1U));
+  const auto it = std::find_if(delta.changes.begin(), delta.changes.end(), [](const auto& change) {
+    return change.kind == nimble::runtime::ConfigChangeKind::kModifyCounterparty && change.session_id == 1U;
+  });
+  REQUIRE(it != delta.changes.end());
+  REQUIRE(it->description.find("session_schedule") != std::string::npos);
+  REQUIRE_FALSE(delta.requires_restart);
+}
+
 TEST_CASE("compute config delta compares validation callback identity", "[dynamic-config]")
 {
   auto current = MakeEngineConfig({ MakeCounterparty(1U, "venue-a") });

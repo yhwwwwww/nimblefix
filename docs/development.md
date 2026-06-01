@@ -15,7 +15,7 @@ NimbleFIX supports both offline xmake and offline CMake flows. xmake is the prim
 - or CMake 3.20+ plus Ninja (preferred CMake generator) or make (fallback when Ninja is unavailable)
 - Linux x86_64 (primary platform)
 
-### Build Targets
+### Common Build Targets
 
 | Target | Kind | Description |
 |--------|------|-------------|
@@ -24,14 +24,21 @@ NimbleFIX supports both offline xmake and offline CMake flows. xmake is the prim
 | `nimblefix-bench` | binary | Performance benchmarks |
 | `nimblefix-dictgen` | binary | Dictionary → artifact compiler |
 | `nimblefix-xml2nfd` | binary | QuickFIX XML → `.nfd` converter |
+| `nimblefix-usagegen` | binary | Send-site shape analysis generator |
+| `nimblefix-orchestra-import` | binary | FIX Orchestra XML importer and contract sidecar generator |
 | `nimblefix-initiator` | binary | CLI FIX client |
 | `nimblefix-acceptor` | binary | CLI FIX server (echo) |
 | `nimblefix-soak` | binary | Stress tester with fault injection |
 | `nimblefix-interop-runner` | binary | Interop scenario runner |
 | `nimblefix-fix-session-testcases` | binary | Official FIX session testcase runner and coverage report generator |
+| `nimblefix-msgdump` | binary | Stored/raw FIX message formatter and filter |
+| `nimblefix-router` | binary | Routing-table runner for raw FIX input |
+| `nimblefix-schema-optimizer` | binary | Schema usage analyzer and trimming estimator |
 | `nimblefix-fuzz-codec` | binary | Codec/admin fuzzer |
 | `nimblefix-fuzz-config` | binary | Config parser fuzzer |
 | `nimblefix-fuzz-dictgen` | binary | Dictionary parser fuzzer |
+| `quickfix-cpp-bench` | binary | Pinned QuickFIX comparison benchmark |
+| `nimblefix-tls-transport-bench` | binary | Optional TLS/plain transport RTT benchmark |
 
 ### Common Commands
 
@@ -140,7 +147,10 @@ $BIN_DIR/nimblefix-tests "Heartbeat round-trip"
 $BIN_DIR/nimblefix-tests --list-tags
 ```
 
-### Available Tags
+### Common Tags
+
+This table lists the tags most useful for focused development. Run
+`$BIN_DIR/nimblefix-tests --list-tags` for the exhaustive current list.
 
 | Tag | Module |
 |-----|--------|
@@ -162,7 +172,7 @@ $BIN_DIR/nimblefix-tests --list-tags
 | `[timer-wheel]` | Timer scheduling |
 | `[message-api]` | Message builder/view API |
 | `[fixed-layout]` | FixedLayout / FixedLayoutWriter |
-| `[generated-writer]` | Generated typed writer classes |
+| `[generated-api]` | Generated typed builder/view API |
 | `[typed-message]` | Typed message accessors |
 | `[normalized-dictionary]` | FIX dictionary structures |
 | `[dictgen]` | Dictionary compilation |
@@ -193,12 +203,12 @@ $BIN_DIR/nimblefix-tests --list-tags
 | `[soak-multiworker]` | Multi-worker soak test |
 | `[reset-seq]` | Sequence reset behavior |
 | `[timer-deadline]` | Timer deadline semantics |
-| `[ha]` | High availability coordinator |
+| `[ha]` | High availability controller |
 | `[dynamic-config]` | Dynamic config apply and delta |
 | `[warmup]` | Warmup sequence |
 | `[diagnostics]` | Diagnostics monitor and sinks |
 | `[diagnostics-backlog]` | Backlog diagnostics |
-| `[management]` | Management plane commands |
+| `[management]` | Management plane status and health queries |
 | `[message-log]` | Message log export and replay |
 | `[router]` | Message routing and forwarding |
 | `[schema-optimizer]` | Schema usage analysis and trimming |
@@ -438,7 +448,6 @@ auto status = codec::EncodeFixMessageToBuffer(message.value(), dictionary_view, 
 ./bench/bench.sh nimblefix
 ./bench/bench.sh nimblefix-nfd
 ./bench/bench.sh quickfix
-./bench/bench.sh builder
 ./bench/bench.sh compare
 ```
 
@@ -450,7 +459,7 @@ All benchmark entrypoints intentionally consume the pinned QuickFIX 4.4 inputs, 
 
 | Boundary | NimbleFIX metric | QuickFIX metric | What it means |
 |----------|----------------|-----------------|---------------|
-| send API | `send` | `quickfix-send` | `session.send<Msg>(populate)` — user-facing send API entry point through command enqueue |
+| user encode | `encode` | `quickfix-encode` | encode a FIX44 business message into each engine's wire-ready representation without session state |
 | session outbound | `outbound` | `quickfix-outbound` | session outbound path — sequence allocation, encode, store write |
 | session inbound | `inbound` | `quickfix-inbound` | decode + session/admin rules + store interaction on an inbound app frame |
 | wire → object | `parse` | `quickfix-parse` | full frame parse back into each engine's object/view model |
@@ -632,7 +641,7 @@ Ready-to-run examples live in:
 Full counterparty record order used by current tools/tests:
 
 ```text
-counterparty|name|session_id|profile_id|begin_string|sender|target|store_mode|store_path|recovery_mode|dispatch_mode|heartbeat_sec|is_initiator|default_appl_ver_id|validation_mode|durable_flush_threshold|durable_rollover_mode|durable_archive_limit|reconnect_enabled|reconnect_initial_ms|reconnect_max_ms|reconnect_max_retries|durable_local_utc_offset_seconds|durable_use_system_timezone|day_cut_mode|day_cut_hour|day_cut_minute|day_cut_utc_offset|reset_seq_num_on_logon|reset_seq_num_on_logout|reset_seq_num_on_disconnect|refresh_on_logon|send_next_expected_msg_seq_num|use_local_time|non_stop_session|start_time|end_time|start_day|end_day|logon_time|logout_time|logon_day|logout_day|sending_time_threshold_seconds|supported_app_msg_types|application_messages_available|contract_service_subsets
+counterparty|name|session_id|profile_id|begin_string|sender|target|store_mode|store_path|recovery_mode|dispatch_mode|heartbeat_sec|is_initiator|default_appl_ver_id|validation_mode|durable_flush_threshold|durable_rollover_mode|durable_archive_limit|reconnect_enabled|reconnect_initial_ms|reconnect_max_ms|reconnect_max_retries|durable_local_utc_offset_seconds|durable_use_system_timezone|day_cut_mode|day_cut_hour|day_cut_minute|day_cut_utc_offset|reset_seq_num_on_logon|reset_seq_num_on_logout|reset_seq_num_on_disconnect|refresh_on_logon|send_next_expected_msg_seq_num|use_local_time|non_stop_session|start_time|end_time|start_day|end_day|logon_time|logout_time|logon_day|logout_day|sending_time_threshold_seconds|supported_app_msg_types|application_messages_available|contract_service_subsets|timestamp_resolution|unknown_field_action|malformed_field_action|validate_enum_values|alternate_endpoints|warmup_message_count
 ```
 
 The newer FIX-behavior columns expose the QuickFIX-style session controls now wired through runtime config and `CounterpartyConfig`:
@@ -647,6 +656,10 @@ The newer FIX-behavior columns expose the QuickFIX-style session controls now wi
 - `supported_app_msg_types`: optional inbound app-message allowlist. When a matching `.nfct` sidecar is loaded, this list must remain within the contract receive subset.
 - `application_messages_available`: explicit maintenance flag. When false, known application messages are rejected with `BusinessMessageReject(380=4)`.
 - `contract_service_subsets`: deployment-selected Orchestra service subsets for the bound profile. These are resolved only on cold paths and never trigger per-message Orchestra interpretation.
+- `timestamp_resolution`: outbound SendingTime precision (`seconds`, `milliseconds`, `microseconds`, or `nanoseconds`).
+- `unknown_field_action`, `malformed_field_action`, `validate_enum_values`: advanced validation-policy knobs layered on top of `validation_mode`.
+- `alternate_endpoints`: comma-separated `host:port` failover endpoints for pluggable initiator connection strategies.
+- `warmup_message_count`: number of inbound application messages after session activation to mark as warmup.
 
 Time fields use `HH:MM:SS`. Day fields accept `sun`..`sat` (or full names). Empty trailing columns keep the default behavior.
 
@@ -664,7 +677,7 @@ auto config = nimble::runtime::LoadEngineConfigFile("engine.nfcfg");
 ### Internal Interop
 
 ```bash
-$BIN_DIR/nimblefix-interop-runner --scenario tests/data/interop/loopback.nfscenario
+$BIN_DIR/nimblefix-interop-runner --scenario tests/data/interop/loopback-basic.nfscenario
 ```
 
 Runs scripted FIX message exchange scenarios and validates behavior.

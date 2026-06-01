@@ -113,7 +113,7 @@ public:
   /// - Adds new counterparties (registers with ShardedRuntime, updates bookkeeping)
   /// - Removes absent counterparties (unregisters from ShardedRuntime)
   /// - Updates modifiable counterparty fields in-place
-  /// - Adds/removes/modifies listeners
+  /// - Updates listener config records; existing LiveAcceptor sockets must be reopened
   /// - Updates engine-level live-changeable fields (trace, metrics)
   ///
   /// Returns ApplyConfigResult describing what was applied and what requires restart.

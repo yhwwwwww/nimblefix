@@ -68,7 +68,7 @@ struct ConfigDelta
 ///
 /// Fields that can be applied live:
 ///   - counterparties (add/remove/modify)
-///   - listeners (add/remove/modify)
+///   - listener config records (existing LiveAcceptor sockets must be reopened)
 ///   - trace_mode, trace_capacity
 ///   - enable_metrics
 ///   - profile_artifacts, profile_dictionaries (new profiles can be loaded)

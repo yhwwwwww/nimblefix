@@ -8,7 +8,7 @@
 
 ## What is NimbleFIX?
 
-NimbleFIX is a C++20 FIX (Financial Information eXchange) protocol engine built from scratch for latency-sensitive trading infrastructure. It handles the full FIX session lifecycle — connection management, Logon/Logout handshake, sequence number tracking, heartbeat monitoring, gap detection, resend recovery — while keeping the hot path allocation-free and lock-free.
+NimbleFIX is a C++20 FIX (Financial Information eXchange) protocol engine built from scratch for latency-sensitive trading infrastructure. It handles the full FIX session lifecycle — connection management, Logon/Logout handshake, sequence number tracking, heartbeat monitoring, gap detection, resend recovery — while keeping the steady-state codec/session path low-allocation and single-writer.
 
 NimbleFIX operates as both **initiator** (client) and **acceptor** (server) using the same internal engine. It supports FIX 4.2, 4.3, 4.4, and FIXT.1.1 transport sessions.
 
@@ -37,7 +37,7 @@ NimbleFIX was designed to answer: *what if every design decision optimized for t
 
 - **Dictionary-backed codec**: FIX metadata is normalized once at startup, either from `.nfd` dictionaries or precompiled `.nfa` artifacts. The hot path uses the same in-memory dictionary representation either way.
 - **Zero-copy message views**: Parsed messages are lightweight views over the original byte buffer. No copies until you explicitly request one.
-- **Single-writer session model**: Each session is owned by exactly one worker thread. No locks, no contention, no false sharing on the critical path.
+- **Single-writer session model**: Each session is owned by exactly one worker thread. Protocol state avoids shared session locks, and cross-thread handoff uses worker-local SPSC queues.
 - **Pre-compiled frame templates**: For high-frequency message types, header/trailer fragments are pre-built. Only variable fields, BodyLength, and Checksum are filled per message.
 - **SIMD-accelerated parsing**: SSE2 vectorized scanning for SOH delimiters and `=` separators in the tokenizer hot loop.
 
@@ -45,9 +45,9 @@ NimbleFIX was designed to answer: *what if every design decision optimized for t
 
 | Feature | Details |
 |---------|---------|
-| **Codec latency** | Current FIX44 compare run: 130 ns header peek (p50), 511 ns full parse (p50) |
-| **Low allocation pressure** | Current compare run: parse/inbound/replay all at 0 alloc/op; loopback at 3 alloc/op |
-| **Session management** | Full Logon/Logout/Heartbeat/TestRequest/ResendRequest/SequenceReset |
+| **Codec latency** | Current local FIX44 compare run: 100 ns header peek (p50), 591 ns full parse (p50) |
+| **Low allocation pressure** | Current local compare run: parse/inbound/replay at 0 alloc/op; outbound at 1 alloc/op; loopback at 3 alloc/op |
+| **Session management** | Core Logon/Logout/Heartbeat/TestRequest/ResendRequest/SequenceReset coverage |
 | **Repeating groups** | Nested groups fully supported via dictionary metadata |
 | **Reconnect with backoff** | Configurable exponential backoff with jitter for initiator reconnect |
 | **Optional TLS transport** | OpenSSL-backed TLS can be compiled in and enabled per initiator counterparty or acceptor listener |
@@ -58,12 +58,12 @@ NimbleFIX was designed to answer: *what if every design decision optimized for t
 | **SIMD tokenizer** | SSE2 byte scanning with automatic scalar fallback |
 | **Observability** | Built-in metrics registry and ring-buffer trace recorder |
 | **Soak testing** | Fault injection harness (gaps, duplicates, reorders, disconnects) |
-| **Fuzz testing** | libFuzzer harnesses for codec, config, and dictionary inputs |
-| **High availability** | Active/standby HA with configurable failover, heartbeat monitoring, and state replication |
-| **Dynamic config** | Hot-reload counterparties, listeners, and engine fields without full restart via `ApplyConfig()` |
-| **Warmup** | Pre-warm codec and profile paths at startup to reduce first-message latency jitter |
+| **Fuzz testing** | Standalone corpus runners for codec/admin, config, and dictionary inputs, plus a libFuzzer codec entrypoint |
+| **High availability** | Active/standby HA with configurable failover, heartbeat monitoring, and callback-driven state replication |
+| **Dynamic config** | Live-update counterparties and selected engine fields via `ApplyConfig()`; listener socket changes require reopening listeners |
+| **Warmup** | Run explicit warmup steps for codec and profile paths before live traffic |
 | **Diagnostics** | Engine health snapshots with pluggable sinks (JSON, text) via `DiagnosticsMonitor` |
-| **Management plane** | Query engine/session status, force disconnect, trigger day-cut, reset sequences at runtime |
+| **Management plane** | Query engine/session status and health snapshots at runtime |
 | **Message log** | Export and replay stored FIX messages with configurable speed (max, real-time, step) |
 | **Connection strategy** | Pluggable reconnect strategies with alternate endpoint failover |
 | **Message routing** | Expression-based routing table with load balancing, field transforms, and forwarding bridges |
@@ -82,7 +82,7 @@ NimbleFIX was designed to answer: *what if every design decision optimized for t
 | **Parsing** | XML data dictionary loaded at runtime; fields stored in `std::map` | Normalized dictionary loaded from `.nfa` or parsed from `.nfd` at startup; hot path uses contiguous lookup sections |
 | **Message representation** | `FieldMap` with heap-allocated strings | Zero-copy `MessageView` over original bytes |
 | **Allocations per message** | Multiple (map insertions, string copies) | Zero in buffer-reuse encode path; minimal in parse path |
-| **Threading** | Global session lock, thread-per-session | Lock-free single-writer per session, sharded workers |
+| **Threading** | Global session lock, thread-per-session | Single-writer per session, sharded workers, SPSC handoff |
 | **Group handling** | Dynamic nesting with map lookups | Dictionary-driven stack with pre-known structure |
 | **Encoding** | Assemble fields → serialize | Pre-compiled frame template, fill variable fields only |
 | **Language** | C++ (pre-C++11 origin) | C++20 |
@@ -321,9 +321,12 @@ Controls how strict the codec is during decode:
 | `nimblefix-acceptor` | CLI FIX acceptor (echo server); operational/advanced tool, not the primary generated-first app example |
 | `nimblefix-soak` | Stress test with fault injection (gaps, duplicates, reorders, disconnects) |
 | `nimblefix-bench` | Latency/throughput benchmark with allocation and CPU counter tracking |
-| `nimblefix-fuzz-codec` | libFuzzer harness for codec and admin protocol |
-| `nimblefix-fuzz-config` | libFuzzer harness for `.nfcfg` config parser |
-| `nimblefix-fuzz-dictgen` | libFuzzer harness for `.nfd` dictionary parser |
+| `nimblefix-msgdump` | Format and filter stored/raw FIX messages as text or JSON |
+| `nimblefix-router` | Apply routing rules to raw FIX input and exercise forwarding transforms |
+| `nimblefix-schema-optimizer` | Analyze observed messages and estimate trimmed-schema layout savings |
+| `nimblefix-fuzz-codec` | Standalone codec/admin corpus runner; `nimblefix-fuzz-codec-libfuzzer` is the libFuzzer codec entrypoint |
+| `nimblefix-fuzz-config` | Standalone corpus runner for the `.nfcfg` config parser |
+| `nimblefix-fuzz-dictgen` | Standalone corpus runner for the `.nfd` dictionary parser |
 | `nimblefix-usagegen` | Scan `send<Msg>(populate, extras)` call sites, generate canonical `MessageShape` keys, deduplicate, and output specialized send-site analysis |
 | `nimblefix-interop-runner` | Bidirectional interoperability scenario runner |
 
@@ -379,6 +382,8 @@ Use `--contract <file> --dump`, `--markdown <file>`, or `--interop-dir <dir>` to
 ### Standard Initiator
 
 ```cpp
+#include <memory>
+
 #include "fix44_api.h"
 #include "nimblefix/runtime/config.h"
 #include "nimblefix/runtime/engine.h"
@@ -464,6 +469,8 @@ Advanced raw encode and dynamic-message escape hatches still exist under `nimble
 ### Standard Acceptor with Dynamic Session Factory
 
 ```cpp
+#include <memory>
+
 #include "fix44_api.h"
 #include "nimblefix/runtime/config.h"
 #include "nimblefix/runtime/acceptor.h"
@@ -623,7 +630,7 @@ auto OnNewOrderSingle(nimble::runtime::InlineSession<Profile>& session,
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `worker_count` | uint32 | 1 | Number of worker threads |
+| `worker_count` | uint32 | 1 | Number of worker shards; values above 1 start worker threads |
 | `poll_mode` | enum | `kBlocking` | `kBlocking` (epoll with timeout) or `kBusy` (spin-loop, lowest latency) |
 | `enable_metrics` | bool | true | Enable built-in metrics collection |
 | `trace_mode` | enum | `kDisabled` | `kDisabled` or `kRing` (ring-buffer trace) |
@@ -637,11 +644,11 @@ auto OnNewOrderSingle(nimble::runtime::InlineSession<Profile>& session,
 | `worker_cpu_affinity` | uint32[] | — | Pin worker threads to CPU cores |
 | `queue_app_mode` | enum | `kCoScheduled` | `kCoScheduled` (drain on worker thread) or `kThreaded` (dedicated app thread per worker) |
 | `app_cpu_affinity` | uint32[] | — | Pin app threads to CPU cores (when `kThreaded`) |
-| `io_backend` | enum | `kEpoll` | `kEpoll` or `kIoUring` (Linux I/O backend) |
+| `io_backend` | enum | `kEpoll` | `kEpoll` or `kIoUring` when available (Linux I/O backend) |
 | `accept_unknown_sessions` | bool | false | Allow `SessionFactory` to handle unknown inbound Logons after static counterparties fail to match |
 | `listeners` | list | — | TCP listener configurations (acceptor only) |
-| `backlog_warn_threshold_ms` | uint32 | 5000 | Log a warning when a session's inbound backlog exceeds this threshold (ms) |
-| `backlog_warn_throttle_ms` | uint32 | 1000 | Minimum interval between backlog warnings for the same session (ms) |
+| `backlog_warn_threshold_ms` | uint32 | 5000 | Warn when an outbound command waits in a worker queue longer than this threshold (ms) |
+| `backlog_warn_throttle_ms` | uint32 | 1000 | Minimum interval between backlog warnings for the same connection (ms) |
 | `counterparties` | list | — | Pre-configured session counterparties |
 
 ### ListenerConfig
@@ -692,7 +699,7 @@ auto OnNewOrderSingle(nimble::runtime::InlineSession<Profile>& session,
 | `tls_client` | TlsClientConfig | disabled | Optional TLS client policy for initiator connections |
 | `acceptor_transport_security` | enum | `kAny` | Accept-side requirement: any, plain-only, or TLS-only |
 | `sending_time_threshold_seconds` | uint32 | 0 | Maximum allowed clock drift in SendingTime (0 = disabled) |
-| `warmup_message_count` | uint32 | 0 | Number of warmup messages to pre-encode at session startup |
+| `warmup_message_count` | uint32 | 0 | Number of inbound application messages after activation to mark as warmup |
 | `timestamp_resolution` | enum | `kMilliseconds` | SendingTime precision: `kSeconds`, `kMilliseconds`, `kMicroseconds`, or `kNanoseconds` |
 | `validation_callback` | shared_ptr | — | Optional per-session callback for custom inbound message validation |
 | `connection_strategy` | shared_ptr | — | Optional pluggable reconnect strategy (overrides exponential backoff) |
@@ -773,9 +780,9 @@ NimbleFIX does not create threads behind your back. Every thread is explicitly c
 |--------|------|-------|------|---------|
 | Front-door | `nf-acc-main` | 1 | Accept TCP connections, read Logon, route to least-loaded worker | `front_door_cpu` |
 | Session worker | `nf-acc-w{N}` | `worker_count` | Own sessions exclusively: decode, sequence, timer, encode, send | `worker_cpu_affinity[N]` |
-| App worker | `nf-app-w{N}` | `worker_count` | Drain SPSC queues, invoke business callbacks | `app_cpu_affinity[N]` |
+| App worker | `nf-app-w{N}` | `worker_count` (if `queue_app_mode=kThreaded`) | Drain SPSC queues, invoke business callbacks | `app_cpu_affinity[N]` |
 
-**Initiator:** Same as acceptor but without the front-door thread. Session workers are named `nf-ini-w{N}`.
+**Initiator:** For `worker_count>1`, the caller thread is named `nf-ini-main` and coordinates the run loop while session workers are named `nf-ini-w{N}`. There is no acceptor-style TCP front-door thread.
 
 When `worker_count=1`, the single worker runs on the caller's thread — no extra thread is spawned. App workers only exist when `queue_app_mode = kThreaded`.
 
@@ -798,7 +805,7 @@ session.send<NewOrderSingle>([](auto& order) { /* populate order */ });
 |------|---------------------|------------|
 | `kInline` (default) | On session worker thread, inside the I/O loop | Must not block |
 | `kQueueDecoupled` + `kCoScheduled` | On session worker thread, during explicit poll call | Must not block |
-| `kQueueDecoupled` + `kThreaded` | On dedicated app worker thread (`nf-app-wN`) | May block (within reason) |
+| `kQueueDecoupled` + `kThreaded` | On dedicated app worker thread (`nf-app-wN`) | Keep bounded; I/O is isolated but queues are finite |
 
 **Inline mode** gives the lowest latency. On the generated-first path, the runtime dispatches typed inbound views on the session worker thread. Advanced raw integrations may still consume zero-copy `MessageView` directly. In either case, callbacks must return quickly; any blocking will stall all sessions on that worker.
 
@@ -843,35 +850,35 @@ QuickFIX is still the reference implementation most teams already know and alrea
 - Allocation tracking: global `operator new` interception counts heap allocations per iteration
 - CPU counters: Linux `perf_event_open` feeds cache-miss and branch-miss columns when available
 
-### Current Side-By-Side Snapshot (2026-04-14)
+### Current Local Side-By-Side Run (2026-05-30)
 
 | | |
 |---|---|
 | **CPU** | AMD Ryzen 7 7840HS with Radeon 780M Graphics |
-| **OS** | Linux 6.19.10-1-cachyos x86_64 |
-| **Compiler** | `g++ (GCC) 15.2.1 20260209` |
-| **Build helper** | `xmake v3.0.8+20260324` via `./bench/bench.sh compare` |
+| **OS** | Linux 7.0.9-1-cachyos x86_64 |
+| **Compiler** | `g++ (GCC) 16.1.1 20260430` |
+| **Build helper** | `xmake v3.0.9+20260519` via `./bench/bench.sh compare` |
 
 #### Cross-Engine Shared Boundaries
 
 | Boundary | NimbleFIX metric | QuickFIX metric | NimbleFIX p50 | NimbleFIX p95 | QuickFIX p50 | QuickFIX p95 | NimbleFIX alloc/op | QuickFIX alloc/op |
 |----------|----------------|-----------------|-------------|-------------|--------------|--------------|------------------|-------------------|
-| user encode | `encode` | `quickfix-encode` | — | — | — | — | — | — |
-| session outbound | `outbound` | `quickfix-outbound` | — | — | — | — | — | — |
-| wire → object | `parse` | `quickfix-parse` | 511 ns | 521 ns | 1.29 us | 1.33 us | 0 | 20 |
-| session inbound | `inbound` | `quickfix-inbound` | 1.65 us | 1.94 us | 2.38 us | 2.75 us | 0 | 18 |
-| replay (`replay_span=128`) | `replay` | `quickfix-replay` | 15.66 us | 16.81 us | 231.20 us | 269.07 us | 0 | 4117 |
-| TCP loopback round-trip | `loopback` | `quickfix-loopback` | 17.58 us | 20.75 us | 20.55 us | 24.68 us | 3 | 77 |
+| user encode | `encode` | `quickfix-encode` | 391 ns | 410 ns | 1.41 us | 1.44 us | 0.0 | 29.0 |
+| session outbound | `outbound` | `quickfix-outbound` | 712 ns | 751 ns | 1.70 us | 2.95 us | 1.0 | 33 |
+| wire → object | `parse` | `quickfix-parse` | 591 ns | 611 ns | 1.48 us | 1.51 us | 0 | 20.0 |
+| session inbound | `inbound` | `quickfix-inbound` | 1.22 us | 1.30 us | 2.46 us | 2.54 us | 0 | 12 |
+| replay (`replay_span=128`) | `replay` | `quickfix-replay` | 14.45 us | 15.43 us | 265.54 us | 293.58 us | 0 | 4117.0 |
+| TCP loopback round-trip | `loopback` | `quickfix-loopback` | 17.17 us | 18.68 us | 21.86 us | 24.62 us | 3.0 | 77.0 |
 
 #### NimbleFIX-Only Tier
 
 | Metric | p50 | p95 | p99 | alloc/op | ops/sec |
 |--------|-----|-----|-----|----------|---------|
-| `peek` | 130 ns | 141 ns | 141 ns | 0 | 6.58M |
+| `peek` | 100 ns | 101 ns | 101 ns | 0 | 8.65M |
 
 Key observations:
 
-- NimbleFIX currently leads every shared tier in the checked-in side-by-side run: about 2.5x on parse, 1.4x on inbound, 14.8x on replay, and 1.2x on loopback RTT.
+- NimbleFIX led every shared tier in this local side-by-side run: about 3.6x on encode, 2.4x on outbound, 2.5x on parse, 2.0x on inbound, 18.4x on replay, and 1.3x on loopback RTT.
 - The replay gap is the largest structural difference: NimbleFIX re-encodes from store state with 0 alloc/op, while QuickFIX replay allocates about 4,117 times per measured iteration.
 - Loopback remains the closest tier because both engines are partly bounded by the same Linux TCP floor once the message leaves userspace.
 - `outbound` is now a paired cross-engine metric (NimbleFIX `outbound` vs QuickFIX `quickfix-outbound`); `peek` remains NimbleFIX-only.
@@ -902,7 +909,7 @@ For exact measurement boundaries, per-metric start/end points, and flow diagrams
 
 ## Project Status
 
-NimbleFIX is under active development. The core engine, session management, codec, and persistence layers are implemented and tested (403 test cases, 5200+ assertions). The hot-path encode pipeline continues to be optimized toward the design targets.
+NimbleFIX is under active development. The core engine, session management, codec, and persistence layers are implemented and covered by the regression suite (400+ test cases and 5k+ assertions). The hot-path encode pipeline continues to be optimized toward the design targets.
 
 ## License
 

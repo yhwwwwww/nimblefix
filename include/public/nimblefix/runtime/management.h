@@ -56,7 +56,11 @@ struct EngineManagementStatus
   std::vector<ManagedSessionStatus> sessions;
 };
 
-/// Management command types.
+/// Management command vocabulary.
+///
+/// Query helpers are implemented directly on ManagementPlane today. Control
+/// commands are reserved for the command-execution surface and are not yet
+/// wired to runtime sessions.
 enum class ManagementCommand : std::uint32_t
 {
   /// Query engine status (read-only).
@@ -84,12 +88,11 @@ struct ManagementCommandResult
   std::optional<ManagedSessionStatus> session_status;
 };
 
-/// Management plane interface for querying and controlling a running engine.
+/// Management plane interface for querying a running engine.
 ///
 /// This provides a single entry point for monitoring/admin tools to:
 /// - Query engine and session state
-/// - Execute control commands
-/// - Obtain health information
+/// - Check health information
 ///
 /// Thread safety: all methods are safe to call from any thread (they read
 /// Engine state which is protected by the Engine's internal synchronization).
@@ -121,8 +124,8 @@ public:
 
   /// Toggle application message availability for a session.
   ///
-  /// When disabled, the session responds to known application messages with
-  /// BusinessMessageReject(380=4).
+  /// This control path is not wired to live runtime sessions yet and currently
+  /// returns kInvalidArgument after validating the engine/session.
   auto SetApplicationMessagesAvailable(std::uint64_t session_id, bool available) -> base::Status;
 
   /// Get the boot timestamp of the engine.
