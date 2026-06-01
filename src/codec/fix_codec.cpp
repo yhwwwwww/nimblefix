@@ -359,25 +359,26 @@ ScanNextField(std::span<const std::byte> bytes,
     return base::Status::FormatError("FIX frame is missing its final delimiter");
   }
   const auto remaining = bytes.size() - field_start;
-  // Single SIMD scan for '=' or SOH — '=' always comes first in a valid field.
-  const auto* eq_ptr = FindEitherByte(bytes.data() + field_start, remaining, equals_byte, delimiter_byte);
-  const auto eq_offset = static_cast<std::size_t>(eq_ptr - (bytes.data() + field_start));
-  if (eq_offset >= remaining) {
+  std::size_t equals = 0U;
+  for (; equals < remaining && equals <= 5U; ++equals) {
+    const auto value = bytes[field_start + equals];
+    if (value == equals_byte) {
+      break;
+    }
+    if (value == delimiter_byte) {
+      return equals == 0U ? base::Status::FormatError("empty FIX field is not allowed")
+                          : base::Status::FormatError("invalid FIX field syntax");
+    }
+  }
+  if (equals >= remaining) {
     return base::Status::FormatError("FIX frame is missing its final delimiter");
   }
-  if (eq_offset == 0U) {
-    // First byte is SOH (empty field) or '=' (no tag) — both invalid.
-    if (*eq_ptr == delimiter_byte) {
-      return base::Status::FormatError("empty FIX field is not allowed");
-    }
+  if (equals == 0U) {
     return base::Status::FormatError("invalid FIX field syntax");
   }
-  if (*eq_ptr == delimiter_byte) {
-    // Found SOH before '=' — no equals sign in this field.
-    return base::Status::FormatError("invalid FIX field syntax");
+  if (equals > 5U || bytes[field_start + equals] != equals_byte) {
+    return base::Status::FormatError("invalid field tag");
   }
-  // eq_ptr points to '='. Now find SOH after the value portion.
-  const auto equals = eq_offset; // offset of '=' relative to field_start
   const auto after_eq = field_start + equals + 1U;
   const auto remaining_after_eq = bytes.size() - after_eq;
   const auto short_scan_len = std::min(remaining_after_eq, kScanNextFieldShortValueBytes);
@@ -877,6 +878,7 @@ ParseParsedGroupEntries(const profile::NormalizedDictionaryView& dictionary,
 
       if (const auto ri = dictionary.group_rule_index(group_def, tag); ri >= 0) {
         const auto* field_def = dictionary.find_field(tag);
+        const auto field_type = ResolveFieldTypeWithDef(tag, field_def);
         ValidateConsumedField(dictionary,
                               tag,
                               group_rules,
@@ -891,10 +893,10 @@ ParseParsedGroupEntries(const profile::NormalizedDictionaryView& dictionary,
 
         auto value_sv = std::string_view(reinterpret_cast<const char*>(bytes.data() + field.value().value_offset),
                                          field.value().value_length);
-        ValidateScalarFieldValue(tag, value_sv, ResolveFieldTypeWithDef(tag, field_def), validation_issue);
+        ValidateScalarFieldValue(tag, value_sv, field_type, validation_issue);
 
-        auto slot = MakeParsedFieldSlot(
-          tag, static_cast<std::uint32_t>(field.value().value_offset), field.value().value_length, dictionary);
+        auto slot = MakeParsedFieldSlotWithType(
+          tag, static_cast<std::uint32_t>(field.value().value_offset), field.value().value_length, field_type);
         if (deferred_count < kMaxDeferredSlots) {
           deferred_slots[deferred_count++] = slot;
         }
@@ -2679,6 +2681,7 @@ DecodeFixMessageView(std::span<const std::byte> bytes,
       (cached_message_def != nullptr && dictionary.message_rule_allows_tag(*cached_message_def, tag))
         ? dictionary.find_group(tag)
         : nullptr;
+    const auto field_type = ResolveFieldTypeWithDef(tag, field_def);
 
     ValidateConsumedField(dictionary,
                           tag,
@@ -2693,12 +2696,10 @@ DecodeFixMessageView(std::span<const std::byte> bytes,
                           group_def != nullptr ? ValidationIssueKind::kNone
                                                : ValidationIssueKind::kTagSpecifiedOutOfRequiredOrder);
 
-    ValidateScalarFieldValue(tag, value_sv, ResolveFieldTypeWithDef(tag, field_def), &validation_issue);
+    ValidateScalarFieldValue(tag, value_sv, field_type, &validation_issue);
     if (group_def != nullptr) {
-      auto slot = MakeParsedFieldSlotWithType(tag,
-                                              static_cast<std::uint32_t>(scanned.value().value_offset),
-                                              scanned.value().value_length,
-                                              ResolveFieldTypeWithDef(tag, field_def));
+      auto slot = MakeParsedFieldSlotWithType(
+        tag, static_cast<std::uint32_t>(scanned.value().value_offset), scanned.value().value_length, field_type);
       AppendParsedFieldSlot(parsed_message, RootContainer(), slot);
       auto next_pos = ParseParsedGroupEntries(dictionary,
                                               bytes,
@@ -2718,10 +2719,8 @@ DecodeFixMessageView(std::span<const std::byte> bytes,
       continue;
     }
 
-    auto slot = MakeParsedFieldSlotWithType(tag,
-                                            static_cast<std::uint32_t>(scanned.value().value_offset),
-                                            scanned.value().value_length,
-                                            ResolveFieldTypeWithDef(tag, field_def));
+    auto slot = MakeParsedFieldSlotWithType(
+      tag, static_cast<std::uint32_t>(scanned.value().value_offset), scanned.value().value_length, field_type);
     AppendParsedFieldSlot(parsed_message, RootContainer(), slot);
     byte_pos = scanned.value().next_pos;
   }

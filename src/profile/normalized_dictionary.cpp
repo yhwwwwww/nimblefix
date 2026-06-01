@@ -326,6 +326,15 @@ NormalizedDictionaryView::message_rule_allows_tag(const MessageDefRecord& record
 auto
 NormalizedDictionaryView::group_rule_allows_tag(const GroupDefRecord& record, std::uint32_t tag) const -> bool
 {
+  if (record.field_rule_count <= 8U) {
+    const auto rules = group_field_rules(record);
+    for (const auto& rule : rules) {
+      if (rule.tag == tag) {
+        return true;
+      }
+    }
+    return false;
+  }
   const auto* base = sorted_group_rules_.data() + record.first_field_rule;
   const auto* end = base + record.field_rule_count;
   auto it = std::lower_bound(base, end, tag, [](const TagRuleEntry& e, std::uint32_t t) { return e.tag < t; });
@@ -347,6 +356,15 @@ NormalizedDictionaryView::message_rule_index(const MessageDefRecord& record, std
 auto
 NormalizedDictionaryView::group_rule_index(const GroupDefRecord& record, std::uint32_t tag) const -> int
 {
+  if (record.field_rule_count <= 8U) {
+    const auto rules = group_field_rules(record);
+    for (std::size_t index = 0U; index < rules.size(); ++index) {
+      if (rules[index].tag == tag) {
+        return static_cast<int>(index);
+      }
+    }
+    return -1;
+  }
   const auto* base = sorted_group_rules_.data() + record.first_field_rule;
   const auto* end = base + record.field_rule_count;
   auto it = std::lower_bound(base, end, tag, [](const TagRuleEntry& e, std::uint32_t t) { return e.tag < t; });
@@ -375,8 +393,7 @@ NormalizedDictionaryView::is_enum_value_allowed(const FieldDefRecord& field_def,
     return true;
   }
 
-  const auto field_index =
-    static_cast<std::size_t>(&field_def - field_defs_.entries().data());
+  const auto field_index = static_cast<std::size_t>(&field_def - field_defs_.entries().data());
   if (field_index < enum_bitmaps_.size() && enum_bitmaps_[field_index].all_single_char) {
     if (value.size() != 1U) {
       return false;
