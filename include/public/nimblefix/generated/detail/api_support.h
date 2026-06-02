@@ -38,15 +38,6 @@ public:
     words_[index / 64U] |= (std::uint64_t{ 1 } << (index % 64U));
   }
 
-  [[nodiscard]] auto has(std::size_t index) const -> bool
-  {
-    if constexpr (FieldCount == 0U) {
-      (void)index;
-      return false;
-    }
-    return (words_[index / 64U] & (std::uint64_t{ 1 } << (index % 64U))) != 0U;
-  }
-
   [[nodiscard]] auto first_missing(const RequiredFieldMask<FieldCount>& required) const -> std::optional<std::size_t>
   {
     for (std::size_t word_index = 0U; word_index < required.size(); ++word_index) {
@@ -122,22 +113,6 @@ public:
   auto set_boolean(std::uint32_t tag, bool value) -> OwnedGroupEntryWriter&
   {
     return upsert_field(message::FieldValue{ .tag = tag, .value = value });
-  }
-
-  auto reserve_fields(std::size_t count) -> OwnedGroupEntryWriter&
-  {
-    if (auto* data = resolve(); data != nullptr) {
-      data->fields.reserve(count);
-    }
-    return *this;
-  }
-
-  auto reserve_groups(std::size_t count) -> OwnedGroupEntryWriter&
-  {
-    if (auto* data = resolve(); data != nullptr) {
-      data->groups.reserve(count);
-    }
-    return *this;
   }
 
   auto reserve_group_entries(std::uint32_t count_tag, std::size_t count) -> OwnedGroupEntryWriter&
@@ -303,72 +278,37 @@ private:
 
 template<typename Builder>
 inline auto
-SetField(Builder& builder, std::uint32_t tag, std::string_view value) -> void
+AddField(Builder& builder, std::uint32_t tag, std::string_view value) -> void
 {
   builder.set_string(tag, value);
 }
 
 template<typename Builder>
 inline auto
-AddField(Builder& builder, std::uint32_t tag, std::string_view value) -> void
-{
-  SetField(builder, tag, value);
-}
-
-template<typename Builder>
-inline auto
-SetField(Builder& builder, std::uint32_t tag, std::int64_t value) -> void
+AddField(Builder& builder, std::uint32_t tag, std::int64_t value) -> void
 {
   builder.set_int(tag, value);
 }
 
 template<typename Builder>
 inline auto
-AddField(Builder& builder, std::uint32_t tag, std::int64_t value) -> void
-{
-  SetField(builder, tag, value);
-}
-
-template<typename Builder>
-inline auto
-SetField(Builder& builder, std::uint32_t tag, char value) -> void
+AddField(Builder& builder, std::uint32_t tag, char value) -> void
 {
   builder.set_char(tag, value);
 }
 
 template<typename Builder>
 inline auto
-AddField(Builder& builder, std::uint32_t tag, char value) -> void
-{
-  SetField(builder, tag, value);
-}
-
-template<typename Builder>
-inline auto
-SetField(Builder& builder, std::uint32_t tag, double value) -> void
+AddField(Builder& builder, std::uint32_t tag, double value) -> void
 {
   builder.set_float(tag, value);
 }
 
 template<typename Builder>
 inline auto
-AddField(Builder& builder, std::uint32_t tag, double value) -> void
-{
-  SetField(builder, tag, value);
-}
-
-template<typename Builder>
-inline auto
-SetField(Builder& builder, std::uint32_t tag, bool value) -> void
-{
-  builder.set_boolean(tag, value);
-}
-
-template<typename Builder>
-inline auto
 AddField(Builder& builder, std::uint32_t tag, bool value) -> void
 {
-  SetField(builder, tag, value);
+  builder.set_boolean(tag, value);
 }
 
 template<class Builder, class Entries, class AppendEntry>
@@ -486,13 +426,6 @@ ValidateMsgType(message::MessageView view, std::string_view expected) -> base::R
   return ViewType(view);
 }
 
-template<typename ViewType>
-inline auto
-BindMessageView(message::MessageView view, std::string_view expected) -> base::Result<ViewType>
-{
-  return ValidateMsgType<ViewType>(view, expected);
-}
-
 inline auto
 MissingRequiredShapeField(const MessageShape& shape, std::uint32_t tag) -> base::Status
 {
@@ -554,17 +487,6 @@ ParseRequiredEnumField(const std::optional<Wire>& raw, std::uint32_t tag, std::s
   }
   return *parsed;
 }
-
-template<std::uint32_t Id>
-struct InboundEnumValidator
-{
-  static auto Validate(std::uint32_t tag, std::string_view value) -> base::Status
-  {
-    (void)tag;
-    (void)value;
-    return base::Status::Ok();
-  }
-};
 
 template<class ValidatorSet>
 inline auto
@@ -673,54 +595,6 @@ struct NoEnumValidators
   }
 };
 
-template<class Handler, class Session, class View>
-using DispatchHandlerMethod = base::Status (Handler::*)(Session&, View);
-
-template<class View, class Handler, class Session>
-inline auto
-DispatchToHandler(message::MessageView message,
-                  Session& session,
-                  Handler& handler,
-                  DispatchHandlerMethod<Handler, Session, View> method) -> base::Status
-{
-  auto bound = View::Bind(message);
-  if (!bound.ok()) {
-    return bound.status();
-  }
-  return (handler.*method)(session, std::move(bound).value());
-}
-
-template<class View, class Handler, class Session, class ValidatorSet>
-inline auto
-DispatchToHandler(message::MessageView message,
-                  Session& session,
-                  Handler& handler,
-                  DispatchHandlerMethod<Handler, Session, View> method,
-                  const MessageShape& shape,
-                  ValidatorSet) -> base::Status
-{
-  auto bound = View::Bind(message);
-  if (!bound.ok()) {
-    return bound.status();
-  }
-  auto validation = ValidateInboundMessageShape<ValidatorSet>(message, shape);
-  if (!validation.ok()) {
-    return validation;
-  }
-  return (handler.*method)(session, std::move(bound).value());
-}
-
-template<class View, class Handler, class Session>
-inline auto
-DispatchToHandler(message::MessageView message,
-                  Session& session,
-                  Handler& handler,
-                  DispatchHandlerMethod<Handler, Session, View> method,
-                  const MessageShape& shape) -> base::Status
-{
-  return DispatchToHandler<View>(message, session, handler, method, shape, NoEnumValidators{});
-}
-
 template<class View, class Handler, class Session, class RawDispatch>
 inline auto
 DispatchToApplicationCallback(Handler& handler, Session& session, View view, RawDispatch raw_dispatch) -> base::Status
@@ -770,47 +644,6 @@ DispatchToApplicationUsingUsageShapes(message::MessageView message,
   }
 
   return DispatchToApplicationCallback(handler, session, std::move(bound).value(), raw_dispatch);
-}
-
-template<class View, class Handler, class Session, class ValidatorSet>
-inline auto
-DispatchToHandlerUsingUsageShapes(message::MessageView message,
-                                  Session& session,
-                                  Handler& handler,
-                                  DispatchHandlerMethod<Handler, Session, View> method,
-                                  const MessageShape* const* usage_shapes,
-                                  std::uint32_t usage_shape_count,
-                                  std::string_view expected_msg_type,
-                                  ValidatorSet) -> base::Status
-{
-  auto bound = View::Bind(message);
-  if (!bound.ok()) {
-    return bound.status();
-  }
-
-  bool found_usage_shape = false;
-  auto first_failure = base::Status::Ok();
-  for (std::uint32_t index = 0U; index < usage_shape_count; ++index) {
-    const auto* shape = usage_shapes == nullptr ? nullptr : usage_shapes[index];
-    if (shape == nullptr || shape->msg_type != expected_msg_type) {
-      continue;
-    }
-
-    found_usage_shape = true;
-    auto validation = ValidateInboundMessageShape<ValidatorSet>(message, *shape);
-    if (validation.ok()) {
-      return (handler.*method)(session, std::move(bound).value());
-    }
-    if (first_failure.ok()) {
-      first_failure = std::move(validation);
-    }
-  }
-
-  if (found_usage_shape) {
-    return first_failure.ok() ? base::Status::InvalidArgument("usage shape validation failed") : first_failure;
-  }
-
-  return (handler.*method)(session, std::move(bound).value());
 }
 
 /// Pre-encoded application body buffer for the typed encode fast path.
