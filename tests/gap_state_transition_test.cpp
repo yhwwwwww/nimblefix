@@ -11,7 +11,7 @@
 
 #include "nimblefix/codec/fix_codec.h"
 #include "nimblefix/codec/fix_tags.h"
-#include "nimblefix/advanced/message_builder.h"
+#include "nimblefix/message/message_data_writer.h"
 #include "nimblefix/session/admin_protocol.h"
 #include "nimblefix/session/session_core.h"
 #include "nimblefix/store/memory_store.h"
@@ -57,7 +57,7 @@ ActivateAcceptorSession(AdminProtocol* protocol,
                         const nimble::profile::NormalizedDictionaryView& dictionary,
                         std::string begin_string) -> nimble::base::Status
 {
-  nimble::message::MessageBuilder logon_builder("A");
+  nimble::message::MessageDataWriter logon_builder("A");
   logon_builder.set_string(35U, "A").set_int(98U, 0).set_int(108U, 30);
   auto inbound =
     EncodeInboundFrame(std::move(logon_builder).build(), dictionary, std::move(begin_string), "BUY", "SELL", 1U, false);
@@ -167,7 +167,7 @@ TEST_CASE("gap-transition: initiator logon response with gap activates after fil
   REQUIRE(protocol->session().Snapshot().next_in_seq == 1U);
 
   // Counterparty sends Logon at seq=3 (gap: expected 1, received 3)
-  nimble::message::MessageBuilder logon_builder("A");
+  nimble::message::MessageDataWriter logon_builder("A");
   logon_builder.set_string(35U, "A").set_int(98U, 0).set_int(108U, 30);
   auto logon_frame =
     EncodeInboundFrame(std::move(logon_builder).build(), dictionary.value(), "FIX.4.4", "SELL", "BUY", 3U, false);
@@ -186,7 +186,7 @@ TEST_CASE("gap-transition: initiator logon response with gap activates after fil
   REQUIRE(resend_decoded.value().message.view().get_int(16U).value() == 2);
 
   // Now fill the gap with a GapFill covering [1, 3) → NewSeqNo=3
-  nimble::message::MessageBuilder gap_fill_builder("4");
+  nimble::message::MessageDataWriter gap_fill_builder("4");
   gap_fill_builder.set_string(35U, "4").set_boolean(123U, true).set_int(36U, 3);
   auto gap_fill = EncodeInboundFrame(std::move(gap_fill_builder).build(),
                                      dictionary.value(),
@@ -228,7 +228,7 @@ TEST_CASE("gap-transition: acceptor logon with gap activates after fill", "[gap-
   REQUIRE(protocol->session().state() == SessionState::kConnected);
 
   // Counterparty sends Logon at seq=5 (gap: expected 1, received 5)
-  nimble::message::MessageBuilder logon_builder("A");
+  nimble::message::MessageDataWriter logon_builder("A");
   logon_builder.set_string(35U, "A").set_int(98U, 0).set_int(108U, 30);
   auto logon_frame =
     EncodeInboundFrame(std::move(logon_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 5U, false);
@@ -247,7 +247,7 @@ TEST_CASE("gap-transition: acceptor logon with gap activates after fill", "[gap-
   REQUIRE(resend_decoded.value().message.view().get_int(16U).value() == 4);
 
   // Fill gap with GapFill [1, 5) → NewSeqNo=5
-  nimble::message::MessageBuilder gap_fill_builder("4");
+  nimble::message::MessageDataWriter gap_fill_builder("4");
   gap_fill_builder.set_string(35U, "4").set_boolean(123U, true).set_int(36U, 5);
   auto gap_fill = EncodeInboundFrame(std::move(gap_fill_builder).build(),
                                      dictionary.value(),
@@ -309,7 +309,7 @@ TEST_CASE("gap-transition: app message triggering gap is delivered after fill", 
 
   // Counterparty sends a NewOrderSingle (D) at seq=5 (gap: expected 2, received
   // 5)
-  nimble::message::MessageBuilder order_builder("D");
+  nimble::message::MessageDataWriter order_builder("D");
   order_builder.set_string(kMsgType, "D")
     .set_string(kClOrdID, "ORDER-001")
     .set_string(kSymbol, "AAPL")
@@ -328,7 +328,7 @@ TEST_CASE("gap-transition: app message triggering gap is delivered after fill", 
   REQUIRE(gap_event.value().outbound_frames.size() >= 1U);
 
   // Fill gap with GapFill [2, 5) → NewSeqNo=5
-  nimble::message::MessageBuilder gap_fill_builder("4");
+  nimble::message::MessageDataWriter gap_fill_builder("4");
   gap_fill_builder.set_string(35U, "4").set_boolean(123U, true).set_int(36U, 5);
   auto gap_fill = EncodeInboundFrame(std::move(gap_fill_builder).build(),
                                      dictionary.value(),
@@ -376,7 +376,7 @@ TEST_CASE("gap-transition: logout triggering gap causes disconnect after fill", 
   REQUIRE(protocol->session().state() == SessionState::kActive);
 
   // Counterparty sends Logout at seq=4 (gap: expected 2, received 4)
-  nimble::message::MessageBuilder logout_builder("5");
+  nimble::message::MessageDataWriter logout_builder("5");
   logout_builder.set_string(35U, "5");
   auto logout_frame =
     EncodeInboundFrame(std::move(logout_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 4U, false);
@@ -386,7 +386,7 @@ TEST_CASE("gap-transition: logout triggering gap causes disconnect after fill", 
   REQUIRE(gap_event.ok());
 
   // Fill gap with GapFill [2, 4) → NewSeqNo=4
-  nimble::message::MessageBuilder gap_fill_builder("4");
+  nimble::message::MessageDataWriter gap_fill_builder("4");
   gap_fill_builder.set_string(35U, "4").set_boolean(123U, true).set_int(36U, 4);
   auto gap_fill = EncodeInboundFrame(std::move(gap_fill_builder).build(),
                                      dictionary.value(),
@@ -429,7 +429,7 @@ TEST_CASE("gap-transition: test request triggering gap gets heartbeat after fill
   REQUIRE(protocol->session().state() == SessionState::kActive);
 
   // Counterparty sends TestRequest at seq=4 (gap: expected 2, received 4)
-  nimble::message::MessageBuilder test_req_builder("1");
+  nimble::message::MessageDataWriter test_req_builder("1");
   test_req_builder.set_string(35U, "1").set_string(112U, "TR-12345");
   auto test_req_frame =
     EncodeInboundFrame(std::move(test_req_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 4U, false);
@@ -439,7 +439,7 @@ TEST_CASE("gap-transition: test request triggering gap gets heartbeat after fill
   REQUIRE(gap_event.ok());
 
   // Fill gap with GapFill [2, 4) → NewSeqNo=4
-  nimble::message::MessageBuilder gap_fill_builder("4");
+  nimble::message::MessageDataWriter gap_fill_builder("4");
   gap_fill_builder.set_string(35U, "4").set_boolean(123U, true).set_int(36U, 4);
   auto gap_fill = EncodeInboundFrame(std::move(gap_fill_builder).build(),
                                      dictionary.value(),
@@ -529,7 +529,7 @@ TEST_CASE("gap-transition: replayed messages complete gap recovery", "[gap-trans
   REQUIRE(ActivateAcceptorSession(protocol.get(), dictionary.value(), "FIX.4.4").ok());
 
   // Receive heartbeat at seq=4 → gap [2, 3]
-  nimble::message::MessageBuilder hb_builder("0");
+  nimble::message::MessageDataWriter hb_builder("0");
   hb_builder.set_string(35U, "0");
   auto hb_frame =
     EncodeInboundFrame(std::move(hb_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 4U, false);
@@ -540,7 +540,7 @@ TEST_CASE("gap-transition: replayed messages complete gap recovery", "[gap-trans
   REQUIRE(protocol->session().state() == SessionState::kResendProcessing);
 
   // Replay seq 2 as PossDup heartbeat
-  nimble::message::MessageBuilder replay2("0");
+  nimble::message::MessageDataWriter replay2("0");
   replay2.set_string(35U, "0");
   auto frame2 = EncodeInboundFrame(
     std::move(replay2).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 2U, true, {}, "20260414-11:59:00.000");
@@ -552,7 +552,7 @@ TEST_CASE("gap-transition: replayed messages complete gap recovery", "[gap-trans
   REQUIRE(protocol->session().state() == SessionState::kResendProcessing);
 
   // Replay seq 3 as PossDup heartbeat — should complete the gap
-  nimble::message::MessageBuilder replay3("0");
+  nimble::message::MessageDataWriter replay3("0");
   replay3.set_string(35U, "0");
   auto frame3 = EncodeInboundFrame(
     std::move(replay3).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 3U, true, {}, "20260414-11:59:00.000");
@@ -664,7 +664,7 @@ TEST_CASE("gap-transition: second gap-triggering message extends gap then both "
   REQUIRE(protocol->session().Snapshot().next_in_seq == 2U);
 
   // First app message at seq=4 (gap [2, 3])
-  nimble::message::MessageBuilder order1("D");
+  nimble::message::MessageDataWriter order1("D");
   order1.set_string(kMsgType, "D")
     .set_string(kClOrdID, "ORD-1")
     .set_string(kSymbol, "AAPL")
@@ -681,7 +681,7 @@ TEST_CASE("gap-transition: second gap-triggering message extends gap then both "
   REQUIRE(protocol->session().state() == SessionState::kResendProcessing);
 
   // Second app message at seq=6 (extends gap to [2, 5])
-  nimble::message::MessageBuilder order2("D");
+  nimble::message::MessageDataWriter order2("D");
   order2.set_string(kMsgType, "D")
     .set_string(kClOrdID, "ORD-2")
     .set_string(kSymbol, "MSFT")
@@ -697,7 +697,7 @@ TEST_CASE("gap-transition: second gap-triggering message extends gap then both "
   REQUIRE(event2.ok());
 
   // Fill [2, 4) → advances next_in_seq to 4 (does not yet complete resend)
-  nimble::message::MessageBuilder gap_fill1("4");
+  nimble::message::MessageDataWriter gap_fill1("4");
   gap_fill1.set_string(35U, "4").set_boolean(123U, true).set_int(36U, 4);
   auto fill_frame1 = EncodeInboundFrame(
     std::move(gap_fill1).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 2U, true, {}, "20260414-11:59:00.000");
@@ -722,7 +722,7 @@ TEST_CASE("gap-transition: second gap-triggering message extends gap then both "
   // completes the resend and drains seq=6 from the deferred queue.
 
   // Counterparty replays seq=4 as PossDup
-  nimble::message::MessageBuilder replay4("D");
+  nimble::message::MessageDataWriter replay4("D");
   replay4.set_string(kMsgType, "D")
     .set_string(kClOrdID, "ORD-1-PD")
     .set_string(kSymbol, "AAPL")
@@ -741,7 +741,7 @@ TEST_CASE("gap-transition: second gap-triggering message extends gap then both "
   REQUIRE(protocol->session().Snapshot().next_in_seq == 5U);
 
   // GapFill [5, 6) fills seq=5, completing the gap → triggers drain
-  nimble::message::MessageBuilder gap_fill2("4");
+  nimble::message::MessageDataWriter gap_fill2("4");
   gap_fill2.set_string(35U, "4").set_boolean(123U, true).set_int(36U, 6);
   auto fill_frame2 = EncodeInboundFrame(
     std::move(gap_fill2).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 5U, true, {}, "20260414-11:59:02.000");
@@ -807,7 +807,7 @@ TEST_CASE("gap-transition: initiator reset-seq-num logon with gap", "[gap-transi
   REQUIRE(protocol->session().state() == SessionState::kPendingLogon);
 
   // Counterparty responds with Logon at seq=2 (expected=1, gap on 1)
-  nimble::message::MessageBuilder logon_builder("A");
+  nimble::message::MessageDataWriter logon_builder("A");
   logon_builder.set_string(35U, "A").set_int(98U, 0).set_int(108U, 30);
   auto logon_frame =
     EncodeInboundFrame(std::move(logon_builder).build(), dictionary.value(), "FIX.4.4", "SELL", "BUY", 2U, false);
@@ -817,7 +817,7 @@ TEST_CASE("gap-transition: initiator reset-seq-num logon with gap", "[gap-transi
   REQUIRE(gap_event.ok());
 
   // Fill gap [1,1] with GapFill
-  nimble::message::MessageBuilder gap_fill("4");
+  nimble::message::MessageDataWriter gap_fill("4");
   gap_fill.set_string(35U, "4").set_boolean(123U, true).set_int(36U, 2);
   auto fill_frame = EncodeInboundFrame(
     std::move(gap_fill).build(), dictionary.value(), "FIX.4.4", "SELL", "BUY", 1U, true, {}, "20260414-11:59:00.000");

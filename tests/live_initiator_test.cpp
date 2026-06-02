@@ -12,11 +12,11 @@
 #include <unordered_set>
 #include <vector>
 
-#include "nimblefix/codec/fix_tags.h"
-#include "nimblefix/advanced/message_builder.h"
-#include "nimblefix/advanced/runtime_application.h"
-#include "nimblefix/runtime/engine.h"
 #include "nimblefix/advanced/live_initiator.h"
+#include "nimblefix/advanced/runtime_application.h"
+#include "nimblefix/codec/fix_tags.h"
+#include "nimblefix/message/message_data_writer.h"
+#include "nimblefix/runtime/engine.h"
 #include "nimblefix/session/admin_protocol.h"
 #include "nimblefix/store/memory_store.h"
 #include "nimblefix/transport/tcp_transport.h"
@@ -37,7 +37,7 @@ NowNs() -> std::uint64_t
 auto
 BuildInitiatorMessage() -> nimble::message::Message
 {
-  nimble::message::MessageBuilder builder("D");
+  nimble::message::MessageDataWriter builder("D");
   builder.set_string(kMsgType, "D");
   auto party = builder.add_group_entry(kNoPartyIDs);
   party.set_string(kPartyID, "INITIATOR-PARTY").set_char(kPartyIDSource, 'D').set_int(kPartyRole, 3);

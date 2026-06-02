@@ -7,13 +7,13 @@
 #include <optional>
 #include <vector>
 
+#include "nimblefix/advanced/live_initiator.h"
+#include "nimblefix/advanced/runtime_application.h"
 #include "nimblefix/codec/fix_tags.h"
-#include "nimblefix/advanced/message_builder.h"
+#include "nimblefix/message/message_data_writer.h"
 #include "nimblefix/message/message_view.h"
 #include "nimblefix/profile/profile_loader.h"
-#include "nimblefix/advanced/runtime_application.h"
 #include "nimblefix/runtime/engine.h"
-#include "nimblefix/advanced/live_initiator.h"
 
 namespace {
 
@@ -84,7 +84,7 @@ ParseValidationMode(std::string_view token) -> std::optional<nimble::session::Va
 auto
 BuildInitiatorMessage() -> nimble::message::Message
 {
-  nimble::message::MessageBuilder builder("D");
+  nimble::message::MessageDataWriter builder("D");
   builder.set(kMsgType, "D");
   auto party = builder.add_group_entry(kNoPartyIDs);
   party.set(kPartyID, "INITIATOR-PARTY").set(kPartyIDSource, 'D').set(kPartyRole, static_cast<std::int64_t>(3));

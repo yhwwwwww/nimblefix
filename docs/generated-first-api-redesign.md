@@ -29,7 +29,7 @@ The original execution checklist was tracked outside the checked-in documentatio
 
 ### 1.2 非目标
 
-1. 不保留现有 `MessageBuilder` / `SessionHandle` 的公共兼容层。
+1. 不保留现有 raw message construction / `SessionHandle` 的公共兼容层。
 2. 不把 YAML/TOML/JSON 配置文件格式引入为库级标准配置协议。
 3. 不在本阶段推进 router / proxy / HA / Web UI。
 
@@ -163,7 +163,6 @@ generated/
 
 以下头不再作为主公共面：
 
-- `nimblefix/advanced/message_builder.h`
 - `nimblefix/advanced/fixed_layout_writer.h`
 - `nimblefix/advanced/typed_message_view.h`
 - `nimblefix/advanced/session_handle.h`
@@ -691,7 +690,7 @@ public:
 关键点：
 
 - 用户不再接触 tag 编号
-- 用户不再接触 `MessageBuilder`
+- 用户不再接触 raw message construction
 - 用户不再接触 `SendCopy/SendTake`
 - 用户不再手工 `if (msg_type == "8")`
 
@@ -782,7 +781,7 @@ src/generated_support/
 
 | 旧 API | 新 API | 处理方式 |
 |------|------|------|
-| `MessageBuilder` | generated outbound object | 下沉到 `advanced/` 或 internal |
+| raw message construction | generated outbound object | 公共 API 移除，仅保留内部测试/工具 writer |
 | `FixedLayoutWriter` | internal encode backend | 转 internal |
 | `TypedMessageView` | generated inbound typed view | 合并到 generated support |
 | `SessionHandle::Send*` | `Session<Profile>::send()` / `InlineSession<Profile>::send()` | 删除旧表面 |
@@ -877,7 +876,7 @@ The detailed acceptance matrix was tracked outside the checked-in documentation.
 
 1. 主路径只展示 generated-first API
 2. 旧 tag-level API 只出现在 advanced/internal 章节
-3. 示例不再出现 `MessageBuilder`、`FixedLayoutWriter`、`SendTake`
+3. 示例不再出现 raw message construction、`FixedLayoutWriter`、`SendTake`
 
 ---
 

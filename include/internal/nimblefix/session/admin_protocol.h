@@ -18,6 +18,7 @@
 #include "nimblefix/message/message_ref.h"
 #include "nimblefix/profile/normalized_dictionary.h"
 #include "nimblefix/session/encoded_frame.h"
+#include "nimblefix/session/logon_field.h"
 #include "nimblefix/session/session_core.h"
 #include "nimblefix/session/session_send_envelope.h"
 #include "nimblefix/session/transport_profile.h"
@@ -471,6 +472,7 @@ struct AdminProtocolConfig
   std::uint32_t heartbeat_interval_seconds{ 30 };
   std::uint32_t sending_time_threshold_seconds{ 0 };
   std::uint32_t warmup_message_count{ 0 };
+  std::vector<LogonField> logon_fields;
   codec::TimestampResolution timestamp_resolution{ codec::TimestampResolution::kMilliseconds };
   bool application_messages_available{ true };
   bool reset_seq_num_on_logon{ false };
@@ -505,17 +507,17 @@ public:
                        std::uint64_t timestamp_ns,
                        SessionSendEnvelopeView envelope = {}) -> base::Result<EncodedFrame>;
   auto SendEncodedApplication(const EncodedApplicationMessage& message,
-                               std::uint64_t timestamp_ns,
-                               SessionSendEnvelopeView envelope = {},
-                               codec::EncodedOutboundExtrasView extras = {}) -> base::Result<EncodedFrame>;
+                              std::uint64_t timestamp_ns,
+                              SessionSendEnvelopeView envelope = {},
+                              codec::EncodedOutboundExtrasView extras = {}) -> base::Result<EncodedFrame>;
   auto SendEncodedApplication(EncodedApplicationMessageView message,
-                               std::uint64_t timestamp_ns,
-                               SessionSendEnvelopeView envelope = {},
-                               codec::EncodedOutboundExtrasView extras = {}) -> base::Result<EncodedFrame>;
+                              std::uint64_t timestamp_ns,
+                              SessionSendEnvelopeView envelope = {},
+                              codec::EncodedOutboundExtrasView extras = {}) -> base::Result<EncodedFrame>;
   auto SendEncodedApplication(const EncodedApplicationMessageRef& message,
-                               std::uint64_t timestamp_ns,
-                               SessionSendEnvelopeView envelope = {},
-                               codec::EncodedOutboundExtrasView extras = {}) -> base::Result<EncodedFrame>;
+                              std::uint64_t timestamp_ns,
+                              SessionSendEnvelopeView envelope = {},
+                              codec::EncodedOutboundExtrasView extras = {}) -> base::Result<EncodedFrame>;
   auto BeginLogout(std::string text, std::uint64_t timestamp_ns) -> base::Result<EncodedFrame>;
   auto ReserveReplayStorage(std::size_t frame_count) -> void;
 

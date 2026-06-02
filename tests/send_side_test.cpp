@@ -12,12 +12,12 @@
 #include <vector>
 
 #include "nimblefix/advanced/encoded_application_message.h"
-#include "nimblefix/advanced/message_builder.h"
 #include "nimblefix/base/result.h"
 #include "nimblefix/codec/fix_codec.h"
 #include "nimblefix/codec/fix_tags.h"
 #include "nimblefix/generated/detail/api_support.h"
 #include "nimblefix/generated/detail/message_shape.h"
+#include "nimblefix/message/message_data_writer.h"
 #include "nimblefix/message/message_ref.h"
 #include "nimblefix/runtime/detail/typed_runtime_application.h"
 #include "nimblefix/runtime/profile_binding.h"
@@ -161,7 +161,7 @@ auto
 ActivateAcceptorSession(nimble::session::AdminProtocol& protocol,
                         const nimble::profile::NormalizedDictionaryView& dictionary) -> nimble::base::Status
 {
-  nimble::message::MessageBuilder logon_builder("A");
+  nimble::message::MessageDataWriter logon_builder("A");
   logon_builder.set_string(kMsgType, "A").set_int(kEncryptMethod, 0).set_int(kHeartBtInt, 30);
 
   auto inbound = EncodeInboundFrame(std::move(logon_builder).build(), dictionary, 1U);
@@ -649,7 +649,7 @@ TEST_CASE("Shape-aware generated dispatch gates handlers on active message shape
   CHECK(app->order_count == 1);
   CHECK(app->last_cl_ord_id == "ORD-SHAPE");
 
-  nimble::message::MessageBuilder missing_usage_builder{ std::string(sample::NewOrderSingle::kMsgType) };
+  nimble::message::MessageDataWriter missing_usage_builder{ std::string(sample::NewOrderSingle::kMsgType) };
   missing_usage_builder.set_string(kMsgType, sample::NewOrderSingle::kMsgType)
     .set_string(sample::Tag::ClOrdID, "ORD-MISSING")
     .set_string(sample::Tag::SenderCompID, "BUY")
@@ -666,7 +666,7 @@ TEST_CASE("Shape-aware generated dispatch gates handlers on active message shape
   CHECK(missing_usage.code() == nimble::base::ErrorCode::kInvalidArgument);
   CHECK(app->order_count == 1);
 
-  nimble::message::MessageBuilder missing_dictionary_builder{ std::string(sample::NewOrderSingle::kMsgType) };
+  nimble::message::MessageDataWriter missing_dictionary_builder{ std::string(sample::NewOrderSingle::kMsgType) };
   missing_dictionary_builder.set_string(kMsgType, sample::NewOrderSingle::kMsgType)
     .set_string(sample::Tag::ClOrdID, "ORD-USAGE")
     .set_string(sample::Tag::Symbol, "AAPL")
@@ -732,7 +732,7 @@ TEST_CASE("Generated handler supports typed message overloads with raw logging f
                  .ToMessage();
   REQUIRE(order.ok());
 
-  nimble::message::MessageBuilder heartbeat_builder{ std::string(sample::Heartbeat::kMsgType) };
+  nimble::message::MessageDataWriter heartbeat_builder{ std::string(sample::Heartbeat::kMsgType) };
   heartbeat_builder.set_string(kMsgType, sample::Heartbeat::kMsgType);
   const auto heartbeat = std::move(heartbeat_builder).build();
 
@@ -780,7 +780,7 @@ TEST_CASE("ValidateInboundMessageShape rejects zero-count required groups", "[se
     }
   };
 
-  nimble::message::MessageBuilder builder{ std::string(sample::NewOrderSingle::kMsgType) };
+  nimble::message::MessageDataWriter builder{ std::string(sample::NewOrderSingle::kMsgType) };
   builder.set_string(kMsgType, sample::NewOrderSingle::kMsgType).reserve_group_entries(sample::Tag::NoPartyIDs, 0U);
 
   const auto message = std::move(builder).build();

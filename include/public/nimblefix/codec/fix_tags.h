@@ -34,6 +34,8 @@ inline constexpr std::uint32_t kText = 58U;
 inline constexpr std::uint32_t kSignature = 89U;
 inline constexpr std::uint32_t kSecureDataLen = 90U;
 inline constexpr std::uint32_t kSecureData = 91U;
+inline constexpr std::uint32_t kRawDataLength = 95U;
+inline constexpr std::uint32_t kRawData = 96U;
 inline constexpr std::uint32_t kEncryptMethod = 98U;
 inline constexpr std::uint32_t kHeartBtInt = 108U;
 inline constexpr std::uint32_t kTestReqID = 112U;
@@ -45,6 +47,8 @@ inline constexpr std::uint32_t kRefTagID = 371U;
 inline constexpr std::uint32_t kRefMsgType = 372U;
 inline constexpr std::uint32_t kRejectReason = 373U;
 inline constexpr std::uint32_t kNextExpectedMsgSeqNum = 789U;
+inline constexpr std::uint32_t kUsername = 553U;
+inline constexpr std::uint32_t kPassword = 554U;
 
 // Application-version negotiation.
 inline constexpr std::uint32_t kApplVerID = 1128U;
@@ -172,12 +176,16 @@ IsCommonAdminTag(std::uint32_t tag) -> bool
     case kNewSeqNo:
     case kRefSeqNum:
     case kText:
+    case kRawDataLength:
+    case kRawData:
     case kEncryptMethod:
     case kHeartBtInt:
     case kTestReqID:
     case kGapFillFlag:
     case kResetSeqNumFlag:
     case kNextExpectedMsgSeqNum:
+    case kUsername:
+    case kPassword:
     case kRefTagID:
     case kRefMsgType:
     case kRejectReason:

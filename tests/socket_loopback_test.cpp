@@ -12,7 +12,7 @@
 #include <vector>
 
 #include "nimblefix/codec/fix_tags.h"
-#include "nimblefix/advanced/message_builder.h"
+#include "nimblefix/message/message_data_writer.h"
 #include "nimblefix/session/admin_protocol.h"
 #include "nimblefix/store/memory_store.h"
 #include "nimblefix/transport/tcp_transport.h"
@@ -294,7 +294,7 @@ TEST_CASE("socket-loopback", "[socket-loopback]")
     }
 
     if (event.value().session_active && !sent_app) {
-      nimble::message::MessageBuilder builder("D");
+      nimble::message::MessageDataWriter builder("D");
       builder.set_string(nimble::codec::tags::kMsgType, "D");
       auto party = builder.add_group_entry(nimble::codec::tags::kNoPartyIDs);
       party.set_string(nimble::codec::tags::kPartyID, "PARTY-A")
@@ -497,7 +497,7 @@ TEST_CASE("tls-transport-loopback", "[socket-loopback][tls]")
     }
 
     if (event.value().session_active && !sent_app) {
-      nimble::message::MessageBuilder builder("D");
+      nimble::message::MessageDataWriter builder("D");
       builder.set_string(nimble::codec::tags::kMsgType, "D");
       auto party = builder.add_group_entry(nimble::codec::tags::kNoPartyIDs);
       party.set_string(nimble::codec::tags::kPartyID, "TLS-PARTY")

@@ -502,7 +502,7 @@ session 建立时只保存对已装载 profile 的只读引用。steady-state �
 - FIX 结构顺序仍必须由调用方保证：`8/9` 在最前、`10` 在最后，repeating group 仍需按规范编码。
 - 这是一条 caller-trusted 的窄接口，而不是面向任意运行时字段切片的通用混合层。
 
-3. Generic path：`MessageBuilder` + generic encoder
+3. Generic path：internal `MessageDataWriter` + generic encoder
 
 - 面向低频、调试或完全动态场景。
 - 按 tag 逐字段写入，不依赖预编译 fixed layout。

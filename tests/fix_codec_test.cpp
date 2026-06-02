@@ -6,10 +6,10 @@
 #include <string_view>
 #include <vector>
 
-#include "nimblefix/advanced/message_builder.h"
 #include "nimblefix/codec/fix_codec.h"
 #include "nimblefix/codec/fix_tags.h"
 #include "nimblefix/codec/simd_scan.h"
+#include "nimblefix/message/message_data_writer.h"
 #include "nimblefix/message/message_ref.h"
 
 #include "test_support.h"
@@ -33,7 +33,7 @@ TEST_CASE("fix-codec", "[fix-codec]")
     SKIP("FIX44 artifact not available: " << dictionary.status().message());
   }
 
-  nimble::message::MessageBuilder builder("D");
+  nimble::message::MessageDataWriter builder("D");
   builder.set_string(kMsgType, "D")
     .set_string(kSenderCompID, "BUY")
     .set_string(kTargetCompID, "SELL")
@@ -121,7 +121,7 @@ TEST_CASE("fix-codec", "[fix-codec]")
   REQUIRE(reusable_decoded.header.msg_type == "D");
   REQUIRE(reusable_decoded.message.view().group(kNoPartyIDs).has_value());
 
-  nimble::message::MessageBuilder cancel_builder("F");
+  nimble::message::MessageDataWriter cancel_builder("F");
   cancel_builder.set_string(kMsgType, "F")
     .set_string(kSenderCompID, "BUY")
     .set_string(kTargetCompID, "SELL")
@@ -207,7 +207,7 @@ TEST_CASE("fix-codec", "[fix-codec]")
   REQUIRE(invalid_group.value().validation_issue.present());
   REQUIRE(invalid_group.value().validation_issue.tag == kNoPartyIDs);
 
-  nimble::message::MessageBuilder reordered_builder("D");
+  nimble::message::MessageDataWriter reordered_builder("D");
   reordered_builder.set_string(kMsgType, "D")
     .set_string(kSenderCompID, "BUY")
     .set_string(kTargetCompID, "SELL")
@@ -270,7 +270,7 @@ TEST_CASE("fix-codec", "[fix-codec]")
   REQUIRE(reordered_decoded.value().validation_issue.kind == nimble::codec::ValidationIssueKind::kUnknownField);
   REQUIRE(reordered_decoded.value().validation_issue.tag == 9999U);
 
-  nimble::message::MessageBuilder spill_builder("D");
+  nimble::message::MessageDataWriter spill_builder("D");
   spill_builder.set_string(kMsgType, "D").set_string(kSenderCompID, "BUY").set_string(kTargetCompID, "SELL");
   for (int index = 0; index < 10; ++index) {
     auto spill_party = spill_builder.add_group_entry(kNoPartyIDs);
@@ -346,7 +346,7 @@ TEST_CASE("auto-generated SendingTime honors encode timestamp resolution", "[fix
     SKIP("FIX44 artifact not available: " << dictionary.status().message());
   }
 
-  nimble::message::MessageBuilder builder("D");
+  nimble::message::MessageDataWriter builder("D");
   builder.set_string(kMsgType, "D").set_string(kClOrdID, "ORD-TS").set_string(kSymbol, "AAPL");
   const auto message = std::move(builder).build();
 
@@ -817,7 +817,7 @@ TEST_CASE("PrecompiledTemplateTable build, find, and encode", "[fix-codec][preco
   REQUIRE(table.value().find("ZZ") == nullptr);
 
   // Build a message and encode via the precompiled table overload
-  nimble::message::MessageBuilder builder("D");
+  nimble::message::MessageDataWriter builder("D");
   builder.set_string(kMsgType, "D")
     .set_string(kSenderCompID, "BUY")
     .set_string(kTargetCompID, "SELL")

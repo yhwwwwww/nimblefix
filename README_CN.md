@@ -19,7 +19,7 @@ NimbleFIX 的定位是聚焦经典、低延迟的 FIX 主干能力，而不是�
 | 标准族 | 状态 | 当前范围 |
 |------|------|------|
 | **经典 FIX session layer** | **已实现** | FIX 4.x / FIXT.1.1 的 initiator / acceptor 运行时，包含 Logon/Logout、心跳、序列号跟踪、gap 检测、重传恢复、重连与持久化 |
-| **FIX tagvalue 编码** | **已实现** | 核心 codec、message builder、fixed-layout writer、raw pass-through 与 SIMD 辅助 tag/value 解析 |
+| **FIX tagvalue 编码** | **已实现** | 核心 codec、生成式 typed message API、fixed-layout writer、raw pass-through 与 SIMD 辅助 tag/value 解析 |
 | **FIX over TLS (FIXS)** | **已实现** | 基于 OpenSSL 的可选 TLS transport，可按 initiator counterparty 或 acceptor listener 在运行时启用 |
 | **FIX 应用层字典** | **部分覆盖** | 以 `.nfd` / `.nfa` 为核心的字典模型，并提供 QuickFIX XML 与 FIX Orchestra XML 导入工具；Orchestra 行为规则独立落到 `.nfct` sidecar |
 | **FIX 官方 session 测试案例** | **部分覆盖** | 已接入离线 FIX Trading session-case manifest 和可执行 `.nfscenario` baseline；runner 已对 72 个 mapped scenario-pass case 全部执行官方语义 predicate 机器校验，当前 0 个 partial mapping、13 个显式 unsupported |
@@ -236,7 +236,7 @@ cd path/to/nimblefix && cmake -S . -B build/cmake/dev-release -DCMAKE_BUILD_TYPE
 - `nimblefix/store/mmap_store.h`
 - `nimblefix/store/durable_batch_store.h`
 
-高级用法再按需补 `nimblefix/advanced/runtime_application.h`、`nimblefix/advanced/engine.h`、`nimblefix/advanced/message_builder.h`、`nimblefix/advanced/encoded_application_message.h`、`nimblefix/advanced/session_handle.h`、`nimblefix/session/admin_protocol.h`、`nimblefix/session/resend_recovery.h`、`nimblefix/runtime/sharded_runtime.h`、`nimblefix/runtime/metrics.h`、`nimblefix/runtime/trace.h`、`nimblefix/runtime/ha.h`、`nimblefix/runtime/dynamic_config.h`、`nimblefix/runtime/warmup.h`、`nimblefix/runtime/diagnostics.h`、`nimblefix/runtime/management.h`、`nimblefix/runtime/message_log.h`、`nimblefix/runtime/connection_strategy.h`、`nimblefix/runtime/session_schedule.h`、`nimblefix/runtime/router.h`、`nimblefix/runtime/io_backend.h`、`nimblefix/session/validation_callback.h`、`nimblefix/codec/timestamp_resolution.h`、`nimblefix/tools/schema_optimizer.h`、`nimblefix/tools/message_dump.h`。`FixedLayoutWriter` 现在仅供仓库内部使用。完整的导出头策略见 [docs/public-api.md](docs/public-api.md)。
+高级用法再按需补 `nimblefix/advanced/runtime_application.h`、`nimblefix/advanced/engine.h`、`nimblefix/advanced/encoded_application_message.h`、`nimblefix/advanced/session_handle.h`、`nimblefix/session/admin_protocol.h`、`nimblefix/session/resend_recovery.h`、`nimblefix/runtime/sharded_runtime.h`、`nimblefix/runtime/metrics.h`、`nimblefix/runtime/trace.h`、`nimblefix/runtime/ha.h`、`nimblefix/runtime/dynamic_config.h`、`nimblefix/runtime/warmup.h`、`nimblefix/runtime/diagnostics.h`、`nimblefix/runtime/management.h`、`nimblefix/runtime/message_log.h`、`nimblefix/runtime/connection_strategy.h`、`nimblefix/runtime/session_schedule.h`、`nimblefix/runtime/router.h`、`nimblefix/runtime/io_backend.h`、`nimblefix/session/validation_callback.h`、`nimblefix/codec/timestamp_resolution.h`、`nimblefix/tools/schema_optimizer.h`、`nimblefix/tools/message_dump.h`。`FixedLayoutWriter` 现在仅供仓库内部使用。完整的导出头策略见 [docs/public-api.md](docs/public-api.md)。
 
 ---
 

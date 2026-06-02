@@ -18,14 +18,15 @@
 #include <cstring>
 #include <optional>
 #include <string_view>
+#include <unordered_set>
 
-#include "nimblefix/advanced/message_builder.h"
 #include "nimblefix/advanced/typed_message_view.h"
 #include "nimblefix/codec/compiled_decoder.h"
 #include "nimblefix/codec/fast_int_format.h"
 #include "nimblefix/codec/fix_tags.h"
 #include "nimblefix/codec/raw_passthrough.h"
 #include "nimblefix/codec/simd_scan.h"
+#include "nimblefix/message/message_data_writer.h"
 #include "nimblefix/profile/normalized_dictionary.h"
 #include "nimblefix/store/session_store.h"
 
@@ -76,6 +77,42 @@ auto
 MessageRecordFlagValue(store::MessageRecordFlags flag) -> std::uint16_t
 {
   return static_cast<std::uint16_t>(flag);
+}
+
+auto
+IsEngineManagedLogonField(std::uint32_t tag) -> bool
+{
+  switch (tag) {
+    case kMsgType:
+    case kEncryptMethod:
+    case kHeartBtInt:
+    case kResetSeqNumFlag:
+    case kNextExpectedMsgSeqNum:
+      return true;
+    default:
+      return codec::tags::IsEncodeManagedTag(tag);
+  }
+}
+
+auto
+ValidateLogonFields(const std::vector<LogonField>& fields) -> base::Status
+{
+  std::unordered_set<std::uint32_t> tags;
+  for (const auto& field : fields) {
+    if (field.tag == 0U) {
+      return base::Status::InvalidArgument("logon field tag must be positive");
+    }
+    if (field.value.empty()) {
+      return base::Status::InvalidArgument("logon field value must not be empty");
+    }
+    if (IsEngineManagedLogonField(field.tag)) {
+      return base::Status::InvalidArgument("logon field overrides an engine-managed Logon tag");
+    }
+    if (!tags.emplace(field.tag).second) {
+      return base::Status::InvalidArgument("duplicate logon field tag");
+    }
+  }
+  return base::Status::Ok();
 }
 
 auto
@@ -260,9 +297,9 @@ ParseSequenceResetNewSeq(const message::MessageView& view,
 }
 
 auto
-BuildAdminMessage(std::string_view msg_type) -> message::MessageBuilder
+BuildAdminMessage(std::string_view msg_type) -> message::MessageDataWriter
 {
-  message::MessageBuilder builder{ std::string(msg_type) };
+  message::MessageDataWriter builder{ std::string(msg_type) };
   builder.set_string(kMsgType, std::string(msg_type));
   return builder;
 }
@@ -709,6 +746,9 @@ AdminProtocol::AdminProtocol(AdminProtocolConfig config,
   : impl_(std::make_unique<Impl>())
 {
   impl_->config_ = std::move(config);
+  if (auto status = ValidateLogonFields(impl_->config_.logon_fields); !status.ok()) {
+    impl_->initialization_error_ = status;
+  }
   impl_->dictionary_ = &dictionary;
   impl_->store_ = store;
   impl_->session_.emplace(impl_->config_.session);
@@ -746,14 +786,14 @@ AdminProtocol::AdminProtocol(AdminProtocolConfig config,
 
   auto recovery = impl_->store_->LoadRecoveryState(impl_->session_->session_id());
   if (!recovery.ok()) {
-    if (recovery.status().code() != base::ErrorCode::kNotFound) {
+    if (recovery.status().code() != base::ErrorCode::kNotFound && !impl_->initialization_error_.has_value()) {
       impl_->initialization_error_ = recovery.status();
     }
     return;
   }
 
   auto status = impl_->session_->RestoreSequenceState(recovery.value().next_in_seq, recovery.value().next_out_seq);
-  if (!status.ok()) {
+  if (!status.ok() && !impl_->initialization_error_.has_value()) {
     impl_->initialization_error_ = status;
   }
 }
@@ -1348,6 +1388,9 @@ AdminProtocol::BuildLogonFrame(std::uint64_t timestamp_ns, bool reset_seq_num) -
       impl_->config_.transport_profile.supports_next_expected_msg_seq_num) {
     const auto snapshot = impl_->session_->Snapshot();
     builder.set_int(kNextExpectedMsgSeqNum, static_cast<std::int64_t>(snapshot.next_in_seq));
+  }
+  for (const auto& field : impl_->config_.logon_fields) {
+    builder.add_string(field.tag, field.value);
   }
   return EncodeFrame(std::move(builder).build(), true, timestamp_ns, true, false, true, 0U);
 }

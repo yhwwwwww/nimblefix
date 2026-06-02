@@ -24,7 +24,6 @@ Bring in these additional headers only when you need them:
 - `nimblefix/advanced/engine.h`
 - `nimblefix/advanced/session_handle.h`
 - `nimblefix/session/session_send_envelope.h`
-- `nimblefix/advanced/message_builder.h`
 - `nimblefix/message/message_view.h`
 - `nimblefix/profile/profile_loader.h`
 - `nimblefix/store/memory_store.h`

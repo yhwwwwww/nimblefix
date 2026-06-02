@@ -12,8 +12,9 @@
 #include <string_view>
 #include <vector>
 
-#include "nimblefix/advanced/message_builder.h"
 #include "nimblefix/codec/fix_codec.h"
+#include "nimblefix/codec/fix_tags.h"
+#include "nimblefix/message/message_data_writer.h"
 #include "nimblefix/profile/artifact_builder.h"
 #include "nimblefix/profile/dictgen_input.h"
 #include "nimblefix/runtime/config.h"
@@ -146,6 +147,12 @@ RequireSameCoreConfig(const nimble::runtime::EngineConfig& expected, const nimbl
     REQUIRE(actual_counterparty.contract_service_subsets == expected_counterparty.contract_service_subsets);
     REQUIRE(actual_counterparty.sending_time_threshold_seconds == expected_counterparty.sending_time_threshold_seconds);
     REQUIRE(actual_counterparty.warmup_message_count == expected_counterparty.warmup_message_count);
+    REQUIRE(actual_counterparty.logon_fields.size() == expected_counterparty.logon_fields.size());
+    for (std::size_t field_index = 0; field_index < expected_counterparty.logon_fields.size(); ++field_index) {
+      REQUIRE(actual_counterparty.logon_fields[field_index].tag == expected_counterparty.logon_fields[field_index].tag);
+      REQUIRE(actual_counterparty.logon_fields[field_index].value ==
+              expected_counterparty.logon_fields[field_index].value);
+    }
     REQUIRE(actual_counterparty.timestamp_resolution == expected_counterparty.timestamp_resolution);
     REQUIRE(actual_counterparty.application_messages_available == expected_counterparty.application_messages_available);
     REQUIRE(actual_counterparty.store_mode == expected_counterparty.store_mode);
@@ -732,6 +739,24 @@ TEST_CASE("structured config validation summary includes expected and actual fie
           std::string::npos);
 }
 
+TEST_CASE("runtime config validates Logon fields", "[runtime-config]")
+{
+  nimble::runtime::EngineConfig config;
+  config.profile_artifacts.push_back("profile.nfa");
+  auto counterparty =
+    nimble::runtime::CounterpartyConfigBuilder::Initiator(
+      "initiator-a", 1001U, nimble::session::SessionKey{ .sender_comp_id = "BUY1", .target_comp_id = "SELL1" }, 4400U)
+      .logon_field(nimble::codec::tags::kUsername, "alice")
+      .logon_field(nimble::codec::tags::kMsgType, "A")
+      .build();
+  counterparty.logon_fields.push_back(nimble::session::LogonField{ nimble::codec::tags::kUsername, "duplicate" });
+  config.counterparties.push_back(std::move(counterparty));
+
+  const auto result = nimble::runtime::ValidateEngineConfigFull(config);
+  REQUIRE(HasDiagnosticField(result, "counterparties[0].logon_fields[1].tag"));
+  REQUIRE(HasDiagnosticField(result, "counterparties[0].logon_fields[2].tag"));
+}
+
 TEST_CASE("ConfigToText round-trip", "[runtime-config]")
 {
   const auto temp_root = std::filesystem::temp_directory_path() / "nimblefix-config-to-text-roundtrip-test";
@@ -799,6 +824,10 @@ TEST_CASE("ConfigToText round-trip", "[runtime-config]")
   initiator.send_next_expected_msg_seq_num = true;
   initiator.sending_time_threshold_seconds = 60U;
   initiator.warmup_message_count = 3U;
+  initiator.logon_fields = {
+    nimble::session::LogonField{ nimble::codec::tags::kUsername, "alice" },
+    nimble::session::LogonField{ nimble::codec::tags::kPassword, "secret" },
+  };
   initiator.timestamp_resolution = nimble::codec::TimestampResolution::kNanoseconds;
   initiator.supported_app_msg_types = { "D", "8" };
   initiator.application_messages_available = false;
@@ -842,8 +871,8 @@ TEST_CASE("ConfigToText round-trip", "[runtime-config]")
   const auto text = nimble::runtime::ConfigToText(config);
   REQUIRE(text.find("listener|main|127.0.0.1|9901|0") != std::string::npos);
   REQUIRE(text.find("counterparty|initiator-a|1001|4400|FIX.4.4|BUY1|SELL1|durable|") != std::string::npos);
-  REQUIRE(text.find("|D,8|false||nanoseconds|log-and-process|log|true||3") != std::string::npos);
-  REQUIRE(text.find("|true||seconds|ignore|ignore|false||0") != std::string::npos);
+  REQUIRE(text.find("|D,8|false||nanoseconds|log-and-process|log|true||3|553:alice,554:secret") != std::string::npos);
+  REQUIRE(text.find("|true||seconds|ignore|ignore|false||0|") != std::string::npos);
 
   const auto parsed = nimble::runtime::LoadEngineConfigText(text);
   REQUIRE(parsed.ok());
@@ -968,7 +997,7 @@ TEST_CASE("runtime-config", "[runtime-config]")
   auto transport_dictionary = engine.LoadDictionaryView(4401U);
   REQUIRE(transport_dictionary.ok());
 
-  nimble::message::MessageBuilder logon_builder("A");
+  nimble::message::MessageDataWriter logon_builder("A");
   logon_builder.set_string(35U, "A").set_int(98U, 0).set_int(108U, 30);
 
   nimble::codec::EncodeOptions options;
@@ -989,7 +1018,7 @@ TEST_CASE("runtime-config", "[runtime-config]")
   REQUIRE(peeked.value().sender_comp_id == "BUYT");
   REQUIRE(peeked.value().target_comp_id == "SELLT");
 
-  nimble::message::MessageBuilder heartbeat_builder("0");
+  nimble::message::MessageDataWriter heartbeat_builder("0");
   heartbeat_builder.set_string(35U, "0");
   auto encoded_heartbeat =
     nimble::codec::EncodeFixMessage(std::move(heartbeat_builder).build(), transport_dictionary.value(), options);

@@ -5,11 +5,11 @@
 #include <thread>
 
 #include "fix44_api.h"
-#include "nimblefix/codec/fix_tags.h"
-#include "nimblefix/advanced/message_builder.h"
 #include "nimblefix/advanced/runtime_application.h"
-#include "nimblefix/runtime/session.h"
+#include "nimblefix/codec/fix_tags.h"
+#include "nimblefix/message/message_data_writer.h"
 #include "nimblefix/runtime/live_runtime_support.h"
+#include "nimblefix/runtime/session.h"
 
 #include "test_support.h"
 
@@ -315,7 +315,7 @@ TEST_CASE("application-queue", "[application-queue]")
     auto sink = std::make_shared<OwnedOnlyCommandSink>();
     nimble::session::SessionHandle handle(4001U, 0U, sink);
 
-    nimble::message::MessageBuilder builder("D");
+    nimble::message::MessageDataWriter builder("D");
     builder.set_string(nimble::codec::tags::kMsgType, "D");
     builder.set_string(nimble::codec::tags::kSenderCompID, "BUY");
     builder.set_string(nimble::codec::tags::kTargetCompID, "SELL");
@@ -334,13 +334,14 @@ TEST_CASE("application-queue", "[application-queue]")
     auto sink = std::make_shared<EncodedCommandSink>();
     nimble::session::SessionHandle handle(4002U, 0U, sink);
 
-    nimble::message::MessageBuilder plain_builder("D");
+    nimble::message::MessageDataWriter plain_builder("D");
     plain_builder.set_string(nimble::codec::tags::kMsgType, "D");
     plain_builder.set_string(nimble::codec::tags::kClOrdID, "ORD-PLAIN");
     auto plain_message = std::move(plain_builder).build();
 
-    REQUIRE(handle.Send(nimble::message::MessageRef::Copy(plain_message.view()),
-                        { .sender_sub_id = "DESK-1", .target_sub_id = "ROUTE-1" })
+    REQUIRE(handle
+              .Send(nimble::message::MessageRef::Copy(plain_message.view()),
+                    { .sender_sub_id = "DESK-1", .target_sub_id = "ROUTE-1" })
               .ok());
     REQUIRE(sink->plain_enqueued() == 1U);
     REQUIRE(sink->last_plain_envelope().sender_sub_id == "DESK-1");
@@ -351,8 +352,9 @@ TEST_CASE("application-queue", "[application-queue]")
     nimble::session::EncodedApplicationMessage encoded(
       "D", std::span<const std::byte>(encoded_body.data(), encoded_body.size()));
 
-    REQUIRE(handle.SendEncoded(nimble::session::EncodedApplicationMessageRef::Take(std::move(encoded)),
-                               { .sender_sub_id = "DESK-9", .target_sub_id = "ROUTE-7" })
+    REQUIRE(handle
+              .SendEncoded(nimble::session::EncodedApplicationMessageRef::Take(std::move(encoded)),
+                           { .sender_sub_id = "DESK-9", .target_sub_id = "ROUTE-7" })
               .ok());
     REQUIRE(sink->plain_enqueued() == 1U);
     REQUIRE(sink->encoded_enqueued() == 1U);
@@ -362,11 +364,10 @@ TEST_CASE("application-queue", "[application-queue]")
     REQUIRE(sink->last_encoded_envelope().target_sub_id == "ROUTE-7");
 
     const auto borrowed = handle.SendEncoded(
-      nimble::session::EncodedApplicationMessageRef::Borrow(
-        nimble::session::EncodedApplicationMessageView{
-          .msg_type = "D",
-          .body = std::span<const std::byte>(encoded_body.data(), encoded_body.size()),
-        }),
+      nimble::session::EncodedApplicationMessageRef::Borrow(nimble::session::EncodedApplicationMessageView{
+        .msg_type = "D",
+        .body = std::span<const std::byte>(encoded_body.data(), encoded_body.size()),
+      }),
       { .sender_sub_id = "DESK-2" });
     REQUIRE(borrowed.code() == nimble::base::ErrorCode::kInvalidArgument);
     REQUIRE(sink->encoded_enqueued() == 1U);
@@ -411,7 +412,7 @@ TEST_CASE("application-queue", "[application-queue]")
     auto sink = std::make_shared<SingleProducerCommandSink>();
     nimble::session::SessionHandle handle(4003U, 0U, sink);
 
-    nimble::message::MessageBuilder builder("D");
+    nimble::message::MessageDataWriter builder("D");
     builder.set_string(nimble::codec::tags::kMsgType, "D");
     builder.set_string(nimble::codec::tags::kClOrdID, "ORD-SP");
     const auto message = std::move(builder).build();

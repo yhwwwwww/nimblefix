@@ -8,7 +8,7 @@
 #include "nimblefix/codec/fix_codec.h"
 #include "nimblefix/codec/fix_tags.h"
 #include "nimblefix/message/fixed_layout_writer.h"
-#include "nimblefix/advanced/message_builder.h"
+#include "nimblefix/message/message_data_writer.h"
 
 #include "test_support.h"
 
@@ -39,7 +39,7 @@ TEST_CASE("message-api", "[message-api]")
   auto dictionary_view = nimble::tests::LoadFix44DictionaryViewOrSkip();
   auto dictionary = nimble::base::Result<nimble::profile::NormalizedDictionaryView>(std::move(dictionary_view));
 
-  nimble::message::MessageBuilder builder("D");
+  nimble::message::MessageDataWriter builder("D");
   builder.set_string(kMsgType, "D")
     .set_string(kSenderCompID, "BUY")
     .set_string(kTargetCompID, "SELL")
@@ -84,7 +84,7 @@ TEST_CASE("message-api", "[message-api]")
 
 TEST_CASE("group-entry-builder survives sibling growth", "[message-api]")
 {
-  nimble::message::MessageBuilder builder("D");
+  nimble::message::MessageDataWriter builder("D");
   builder.set_string(kMsgType, "D");
 
   auto first_party = builder.add_group_entry(kNoPartyIDs);
@@ -211,12 +211,12 @@ TEST_CASE("fixed-layout-writer-with-groups", "[message-api][fixed-layout]")
   CHECK((*group)[0].get_int(kPartyRole).value() == 1);
 }
 
-TEST_CASE("fixed-layout-writer-matches-message-builder", "[message-api][fixed-layout]")
+TEST_CASE("fixed-layout-writer-matches-owned-message", "[message-api][fixed-layout]")
 {
   auto dictionary_view = nimble::tests::LoadFix44DictionaryViewOrSkip();
   auto dictionary = nimble::base::Result<nimble::profile::NormalizedDictionaryView>(std::move(dictionary_view));
 
-  nimble::message::MessageBuilder mb("D");
+  nimble::message::MessageDataWriter mb("D");
   mb.set_string(kSenderCompID, "BUY").set_string(kTargetCompID, "SELL").set_string(kAccount, "ACC-1");
   auto mb_party = mb.add_group_entry(kNoPartyIDs);
   mb_party.set_string(kPartyID, "PTY1").set_char(kPartyIDSource, 'D').set_int(kPartyRole, 1);
@@ -404,10 +404,7 @@ TEST_CASE("generated-api-matches-raw-fixed-layout-writer", "[message-api][genera
 
   NewOrderSingleBuilder typed;
   PopulateGeneratedOrderForBackendCompare(&typed);
-  typed.add_party()
-    .party_id("PTY1")
-    .party_id_source(PartyIdSource::Proprietary)
-    .party_role(PartyRole::ExecutingFirm);
+  typed.add_party().party_id("PTY1").party_id_source(PartyIdSource::Proprietary).party_role(PartyRole::ExecutingFirm);
 
   auto typed_message = typed.ToMessage();
   REQUIRE(typed_message.ok());

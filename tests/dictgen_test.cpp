@@ -9,7 +9,7 @@
 
 #include "nimblefix/codec/fix_codec.h"
 #include "nimblefix/codec/fix_tags.h"
-#include "nimblefix/advanced/message_builder.h"
+#include "nimblefix/message/message_data_writer.h"
 #include "nimblefix/profile/artifact_builder.h"
 #include "nimblefix/profile/dictgen_input.h"
 #include "nimblefix/profile/normalized_dictionary.h"
@@ -72,7 +72,7 @@ TEST_CASE("dictgen", "[dictgen]")
   options.msg_seq_num = 1U;
   options.sending_time = "20260404-12:00:00.000";
 
-  nimble::message::MessageBuilder builder{ "D" };
+  nimble::message::MessageDataWriter builder{ "D" };
   builder.reserve_fields(4U).reserve_groups(1U).reserve_group_entries(nimble::codec::tags::kNoPartyIDs, 1U);
   builder.set_string(nimble::codec::tags::kSenderCompID, "BUY").set_string(nimble::codec::tags::kTargetCompID, "SELL");
   auto party = builder.add_group_entry(nimble::codec::tags::kNoPartyIDs);

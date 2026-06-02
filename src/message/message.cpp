@@ -1,4 +1,4 @@
-#include "nimblefix/advanced/message_builder.h"
+#include "nimblefix/message/message_data_writer.h"
 
 #include "nimblefix/message/message_ref.h"
 
@@ -282,37 +282,37 @@ RebindParsedMessageDataRaw(ParsedMessageData* data, std::span<const std::byte> r
 } // namespace
 
 auto
-MessageBuilder::view() const -> MessageView
+MessageDataWriter::view() const -> MessageView
 {
   return MessageView(&data_);
 }
 
 auto
-MessageBuilder::encode_to_buffer(const profile::NormalizedDictionaryView& dictionary,
-                                 const codec::EncodeOptions& options,
-                                 codec::EncodeBuffer* buffer) const -> base::Status
+MessageDataWriter::encode_to_buffer(const profile::NormalizedDictionaryView& dictionary,
+                                    const codec::EncodeOptions& options,
+                                    codec::EncodeBuffer* buffer) const -> base::Status
 {
   return codec::EncodeFixMessageToBuffer(view(), dictionary, options, buffer);
 }
 
 auto
-MessageBuilder::encode_to_buffer(const profile::NormalizedDictionaryView& dictionary,
-                                 const codec::EncodeOptions& options,
-                                 codec::EncodeBuffer* buffer,
-                                 const codec::PrecompiledTemplateTable* precompiled) const -> base::Status
+MessageDataWriter::encode_to_buffer(const profile::NormalizedDictionaryView& dictionary,
+                                    const codec::EncodeOptions& options,
+                                    codec::EncodeBuffer* buffer,
+                                    const codec::PrecompiledTemplateTable* precompiled) const -> base::Status
 {
   return codec::EncodeFixMessageToBuffer(view(), dictionary, options, buffer, precompiled);
 }
 
 auto
-MessageBuilder::encode(const profile::NormalizedDictionaryView& dictionary, const codec::EncodeOptions& options) const
-  -> base::Result<std::vector<std::byte>>
+MessageDataWriter::encode(const profile::NormalizedDictionaryView& dictionary,
+                          const codec::EncodeOptions& options) const -> base::Result<std::vector<std::byte>>
 {
   return codec::EncodeFixMessage(view(), dictionary, options);
 }
 
 auto
-GroupEntryBuilder::upsert_field(FieldValue value) -> GroupEntryBuilder&
+GroupEntryDataWriter::upsert_field(FieldValue value) -> GroupEntryDataWriter&
 {
   if (auto* data = resolve(); data != nullptr) {
     UpsertField(data->fields, std::move(value));
@@ -321,37 +321,37 @@ GroupEntryBuilder::upsert_field(FieldValue value) -> GroupEntryBuilder&
 }
 
 auto
-GroupEntryBuilder::set_string(std::uint32_t tag, std::string_view value) -> GroupEntryBuilder&
+GroupEntryDataWriter::set_string(std::uint32_t tag, std::string_view value) -> GroupEntryDataWriter&
 {
   return upsert_field(FieldValue{ .tag = tag, .value = std::string(value) });
 }
 
 auto
-GroupEntryBuilder::set_int(std::uint32_t tag, std::int64_t value) -> GroupEntryBuilder&
+GroupEntryDataWriter::set_int(std::uint32_t tag, std::int64_t value) -> GroupEntryDataWriter&
 {
   return upsert_field(FieldValue{ .tag = tag, .value = value });
 }
 
 auto
-GroupEntryBuilder::set_char(std::uint32_t tag, char value) -> GroupEntryBuilder&
+GroupEntryDataWriter::set_char(std::uint32_t tag, char value) -> GroupEntryDataWriter&
 {
   return upsert_field(FieldValue{ .tag = tag, .value = value });
 }
 
 auto
-GroupEntryBuilder::set_float(std::uint32_t tag, double value) -> GroupEntryBuilder&
+GroupEntryDataWriter::set_float(std::uint32_t tag, double value) -> GroupEntryDataWriter&
 {
   return upsert_field(FieldValue{ .tag = tag, .value = value });
 }
 
 auto
-GroupEntryBuilder::set_boolean(std::uint32_t tag, bool value) -> GroupEntryBuilder&
+GroupEntryDataWriter::set_boolean(std::uint32_t tag, bool value) -> GroupEntryDataWriter&
 {
   return upsert_field(FieldValue{ .tag = tag, .value = value });
 }
 
 auto
-GroupEntryBuilder::reserve_fields(std::size_t count) -> GroupEntryBuilder&
+GroupEntryDataWriter::reserve_fields(std::size_t count) -> GroupEntryDataWriter&
 {
   if (auto* data = resolve(); data != nullptr) {
     data->fields.reserve(count);
@@ -360,7 +360,7 @@ GroupEntryBuilder::reserve_fields(std::size_t count) -> GroupEntryBuilder&
 }
 
 auto
-GroupEntryBuilder::reserve_groups(std::size_t count) -> GroupEntryBuilder&
+GroupEntryDataWriter::reserve_groups(std::size_t count) -> GroupEntryDataWriter&
 {
   if (auto* data = resolve(); data != nullptr) {
     data->groups.reserve(count);
@@ -369,7 +369,7 @@ GroupEntryBuilder::reserve_groups(std::size_t count) -> GroupEntryBuilder&
 }
 
 auto
-GroupEntryBuilder::reserve_group_entries(std::uint32_t count_tag, std::size_t count) -> GroupEntryBuilder&
+GroupEntryDataWriter::reserve_group_entries(std::uint32_t count_tag, std::size_t count) -> GroupEntryDataWriter&
 {
   if (auto* group = ensure_group(count_tag); group != nullptr) {
     group->entries.reserve(count);
@@ -378,7 +378,7 @@ GroupEntryBuilder::reserve_group_entries(std::uint32_t count_tag, std::size_t co
 }
 
 auto
-GroupEntryBuilder::resolve() -> MessageData*
+GroupEntryDataWriter::resolve() -> MessageData*
 {
   auto* data = root_;
   if (data == nullptr) {
@@ -397,7 +397,7 @@ GroupEntryBuilder::resolve() -> MessageData*
 }
 
 auto
-GroupEntryBuilder::ensure_group(std::uint32_t count_tag) -> GroupData*
+GroupEntryDataWriter::ensure_group(std::uint32_t count_tag) -> GroupData*
 {
   auto* data = resolve();
   if (data == nullptr) {
@@ -412,7 +412,7 @@ GroupEntryBuilder::ensure_group(std::uint32_t count_tag) -> GroupData*
 }
 
 auto
-GroupEntryBuilder::add_group_entry(std::uint32_t count_tag) -> GroupEntryBuilder
+GroupEntryDataWriter::add_group_entry(std::uint32_t count_tag) -> GroupEntryDataWriter
 {
   auto* group = ensure_group(count_tag);
   if (group == nullptr) {
@@ -422,81 +422,81 @@ GroupEntryBuilder::add_group_entry(std::uint32_t count_tag) -> GroupEntryBuilder
   group->entries.push_back(MessageData{});
   auto child_path = path_;
   child_path.push_back(PathSegment{ .count_tag = count_tag, .entry_index = group->entries.size() - 1U });
-  return GroupEntryBuilder(root_, std::move(child_path));
+  return GroupEntryDataWriter(root_, std::move(child_path));
 }
 
-MessageBuilder::MessageBuilder(std::string msg_type)
+MessageDataWriter::MessageDataWriter(std::string msg_type)
 {
   data_.msg_type = std::move(msg_type);
 }
 
 auto
-MessageBuilder::upsert_field(FieldValue value) -> MessageBuilder&
+MessageDataWriter::upsert_field(FieldValue value) -> MessageDataWriter&
 {
   UpsertField(data_.fields, std::move(value));
   return *this;
 }
 
 auto
-MessageBuilder::set_string(std::uint32_t tag, std::string_view value) -> MessageBuilder&
+MessageDataWriter::set_string(std::uint32_t tag, std::string_view value) -> MessageDataWriter&
 {
   return upsert_field(FieldValue{ .tag = tag, .value = std::string(value) });
 }
 
 auto
-MessageBuilder::set_int(std::uint32_t tag, std::int64_t value) -> MessageBuilder&
+MessageDataWriter::set_int(std::uint32_t tag, std::int64_t value) -> MessageDataWriter&
 {
   return upsert_field(FieldValue{ .tag = tag, .value = value });
 }
 
 auto
-MessageBuilder::set_char(std::uint32_t tag, char value) -> MessageBuilder&
+MessageDataWriter::set_char(std::uint32_t tag, char value) -> MessageDataWriter&
 {
   return upsert_field(FieldValue{ .tag = tag, .value = value });
 }
 
 auto
-MessageBuilder::set_float(std::uint32_t tag, double value) -> MessageBuilder&
+MessageDataWriter::set_float(std::uint32_t tag, double value) -> MessageDataWriter&
 {
   return upsert_field(FieldValue{ .tag = tag, .value = value });
 }
 
 auto
-MessageBuilder::set_boolean(std::uint32_t tag, bool value) -> MessageBuilder&
+MessageDataWriter::set_boolean(std::uint32_t tag, bool value) -> MessageDataWriter&
 {
   return upsert_field(FieldValue{ .tag = tag, .value = value });
 }
 
 auto
-MessageBuilder::add_string(std::uint32_t tag, std::string_view value) -> MessageBuilder&
+MessageDataWriter::add_string(std::uint32_t tag, std::string_view value) -> MessageDataWriter&
 {
   data_.fields.push_back(FieldValue{ .tag = tag, .value = std::string(value) });
   return *this;
 }
 
 auto
-MessageBuilder::reserve_fields(std::size_t count) -> MessageBuilder&
+MessageDataWriter::reserve_fields(std::size_t count) -> MessageDataWriter&
 {
   data_.fields.reserve(count);
   return *this;
 }
 
 auto
-MessageBuilder::reserve_groups(std::size_t count) -> MessageBuilder&
+MessageDataWriter::reserve_groups(std::size_t count) -> MessageDataWriter&
 {
   data_.groups.reserve(count);
   return *this;
 }
 
 auto
-MessageBuilder::reserve_group_entries(std::uint32_t count_tag, std::size_t count) -> MessageBuilder&
+MessageDataWriter::reserve_group_entries(std::uint32_t count_tag, std::size_t count) -> MessageDataWriter&
 {
   ensure_group(count_tag).entries.reserve(count);
   return *this;
 }
 
 auto
-MessageBuilder::ensure_group(std::uint32_t count_tag) -> GroupData&
+MessageDataWriter::ensure_group(std::uint32_t count_tag) -> GroupData&
 {
   if (auto* group = FindGroup(data_.groups, count_tag); group != nullptr) {
     return *group;
@@ -507,23 +507,23 @@ MessageBuilder::ensure_group(std::uint32_t count_tag) -> GroupData&
 }
 
 auto
-MessageBuilder::add_group_entry(std::uint32_t count_tag) -> GroupEntryBuilder
+MessageDataWriter::add_group_entry(std::uint32_t count_tag) -> GroupEntryDataWriter
 {
   auto& group = ensure_group(count_tag);
   group.entries.push_back(MessageData{});
-  return GroupEntryBuilder(&data_,
-                           std::vector<GroupEntryBuilder::PathSegment>{ GroupEntryBuilder::PathSegment{
-                             .count_tag = count_tag, .entry_index = group.entries.size() - 1U } });
+  return GroupEntryDataWriter(&data_,
+                              std::vector<GroupEntryDataWriter::PathSegment>{ GroupEntryDataWriter::PathSegment{
+                                .count_tag = count_tag, .entry_index = group.entries.size() - 1U } });
 }
 
 auto
-MessageBuilder::build() && -> Message
+MessageDataWriter::build() && -> Message
 {
   return Message(std::move(data_));
 }
 
 auto
-MessageBuilder::reset() -> void
+MessageDataWriter::reset() -> void
 {
   data_.fields.clear();
   for (auto& group : data_.groups) {

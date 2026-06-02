@@ -5,10 +5,10 @@
 
 #include <catch2/catch_test_macros.hpp>
 
-#include "nimblefix/advanced/message_builder.h"
 #include "nimblefix/codec/fix_codec.h"
 #include "nimblefix/codec/fix_tags.h"
 #include "nimblefix/codec/raw_passthrough.h"
+#include "nimblefix/message/message_data_writer.h"
 #include "nimblefix/session/admin_protocol.h"
 #include "nimblefix/store/memory_store.h"
 
@@ -151,6 +151,48 @@ ActivateAcceptorSession(nimble::session::AdminProtocol* protocol,
                         std::string begin_string,
                         std::string default_appl_ver_id = {}) -> nimble::base::Status;
 
+TEST_CASE("admin protocol appends configured Logon fields", "[admin-protocol][logon]")
+{
+  auto dictionary = nimble::tests::LoadFix44DictionaryView();
+  if (!dictionary.ok()) {
+    SKIP("FIX44 artifact not available: " << dictionary.status().message());
+  }
+
+  nimble::store::MemorySessionStore store;
+  nimble::session::AdminProtocol protocol(
+    nimble::session::AdminProtocolConfig{
+      .session =
+        nimble::session::SessionConfig{
+          .session_id = 5010U,
+          .key = nimble::session::SessionKey{ "FIX.4.4", "BUY", "SELL" },
+          .profile_id = dictionary.value().profile().header().profile_id,
+          .heartbeat_interval_seconds = 30U,
+          .is_initiator = true,
+        },
+      .begin_string = "FIX.4.4",
+      .sender_comp_id = "BUY",
+      .target_comp_id = "SELL",
+      .heartbeat_interval_seconds = 30U,
+      .logon_fields =
+        {
+          nimble::session::LogonField{ kUsername, "alice" },
+          nimble::session::LogonField{ kPassword, "secret" },
+        },
+    },
+    dictionary.value(),
+    &store);
+
+  auto connected = protocol.OnTransportConnected(1U);
+  REQUIRE(connected.ok());
+  REQUIRE(connected.value().outbound_frames.size() == 1U);
+
+  auto decoded = nimble::codec::DecodeFixMessage(connected.value().outbound_frames.front().bytes, dictionary.value());
+  REQUIRE(decoded.ok());
+  REQUIRE(decoded.value().header.msg_type == "A");
+  REQUIRE(decoded.value().message.view().get_string(kUsername).value() == "alice");
+  REQUIRE(decoded.value().message.view().get_string(kPassword).value() == "secret");
+}
+
 TEST_CASE("admin protocol sends pre-encoded application payload", "[admin-protocol]")
 {
   auto dictionary = nimble::tests::LoadFix44DictionaryView();
@@ -204,7 +246,7 @@ TEST_CASE("admin protocol sends pre-encoded application payload", "[admin-protoc
   REQUIRE(stored.value().front().payload ==
           std::vector<std::byte>(outbound.value().bytes.view().begin(), outbound.value().bytes.view().end()));
 
-  nimble::message::MessageBuilder resend_builder("2");
+  nimble::message::MessageDataWriter resend_builder("2");
   resend_builder.set_string(kMsgType, "2").set_int(kBeginSeqNo, 2).set_int(kEndSeqNo, 2);
   auto inbound =
     EncodeInboundFrame(std::move(resend_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 2U, false);
@@ -252,19 +294,19 @@ TEST_CASE("admin protocol treats SenderSubID and TargetSubID as per-message enve
   REQUIRE(protocol.OnTransportConnected(1U).ok());
   REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
 
-  nimble::message::MessageBuilder first_builder("D");
+  nimble::message::MessageDataWriter first_builder("D");
   first_builder.set_string(kMsgType, "D").set_string(kClOrdID, "ORD-A");
   auto first = protocol.SendApplication(
     std::move(first_builder).build(), 100U, { .sender_sub_id = "DESK-A", .target_sub_id = "ROUTE-A" });
   REQUIRE(first.ok());
 
-  nimble::message::MessageBuilder second_builder("D");
+  nimble::message::MessageDataWriter second_builder("D");
   second_builder.set_string(kMsgType, "D").set_string(kClOrdID, "ORD-B");
   auto second = protocol.SendApplication(
     std::move(second_builder).build(), 110U, { .sender_sub_id = "DESK-B", .target_sub_id = "ROUTE-B" });
   REQUIRE(second.ok());
 
-  nimble::message::MessageBuilder third_builder("D");
+  nimble::message::MessageDataWriter third_builder("D");
   third_builder.set_string(kMsgType, "D").set_string(kClOrdID, "ORD-C");
   auto third = protocol.SendApplication(std::move(third_builder).build(), 120U);
   REQUIRE(third.ok());
@@ -327,7 +369,7 @@ ActivateAcceptorSession(nimble::session::AdminProtocol* protocol,
                         std::string begin_string,
                         std::string default_appl_ver_id) -> nimble::base::Status
 {
-  nimble::message::MessageBuilder logon_builder("A");
+  nimble::message::MessageDataWriter logon_builder("A");
   logon_builder.set_string(kMsgType, "A").set_int(kEncryptMethod, 0).set_int(kHeartBtInt, 30);
   auto inbound = EncodeInboundFrame(std::move(logon_builder).build(),
                                     dictionary,
@@ -392,7 +434,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
 
     REQUIRE(protocol.OnTransportConnected(1U).ok());
 
-    nimble::message::MessageBuilder logon_builder("A");
+    nimble::message::MessageDataWriter logon_builder("A");
     logon_builder.set_string(kMsgType, "A").set_int(kEncryptMethod, 0).set_int(kHeartBtInt, 30);
     auto inbound =
       EncodeInboundFrame(std::move(logon_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 7U, false);
@@ -445,7 +487,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
 
     REQUIRE(protocol.OnTransportConnected(1U).ok());
 
-    nimble::message::MessageBuilder logon_builder("A");
+    nimble::message::MessageDataWriter logon_builder("A");
     logon_builder.set_string(kMsgType, "A")
       .set_int(kEncryptMethod, 0)
       .set_int(kHeartBtInt, 30)
@@ -628,7 +670,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(protocol.OnTransportConnected(1U).ok());
     REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
 
-    nimble::message::MessageBuilder heartbeat_builder("0");
+    nimble::message::MessageDataWriter heartbeat_builder("0");
     heartbeat_builder.set_string(kMsgType, "0");
     auto inbound =
       EncodeInboundFrame(std::move(heartbeat_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 1U, true);
@@ -671,7 +713,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(protocol.OnTransportConnected(1U).ok());
     REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
 
-    nimble::message::MessageBuilder heartbeat_builder("0");
+    nimble::message::MessageDataWriter heartbeat_builder("0");
     heartbeat_builder.set_string(kMsgType, "0");
     auto inbound = EncodeInboundFrame(std::move(heartbeat_builder).build(),
                                       dictionary.value(),
@@ -720,7 +762,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(protocol.OnTransportConnected(1U).ok());
     REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
 
-    nimble::message::MessageBuilder heartbeat_builder("0");
+    nimble::message::MessageDataWriter heartbeat_builder("0");
     heartbeat_builder.set_string(kMsgType, "0");
     auto inbound = EncodeInboundFrame(std::move(heartbeat_builder).build(),
                                       dictionary.value(),
@@ -807,7 +849,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(protocol.OnTransportConnected(1U).ok());
     REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
 
-    nimble::message::MessageBuilder heartbeat_builder("0");
+    nimble::message::MessageDataWriter heartbeat_builder("0");
     heartbeat_builder.set_string(kMsgType, "0");
     auto inbound =
       EncodeInboundFrame(std::move(heartbeat_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 1U, true);
@@ -874,7 +916,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
 
     REQUIRE(protocol.OnTransportConnected(1U).ok());
 
-    nimble::message::MessageBuilder logon_builder("A");
+    nimble::message::MessageDataWriter logon_builder("A");
     logon_builder.set_string(kMsgType, "A").set_int(kEncryptMethod, 0).set_int(kHeartBtInt, 30);
     auto inbound = EncodeInboundFrame(
       std::move(logon_builder).build(), dictionary.value(), "FIXT.1.1", "OTHER", "SELL", 1U, false, "9");
@@ -922,7 +964,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
 
     REQUIRE(protocol.OnTransportConnected(1U).ok());
 
-    nimble::message::MessageBuilder logon_builder("A");
+    nimble::message::MessageDataWriter logon_builder("A");
     logon_builder.set_string(kMsgType, "A").set_int(kEncryptMethod, 0).set_int(kHeartBtInt, 30);
     auto inbound =
       EncodeInboundFrame(std::move(logon_builder).build(), dictionary.value(), "FIX.4.2", "BUY", "SELL", 1U, false);
@@ -962,7 +1004,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
 
     REQUIRE(protocol.OnTransportConnected(1U).ok());
 
-    nimble::message::MessageBuilder logon_builder("A");
+    nimble::message::MessageDataWriter logon_builder("A");
     logon_builder.set_string(kMsgType, "A").set_int(kEncryptMethod, 0).set_int(kHeartBtInt, 30);
     auto inbound =
       EncodeInboundFrame(std::move(logon_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "OTHER", 1U, false);
@@ -1001,7 +1043,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
 
     REQUIRE(protocol.OnTransportConnected(1U).ok());
 
-    nimble::message::MessageBuilder logon_builder("A");
+    nimble::message::MessageDataWriter logon_builder("A");
     logon_builder.set_string(kMsgType, "A").set_int(kEncryptMethod, 0);
     auto inbound =
       EncodeInboundFrame(std::move(logon_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 1U, false);
@@ -1040,7 +1082,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
 
     REQUIRE(protocol.OnTransportConnected(1U).ok());
 
-    nimble::message::MessageBuilder logon_builder("A");
+    nimble::message::MessageDataWriter logon_builder("A");
     logon_builder.set_string(kMsgType, "A").set_int(kEncryptMethod, 1).set_int(kHeartBtInt, 30);
     auto inbound =
       EncodeInboundFrame(std::move(logon_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 1U, false);
@@ -1081,7 +1123,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
 
     REQUIRE(protocol.OnTransportConnected(1U).ok());
 
-    nimble::message::MessageBuilder logon_builder("A");
+    nimble::message::MessageDataWriter logon_builder("A");
     logon_builder.set_string(kMsgType, "A").set_int(kEncryptMethod, 0).set_int(kHeartBtInt, 30);
     auto inbound =
       EncodeInboundFrame(std::move(logon_builder).build(), dictionary.value(), "FIXT.1.1", "BUY", "SELL", 1U, false);
@@ -1123,7 +1165,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
 
     REQUIRE(protocol.OnTransportConnected(1U).ok());
 
-    nimble::message::MessageBuilder logon_builder("A");
+    nimble::message::MessageDataWriter logon_builder("A");
     logon_builder.set_string(kMsgType, "A").set_int(kEncryptMethod, 0).set_int(kHeartBtInt, 30);
     auto inbound =
       EncodeInboundFrame(std::move(logon_builder).build(), dictionary.value(), "FIXT.1.1", "BUY", "SELL", 1U, false);
@@ -1164,7 +1206,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
 
     REQUIRE(protocol.OnTransportConnected(1U).ok());
 
-    nimble::message::MessageBuilder logon_builder("A");
+    nimble::message::MessageDataWriter logon_builder("A");
     logon_builder.set_string(kMsgType, "A").set_int(kEncryptMethod, 0).set_int(kHeartBtInt, 30);
     auto inbound = EncodeInboundFrame(
       std::move(logon_builder).build(), dictionary.value(), "FIXT.1.1", "BUY", "SELL", 1U, false, "7");
@@ -1203,7 +1245,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
 
     REQUIRE(protocol.OnTransportConnected(1U).ok());
 
-    nimble::message::MessageBuilder logon_builder("A");
+    nimble::message::MessageDataWriter logon_builder("A");
     logon_builder.set_string(kMsgType, "A").set_int(kEncryptMethod, 0).set_int(kHeartBtInt, 30);
     auto inbound =
       EncodeInboundFrame(std::move(logon_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 1U, true);
@@ -1276,7 +1318,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
 
     REQUIRE(protocol.OnTransportConnected(1U).ok());
 
-    nimble::message::MessageBuilder heartbeat_builder("0");
+    nimble::message::MessageDataWriter heartbeat_builder("0");
     heartbeat_builder.set_string(kMsgType, "0");
     auto inbound =
       EncodeInboundFrame(std::move(heartbeat_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 1U, false);
@@ -1315,7 +1357,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
 
     REQUIRE(protocol.OnTransportConnected(1U).ok());
 
-    nimble::message::MessageBuilder resend_builder("2");
+    nimble::message::MessageDataWriter resend_builder("2");
     resend_builder.set_string(kMsgType, "2").set_int(kBeginSeqNo, 1).set_int(kEndSeqNo, 0);
     auto inbound =
       EncodeInboundFrame(std::move(resend_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 2U, false);
@@ -1356,7 +1398,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(protocol.OnTransportConnected(1U).ok());
     REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
 
-    nimble::message::MessageBuilder heartbeat_builder("0");
+    nimble::message::MessageDataWriter heartbeat_builder("0");
     heartbeat_builder.set_string(kMsgType, "0");
     auto inbound =
       EncodeInboundFrame(std::move(heartbeat_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 1U, false);
@@ -1396,7 +1438,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(protocol.OnTransportConnected(1U).ok());
     REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
 
-    nimble::message::MessageBuilder logon_builder("A");
+    nimble::message::MessageDataWriter logon_builder("A");
     logon_builder.set_string(kMsgType, "A").set_int(kEncryptMethod, 0).set_int(kHeartBtInt, 30);
     auto inbound =
       EncodeInboundFrame(std::move(logon_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 2U, false);
@@ -1442,7 +1484,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(protocol.OnTransportConnected(1U).ok());
     REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
 
-    nimble::message::MessageBuilder test_request_builder("1");
+    nimble::message::MessageDataWriter test_request_builder("1");
     test_request_builder.set_string(kMsgType, "1");
     auto inbound = EncodeInboundFrame(
       std::move(test_request_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 2U, false);
@@ -1484,7 +1526,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(protocol.OnTransportConnected(1U).ok());
     REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
 
-    nimble::message::MessageBuilder resend_builder("2");
+    nimble::message::MessageDataWriter resend_builder("2");
     resend_builder.set_string(kMsgType, "2").set_int(kBeginSeqNo, 9).set_int(kEndSeqNo, 4);
     auto inbound =
       EncodeInboundFrame(std::move(resend_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 2U, false);
@@ -1526,7 +1568,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(protocol.OnTransportConnected(1U).ok());
     REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
 
-    nimble::message::MessageBuilder reset_builder("4");
+    nimble::message::MessageDataWriter reset_builder("4");
     reset_builder.set_string(kMsgType, "4");
     auto inbound =
       EncodeInboundFrame(std::move(reset_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 2U, false);
@@ -1568,7 +1610,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(protocol.OnTransportConnected(1U).ok());
     REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
 
-    nimble::message::MessageBuilder reset_builder("4");
+    nimble::message::MessageDataWriter reset_builder("4");
     reset_builder.set_string(kMsgType, "4").set_int(kNewSeqNo, 1);
     auto inbound =
       EncodeInboundFrame(std::move(reset_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 2U, false);
@@ -1610,7 +1652,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(protocol.OnTransportConnected(1U).ok());
     REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
 
-    nimble::message::MessageBuilder heartbeat_builder("0");
+    nimble::message::MessageDataWriter heartbeat_builder("0");
     heartbeat_builder.set_string(kMsgType, "0");
     auto gap_inbound =
       EncodeInboundFrame(std::move(heartbeat_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 5U, false);
@@ -1626,7 +1668,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(resend.value().message.view().get_int(kBeginSeqNo).value() == 2);
     REQUIRE(resend.value().message.view().get_int(kEndSeqNo).value() == 4);
 
-    nimble::message::MessageBuilder first_gap_fill_builder("4");
+    nimble::message::MessageDataWriter first_gap_fill_builder("4");
     first_gap_fill_builder.set_string(kMsgType, "4").set_boolean(kGapFillFlag, true).set_int(kNewSeqNo, 4);
     auto first_gap_fill = EncodeInboundFrame(
       std::move(first_gap_fill_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 2U, false);
@@ -1644,7 +1686,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(after_first_gap_fill.pending_resend.end_seq == 4U);
     REQUIRE(after_first_gap_fill.next_in_seq == 4U);
 
-    nimble::message::MessageBuilder overlapping_gap_fill_builder("4");
+    nimble::message::MessageDataWriter overlapping_gap_fill_builder("4");
     overlapping_gap_fill_builder.set_string(kMsgType, "4").set_boolean(kGapFillFlag, true).set_int(kNewSeqNo, 6);
     auto overlapping_gap_fill = EncodeInboundFrame(std::move(overlapping_gap_fill_builder).build(),
                                                    dictionary.value(),
@@ -1697,7 +1739,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(protocol.OnTransportConnected(1U).ok());
     REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
 
-    nimble::message::MessageBuilder first_gap_fill_builder("4");
+    nimble::message::MessageDataWriter first_gap_fill_builder("4");
     first_gap_fill_builder.set_string(kMsgType, "4").set_boolean(kGapFillFlag, true).set_int(kNewSeqNo, 5);
     auto first_gap_fill = EncodeInboundFrame(
       std::move(first_gap_fill_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 2U, false);
@@ -1708,7 +1750,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(first_gap_fill_event.value().outbound_frames.empty());
     REQUIRE(!first_gap_fill_event.value().disconnect);
 
-    nimble::message::MessageBuilder duplicate_gap_fill_builder("4");
+    nimble::message::MessageDataWriter duplicate_gap_fill_builder("4");
     duplicate_gap_fill_builder.set_string(kMsgType, "4").set_boolean(kGapFillFlag, true).set_int(kNewSeqNo, 5);
     auto duplicate_gap_fill = EncodeInboundFrame(std::move(duplicate_gap_fill_builder).build(),
                                                  dictionary.value(),
@@ -1760,7 +1802,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(protocol.OnTransportConnected(1U).ok());
     REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
 
-    nimble::message::MessageBuilder first_gap_fill_builder("4");
+    nimble::message::MessageDataWriter first_gap_fill_builder("4");
     first_gap_fill_builder.set_string(kMsgType, "4").set_boolean(kGapFillFlag, true).set_int(kNewSeqNo, 5);
     auto first_gap_fill = EncodeInboundFrame(
       std::move(first_gap_fill_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 2U, false);
@@ -1768,7 +1810,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(protocol.OnInbound(first_gap_fill.value(), 10U).ok());
     REQUIRE(protocol.session().Snapshot().next_in_seq == 5U);
 
-    nimble::message::MessageBuilder stale_gap_fill_builder("4");
+    nimble::message::MessageDataWriter stale_gap_fill_builder("4");
     stale_gap_fill_builder.set_string(kMsgType, "4").set_boolean(kGapFillFlag, true).set_int(kNewSeqNo, 6);
     auto stale_gap_fill = EncodeInboundFrame(
       std::move(stale_gap_fill_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 3U, false);
@@ -1811,7 +1853,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(protocol.OnTransportConnected(1U).ok());
     REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
 
-    nimble::message::MessageBuilder app_builder("D");
+    nimble::message::MessageDataWriter app_builder("D");
     app_builder.set_string(kMsgType, "D").set_string(kClOrdID, "ORD-1");
     auto outbound = protocol.SendApplication(std::move(app_builder).build(), 100U);
     REQUIRE(outbound.ok());
@@ -1820,7 +1862,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(original.ok());
     REQUIRE(!original.value().header.sending_time.empty());
 
-    nimble::message::MessageBuilder resend_builder("2");
+    nimble::message::MessageDataWriter resend_builder("2");
     resend_builder.set_string(kMsgType, "2").set_int(kBeginSeqNo, 2).set_int(kEndSeqNo, 2);
     auto inbound =
       EncodeInboundFrame(std::move(resend_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 2U, false);
@@ -1870,7 +1912,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(before_replay.state == nimble::session::SessionState::kAwaitingLogout);
     REQUIRE(before_replay.next_out_seq == 3U);
 
-    nimble::message::MessageBuilder resend_builder("2");
+    nimble::message::MessageDataWriter resend_builder("2");
     resend_builder.set_string(kMsgType, "2").set_int(kBeginSeqNo, 2).set_int(kEndSeqNo, 2);
     auto inbound =
       EncodeInboundFrame(std::move(resend_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 2U, false);
@@ -1922,7 +1964,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(protocol.OnTransportConnected(1U).ok());
     REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
 
-    nimble::message::MessageBuilder logout_builder("5");
+    nimble::message::MessageDataWriter logout_builder("5");
     logout_builder.set_string(kMsgType, "5");
     auto inbound =
       EncodeInboundFrame(std::move(logout_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 2U, false);
@@ -1966,7 +2008,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(protocol.OnTransportConnected(1U).ok());
     REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
 
-    nimble::message::MessageBuilder heartbeat_builder("0");
+    nimble::message::MessageDataWriter heartbeat_builder("0");
     heartbeat_builder.set_string(kMsgType, "0");
     auto inbound =
       EncodeInboundFrame(std::move(heartbeat_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 4U, false);
@@ -2037,7 +2079,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(protocol.OnTransportConnected(1U).ok());
     REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
 
-    nimble::message::MessageBuilder app_builder("ZZ");
+    nimble::message::MessageDataWriter app_builder("ZZ");
     app_builder.set_string(kMsgType, "ZZ");
     auto inbound =
       EncodeInboundFrame(std::move(app_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 2U, false);
@@ -2081,7 +2123,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(protocol.OnTransportConnected(1U).ok());
     REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
 
-    nimble::message::MessageBuilder app_builder("AE");
+    nimble::message::MessageDataWriter app_builder("AE");
     app_builder.set_string(kMsgType, "AE");
     auto inbound =
       EncodeInboundFrame(std::move(app_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 2U, false);
@@ -2125,7 +2167,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(protocol.OnTransportConnected(1U).ok());
     REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
 
-    nimble::message::MessageBuilder app_builder("D");
+    nimble::message::MessageDataWriter app_builder("D");
     app_builder.set_string(kMsgType, "D");
     auto inbound =
       EncodeInboundFrame(std::move(app_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 2U, false);
@@ -2200,7 +2242,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(protocol.OnTransportConnected(1U).ok());
     REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
 
-    nimble::message::MessageBuilder app_builder("ZZ");
+    nimble::message::MessageDataWriter app_builder("ZZ");
     app_builder.set_string(kMsgType, "ZZ");
     auto inbound =
       EncodeInboundFrame(std::move(app_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 2U, false);
@@ -2741,7 +2783,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(protocol.OnTransportConnected(1U).ok());
     REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
 
-    nimble::message::MessageBuilder app_builder("D");
+    nimble::message::MessageDataWriter app_builder("D");
     app_builder.set_string(kMsgType, "D");
     auto inbound =
       EncodeInboundFrame(std::move(app_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 2U, false);
@@ -2776,7 +2818,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(protocol.OnTransportConnected(1U).ok());
     REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
 
-    nimble::message::MessageBuilder app_builder("D");
+    nimble::message::MessageDataWriter app_builder("D");
     app_builder.set_string(kMsgType, "D").set_string(kSymbol, "AAPL");
     auto party = app_builder.add_group_entry(kNoPartyIDs);
     party.set_string(kPartyID, "PTY1").set_int(kPartyRole, 7);
@@ -2814,7 +2856,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(protocol.OnTransportConnected(1U).ok());
     REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
 
-    nimble::message::MessageBuilder app_builder("D");
+    nimble::message::MessageDataWriter app_builder("D");
     app_builder.set_string(kMsgType, "D");
     auto inbound =
       EncodeInboundFrame(std::move(app_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 2U, false);
@@ -2850,7 +2892,7 @@ TEST_CASE("admin-protocol", "[admin-protocol]")
     REQUIRE(protocol.OnTransportConnected(1U).ok());
     REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
 
-    nimble::message::MessageBuilder app_builder("D");
+    nimble::message::MessageDataWriter app_builder("D");
     app_builder.set_string(kMsgType, "D").set_string(kSymbol, "AAPL");
     auto party = app_builder.add_group_entry(kNoPartyIDs);
     party.set_string(kPartyID, "PTY1").set_char(kPartyIDSource, 'D').set_int(kPartyRole, 1);
@@ -3029,7 +3071,7 @@ TEST_CASE("PossResend flag detected on app message", "[admin-protocol]")
   REQUIRE(protocol.OnTransportConnected(1U).ok());
   REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
 
-  nimble::message::MessageBuilder app_builder("D");
+  nimble::message::MessageDataWriter app_builder("D");
   app_builder.set_string(kMsgType, "D").set_string(kSymbol, "MSFT").set_boolean(kPossResend, true);
   auto inbound =
     EncodeInboundFrame(std::move(app_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 2U, false);
@@ -3071,7 +3113,7 @@ TEST_CASE("PossResend flag not set on normal message", "[admin-protocol]")
   REQUIRE(protocol.OnTransportConnected(1U).ok());
   REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
 
-  nimble::message::MessageBuilder app_builder("D");
+  nimble::message::MessageDataWriter app_builder("D");
   app_builder.set_string(kMsgType, "D").set_string(kSymbol, "AAPL");
   auto inbound =
     EncodeInboundFrame(std::move(app_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 2U, false);
@@ -3113,7 +3155,7 @@ TEST_CASE("PossResend message still processed by application", "[admin-protocol]
   REQUIRE(protocol.OnTransportConnected(1U).ok());
   REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
 
-  nimble::message::MessageBuilder app_builder("D");
+  nimble::message::MessageDataWriter app_builder("D");
   app_builder.set_string(kMsgType, "D").set_string(kSymbol, "GOOG").set_boolean(kPossResend, true);
   auto inbound =
     EncodeInboundFrame(std::move(app_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 2U, false);
@@ -3166,7 +3208,7 @@ TEST_CASE("ResendRequest happy path", "[admin-protocol]")
 
   // Send 3 outbound application messages (seqs 2, 3, 4)
   for (int i = 0; i < 3; ++i) {
-    nimble::message::MessageBuilder app_builder("D");
+    nimble::message::MessageDataWriter app_builder("D");
     app_builder.set_string(kMsgType, "D").set_string(kSymbol, "AAPL");
     auto sent = protocol.SendApplication(std::move(app_builder).build(), 100U + static_cast<std::uint64_t>(i));
     REQUIRE(sent.ok());
@@ -3174,7 +3216,7 @@ TEST_CASE("ResendRequest happy path", "[admin-protocol]")
   REQUIRE(protocol.session().Snapshot().next_out_seq == 5U);
 
   // Counterparty requests resend of seqs 2-4
-  nimble::message::MessageBuilder resend_builder("2");
+  nimble::message::MessageDataWriter resend_builder("2");
   resend_builder.set_string(kMsgType, "2").set_int(kBeginSeqNo, 2).set_int(kEndSeqNo, 4);
   auto inbound =
     EncodeInboundFrame(std::move(resend_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 2U, false);
@@ -3224,7 +3266,7 @@ TEST_CASE("ResendRequest BeginSeqNo=0 rejected", "[admin-protocol]")
   REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
 
   // BeginSeqNo=0 is invalid per FIX spec — must be positive
-  nimble::message::MessageBuilder resend_builder("2");
+  nimble::message::MessageDataWriter resend_builder("2");
   resend_builder.set_string(kMsgType, "2").set_int(kBeginSeqNo, 0).set_int(kEndSeqNo, 5);
   auto inbound =
     EncodeInboundFrame(std::move(resend_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 2U, false);
@@ -3274,7 +3316,7 @@ TEST_CASE("ResendRequest EndSeqNo=0 replays to infinity", "[admin-protocol]")
 
   // Send 2 outbound app messages (seqs 2, 3)
   for (int i = 0; i < 2; ++i) {
-    nimble::message::MessageBuilder app_builder("D");
+    nimble::message::MessageDataWriter app_builder("D");
     app_builder.set_string(kMsgType, "D").set_string(kSymbol, "AAPL");
     auto sent = protocol.SendApplication(std::move(app_builder).build(), 100U + static_cast<std::uint64_t>(i));
     REQUIRE(sent.ok());
@@ -3282,7 +3324,7 @@ TEST_CASE("ResendRequest EndSeqNo=0 replays to infinity", "[admin-protocol]")
   REQUIRE(protocol.session().Snapshot().next_out_seq == 4U);
 
   // EndSeqNo=0 means "all messages from BeginSeqNo to end"
-  nimble::message::MessageBuilder resend_builder("2");
+  nimble::message::MessageDataWriter resend_builder("2");
   resend_builder.set_string(kMsgType, "2").set_int(kBeginSeqNo, 1).set_int(kEndSeqNo, 0);
   auto inbound =
     EncodeInboundFrame(std::move(resend_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 2U, false);
@@ -3341,7 +3383,7 @@ TEST_CASE("TestRequest happy path", "[admin-protocol]")
   REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
 
   // Receive TestRequest with TestReqID
-  nimble::message::MessageBuilder test_builder("1");
+  nimble::message::MessageDataWriter test_builder("1");
   test_builder.set_string(kMsgType, "1").set_string(kTestReqID, "HELLO-123");
   auto inbound =
     EncodeInboundFrame(std::move(test_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 2U, false);
@@ -3440,7 +3482,7 @@ TEST_CASE("TestRequest duplicate handling", "[admin-protocol]")
   REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
 
   // First TestRequest
-  nimble::message::MessageBuilder test1("1");
+  nimble::message::MessageDataWriter test1("1");
   test1.set_string(kMsgType, "1").set_string(kTestReqID, "DUP-REQ");
   auto inbound1 = EncodeInboundFrame(std::move(test1).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 2U, false);
   REQUIRE(inbound1.ok());
@@ -3455,7 +3497,7 @@ TEST_CASE("TestRequest duplicate handling", "[admin-protocol]")
   REQUIRE(hb1.value().message.view().get_string(kTestReqID).value() == "DUP-REQ");
 
   // Second TestRequest with same TestReqID at next seq
-  nimble::message::MessageBuilder test2("1");
+  nimble::message::MessageDataWriter test2("1");
   test2.set_string(kMsgType, "1").set_string(kTestReqID, "DUP-REQ");
   auto inbound2 = EncodeInboundFrame(std::move(test2).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 3U, false);
   REQUIRE(inbound2.ok());
@@ -3512,7 +3554,7 @@ TEST_CASE("Acceptor reset_seq_num_on_logon resets local state before Logon respo
 
   REQUIRE(protocol.OnTransportConnected(1U).ok());
 
-  nimble::message::MessageBuilder logon_builder("A");
+  nimble::message::MessageDataWriter logon_builder("A");
   logon_builder.set_string(kMsgType, "A").set_int(kEncryptMethod, 0).set_int(kHeartBtInt, 30);
   auto inbound =
     EncodeInboundFrame(std::move(logon_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 1U, false);
@@ -3564,7 +3606,7 @@ TEST_CASE("SequenceReset-Reset happy path", "[admin-protocol]")
   REQUIRE(protocol.session().Snapshot().next_in_seq == 2U);
 
   // SequenceReset-Reset (no GapFillFlag) advances expected inbound seq
-  nimble::message::MessageBuilder reset_builder("4");
+  nimble::message::MessageDataWriter reset_builder("4");
   reset_builder.set_string(kMsgType, "4").set_int(kNewSeqNo, 10);
   auto inbound =
     EncodeInboundFrame(std::move(reset_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 2U, false);
@@ -3609,7 +3651,7 @@ TEST_CASE("SequenceReset-Reset accepts stale reset frames", "[admin-protocol][re
   REQUIRE(protocol.OnTransportConnected(1U).ok());
   REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
 
-  nimble::message::MessageBuilder gap_fill_builder("4");
+  nimble::message::MessageDataWriter gap_fill_builder("4");
   gap_fill_builder.set_string(kMsgType, "4").set_boolean(kGapFillFlag, true).set_int(kNewSeqNo, 5);
   auto gap_fill =
     EncodeInboundFrame(std::move(gap_fill_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 2U, false);
@@ -3617,7 +3659,7 @@ TEST_CASE("SequenceReset-Reset accepts stale reset frames", "[admin-protocol][re
   REQUIRE(protocol.OnInbound(gap_fill.value(), 10U).ok());
   REQUIRE(protocol.session().Snapshot().next_in_seq == 5U);
 
-  nimble::message::MessageBuilder reset_builder("4");
+  nimble::message::MessageDataWriter reset_builder("4");
   reset_builder.set_string(kMsgType, "4").set_int(kNewSeqNo, 8);
   auto stale_reset =
     EncodeInboundFrame(std::move(reset_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 3U, false);
@@ -3660,7 +3702,7 @@ TEST_CASE("SequenceReset backward rejected", "[admin-protocol]")
   REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
 
   // NewSeqNo=1 is backward (next_in_seq will be 3 after ObserveInboundSeq(2))
-  nimble::message::MessageBuilder reset_builder("4");
+  nimble::message::MessageDataWriter reset_builder("4");
   reset_builder.set_string(kMsgType, "4").set_int(kNewSeqNo, 1);
   auto inbound =
     EncodeInboundFrame(std::move(reset_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 2U, false);
@@ -3710,7 +3752,7 @@ TEST_CASE("SequenceReset-GapFill happy path", "[admin-protocol]")
   REQUIRE(protocol.session().Snapshot().next_in_seq == 2U);
 
   // GapFill at expected seq advances inbound expected seq past the filled range
-  nimble::message::MessageBuilder gap_fill_builder("4");
+  nimble::message::MessageDataWriter gap_fill_builder("4");
   gap_fill_builder.set_string(kMsgType, "4").set_boolean(kGapFillFlag, true).set_int(kNewSeqNo, 5);
   auto inbound =
     EncodeInboundFrame(std::move(gap_fill_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 2U, false);
@@ -3756,7 +3798,7 @@ TEST_CASE("SequenceReset-GapFill partial fill", "[admin-protocol]")
   REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIX.4.4").ok());
 
   // Create a gap: receive heartbeat at seq 5 when expected is 2
-  nimble::message::MessageBuilder heartbeat_builder("0");
+  nimble::message::MessageDataWriter heartbeat_builder("0");
   heartbeat_builder.set_string(kMsgType, "0");
   auto gap_inbound =
     EncodeInboundFrame(std::move(heartbeat_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 5U, false);
@@ -3774,7 +3816,7 @@ TEST_CASE("SequenceReset-GapFill partial fill", "[admin-protocol]")
   REQUIRE(resend_req.value().message.view().get_int(kEndSeqNo).value() == 4);
 
   // Partial GapFill: covers seqs 2-3 only (NewSeqNo=4), seq 4 still missing
-  nimble::message::MessageBuilder gap_fill_builder("4");
+  nimble::message::MessageDataWriter gap_fill_builder("4");
   gap_fill_builder.set_string(kMsgType, "4").set_boolean(kGapFillFlag, true).set_int(kNewSeqNo, 4);
   auto gap_fill_inbound =
     EncodeInboundFrame(std::move(gap_fill_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 2U, false);
@@ -3825,7 +3867,7 @@ TEST_CASE("Reject received processed silently", "[admin-protocol]")
   REQUIRE(protocol.session().Snapshot().next_in_seq == 2U);
 
   // Receive inbound Reject — protocol processes it silently
-  nimble::message::MessageBuilder reject_builder("3");
+  nimble::message::MessageDataWriter reject_builder("3");
   reject_builder.set_string(kMsgType, "3").set_int(kRefSeqNum, 1).set_string(kText, "invalid message");
   auto inbound =
     EncodeInboundFrame(std::move(reject_builder).build(), dictionary.value(), "FIX.4.4", "BUY", "SELL", 2U, false);
@@ -4181,7 +4223,7 @@ TEST_CASE("FIXT.1.1 application emits per-message ApplVerID", "[fix50]")
   REQUIRE(protocol.OnTransportConnected(1U).ok());
   REQUIRE(ActivateAcceptorSession(&protocol, dictionary.value(), "FIXT.1.1", "9").ok());
 
-  nimble::message::MessageBuilder builder("D");
+  nimble::message::MessageDataWriter builder("D");
   builder.set_string(kMsgType, "D").set_string(kClOrdID, "ORD-FIX50").set_string(kSymbol, "AAPL");
   auto outbound = protocol.SendApplication(
     std::move(builder).build(), 10U, nimble::session::SessionSendEnvelopeView{ .appl_ver_id = "8" });

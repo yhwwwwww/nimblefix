@@ -16,6 +16,7 @@
 #include "nimblefix/codec/fix_codec.h"
 #include "nimblefix/message/message_ref.h"
 #include "nimblefix/session/encoded_frame.h"
+#include "nimblefix/session/logon_field.h"
 #include "nimblefix/session/session_core.h"
 #include "nimblefix/session/session_send_envelope.h"
 #include "nimblefix/session/transport_profile.h"
@@ -564,6 +565,7 @@ struct AdminProtocolConfig
   std::uint32_t heartbeat_interval_seconds{ 30 };
   std::uint32_t sending_time_threshold_seconds{ 0 };
   std::uint32_t warmup_message_count{ 0 };
+  std::vector<LogonField> logon_fields;
   codec::TimestampResolution timestamp_resolution{ codec::TimestampResolution::kMilliseconds };
   bool application_messages_available{ true };
   bool reset_seq_num_on_logon{ false };

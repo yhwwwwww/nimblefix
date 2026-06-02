@@ -8,7 +8,7 @@
 #include "nimblefix/codec/fix_codec.h"
 #include "nimblefix/codec/fix_tags.h"
 #include "nimblefix/message/fixed_layout_writer.h"
-#include "nimblefix/advanced/message_builder.h"
+#include "nimblefix/message/message_data_writer.h"
 
 #include "test_support.h"
 
@@ -47,7 +47,7 @@ TEST_CASE("encoded fragments drive generic and template encoders end-to-end", "[
     SKIP("FIX44 artifact not available: " << dictionary.status().message());
   }
 
-  nimble::message::MessageBuilder builder("D");
+  nimble::message::MessageDataWriter builder("D");
   builder.set_string(kMsgType, "D")
     .set_string(kClOrdID, "ORD-42")
     .set_string(kSymbol, "AAPL")
@@ -234,7 +234,8 @@ TEST_CASE("encoded fragments drive generated api end-to-end", "[fix-codec][outbo
   REQUIRE(message.ok());
 
   nimble::codec::EncodeBuffer buffer;
-  auto status = nimble::codec::EncodeFixMessageToBuffer(message.value(), dictionary.value(), options, extras.view(), &buffer);
+  auto status =
+    nimble::codec::EncodeFixMessageToBuffer(message.value(), dictionary.value(), options, extras.view(), &buffer);
   REQUIRE(status.ok());
 
   auto decoded = nimble::codec::DecodeFixMessageView(buffer.bytes(), dictionary.value());

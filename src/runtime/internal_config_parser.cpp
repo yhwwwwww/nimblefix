@@ -90,8 +90,9 @@ constexpr std::size_t kMalformedFieldAction = 49U;
 constexpr std::size_t kValidateEnumValues = 50U;
 constexpr std::size_t kAlternateEndpoints = 51U;
 constexpr std::size_t kWarmupMessageCount = 52U;
+constexpr std::size_t kLogonFields = 53U;
 constexpr std::size_t kMinFieldCount = kIsInitiator + 1U;
-constexpr std::size_t kMaxFieldCount = kWarmupMessageCount + 1U;
+constexpr std::size_t kMaxFieldCount = kLogonFields + 1U;
 } // namespace counterparty_columns
 
 auto
@@ -283,6 +284,30 @@ ParseEndpointList(std::string_view token) -> base::Result<std::vector<Connection
   }
 
   return endpoints;
+}
+
+auto
+ParseLogonFieldList(std::string_view token) -> base::Result<std::vector<session::LogonField>>
+{
+  std::vector<session::LogonField> fields;
+  const auto value = Trim(token);
+  if (value.empty()) {
+    return fields;
+  }
+
+  for (const auto& part : Split(value, kConfigListSeparator)) {
+    const auto separator = part.find(':');
+    if (separator == std::string::npos || separator == 0U || separator + 1U >= part.size()) {
+      return base::Status::InvalidArgument("invalid logon field value in runtime config");
+    }
+    auto tag = ParseInteger<std::uint32_t>(std::string_view(part).substr(0U, separator), "logon_field_tag");
+    if (!tag.ok()) {
+      return tag.status();
+    }
+    fields.emplace_back(tag.value(), std::string(Trim(std::string_view(part).substr(separator + 1U))));
+  }
+
+  return fields;
 }
 
 auto
@@ -1033,6 +1058,13 @@ LoadEngineConfigText(std::string_view text, const std::filesystem::path& base_di
           return alternate_endpoints.status();
         }
       }
+      auto logon_fields = base::Result<std::vector<session::LogonField>>(std::vector<session::LogonField>{});
+      if (parts.size() > counterparty_columns::kLogonFields) {
+        logon_fields = ParseLogonFieldList(parts[counterparty_columns::kLogonFields]);
+        if (!logon_fields.ok()) {
+          return logon_fields.status();
+        }
+      }
       auto heartbeat = ParseInteger<std::uint32_t>(parts[counterparty_columns::kHeartbeatIntervalSeconds],
                                                    "heartbeat_interval_seconds");
       if (!heartbeat.ok()) {
@@ -1068,6 +1100,7 @@ LoadEngineConfigText(std::string_view text, const std::filesystem::path& base_di
         .contract_service_subsets = contract_service_subsets,
         .sending_time_threshold_seconds = sending_time_threshold_seconds,
         .warmup_message_count = warmup_message_count,
+        .logon_fields = logon_fields.value(),
         .timestamp_resolution = timestamp_resolution.value(),
         .application_messages_available = application_messages_available.value(),
         .store_mode = store_mode.value(),

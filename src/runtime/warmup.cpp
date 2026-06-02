@@ -8,8 +8,8 @@
 #include <sstream>
 #include <string_view>
 
-#include "nimblefix/advanced/message_builder.h"
 #include "nimblefix/codec/fix_tags.h"
+#include "nimblefix/message/message_data_writer.h"
 #include "nimblefix/runtime/engine.h"
 
 namespace nimble::runtime {
@@ -25,7 +25,7 @@ BuildSyntheticMessage(std::string_view msg_type) -> message::Message
 {
   using namespace codec::tags;
 
-  message::MessageBuilder builder{ std::string(msg_type) };
+  message::MessageDataWriter builder{ std::string(msg_type) };
   builder.set_string(kMsgType, msg_type);
   if (msg_type == codec::msg_types::kLogon) {
     builder.set_int(kEncryptMethod, 0).set_int(kHeartBtInt, 30);

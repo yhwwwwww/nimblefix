@@ -11,6 +11,7 @@
 #include <utility>
 #include <vector>
 
+#include "nimblefix/codec/fix_tags.h"
 #include "nimblefix/runtime/contract_binding.h"
 #include "nimblefix/runtime/schedule_helpers.h"
 
@@ -43,6 +44,22 @@ auto
 IsTransportSession(std::string_view begin_string) -> bool
 {
   return begin_string == "FIXT.1.1";
+}
+
+auto
+IsEngineManagedLogonField(std::uint32_t tag) -> bool
+{
+  using namespace codec::tags;
+  switch (tag) {
+    case kMsgType:
+    case kEncryptMethod:
+    case kHeartBtInt:
+    case kResetSeqNumFlag:
+    case kNextExpectedMsgSeqNum:
+      return true;
+    default:
+      return IsEncodeManagedTag(tag);
+  }
 }
 
 auto
@@ -974,6 +991,12 @@ EndpointToText(const ConnectionEndpoint& endpoint) -> std::string
 }
 
 auto
+LogonFieldToText(const session::LogonField& field) -> std::string
+{
+  return std::to_string(field.tag) + ":" + field.value;
+}
+
+auto
 ValidateTlsClientConfigFull(std::size_t counterparty_index,
                             std::string_view counterparty_name,
                             const TlsClientConfig& config) -> ConfigValidationResult
@@ -1412,6 +1435,34 @@ ValidateEngineConfigFull(const EngineConfig& config) -> ConfigValidationResult
                     "transport_profile supports NextExpectedMsgSeqNum or send_next_expected_msg_seq_num=false",
                     "send_next_expected_msg_seq_num=true, begin_string=" + counterparty.transport_profile.begin_string);
     }
+    std::unordered_set<std::uint32_t> logon_field_tags;
+    for (std::size_t field_index = 0; field_index < counterparty.logon_fields.size(); ++field_index) {
+      const auto& field = counterparty.logon_fields[field_index];
+      const auto field_path =
+        CounterpartyFieldPath(counterparty_index, "logon_fields[" + std::to_string(field_index) + "]");
+      if (field.tag == 0U) {
+        AddDiagnostic(result, field_path + ".tag", "logon field tag must be positive", "> 0", "0");
+      }
+      if (field.value.empty()) {
+        AddDiagnostic(result, field_path + ".value", "logon field value must not be empty", "non-empty string", "");
+      }
+      if (IsEngineManagedLogonField(field.tag)) {
+        AddDiagnostic(result,
+                      field_path + ".tag",
+                      "logon field overrides an engine-managed Logon tag",
+                      "venue-specific Logon body field",
+                      std::to_string(field.tag));
+      }
+      if (field.tag != 0U && !logon_field_tags.emplace(field.tag).second) {
+        AddDiagnostic(result,
+                      field_path + ".tag",
+                      "duplicate logon field tag",
+                      ConfigErrorSeverity::kError,
+                      base::ErrorCode::kAlreadyExists,
+                      "unique logon field tag",
+                      std::to_string(field.tag));
+      }
+    }
     AppendDiagnostics(result, ValidateSessionScheduleFull(counterparty.session_schedule, counterparty_index));
     AppendDiagnostics(result, ValidateDayCutFull(counterparty.day_cut, counterparty_index));
     AppendDiagnostics(result,
@@ -1551,8 +1602,8 @@ ConfigToText(const EngineConfig& config) -> std::string
         << session::UnknownFieldActionName(counterparty.validation_policy.unknown_field_action) << '|'
         << session::MalformedFieldActionName(counterparty.validation_policy.malformed_field_action) << '|'
         << BoolToText(counterparty.validation_policy.validate_enum_values) << '|'
-        << JoinCsv(counterparty.alternate_endpoints, EndpointToText) << '|' << counterparty.warmup_message_count
-        << '\n';
+        << JoinCsv(counterparty.alternate_endpoints, EndpointToText) << '|' << counterparty.warmup_message_count << '|'
+        << JoinCsv(counterparty.logon_fields, LogonFieldToText) << '\n';
     if (counterparty.connection_strategy != nullptr) {
       out << "# counterparty " << counterparty.name
           << " has a runtime-only connection_strategy; strategy objects are not serialized\n";
@@ -1690,6 +1741,13 @@ auto
 CounterpartyConfigBuilder::supported_app_msg_types(std::vector<std::string> values) -> CounterpartyConfigBuilder&
 {
   config_.supported_app_msg_types = std::move(values);
+  return *this;
+}
+
+auto
+CounterpartyConfigBuilder::logon_field(std::uint32_t tag, std::string value) -> CounterpartyConfigBuilder&
+{
+  config_.logon_fields.emplace_back(tag, std::move(value));
   return *this;
 }
 

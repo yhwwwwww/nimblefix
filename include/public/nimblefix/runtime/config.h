@@ -11,6 +11,7 @@
 #include "nimblefix/codec/timestamp_resolution.h"
 #include "nimblefix/runtime/connection_strategy.h"
 #include "nimblefix/runtime/io_backend.h"
+#include "nimblefix/session/logon_field.h"
 #include "nimblefix/session/resend_recovery.h"
 #include "nimblefix/session/session_core.h"
 #include "nimblefix/session/transport_profile.h"
@@ -275,6 +276,9 @@ struct CounterpartyConfig
   // as warmup. Callbacks can query is_warmup() to distinguish these messages.
   // 0 disables warmup tracking (is_warmup() always returns false).
   std::uint32_t warmup_message_count{ 0 };
+  // Extra body fields appended to engine-generated outbound Logon(35=A)
+  // frames, for example Username(553) and Password(554).
+  std::vector<session::LogonField> logon_fields;
   // Outbound SendingTime(52) timestamp resolution. Default millisecond
   // preserves FIX 4.x compatibility. Nanosecond is useful for ultra-low-latency venues.
   codec::TimestampResolution timestamp_resolution{ codec::TimestampResolution::kMilliseconds };
@@ -512,6 +516,13 @@ public:
   /// \param values Supported application MsgType values.
   /// \return This builder.
   auto supported_app_msg_types(std::vector<std::string> values) -> CounterpartyConfigBuilder&;
+
+  /// Append an extra outbound Logon(35=A) body field.
+  ///
+  /// \param tag FIX tag number, for example Username(553) or Password(554).
+  /// \param value FIX wire value for the field.
+  /// \return This builder.
+  auto logon_field(std::uint32_t tag, std::string value) -> CounterpartyConfigBuilder&;
 
   /// Select contract service subsets for this deployed session binding.
   ///

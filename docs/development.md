@@ -170,7 +170,7 @@ This table lists the tags most useful for focused development. Run
 | `[sharded-runtime]` | Multi-shard engine |
 | `[profile-loader]` | Artifact loading |
 | `[timer-wheel]` | Timer scheduling |
-| `[message-api]` | Message builder/view API |
+| `[message-api]` | Message/view API |
 | `[fixed-layout]` | FixedLayout / FixedLayoutWriter |
 | `[generated-api]` | Generated typed builder/view API |
 | `[typed-message]` | Typed message accessors |

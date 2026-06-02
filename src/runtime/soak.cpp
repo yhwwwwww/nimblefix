@@ -9,9 +9,9 @@
 #include <utility>
 #include <vector>
 
-#include "nimblefix/advanced/message_builder.h"
 #include "nimblefix/codec/fix_codec.h"
 #include "nimblefix/codec/fix_tags.h"
+#include "nimblefix/message/message_data_writer.h"
 #include "nimblefix/profile/normalized_dictionary.h"
 #include "nimblefix/profile/profile_loader.h"
 #include "nimblefix/runtime/engine.h"
@@ -42,9 +42,9 @@ AdvanceTime(SoakSessionHarness* harness, std::uint64_t delta_ns) -> std::uint64_
 }
 
 auto
-BuildAdminMessage(std::string_view msg_type) -> message::MessageBuilder
+BuildAdminMessage(std::string_view msg_type) -> message::MessageDataWriter
 {
-  message::MessageBuilder builder{ std::string(msg_type) };
+  message::MessageDataWriter builder{ std::string(msg_type) };
   builder.set_string(kMsgType, std::string(msg_type));
   return builder;
 }
@@ -88,7 +88,7 @@ auto
 BuildApplicationMessage(const profile::NormalizedDictionaryView& dictionary, std::uint32_t round, bool with_group)
   -> message::Message
 {
-  message::MessageBuilder builder("D");
+  message::MessageDataWriter builder("D");
   builder.set_string(kMsgType, "D");
   builder.set_string(kClOrdID, "ORD-" + std::to_string(round + 1U));
   builder.set_string(kSymbol, "AAPL");
@@ -581,6 +581,7 @@ RunSoak(const SoakConfig& config) -> base::Result<SoakReport>
         .default_appl_ver_id = harness.counterparty.session.default_appl_ver_id,
         .heartbeat_interval_seconds = harness.counterparty.session.heartbeat_interval_seconds,
         .warmup_message_count = harness.counterparty.warmup_message_count,
+        .logon_fields = harness.counterparty.logon_fields,
         .timestamp_resolution = harness.counterparty.timestamp_resolution,
         .validation_policy = harness.counterparty.validation_policy,
         .validation_callback = harness.counterparty.validation_callback,
