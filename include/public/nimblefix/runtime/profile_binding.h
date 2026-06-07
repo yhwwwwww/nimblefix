@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <type_traits>
 #include <utility>
 
 #include "nimblefix/generated/detail/message_shape.h"
@@ -29,7 +30,9 @@ private:
   static auto MakeDispatcher(const generated::detail::MessageShape* const* usage_shapes,
                              std::uint32_t usage_shape_count) -> typename Profile::Dispatcher
   {
-    if constexpr (requires { typename Profile::Dispatcher(usage_shapes, usage_shape_count); }) {
+    if constexpr (std::is_constructible_v<typename Profile::Dispatcher,
+                                          const generated::detail::MessageShape* const*,
+                                          std::uint32_t>) {
       return typename Profile::Dispatcher(usage_shapes, usage_shape_count);
     } else {
       (void)usage_shapes;
