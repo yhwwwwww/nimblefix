@@ -10,16 +10,15 @@
 #include "nimblefix/runtime/acceptor.h"
 #include "nimblefix/runtime/engine.h"
 #include "nimblefix/runtime/initiator.h"
+#include "nimblefix/runtime/simple.h"
 
 namespace {
 
 class TypedRuntimeSmokeApp final : public nimble::generated::profile_4400::Handler
-{
-};
+{};
 
 struct StubDispatcher
-{
-};
+{};
 
 struct SchemaMismatchProfile
 {
@@ -206,6 +205,21 @@ TEST_CASE("typed runtime wrappers instantiate against generated profile", "[prof
   CHECK(initiator.pending_reconnect_count() == 0U);
   CHECK(acceptor.active_connection_count() == 0U);
   CHECK(acceptor.completed_session_count() == 0U);
+}
+
+TEST_CASE("simple runtime facade instantiates against generated profile", "[profile-loader][typed-runtime]")
+{
+  using Profile = nimble::generated::profile_4400::Profile;
+
+  auto initiator = nimble::runtime::CreateInitiator<Profile>(nimble::runtime::SimpleInitiatorSettings<Profile>{});
+  REQUIRE_FALSE(initiator.ok());
+  CHECK(initiator.status().code() == nimble::base::ErrorCode::kInvalidArgument);
+  CHECK(initiator.status().message().find("application instance") != std::string::npos);
+
+  auto acceptor = nimble::runtime::CreateAcceptor<Profile>(nimble::runtime::SimpleAcceptorSettings<Profile>{});
+  REQUIRE_FALSE(acceptor.ok());
+  CHECK(acceptor.status().code() == nimble::base::ErrorCode::kInvalidArgument);
+  CHECK(acceptor.status().message().find("application instance") != std::string::npos);
 }
 
 TEST_CASE("engine bind rejects schema hash mismatch", "[profile-loader][typed-runtime]")

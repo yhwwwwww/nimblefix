@@ -2,13 +2,8 @@
 #include <string>
 
 #include "fix44_api.h"
-#include "nimblefix/base/result.h"
 #include "nimblefix/base/status.h"
-#include "nimblefix/runtime/acceptor.h"
-#include "nimblefix/runtime/config.h"
-#include "nimblefix/runtime/engine.h"
-#include "nimblefix/session/session_key.h"
-#include "nimblefix/session/transport_profile.h"
+#include "nimblefix/runtime/simple.h"
 
 using namespace nimble::generated::profile_4400;
 
@@ -59,49 +54,19 @@ public:
 int
 main()
 {
-  nimble::runtime::EngineConfig config;
-  config.worker_count = 2;
-  config.profile_artifacts = { kProfileArtifactPath };
-  config.listeners.push_back(nimble::runtime::ListenerConfig{
-    .name = kListenerName,
-    .host = kListenerHost,
-    .port = kListenerPort,
-  });
-  config.accept_unknown_sessions = true;
-
-  nimble::runtime::Engine engine;
-  auto boot = engine.Boot(config);
-  if (!boot.ok()) {
-    return 1;
-  }
-
-  // Accept unknown inbound sessions dynamically. The key is already normalized
-  // to the local acceptor perspective by the runtime.
-  engine.SetSessionFactory(
-    [](const nimble::session::SessionKey& key) -> nimble::base::Result<nimble::runtime::CounterpartyConfig> {
-      return nimble::runtime::CounterpartyConfig{
-        .name = std::string(key.sender_comp_id),
-        .session = {
-          .key = key,
-          .profile_id = Profile::kProfileId,
-          .heartbeat_interval_seconds = kHeartbeatIntervalSeconds,
-          .is_initiator = false,
-        },
-        .transport_profile = nimble::session::TransportSessionProfile::Fix44(),
-      };
-    });
-
-  auto binding = engine.Bind<Profile>();
-  if (!binding.ok()) {
-    return 1;
-  }
-
   auto app = std::make_shared<EchoExecutionReportApp>();
-  nimble::runtime::Acceptor<Profile> acceptor(&engine, &binding.value(), { .application = app });
-
-  auto open = acceptor.OpenListeners(kListenerName);
-  if (!open.ok()) {
+  auto acceptor = nimble::runtime::CreateAcceptor<Profile>(nimble::runtime::SimpleAcceptorSettings<Profile>{
+    .profile_artifact = kProfileArtifactPath,
+    .listener_name = kListenerName,
+    .listener_host = kListenerHost,
+    .listener_port = kListenerPort,
+    .name = "hello-fix-dynamic",
+    .accept_unknown_sessions = true,
+    .heartbeat_interval_seconds = kHeartbeatIntervalSeconds,
+    .application = app,
+  });
+  if (!acceptor.ok()) {
     return 1;
   }
-  return acceptor.Run().ok() ? 0 : 1;
+  return acceptor.value().Run().ok() ? 0 : 1;
 }

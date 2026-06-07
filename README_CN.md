@@ -45,8 +45,8 @@ NimbleFIX 的设计出发点是：*如果每个设计决策都为热路径优化
 
 | 特性 | 说明 |
 |------|------|
-| **编解码延迟** | 当前本机 FIX44 对比结果：header peek 100 ns (p50)，完整解析 591 ns (p50) |
-| **低分配压力** | 当前本机 compare 结果：parse/inbound/replay 为 0 alloc/op；outbound 为 1 alloc/op；loopback 为 3 alloc/op |
+| **编解码延迟** | 当前本机 FIX44 对比结果：header peek 120 ns (p50)，完整解析 701 ns (p50) |
+| **低分配压力** | 当前本机 compare 结果：parse/inbound/replay 为 0 alloc/op；outbound 为 0 alloc/op；loopback 为 3 alloc/op |
 | **会话管理覆盖** | 覆盖核心 Logon/Logout/Heartbeat/TestRequest/ResendRequest/SequenceReset 路径 |
 | **嵌套重复组** | 通过字典元数据完整支持嵌套 repeating group |
 | **自动重连退避** | initiator 可配置指数退避 + 随机抖动的自动重连 |
@@ -81,7 +81,7 @@ NimbleFIX 的设计出发点是：*如果每个设计决策都为热路径优化
 |------|----------|---------|
 | **解析** | 运行时加载 XML 数据字典；字段存入 `std::map` | 启动时从 `.nfa` 或 `.nfd` 归一化到内存字典；热路径使用连续查找表 |
 | **消息表示** | `FieldMap`，堆分配字符串 | 零拷贝 `MessageView`，直接引用原始字节 |
-| **每消息分配** | 多次（map 插入、字符串拷贝） | 复用缓冲区编码路径为 0 次 |
+| **每消息分配** | 多次（map 插入、字符串拷贝） | 复用缓冲区编码路径为 0 次；parse 路径分配很低 |
 | **线程模型** | 全局 session 锁，thread-per-session | 每 session 单写者、分片 worker、SPSC 交接 |
 | **Group 处理** | 动态嵌套 + map 查找 | 字典驱动栈，预知结构 |
 | **编码** | 收集字段 → 序列化 | 预编译帧模板，仅填充可变字段 |
@@ -225,11 +225,19 @@ cd path/to/nimblefix && cmake -S . -B build/cmake/dev-release -DCMAKE_BUILD_TYPE
 大多数应用直接 include 下面这些头就够了：
 
 - 生成出来的 profile 头，例如 `fix44_api.h`
+- `nimblefix/runtime/simple.h`
+
+只有需要更底层生命周期控制时，再直接 include 显式 runtime 头：
+
 - `nimblefix/runtime/config.h`
 - `nimblefix/runtime/engine.h`
 - `nimblefix/runtime/initiator.h` 或 `nimblefix/runtime/acceptor.h`
 - `nimblefix/runtime/profile_binding.h`
+
+高级工具和自定义集成还可以 include：
+
 - `nimblefix/message/message_view.h`
+- `nimblefix/advanced/message_data_writer.h`
 - `nimblefix/codec/fix_codec.h`
 - `nimblefix/profile/profile_loader.h`
 - `nimblefix/store/memory_store.h`
@@ -377,10 +385,7 @@ Component 会被自动内联展开，group 会被自动提取，XML 类型会自
 #include <memory>
 
 #include "fix44_api.h"
-#include "nimblefix/runtime/config.h"
-#include "nimblefix/runtime/engine.h"
-#include "nimblefix/runtime/initiator.h"
-#include "nimblefix/runtime/profile_binding.h"
+#include "nimblefix/runtime/simple.h"
 
 using namespace nimble::generated::profile_4400;
 
@@ -399,9 +404,9 @@ public:
         });
     }
 
-    auto OnExecutionReport(nimble::runtime::InlineSession<Profile>&,
-                           ExecutionReportView exec)
-        -> nimble::base::Status override {
+    auto OnTypedMessage(nimble::runtime::InlineSession<Profile>&,
+                        ExecutionReportView exec)
+        -> nimble::base::Status {
         auto exec_id = exec.exec_id_raw();
         auto ord_status = exec.ord_status();
         (void)exec_id;
@@ -411,44 +416,23 @@ public:
 };
 
 int main() {
-    nimble::runtime::EngineConfig config;
-    config.worker_count = 1;
-    config.profile_artifacts = {"build/bench/quickfix_FIX44.nfa"};
-    config.counterparties.push_back(nimble::runtime::CounterpartyConfig{
-        .name = "venue-a",
-        .session = {
-            .session_id = 1U,
-            .key = nimble::session::SessionKey::ForInitiator("MY_FIRM", "VENUE_A"),
-            .profile_id = Profile::kProfileId,
-            .heartbeat_interval_seconds = 30U,
-            .is_initiator = true,
-        },
-        .transport_profile = nimble::session::TransportSessionProfile::Fix44(),
-        .reconnect_enabled = true,
-        .reconnect_initial_ms = nimble::runtime::kDefaultReconnectInitialMs,
-        .reconnect_max_ms = nimble::runtime::kDefaultReconnectMaxMs,
-        .reconnect_max_retries = nimble::runtime::kUnlimitedReconnectRetries,
-    });
-
-    nimble::runtime::Engine engine;
-    auto boot = engine.Boot(config);
-    if (!boot.ok()) {
-        return 1;
-    }
-
-    auto binding = engine.Bind<Profile>();
-    if (!binding.ok()) {
-        return 1;
-    }
-
     auto app = std::make_shared<MyApp>();
-    nimble::runtime::Initiator<Profile> initiator(&engine, &binding.value(), { .application = app });
-
-    auto open = initiator.OpenSession(1U, "exchange.example.com", 9876);
-    if (!open.ok()) {
+    auto initiator = nimble::runtime::CreateInitiator<Profile>(
+        nimble::runtime::SimpleInitiatorSettings<Profile, MyApp>{
+            .profile_artifact = "build/bench/quickfix_FIX44.nfa",
+            .name = "venue-a",
+            .session_id = 1U,
+            .sender_comp_id = "MY_FIRM",
+            .target_comp_id = "VENUE_A",
+            .host = "exchange.example.com",
+            .port = 9876,
+            .heartbeat_interval_seconds = 30U,
+            .application = app,
+        });
+    if (!initiator.ok()) {
         return 1;
     }
-    return initiator.Run().ok() ? 0 : 1;
+    return initiator.value().Run().ok() ? 0 : 1;
 }
 ```
 
@@ -464,17 +448,14 @@ int main() {
 #include <memory>
 
 #include "fix44_api.h"
-#include "nimblefix/runtime/config.h"
-#include "nimblefix/runtime/acceptor.h"
-#include "nimblefix/runtime/engine.h"
-#include "nimblefix/runtime/profile_binding.h"
+#include "nimblefix/runtime/simple.h"
 
 using namespace nimble::generated::profile_4400;
 
 class MyApp final : public Handler {
 public:
-    auto OnNewOrderSingle(nimble::runtime::InlineSession<Profile>& session,
-                          NewOrderSingleView order) -> nimble::base::Status override {
+    auto OnTypedMessage(nimble::runtime::InlineSession<Profile>& session,
+                        NewOrderSingleView order) -> nimble::base::Status {
         return session.send<ExecutionReport>([&](auto& report) {
             report.order_id("ORD-001")
                 .exec_id("EXEC-001")
@@ -494,47 +475,24 @@ public:
     }
 };
 
-nimble::runtime::EngineConfig config;
-config.worker_count = 2;
-config.profile_artifacts = {"build/bench/quickfix_FIX44.nfa"};
-config.listeners.push_back(nimble::runtime::ListenerConfig{
-    .name = "main",
-    .host = "0.0.0.0",
-    .port = 9876,
-});
-config.accept_unknown_sessions = true;
-
-nimble::runtime::Engine engine;
-auto boot = engine.Boot(config);
-if (!boot.ok()) {
-    return 1;
+int main() {
+    auto app = std::make_shared<MyApp>();
+    auto acceptor = nimble::runtime::CreateAcceptor<Profile>(
+        nimble::runtime::SimpleAcceptorSettings<Profile, MyApp>{
+            .profile_artifact = "build/bench/quickfix_FIX44.nfa",
+            .listener_name = "main",
+            .listener_host = "0.0.0.0",
+            .listener_port = 9876,
+            .name = "dynamic-acceptor",
+            .accept_unknown_sessions = true,
+            .heartbeat_interval_seconds = 30U,
+            .application = app,
+        });
+    if (!acceptor.ok()) {
+        return 1;
+    }
+    return acceptor.value().Run().ok() ? 0 : 1;
 }
-
-// 根据入站 Logon 动态接受 session：
-engine.SetSessionFactory([](const nimble::session::SessionKey& key)
-    -> nimble::base::Result<nimble::runtime::CounterpartyConfig> {
-    return nimble::runtime::CounterpartyConfig{
-        .name = key.sender_comp_id,
-        .session = {
-            .profile_id = Profile::kProfileId,
-            .key = key,
-            .heartbeat_interval_seconds = 30,
-        },
-    };
-});
-
-auto binding = engine.Bind<Profile>();
-if (!binding.ok()) {
-    return 1;
-}
-
-auto app = std::make_shared<MyApp>();
-nimble::runtime::Acceptor<Profile> acceptor(&engine, &binding.value(), { .application = app });
-auto open = acceptor.OpenListeners("main");
-if (!open.ok()) {
-    return 1;
-}
-return acceptor.Run().ok() ? 0 : 1;
 ```
 
 ### 使用预配置对端的 Acceptor
@@ -576,7 +534,7 @@ if (!binding.ok()) {
 }
 
 auto app = std::make_shared<MyApp>();
-nimble::runtime::Acceptor<Profile> acceptor(&engine, &binding.value(), { .application = app });
+nimble::runtime::Acceptor<Profile, MyApp> acceptor(&engine, &binding.value(), { .application = app });
 auto open = acceptor.OpenListeners("main");
 if (!open.ok()) {
     return 1;
@@ -586,12 +544,14 @@ return acceptor.Run().ok() ? 0 : 1;
 
 ### 热路径 Acceptor：读取入站消息
 
+做通用日志或指标时，可以 override `Handler::OnMessage(...)` 并使用 raw `MessageView`。做选择性的业务逻辑时，添加 `OnTypedMessage(...)` 重载，例如 `OnTypedMessage(session, NewOrderSingleView)`，并将 runtime wrapper 绑定为 `Acceptor<Profile, MyApp>` 或 `Initiator<Profile, MyApp>`。
+
 在 typed handler 路径里，常规业务逻辑直接使用生成的 inbound view；只有做协议工具或网关时才退回 raw `MessageView`：
 
 ```cpp
-auto OnNewOrderSingle(nimble::runtime::InlineSession<Profile>& session,
-                      NewOrderSingleView order)
-    -> nimble::base::Status override {
+auto OnTypedMessage(nimble::runtime::InlineSession<Profile>& session,
+                    NewOrderSingleView order)
+    -> nimble::base::Status {
     if (auto parties = order.parties(); parties.has_value()) {
         for (const auto party : *parties) {
             auto party_id = party.party_id();
@@ -845,7 +805,7 @@ QuickFIX 仍然是大多数团队最熟悉、最常见的 C++ FIX 引擎，所�
 - 分配统计：全局 `operator new` 拦截统计每轮堆分配
 - CPU 计数器：在可用时通过 Linux `perf_event_open` 提供 cache miss / branch miss 列
 
-### 当前本机 NimbleFIX vs QuickFIX 对照结果（2026-05-30）
+### 当前本机 NimbleFIX vs QuickFIX 对照结果（2026-06-07）
 
 | | |
 |---|---|
@@ -858,24 +818,25 @@ QuickFIX 仍然是大多数团队最熟悉、最常见的 C++ FIX 引擎，所�
 
 | 边界 | NimbleFIX 指标 | QuickFIX 指标 | NimbleFIX p50 | NimbleFIX p95 | QuickFIX p50 | QuickFIX p95 | NimbleFIX alloc/op | QuickFIX alloc/op |
 |------|---------------|--------------|-------------|-------------|-------------|-------------|-------------------|-------------------|
-| 用户编码 | `encode` | `quickfix-encode` | 391 ns | 410 ns | 1.41 us | 1.44 us | 0.0 | 29.0 |
-| 会话出站 | `outbound` | `quickfix-outbound` | 712 ns | 751 ns | 1.70 us | 2.95 us | 1.0 | 33 |
-| 线格式 → 对象 | `parse` | `quickfix-parse` | 591 ns | 611 ns | 1.48 us | 1.51 us | 0 | 20.0 |
-| 会话入站 | `inbound` | `quickfix-inbound` | 1.22 us | 1.30 us | 2.46 us | 2.54 us | 0 | 12 |
-| 重放 (`replay_span=128`) | `replay` | `quickfix-replay` | 14.45 us | 15.43 us | 265.54 us | 293.58 us | 0 | 4117.0 |
-| TCP 回环往返 | `loopback` | `quickfix-loopback` | 17.17 us | 18.68 us | 21.86 us | 24.62 us | 3.0 | 77.0 |
+| 用户编码 | `encode` | `quickfix-encode` | 471 ns | 511 ns | 1.58 us | 1.84 us | 0.0 | 29.0 |
+| 会话出站 | `outbound` | `quickfix-outbound` | 801 ns | 1.94 us | 1.92 us | 2.02 us | 0.0 | 33 |
+| 线格式 → 对象 | `parse` | `quickfix-parse` | 701 ns | 821 ns | 1.72 us | 1.76 us | 0 | 20.0 |
+| 会话入站 | `inbound` | `quickfix-inbound` | 1.21 us | 2.46 us | 2.84 us | 2.98 us | 0 | 12 |
+| 重放 (`replay_span=128`) | `replay` | `quickfix-replay` | 17.51 us | 17.92 us | 78.75 us | 83.48 us | 0 | 1043.1 |
+| TCP 回环往返 | `loopback` | `quickfix-loopback` | 18.28 us | 22.28 us | 27.60 us | 31.29 us | 3.0 | 77.0 |
 
 #### NimbleFIX 专有层级
 
 | 指标 | p50 | p95 | p99 | alloc/op | ops/sec |
 |------|-----|-----|-----|----------|---------|
-| `peek` | 100 ns | 101 ns | 101 ns | 0 | 8.65M |
+| `peek` | 120 ns | 121 ns | 121 ns | 0 | 7.14M |
 
 关键观察：
 
-- 在这次本机 side-by-side 实测里，NimbleFIX 在所有共享边界上都领先：encode 约 3.6x、outbound 约 2.4x、parse 约 2.5x、inbound 约 2.0x、replay 约 18.4x、loopback RTT 约 1.3x。
-- replay 的结构差异最大：NimbleFIX 在这一层保持 0 alloc/op，而 QuickFIX 每轮大约 4117 次分配。
+- 在这次本机 side-by-side 实测里，NimbleFIX 在所有共享边界上都领先：encode 约 3.4x、outbound 约 2.4x、parse 约 2.5x、inbound 约 2.3x、replay 约 4.5x、loopback RTT 约 1.5x。
+- replay 的结构差异最大：NimbleFIX 在这一层保持 0 alloc/op，而 QuickFIX 每轮大约 1043 次分配。
 - loopback 是两边最接近的一层，因为消息一旦离开用户态，Linux TCP 栈本身就开始主导总耗时。
+- `outbound` 现在是成对的跨引擎指标（NimbleFIX `outbound` 对 QuickFIX `quickfix-outbound`）；`peek` 仍然是 NimbleFIX 专有指标。
 
 ### 自行运行测试
 
@@ -885,6 +846,8 @@ QuickFIX 仍然是大多数团队最熟悉、最常见的 C++ FIX 引擎，所�
 ./bench/bench.sh nimblefix-nfd    # NimbleFIX 测试（直接加载 .nfd）
 ./bench/bench.sh quickfix       # QuickFIX 对比测试
 ./bench/bench.sh compare        # 完整跨引擎对比
+./bench/bench.sh busy-poll --iterations 1000
+./bench/bench.sh acceptor-throughput --clients 4
 ```
 
 上面所有 benchmark 命令都明确使用固定的 QuickFIX 4.4 输入：`bench/vendor/quickfix/spec/FIX44.xml`、`build/bench/quickfix_FIX44.nfd` 或 `build/bench/quickfix_FIX44.nfa`。

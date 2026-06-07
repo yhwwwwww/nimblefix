@@ -6,10 +6,10 @@
 #include <string_view>
 #include <vector>
 
+#include "nimblefix/advanced/message_data_writer.h"
 #include "nimblefix/codec/fix_codec.h"
 #include "nimblefix/codec/fix_tags.h"
 #include "nimblefix/codec/simd_scan.h"
-#include "nimblefix/message/message_data_writer.h"
 #include "nimblefix/message/message_ref.h"
 
 #include "test_support.h"

@@ -3,10 +3,10 @@
 #include <algorithm>
 #include <array>
 #include <cstddef>
-#include <memory>
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "nimblefix/codec/fix_codec.h"
@@ -111,7 +111,8 @@ struct EncodedApplicationMessage
 ///
 /// Performance: use `Borrow()` only when the body outlives the immediate send
 /// call. `Copy()` is the safe convenience path; `Take()` avoids the extra copy
-/// when the caller can transfer ownership.
+/// when the caller can transfer ownership. Owned refs keep typical application
+/// bodies inline, avoiding a heap allocation on the normal generated send path.
 class EncodedApplicationMessageRef
 {
 public:
@@ -123,7 +124,7 @@ public:
   /// \return Reference wrapper owning the message storage.
   static auto Take(EncodedApplicationMessage&& message) -> EncodedApplicationMessageRef
   {
-    return EncodedApplicationMessageRef(std::make_shared<EncodedApplicationMessage>(std::move(message)));
+    return EncodedApplicationMessageRef(std::move(message));
   }
 
   /// Borrow an encoded application body.
@@ -156,27 +157,28 @@ public:
 
   [[nodiscard]] auto valid() const -> bool
   {
-    if (owned_ != nullptr) {
-      return owned_->valid();
+    if (has_owned_) {
+      return owned_.valid();
     }
     return view_.valid();
   }
 
-  [[nodiscard]] auto owns_storage() const -> bool { return owned_ != nullptr; }
+  [[nodiscard]] auto owns_storage() const -> bool { return has_owned_; }
 
-  [[nodiscard]] auto borrows_view() const -> bool { return owned_ == nullptr && view_.valid(); }
+  [[nodiscard]] auto borrows_view() const -> bool { return !has_owned_ && view_.valid(); }
 
   [[nodiscard]] auto view() const -> EncodedApplicationMessageView
   {
-    if (owned_ != nullptr) {
-      return owned_->view();
+    if (has_owned_) {
+      return owned_.view();
     }
     return view_;
   }
 
 private:
-  explicit EncodedApplicationMessageRef(std::shared_ptr<const EncodedApplicationMessage> owned)
+  explicit EncodedApplicationMessageRef(EncodedApplicationMessage&& owned)
     : owned_(std::move(owned))
+    , has_owned_(true)
   {
   }
 
@@ -185,7 +187,8 @@ private:
   {
   }
 
-  std::shared_ptr<const EncodedApplicationMessage> owned_{};
+  EncodedApplicationMessage owned_{};
+  bool has_owned_{ false };
   EncodedApplicationMessageView view_{};
 };
 

@@ -1538,59 +1538,6 @@ EmitOutboundBuilderType(std::ostringstream& out,
   out << "    return base::Status::Ok();\n"
       << "  }\n\n";
 
-  out << "  auto ToMessage() const -> base::Result<message::Message> {\n"
-      << "    auto validation = validate();\n"
-      << "    if (!validation.ok()) {\n"
-      << "      return validation;\n"
-      << "    }\n"
-      << "    return detail::BuildOwnedMessage(kMsgType, ";
-
-  std::size_t scalar_count = 0U;
-  std::size_t group_count = 0U;
-  for (const auto& rule : message.field_rules) {
-    if (group_by_tag.count(rule.tag) != 0U) {
-      ++group_count;
-    } else if (field_by_tag.count(rule.tag) != 0U) {
-      ++scalar_count;
-    }
-  }
-  out << scalar_count << "U, " << group_count << "U, [this](auto& builder) -> base::Status {\n";
-
-  for (const auto& rule : message.field_rules) {
-    const auto group_it = group_by_tag.find(rule.tag);
-    if (group_it != group_by_tag.end()) {
-      const auto& group = *group_it->second;
-      const auto group_name = context_group_names.at(group.count_tag).plural_snake;
-      out << "    if (!" << group_name << "_.empty()) {\n"
-          << "      auto status = detail::AppendGroupEntries(\n"
-          << "        builder,\n"
-          << "        " << group.count_tag << "U,\n"
-          << "        " << group_name << "_,\n"
-          << "        [](auto& group_entry, const auto& entry) -> base::Status { return entry.AppendTo(group_entry); "
-             "});\n"
-          << "        if (!status.ok()) {\n"
-          << "          return status;\n"
-          << "        }\n"
-          << "    }\n";
-      continue;
-    }
-
-    const auto field_it = field_by_tag.find(rule.tag);
-    if (field_it == field_by_tag.end()) {
-      continue;
-    }
-    const auto field_name = FieldMethodName(*field_it->second);
-    out << "    if (has_" << field_name << "_) {\n"
-        << "      detail::AddField(builder, " << field_it->second->tag << "U, " << field_name << "_);\n"
-        << "    }\n";
-  }
-  out << "    for (const auto& [tag, value] : raw_extras_) {\n"
-      << "      builder.add_string(tag, value);\n"
-      << "    }\n"
-      << "    return base::Status::Ok();\n"
-      << "    });\n"
-      << "  }\n\n";
-
   out << "  auto EncodeBody(detail::BodyEncodeBuffer& buffer) const -> base::Status {\n"
       << "    auto validation = validate();\n"
       << "    if (!validation.ok()) {\n"
@@ -1856,14 +1803,68 @@ EmitHandlerAndDispatcher(std::ostringstream& out, const NormalizedDictionary& di
       << "                                 Application& application) const -> base::Status {\n"
       << "  if (!message.valid()) {\n"
       << "    return base::Status::InvalidArgument(\"message view is invalid\");\n"
-      << "  }\n";
-  for (const auto& message : dictionary.messages) {
-    out << "  if (message.msg_type() == \"" << EmitStringLiteral(message.msg_type) << "\") {\n"
-        << "    return DispatchKnown<" << message.name << "View>(session, message, application, \""
-        << EmitStringLiteral(message.msg_type) << "\");\n"
-        << "  }\n";
+      << "  }\n"
+      << "  const auto msg_type = message.msg_type();\n"
+      << "  switch (msg_type.size()) {\n"
+      << "    case 1U:\n"
+      << "      switch (msg_type[0]) {\n";
+  for (const auto& message_def : dictionary.messages) {
+    if (message_def.msg_type.size() != 1U) {
+      continue;
+    }
+    out << "        case " << EmitCharLiteral(message_def.msg_type[0]) << ":\n"
+        << "          return DispatchKnown<" << message_def.name << "View>(session, message, application, \""
+        << EmitStringLiteral(message_def.msg_type) << "\");\n";
   }
-  out << "  return application.OnMessage(session, message);\n"
+  out << "        default:\n"
+      << "          break;\n"
+      << "      }\n"
+      << "      break;\n"
+      << "    case 2U:\n"
+      << "      switch (msg_type[0]) {\n";
+
+  std::vector<const MessageDef*> two_byte_messages;
+  for (const auto& message_def : dictionary.messages) {
+    if (message_def.msg_type.size() == 2U) {
+      two_byte_messages.push_back(&message_def);
+    }
+  }
+  std::sort(two_byte_messages.begin(), two_byte_messages.end(), [](const MessageDef* lhs, const MessageDef* rhs) {
+    return lhs->msg_type < rhs->msg_type;
+  });
+  for (std::size_t index = 0U; index < two_byte_messages.size();) {
+    const auto first = two_byte_messages[index]->msg_type[0];
+    out << "        case " << EmitCharLiteral(first) << ":\n"
+        << "          switch (msg_type[1]) {\n";
+    while (index < two_byte_messages.size() && two_byte_messages[index]->msg_type[0] == first) {
+      const auto& message_def = *two_byte_messages[index];
+      out << "            case " << EmitCharLiteral(message_def.msg_type[1]) << ":\n"
+          << "              return DispatchKnown<" << message_def.name << "View>(session, message, application, \""
+          << EmitStringLiteral(message_def.msg_type) << "\");\n";
+      ++index;
+    }
+    out << "            default:\n"
+        << "              break;\n"
+        << "          }\n"
+        << "          break;\n";
+  }
+  out << "        default:\n"
+      << "          break;\n"
+      << "      }\n"
+      << "      break;\n"
+      << "    default:\n";
+  for (const auto& message_def : dictionary.messages) {
+    if (message_def.msg_type.size() <= 2U) {
+      continue;
+    }
+    out << "      if (msg_type == \"" << EmitStringLiteral(message_def.msg_type) << "\") {\n"
+        << "        return DispatchKnown<" << message_def.name << "View>(session, message, application, \""
+        << EmitStringLiteral(message_def.msg_type) << "\");\n"
+        << "      }\n";
+  }
+  out << "      break;\n"
+      << "  }\n"
+      << "  return application.OnMessage(session, message);\n"
       << "}\n\n";
 
   out << "template<class View, class Application>\n"

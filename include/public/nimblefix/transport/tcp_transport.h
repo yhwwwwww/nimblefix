@@ -135,6 +135,9 @@ public:
 
 private:
   auto Swap(TcpConnection& other) noexcept -> void;
+  auto CompactConsumedReadBuffer() -> void;
+  auto TryExtractBufferedFrameView() -> base::Result<std::optional<std::span<const std::byte>>>;
+  auto ReadAvailableBytes() -> base::Result<bool>;
 
   // Returns: 1=ready, 0=timeout, -1=error. Monitors fd for given events using
   // epoll.
@@ -142,8 +145,8 @@ private:
 
   int fd_{ -1 };
   int epoll_fd_ = -1;
+  std::uint32_t epoll_events_{ 0 };
   std::vector<std::byte> read_buffer_;
-  std::vector<std::byte> frame_buffer_;
   std::size_t read_cursor_{ 0 };
 };
 

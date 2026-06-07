@@ -58,6 +58,7 @@
 #include <unistd.h>
 
 #include "fix44_api.h"
+#include "nimblefix/advanced/message_data_writer.h"
 #include "nimblefix/codec/fix_codec.h"
 #include "nimblefix/message/message_view.h"
 #include "nimblefix/profile/normalized_dictionary.h"
@@ -227,49 +228,53 @@ GeneratedPartyRole(std::int64_t wire) -> fix44::PartyRole
 auto
 BuildNewOrder(const NewOrderFields& req) -> nimble::message::Message
 {
-  fix44::NewOrderSingleBuilder order;
-  order.account(req.account)
-    .cl_ord_id(req.cl_ord_id)
-    .currency(req.currency)
-    .exec_inst(GeneratedExecInst(req.exec_inst))
-    .handl_inst(GeneratedHandlInst(req.hand_l_inst))
-    .security_id(req.security_id)
-    .security_id_source(GeneratedSecurityIdSource(req.security_id_source))
-    .order_qty(req.order_qty)
-    .ord_type(GeneratedOrdType(req.ord_type))
-    .price(req.price)
-    .side(GeneratedSide(req.side))
-    .symbol(req.symbol)
-    .time_in_force(GeneratedTimeInForce(req.time_in_force))
-    .transact_time(req.transact_time)
-    .ex_destination(req.ex_destination)
-    .security_exchange(req.security_exchange);
-  order.add_party()
-    .party_id(req.party_id)
-    .party_id_source(GeneratedPartyIdSource(req.party_id_source))
-    .party_role(GeneratedPartyRole(req.party_role));
-  return order.ToMessage().value();
+  nimble::message::MessageDataWriter order{ std::string(fix44::NewOrderSingle::kMsgType) };
+  order.reserve_fields(16U)
+    .reserve_group_entries(fix44::Tag::NoPartyIDs, 1U)
+    .set_string(fix44::Tag::Account, req.account)
+    .set_string(fix44::Tag::ClOrdID, req.cl_ord_id)
+    .set_string(fix44::Tag::Currency, req.currency)
+    .set_char(fix44::Tag::ExecInst, req.exec_inst)
+    .set_char(fix44::Tag::HandlInst, req.hand_l_inst)
+    .set_string(fix44::Tag::SecurityID, req.security_id)
+    .set_string(fix44::Tag::SecurityIDSource, req.security_id_source)
+    .set_float(fix44::Tag::OrderQty, req.order_qty)
+    .set_char(fix44::Tag::OrdType, req.ord_type)
+    .set_float(fix44::Tag::Price, req.price)
+    .set_char(fix44::Tag::Side, req.side)
+    .set_string(fix44::Tag::Symbol, req.symbol)
+    .set_char(fix44::Tag::TimeInForce, req.time_in_force)
+    .set_string(fix44::Tag::TransactTime, req.transact_time)
+    .set_string(fix44::Tag::ExDestination, req.ex_destination)
+    .set_string(fix44::Tag::SecurityExchange, req.security_exchange);
+  order.add_group_entry(fix44::Tag::NoPartyIDs)
+    .set_string(fix44::Tag::PartyID, req.party_id)
+    .set_char(fix44::Tag::PartyIDSource, req.party_id_source)
+    .set_int(fix44::Tag::PartyRole, req.party_role);
+  return std::move(order).build();
 }
 
 auto
 BuildCancelOrder(const CancelOrderFields& req) -> nimble::message::Message
 {
-  fix44::OrderCancelRequestBuilder cancel;
-  cancel.account(req.account)
-    .cl_ord_id(req.cl_ord_id)
-    .orig_cl_ord_id(req.orig_cl_ord_id)
-    .security_id(req.security_id)
-    .security_id_source(GeneratedSecurityIdSource(req.security_id_source))
-    .order_qty(req.order_qty)
-    .side(GeneratedSide(req.side))
-    .symbol(req.symbol)
-    .transact_time(req.transact_time)
-    .security_exchange(req.security_exchange);
-  cancel.add_party()
-    .party_id(req.party_id)
-    .party_id_source(GeneratedPartyIdSource(req.party_id_source))
-    .party_role(GeneratedPartyRole(req.party_role));
-  return cancel.ToMessage().value();
+  nimble::message::MessageDataWriter cancel{ std::string(fix44::OrderCancelRequest::kMsgType) };
+  cancel.reserve_fields(10U)
+    .reserve_group_entries(fix44::Tag::NoPartyIDs, 1U)
+    .set_string(fix44::Tag::Account, req.account)
+    .set_string(fix44::Tag::ClOrdID, req.cl_ord_id)
+    .set_string(fix44::Tag::OrigClOrdID, req.orig_cl_ord_id)
+    .set_string(fix44::Tag::SecurityID, req.security_id)
+    .set_string(fix44::Tag::SecurityIDSource, req.security_id_source)
+    .set_float(fix44::Tag::OrderQty, req.order_qty)
+    .set_char(fix44::Tag::Side, req.side)
+    .set_string(fix44::Tag::Symbol, req.symbol)
+    .set_string(fix44::Tag::TransactTime, req.transact_time)
+    .set_string(fix44::Tag::SecurityExchange, req.security_exchange);
+  cancel.add_group_entry(fix44::Tag::NoPartyIDs)
+    .set_string(fix44::Tag::PartyID, req.party_id)
+    .set_char(fix44::Tag::PartyIDSource, req.party_id_source)
+    .set_int(fix44::Tag::PartyRole, req.party_role);
+  return std::move(cancel).build();
 }
 
 // ---------------------------------------------------------------------------
@@ -281,30 +286,31 @@ BuildExecReportNew(nimble::message::MessageView order, std::uint32_t exec_id) ->
 {
   const auto inbound = fix44::NewOrderSingleView::Bind(order).value();
 
-  fix44::ExecutionReportBuilder report;
-  report.order_id(std::string("O") + std::to_string(exec_id))
-    .exec_id(std::string("E") + std::to_string(exec_id))
-    .exec_type(fix44::ExecType::New)
-    .ord_status(fix44::OrdStatus::New)
-    .transact_time(NowFixTimestamp())
-    .cum_qty(0.0)
-    .avg_px(0.0);
+  nimble::message::MessageDataWriter report{ std::string(fix44::ExecutionReport::kMsgType) };
+  report.reserve_fields(12U)
+    .set_string(fix44::Tag::OrderID, std::string("O") + std::to_string(exec_id))
+    .set_string(fix44::Tag::ExecID, std::string("E") + std::to_string(exec_id))
+    .set_char(fix44::Tag::ExecType, fix44::ToWire(fix44::ExecType::New))
+    .set_char(fix44::Tag::OrdStatus, fix44::ToWire(fix44::OrdStatus::New))
+    .set_string(fix44::Tag::TransactTime, NowFixTimestamp())
+    .set_float(fix44::Tag::CumQty, 0.0)
+    .set_float(fix44::Tag::AvgPx, 0.0);
 
   if (auto account = inbound.account(); account.has_value()) {
-    report.account(account.value());
+    report.set_string(fix44::Tag::Account, account.value());
   }
   if (auto cl_ord_id = inbound.cl_ord_id(); cl_ord_id.has_value()) {
-    report.cl_ord_id(cl_ord_id.value());
+    report.set_string(fix44::Tag::ClOrdID, cl_ord_id.value());
   }
   if (auto side = inbound.side(); side.ok()) {
-    report.side(side.value());
+    report.set_char(fix44::Tag::Side, fix44::ToWire(side.value()));
   }
   if (auto symbol = inbound.symbol(); symbol.has_value()) {
-    report.symbol(symbol.value());
+    report.set_string(fix44::Tag::Symbol, symbol.value());
   }
   const auto order_qty = inbound.order_qty().value_or(100.0);
-  report.order_qty(order_qty).leaves_qty(order_qty);
-  return report.ToMessage().value();
+  report.set_float(fix44::Tag::OrderQty, order_qty).set_float(fix44::Tag::LeavesQty, order_qty);
+  return std::move(report).build();
 }
 
 auto
@@ -312,33 +318,34 @@ BuildExecReportCanceled(nimble::message::MessageView cancel_req, std::uint32_t e
 {
   const auto inbound = fix44::OrderCancelRequestView::Bind(cancel_req).value();
 
-  fix44::ExecutionReportBuilder report;
-  report.order_id(std::string("O") + std::to_string(exec_id))
-    .exec_id(std::string("E") + std::to_string(exec_id))
-    .exec_type(fix44::ExecType::Canceled)
-    .ord_status(fix44::OrdStatus::Canceled)
-    .transact_time(NowFixTimestamp())
-    .avg_px(150.25)
-    .leaves_qty(0.0);
+  nimble::message::MessageDataWriter report{ std::string(fix44::ExecutionReport::kMsgType) };
+  report.reserve_fields(14U)
+    .set_string(fix44::Tag::OrderID, std::string("O") + std::to_string(exec_id))
+    .set_string(fix44::Tag::ExecID, std::string("E") + std::to_string(exec_id))
+    .set_char(fix44::Tag::ExecType, fix44::ToWire(fix44::ExecType::Canceled))
+    .set_char(fix44::Tag::OrdStatus, fix44::ToWire(fix44::OrdStatus::Canceled))
+    .set_string(fix44::Tag::TransactTime, NowFixTimestamp())
+    .set_float(fix44::Tag::AvgPx, 150.25)
+    .set_float(fix44::Tag::LeavesQty, 0.0);
 
   if (auto account = inbound.account(); account.has_value()) {
-    report.account(account.value());
+    report.set_string(fix44::Tag::Account, account.value());
   }
   if (auto cl_ord_id = inbound.cl_ord_id(); cl_ord_id.has_value()) {
-    report.cl_ord_id(cl_ord_id.value());
+    report.set_string(fix44::Tag::ClOrdID, cl_ord_id.value());
   }
   if (auto orig_cl_ord_id = inbound.orig_cl_ord_id(); orig_cl_ord_id.has_value()) {
-    report.orig_cl_ord_id(orig_cl_ord_id.value());
+    report.set_string(fix44::Tag::OrigClOrdID, orig_cl_ord_id.value());
   }
   if (auto side = inbound.side(); side.ok()) {
-    report.side(side.value());
+    report.set_char(fix44::Tag::Side, fix44::ToWire(side.value()));
   }
   if (auto symbol = inbound.symbol(); symbol.has_value()) {
-    report.symbol(symbol.value());
+    report.set_string(fix44::Tag::Symbol, symbol.value());
   }
   const auto order_qty = inbound.order_qty().value_or(100.0);
-  report.order_qty(order_qty).cum_qty(order_qty);
-  return report.ToMessage().value();
+  report.set_float(fix44::Tag::OrderQty, order_qty).set_float(fix44::Tag::CumQty, order_qty);
+  return std::move(report).build();
 }
 
 // ---------------------------------------------------------------------------

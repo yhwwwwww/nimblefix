@@ -12,12 +12,12 @@
 #include <vector>
 
 #include "nimblefix/advanced/encoded_application_message.h"
+#include "nimblefix/advanced/message_data_writer.h"
 #include "nimblefix/base/result.h"
 #include "nimblefix/codec/fix_codec.h"
 #include "nimblefix/codec/fix_tags.h"
 #include "nimblefix/generated/detail/api_support.h"
 #include "nimblefix/generated/detail/message_shape.h"
-#include "nimblefix/message/message_data_writer.h"
 #include "nimblefix/message/message_ref.h"
 #include "nimblefix/runtime/detail/typed_runtime_application.h"
 #include "nimblefix/runtime/profile_binding.h"
@@ -112,6 +112,25 @@ PopulateRequiredOrder(sample::NewOrderSingleBuilder& order,
     .order_qty(order_qty)
     .ord_type('2')
     .venue_order_type(venue_order_type);
+}
+
+auto
+BuildSampleNewOrderMessage(std::string_view cl_ord_id, std::string_view venue_order_type = "LIMIT")
+  -> nimble::message::Message
+{
+  nimble::message::MessageDataWriter builder{ std::string(sample::NewOrderSingle::kMsgType) };
+  builder.reserve_fields(9U)
+    .set_string(kMsgType, sample::NewOrderSingle::kMsgType)
+    .set_string(sample::Tag::ClOrdID, cl_ord_id)
+    .set_string(sample::Tag::SenderCompID, "BUY")
+    .set_string(sample::Tag::TargetCompID, "SELL")
+    .set_string(sample::Tag::Symbol, "AAPL")
+    .set_char(sample::Tag::Side, '1')
+    .set_string(sample::Tag::TransactTime, "20260406-12:00:00.000")
+    .set_int(sample::Tag::OrderQty, 100)
+    .set_char(sample::Tag::OrdType, '2')
+    .set_string(sample::Tag::VenueOrderType, venue_order_type);
+  return std::move(builder).build();
 }
 
 auto
@@ -630,21 +649,8 @@ TEST_CASE("Shape-aware generated dispatch gates handlers on active message shape
   nimble::runtime::detail::TypedRuntimeApplication<sample::Profile, RecordingShapeDispatchApp> runtime_app(&binding,
                                                                                                            app);
 
-  auto accepted_message = sample::NewOrderSingleBuilder{}
-                            .msg_type(sample::NewOrderSingle::kMsgType)
-                            .cl_ord_id("ORD-SHAPE")
-                            .sender_comp_id("BUY")
-                            .target_comp_id("SELL")
-                            .symbol("AAPL")
-                            .side('1')
-                            .transact_time("20260406-12:00:00.000")
-                            .order_qty(100)
-                            .ord_type('2')
-                            .venue_order_type("LIMIT")
-                            .ToMessage();
-  REQUIRE(accepted_message.ok());
-
-  const auto accepted = runtime_app.OnAppMessage(MakeRuntimeEvent(accepted_message.value().view()));
+  const auto accepted_message = BuildSampleNewOrderMessage("ORD-SHAPE");
+  const auto accepted = runtime_app.OnAppMessage(MakeRuntimeEvent(accepted_message.view()));
   REQUIRE(accepted.ok());
   CHECK(app->order_count == 1);
   CHECK(app->last_cl_ord_id == "ORD-SHAPE");
@@ -690,21 +696,8 @@ TEST_CASE("Generated handler supports one callback for message logging", "[send-
   auto app = std::make_shared<RecordingMessageLogApp>();
   nimble::runtime::detail::TypedRuntimeApplication<sample::Profile, sample::Handler> runtime_app(&binding, app);
 
-  auto message = sample::NewOrderSingleBuilder{}
-                   .msg_type(sample::NewOrderSingle::kMsgType)
-                   .cl_ord_id("ORD-LOG")
-                   .sender_comp_id("BUY")
-                   .target_comp_id("SELL")
-                   .symbol("AAPL")
-                   .side('1')
-                   .transact_time("20260406-12:00:00.000")
-                   .order_qty(100)
-                   .ord_type('2')
-                   .venue_order_type("LIMIT")
-                   .ToMessage();
-  REQUIRE(message.ok());
-
-  const auto status = runtime_app.OnAppMessage(MakeRuntimeEvent(message.value().view()));
+  const auto message = BuildSampleNewOrderMessage("ORD-LOG");
+  const auto status = runtime_app.OnAppMessage(MakeRuntimeEvent(message.view()));
   REQUIRE(status.ok());
   CHECK(app->message_count == 1);
   CHECK(app->last_msg_type == sample::NewOrderSingle::kMsgType);
@@ -718,25 +711,13 @@ TEST_CASE("Generated handler supports typed message overloads with raw logging f
   auto app = std::make_shared<RecordingTypedAndRawApp>();
   nimble::runtime::detail::TypedRuntimeApplication<sample::Profile, RecordingTypedAndRawApp> runtime_app(&binding, app);
 
-  auto order = sample::NewOrderSingleBuilder{}
-                 .msg_type(sample::NewOrderSingle::kMsgType)
-                 .cl_ord_id("ORD-TYPED")
-                 .sender_comp_id("BUY")
-                 .target_comp_id("SELL")
-                 .symbol("AAPL")
-                 .side('1')
-                 .transact_time("20260406-12:00:00.000")
-                 .order_qty(100)
-                 .ord_type('2')
-                 .venue_order_type("LIMIT")
-                 .ToMessage();
-  REQUIRE(order.ok());
+  const auto order = BuildSampleNewOrderMessage("ORD-TYPED");
 
   nimble::message::MessageDataWriter heartbeat_builder{ std::string(sample::Heartbeat::kMsgType) };
   heartbeat_builder.set_string(kMsgType, sample::Heartbeat::kMsgType);
   const auto heartbeat = std::move(heartbeat_builder).build();
 
-  REQUIRE(runtime_app.OnAppMessage(MakeRuntimeEvent(order.value().view())).ok());
+  REQUIRE(runtime_app.OnAppMessage(MakeRuntimeEvent(order.view())).ok());
   REQUIRE(runtime_app.OnAppMessage(MakeRuntimeEvent(heartbeat.view())).ok());
 
   CHECK(app->order_count == 1);

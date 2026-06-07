@@ -12,13 +12,14 @@ External applications should add only `include/public/` to the include path.
 The main application path is generated-first:
 
 - your generated profile header such as `fix44_api.h`
+- `nimblefix/runtime/simple.h`
+
+Bring in these additional headers only when you need them:
+
 - `nimblefix/runtime/config.h`
 - `nimblefix/runtime/engine.h`
 - `nimblefix/runtime/profile_binding.h`
 - `nimblefix/runtime/initiator.h` or `nimblefix/runtime/acceptor.h`
-
-Bring in these additional headers only when you need them:
-
 - `nimblefix/runtime/application.h`
 - `nimblefix/advanced/runtime_application.h`
 - `nimblefix/advanced/engine.h`
@@ -32,11 +33,20 @@ Bring in these additional headers only when you need them:
 
 ## Lifecycle Contract
 
-`Engine::Boot()` is the normal entry point. It validates `EngineConfig`, loads profiles from `profile_artifacts` and `profile_dictionaries`, optionally loads matching contract sidecars from `profile_contracts`, registers static counterparties, and makes `config()`, `profiles()`, `runtime()`, `FindCounterpartyConfig()`, and `FindListenerConfig()` available on success.
+`CreateInitiator<Profile>()` and `CreateAcceptor<Profile>()` in `runtime/simple.h` are the normal first-integration entry points. They build the common `EngineConfig`, boot `Engine`, bind the generated profile, construct the typed runtime wrapper, open the session or listener, and return a small owning runtime object.
+
+Use explicit `Engine::Boot()` when you need advanced lifecycle control. It validates `EngineConfig`, loads profiles from `profile_artifacts` and `profile_dictionaries`, optionally loads matching contract sidecars from `profile_contracts`, registers static counterparties, and makes `config()`, `profiles()`, `runtime()`, `FindCounterpartyConfig()`, and `FindListenerConfig()` available on success.
 
 `Engine::LoadProfiles()` exists for tooling and tests that need profile loading without a booted runtime. Typed `Engine::Bind<Profile>()` works after either `LoadProfiles()` or `Boot()`, but normal applications should still prefer `Boot()`.
 
-The expected startup order is:
+The simple startup order is:
+
+1. Create your generated `Handler` subclass.
+2. Fill `SimpleInitiatorSettings<Profile, MyApp>` or `SimpleAcceptorSettings<Profile, MyApp>`.
+3. Call `CreateInitiator<Profile>(settings)` or `CreateAcceptor<Profile>(settings)`.
+4. Call `Run()`.
+
+The explicit startup order is still available for advanced integrations:
 
 1. Fill `EngineConfig`.
 2. Call `ValidateEngineConfig()` if you want an explicit preflight step.
@@ -48,16 +58,13 @@ The expected startup order is:
 
 ## Minimal Initiator Walkthrough
 
-This is the shortest normal path from config to a running initiator on the typed generated API:
+This is the shortest normal path to a running initiator on the typed generated API:
 
 ```cpp
 #include <memory>
 
 #include "fix44_api.h"
-#include "nimblefix/runtime/config.h"
-#include "nimblefix/runtime/engine.h"
-#include "nimblefix/runtime/initiator.h"
-#include "nimblefix/runtime/profile_binding.h"
+#include "nimblefix/runtime/simple.h"
 
 using namespace nimble::generated::profile_4400;
 
@@ -85,51 +92,32 @@ public:
   }
 };
 
-nimble::runtime::EngineConfig config;
-config.profile_artifacts.push_back("fix44.nfa");
-config.counterparties.push_back(nimble::runtime::CounterpartyConfig{
-  .name = "buy-side",
-  .session = {
-    .session_id = 1001U,
-    .key = nimble::session::SessionKey::ForInitiator("BUY1", "SELL1"),
-    .profile_id = Profile::kProfileId,
-    .heartbeat_interval_seconds = 30U,
-    .is_initiator = true,
-  },
-  .transport_profile = nimble::session::TransportSessionProfile::Fix44(),
-  .reconnect_enabled = true,
-  .reconnect_initial_ms = nimble::runtime::kDefaultReconnectInitialMs,
-  .reconnect_max_ms = nimble::runtime::kDefaultReconnectMaxMs,
-  .reconnect_max_retries = nimble::runtime::kUnlimitedReconnectRetries,
-});
-
-nimble::runtime::Engine engine;
-auto boot = engine.Boot(config);
-if (!boot.ok()) {
-  return boot;
-}
-
-auto binding = engine.Bind<Profile>();
-if (!binding.ok()) {
-  return binding.status();
-}
-
 auto app = std::make_shared<BuySideApp>();
-nimble::runtime::Initiator<Profile, BuySideApp> initiator(&engine, &binding.value(), { .application = app });
-
-auto open = initiator.OpenSession(1001U, "127.0.0.1", 9876);
-if (!open.ok()) {
-  return open;
+auto initiator = nimble::runtime::CreateInitiator<Profile>(
+  nimble::runtime::SimpleInitiatorSettings<Profile, BuySideApp>{
+    .profile_artifact = "fix44.nfa",
+    .name = "buy-side",
+    .session_id = 1001U,
+    .sender_comp_id = "BUY1",
+    .target_comp_id = "SELL1",
+    .host = "127.0.0.1",
+    .port = 9876,
+    .heartbeat_interval_seconds = 30U,
+    .application = app,
+  });
+if (!initiator.ok()) {
+  return initiator.status();
 }
-
-return initiator.Run();
+return initiator.value().Run();
 ```
 
 Notes:
 
-- `Engine::Bind<Profile>()` validates both `profile_id` and `schema_hash` against the loaded artifact.
+- `CreateInitiator()` and `CreateAcceptor()` call `Engine::Bind<Profile>()`; explicit engine integrations should still call it manually to validate `profile_id` and `schema_hash`.
 - `runtime::Session<Profile>` is the ordinary-thread send surface.
 - `runtime::InlineSession<Profile>` is the inline callback surface for typed inbound dispatch.
+- `SimpleCounterpartyOptions` covers common production knobs: store mode/path, recovery mode, validation policy, and session schedules. Initiator settings also expose reconnect timing and TLS client policy; acceptor settings expose listener TLS and acceptor transport-security policy.
+- `SimpleRuntimeOptions` covers runtime knobs that stay common across initiators and acceptors: worker count, poll timeout, I/O timeout, command queue capacity, front-door CPU affinity, and worker CPU affinity.
 - For broad logging or metrics, override the generated `Handler::OnMessage(...)` raw callback. Typed handlers such as `OnTypedMessage(session, ExecutionReportView)` are detected only when the runtime wrapper is instantiated with the concrete app type.
 - Generated business sends use `session.send<Msg>(populate, extras)`. The deprecated `send(OutboundMessage&&)` overload is no longer part of the public API.
 - `OpenSession()` may block until the TCP dial succeeds or times out.
@@ -192,10 +180,7 @@ them once in a canonical place.
 #include <memory>
 
 #include "fix44_api.h"
-#include "nimblefix/runtime/config.h"
-#include "nimblefix/runtime/acceptor.h"
-#include "nimblefix/runtime/engine.h"
-#include "nimblefix/runtime/profile_binding.h"
+#include "nimblefix/runtime/simple.h"
 
 using namespace nimble::generated::profile_4400;
 
@@ -222,45 +207,24 @@ public:
   }
 };
 
-nimble::runtime::EngineConfig config;
-config.profile_artifacts.push_back("fix44.nfa");
-config.listeners.push_back(nimble::runtime::ListenerConfig{
-  .name = "main",
-  .host = "0.0.0.0",
-  .port = 9876,
-});
-config.counterparties.push_back(nimble::runtime::CounterpartyConfig{
-  .name = "sell-side",
-  .session = {
-    .session_id = 2001U,
-    .key = nimble::session::SessionKey::ForAcceptor("SELL1", "BUY1"),
-    .profile_id = Profile::kProfileId,
-    .heartbeat_interval_seconds = 30U,
-    .is_initiator = false,
-  },
-  .transport_profile = nimble::session::TransportSessionProfile::Fix44(),
-});
-
-nimble::runtime::Engine engine;
-auto boot = engine.Boot(config);
-if (!boot.ok()) {
-  return boot;
-}
-
-auto binding = engine.Bind<Profile>();
-if (!binding.ok()) {
-  return binding.status();
-}
-
 auto app = std::make_shared<SellSideApp>();
-nimble::runtime::Acceptor<Profile, SellSideApp> acceptor(&engine, &binding.value(), { .application = app });
-
-auto open = acceptor.OpenListeners("main");
-if (!open.ok()) {
-  return open;
+auto acceptor = nimble::runtime::CreateAcceptor<Profile>(
+  nimble::runtime::SimpleAcceptorSettings<Profile, SellSideApp>{
+    .profile_artifact = "fix44.nfa",
+    .listener_name = "main",
+    .listener_host = "0.0.0.0",
+    .listener_port = 9876,
+    .name = "sell-side",
+    .session_id = 2001U,
+    .local_comp_id = "SELL1",
+    .remote_comp_id = "BUY1",
+    .heartbeat_interval_seconds = 30U,
+    .application = app,
+  });
+if (!acceptor.ok()) {
+  return acceptor.status();
 }
-
-return acceptor.Run();
+return acceptor.value().Run();
 ```
 
 ## Dynamic Acceptor Walkthrough
@@ -318,12 +282,14 @@ These headers remain public because public signatures depend on them or advanced
 - `nimblefix/advanced/runtime_application.h`
 - `nimblefix/runtime/acceptor.h`
 - `nimblefix/runtime/initiator.h`
+- `nimblefix/runtime/simple.h`
 - `nimblefix/runtime/metrics.h`
 - `nimblefix/runtime/profile_registry.h`
 - `nimblefix/runtime/session.h`
 - `nimblefix/runtime/profile_binding.h`
 - `nimblefix/runtime/sharded_runtime.h`
 - `nimblefix/runtime/trace.h`
+- `nimblefix/advanced/message_data_writer.h`
 - `nimblefix/advanced/encoded_application_message.h`
 - `nimblefix/session/session_snapshot.h`
 - `nimblefix/session/transport_profile.h`
@@ -359,6 +325,7 @@ Everything under `include/internal/nimblefix/` remains repository-private.
 ## Do Not Do This
 
 - Do not write new primary examples around `RuntimeEvent.message_view()` or `ApplicationCallbacks` when a generated typed handler is available.
+- Do not include `nimblefix/advanced/message_data_writer.h` for ordinary business sends. It is for schema-agnostic tools, tests, admin internals, and raw bridges.
 - Do not skip `Engine::Bind<Profile>()`; it is the schema-match guard between generated code and loaded runtime artifacts.
 - Do not share one `Session<Profile>` or raw `SessionHandle` send path across multiple producer threads. The runtime send path is single-producer.
 - Do not default to inline-borrowed raw send variants unless you are intentionally using the advanced low-level surface.

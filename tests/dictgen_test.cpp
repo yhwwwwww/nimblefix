@@ -7,9 +7,9 @@
 #include <span>
 #include <string>
 
+#include "nimblefix/advanced/message_data_writer.h"
 #include "nimblefix/codec/fix_codec.h"
 #include "nimblefix/codec/fix_tags.h"
-#include "nimblefix/message/message_data_writer.h"
 #include "nimblefix/profile/artifact_builder.h"
 #include "nimblefix/profile/dictgen_input.h"
 #include "nimblefix/profile/normalized_dictionary.h"

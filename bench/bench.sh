@@ -57,6 +57,14 @@ commands:
     nimblefix-nfd Run NimbleFIX benchmark against build/bench/quickfix_FIX44.nfd
   quickfix      Run QuickFIX comparison benchmark (parse, encode, session-inbound, replay, loopback)
   compare       Run the default NimbleFIX and QuickFIX comparison suites side by side
+  parse-only    Run only NimbleFIX wire parse/decode
+  internal-send Run only NimbleFIX generated body + full-frame encode
+  overall-send  Run only NimbleFIX typed session send without TCP
+  rtt-half      Run NimbleFIX AdminProtocol/direct-TCP loopback and report RTT/2
+  multi-client  Run concurrent NimbleFIX AdminProtocol/direct-TCP loopback pairs; accepts --clients <count>
+  busy-poll     Run NimbleFIX live-runtime busy-poll RTT mode
+  acceptor-throughput
+                Run one live acceptor with multiple live initiator sessions; accepts --clients <count>
 
 environment overrides:
     NIMBLEFIX_BUILD_SYSTEM=auto|xmake|cmake  Preferred build system selector
@@ -542,6 +550,48 @@ case "$command_name" in
             set -- --iterations 100000 --replay 1000 --replay-span 128 --loopback 1000
         fi
         run_quickfix "$@"
+        ;;
+    parse-only)
+        if [ "$#" -eq 0 ]; then
+            set -- --iterations 100000
+        fi
+        run_nimblefix_artifact --mode parse-only "$@"
+        ;;
+    internal-send)
+        if [ "$#" -eq 0 ]; then
+            set -- --iterations 100000
+        fi
+        run_nimblefix_artifact --mode internal-send "$@"
+        ;;
+    overall-send)
+        if [ "$#" -eq 0 ]; then
+            set -- --iterations 100000
+        fi
+        run_nimblefix_artifact --mode overall-send "$@"
+        ;;
+    rtt-half)
+        if [ "$#" -eq 0 ]; then
+            set -- --iterations 100000 --loopback 1000
+        fi
+        run_nimblefix_artifact --mode rtt-half "$@"
+        ;;
+    multi-client)
+        if [ "$#" -eq 0 ]; then
+            set -- --iterations 4000 --clients 4
+        fi
+        run_nimblefix_artifact --mode multi-client "$@"
+        ;;
+    busy-poll)
+        if [ "$#" -eq 0 ]; then
+            set -- --iterations 100000
+        fi
+        run_nimblefix_artifact --mode busy-poll "$@"
+        ;;
+    acceptor-throughput)
+        if [ "$#" -eq 0 ]; then
+            set -- --iterations 100000 --clients 4
+        fi
+        run_nimblefix_artifact --mode acceptor-throughput "$@"
         ;;
     compare)
         if [ "$#" -ne 0 ]; then

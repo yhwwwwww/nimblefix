@@ -15,6 +15,7 @@
 #include <liburing.h>
 #endif
 
+#include <algorithm>
 #include <charconv>
 #include <cstring>
 #include <limits>
@@ -24,7 +25,6 @@ namespace nimble::transport {
 namespace {
 
 constexpr std::size_t kDefaultReadBufferCapacity = 4096U;
-constexpr std::size_t kDefaultFrameBufferCapacity = 1024U;
 constexpr std::size_t kMinimumFrameProbeBytes = 12U;
 constexpr std::size_t kBodyLengthFieldPrefixSize = 3U;
 constexpr std::size_t kChecksumFieldWireSize = 7U;
@@ -193,14 +193,12 @@ TryExtractFrame(std::span<const std::byte> buffer, Sink&& sink) -> base::Result<
 TcpConnection::TcpConnection()
 {
   read_buffer_.reserve(kDefaultReadBufferCapacity);
-  frame_buffer_.reserve(kDefaultFrameBufferCapacity);
 }
 
 TcpConnection::TcpConnection(int fd)
   : fd_(fd)
 {
   read_buffer_.reserve(kDefaultReadBufferCapacity);
-  frame_buffer_.reserve(kDefaultFrameBufferCapacity);
 }
 
 TcpConnection::~TcpConnection()
@@ -228,8 +226,8 @@ TcpConnection::Swap(TcpConnection& other) noexcept -> void
 {
   std::swap(fd_, other.fd_);
   std::swap(epoll_fd_, other.epoll_fd_);
+  std::swap(epoll_events_, other.epoll_events_);
   std::swap(read_buffer_, other.read_buffer_);
-  std::swap(frame_buffer_, other.frame_buffer_);
   std::swap(read_cursor_, other.read_cursor_);
 }
 
@@ -529,46 +527,86 @@ TcpConnection::BusySend(std::span<const std::byte> bytes, std::chrono::milliseco
 }
 
 auto
+TcpConnection::CompactConsumedReadBuffer() -> void
+{
+  if (read_cursor_ == 0U) {
+    return;
+  }
+  if (read_cursor_ >= read_buffer_.size()) {
+    read_buffer_.clear();
+    read_cursor_ = 0U;
+    return;
+  }
+  if (read_cursor_ > read_buffer_.capacity() / 2U) {
+    read_buffer_.erase(read_buffer_.begin(), read_buffer_.begin() + static_cast<std::ptrdiff_t>(read_cursor_));
+    read_cursor_ = 0U;
+  }
+}
+
+auto
+TcpConnection::TryExtractBufferedFrameView() -> base::Result<std::optional<std::span<const std::byte>>>
+{
+  CompactConsumedReadBuffer();
+  const auto remaining = read_buffer_.size() - read_cursor_;
+  const auto* unconsumed_data = remaining == 0U ? nullptr : read_buffer_.data() + read_cursor_;
+  const auto unconsumed = std::span<const std::byte>(unconsumed_data, remaining);
+  const auto frame_offset = read_cursor_;
+  auto consumed = TryExtractFrame(unconsumed, [](std::span<const std::byte>) {});
+  if (consumed.ok() && consumed.value() > 0U) {
+    read_cursor_ += consumed.value();
+    return std::optional<std::span<const std::byte>>(
+      std::span<const std::byte>(read_buffer_.data() + frame_offset, consumed.value()));
+  }
+  if (consumed.status().code() == base::ErrorCode::kFormatError) {
+    return consumed.status();
+  }
+  return std::optional<std::span<const std::byte>>{};
+}
+
+auto
+TcpConnection::ReadAvailableBytes() -> base::Result<bool>
+{
+  CompactConsumedReadBuffer();
+  if (read_buffer_.size() >= kMaxReadBufferSize) {
+    Close();
+    return base::Status::IoError("TCP read buffer exceeded maximum size limit");
+  }
+
+  const auto old_size = read_buffer_.size();
+  const auto writable_size = std::min(kDefaultReadBufferCapacity, kMaxReadBufferSize - old_size);
+  read_buffer_.resize(old_size + writable_size);
+
+  const auto rc = recv(fd_, read_buffer_.data() + old_size, writable_size, 0);
+  if (rc < 0) {
+    read_buffer_.resize(old_size);
+    if (errno == EAGAIN || errno == EWOULDBLOCK) {
+      return false;
+    }
+    return base::Status::IoError(std::string("recv failed: ") + std::strerror(errno));
+  }
+  if (rc == 0) {
+    read_buffer_.resize(old_size);
+    return base::Status::IoError("peer closed the socket");
+  }
+
+  read_buffer_.resize(old_size + static_cast<std::size_t>(rc));
+  return true;
+}
+
+auto
 TcpConnection::TryReceiveFrameView() -> base::Result<std::optional<std::span<const std::byte>>>
 {
   while (true) {
-    auto unconsumed =
-      std::span<const std::byte>(read_buffer_.data() + read_cursor_, read_buffer_.size() - read_cursor_);
-    auto consumed = TryExtractFrame(
-      unconsumed, [&](std::span<const std::byte> frame) { frame_buffer_.assign(frame.begin(), frame.end()); });
-    if (consumed.ok() && consumed.value() > 0) {
-      read_cursor_ += consumed.value();
-      if (read_cursor_ == read_buffer_.size()) {
-        read_buffer_.clear();
-        read_cursor_ = 0;
-      } else if (read_cursor_ > read_buffer_.capacity() / 2) {
-        read_buffer_.erase(read_buffer_.begin(), read_buffer_.begin() + static_cast<std::ptrdiff_t>(read_cursor_));
-        read_cursor_ = 0;
-      }
-      return std::optional<std::span<const std::byte>>(
-        std::span<const std::byte>(frame_buffer_.data(), frame_buffer_.size()));
+    auto frame = TryExtractBufferedFrameView();
+    if (!frame.ok() || frame.value().has_value()) {
+      return frame;
     }
-    if (consumed.status().code() == base::ErrorCode::kFormatError) {
-      return consumed.status();
+    auto read = ReadAvailableBytes();
+    if (!read.ok()) {
+      return read.status();
     }
-
-    std::byte buffer[kDefaultReadBufferCapacity];
-    const auto rc = recv(fd_, buffer, sizeof(buffer), 0);
-    if (rc < 0) {
-      if (errno == EAGAIN || errno == EWOULDBLOCK) {
-        return std::optional<std::span<const std::byte>>{};
-      }
-      return base::Status::IoError(std::string("recv failed: ") + std::strerror(errno));
-    }
-    if (rc == 0) {
-      return base::Status::IoError("peer closed the socket");
-    }
-
-    read_buffer_.insert(read_buffer_.end(), buffer, buffer + rc);
-
-    if (read_buffer_.size() > kMaxReadBufferSize) {
-      Close();
-      return base::Status::IoError("TCP read buffer exceeded maximum size limit");
+    if (!read.value()) {
+      return std::optional<std::span<const std::byte>>{};
     }
   }
 }
@@ -583,23 +621,12 @@ TcpConnection::ReceiveFrameView(std::chrono::milliseconds timeout) -> base::Resu
   }
   const auto deadline = std::chrono::steady_clock::now() + timeout;
   while (true) {
-    auto unconsumed =
-      std::span<const std::byte>(read_buffer_.data() + read_cursor_, read_buffer_.size() - read_cursor_);
-    auto consumed = TryExtractFrame(
-      unconsumed, [&](std::span<const std::byte> frame) { frame_buffer_.assign(frame.begin(), frame.end()); });
-    if (consumed.ok() && consumed.value() > 0) {
-      read_cursor_ += consumed.value();
-      if (read_cursor_ == read_buffer_.size()) {
-        read_buffer_.clear();
-        read_cursor_ = 0;
-      } else if (read_cursor_ > read_buffer_.capacity() / 2) {
-        read_buffer_.erase(read_buffer_.begin(), read_buffer_.begin() + static_cast<std::ptrdiff_t>(read_cursor_));
-        read_cursor_ = 0;
-      }
-      return std::span<const std::byte>(frame_buffer_.data(), frame_buffer_.size());
+    auto frame = TryExtractBufferedFrameView();
+    if (!frame.ok()) {
+      return frame.status();
     }
-    if (consumed.status().code() == base::ErrorCode::kFormatError) {
-      return consumed.status();
+    if (frame.value().has_value()) {
+      return *frame.value();
     }
 
     const auto now = std::chrono::steady_clock::now();
@@ -618,23 +645,9 @@ TcpConnection::ReceiveFrameView(std::chrono::milliseconds timeout) -> base::Resu
       return base::Status::IoError("socket closed or errored while polling");
     }
 
-    std::byte buffer[kDefaultReadBufferCapacity];
-    const auto rc = recv(fd_, buffer, sizeof(buffer), 0);
-    if (rc < 0) {
-      if (errno == EAGAIN || errno == EWOULDBLOCK) {
-        continue;
-      }
-      return base::Status::IoError(std::string("recv failed: ") + std::strerror(errno));
-    }
-    if (rc == 0) {
-      return base::Status::IoError("peer closed the socket");
-    }
-
-    read_buffer_.insert(read_buffer_.end(), buffer, buffer + rc);
-
-    if (read_buffer_.size() > kMaxReadBufferSize) {
-      Close();
-      return base::Status::IoError("TCP read buffer exceeded maximum size limit");
+    auto read = ReadAvailableBytes();
+    if (!read.ok()) {
+      return read.status();
     }
   }
 }
@@ -644,45 +657,20 @@ TcpConnection::BusyReceiveFrameView(std::chrono::milliseconds timeout) -> base::
 {
   const auto deadline = std::chrono::steady_clock::now() + timeout;
   while (true) {
-    auto unconsumed =
-      std::span<const std::byte>(read_buffer_.data() + read_cursor_, read_buffer_.size() - read_cursor_);
-    auto consumed = TryExtractFrame(
-      unconsumed, [&](std::span<const std::byte> frame) { frame_buffer_.assign(frame.begin(), frame.end()); });
-    if (consumed.ok() && consumed.value() > 0) {
-      read_cursor_ += consumed.value();
-      if (read_cursor_ == read_buffer_.size()) {
-        read_buffer_.clear();
-        read_cursor_ = 0;
-      } else if (read_cursor_ > read_buffer_.capacity() / 2) {
-        read_buffer_.erase(read_buffer_.begin(), read_buffer_.begin() + static_cast<std::ptrdiff_t>(read_cursor_));
-        read_cursor_ = 0;
-      }
-      return std::span<const std::byte>(frame_buffer_.data(), frame_buffer_.size());
+    auto frame = TryExtractBufferedFrameView();
+    if (!frame.ok()) {
+      return frame.status();
     }
-    if (consumed.status().code() == base::ErrorCode::kFormatError) {
-      return consumed.status();
+    if (frame.value().has_value()) {
+      return *frame.value();
     }
 
-    std::byte buffer[kDefaultReadBufferCapacity];
-    const auto rc = recv(fd_, buffer, sizeof(buffer), 0);
-    if (rc < 0) {
-      if (errno == EAGAIN || errno == EWOULDBLOCK) {
-        if (std::chrono::steady_clock::now() >= deadline) {
-          return base::Status::IoError("timed out while busy-waiting for a FIX frame");
-        }
-        continue;
-      }
-      return base::Status::IoError(std::string("recv failed: ") + std::strerror(errno));
+    auto read = ReadAvailableBytes();
+    if (!read.ok()) {
+      return read.status();
     }
-    if (rc == 0) {
-      return base::Status::IoError("peer closed the socket");
-    }
-
-    read_buffer_.insert(read_buffer_.end(), buffer, buffer + rc);
-
-    if (read_buffer_.size() > kMaxReadBufferSize) {
-      Close();
-      return base::Status::IoError("TCP read buffer exceeded maximum size limit");
+    if (!read.value() && std::chrono::steady_clock::now() >= deadline) {
+      return base::Status::IoError("timed out while busy-waiting for a FIX frame");
     }
   }
 }
@@ -714,22 +702,36 @@ TcpConnection::ReceiveFrame(std::chrono::milliseconds timeout) -> base::Result<s
 auto
 TcpConnection::EpollWaitFd(int fd, uint32_t events, int timeout_ms) -> int
 {
+  if (epoll_fd_ < 0) {
+    epoll_fd_ = epoll_create1(EPOLL_CLOEXEC);
+    if (epoll_fd_ < 0) {
+      return -1;
+    }
+  }
   struct epoll_event ev{};
   ev.events = events;
   ev.data.fd = fd;
-  if (epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, fd, &ev) != 0) {
-    if (errno == EEXIST) {
-      epoll_ctl(epoll_fd_, EPOLL_CTL_MOD, fd, &ev);
-    } else {
+  if (epoll_events_ == 0U) {
+    if (epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, fd, &ev) != 0) {
+      if (errno != EEXIST) {
+        return -1;
+      }
+      if (epoll_ctl(epoll_fd_, EPOLL_CTL_MOD, fd, &ev) != 0) {
+        return -1;
+      }
+    }
+    epoll_events_ = events;
+  } else if (epoll_events_ != events) {
+    if (epoll_ctl(epoll_fd_, EPOLL_CTL_MOD, fd, &ev) != 0) {
       return -1;
     }
+    epoll_events_ = events;
   }
   struct epoll_event out{};
   int ret;
   do {
     ret = epoll_wait(epoll_fd_, &out, 1, timeout_ms);
   } while (ret == -1 && errno == EINTR);
-  epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, fd, nullptr);
   if (ret == 0)
     return 0; // timeout
   if (ret < 0)
@@ -746,6 +748,7 @@ TcpConnection::Close() -> void
     ::close(epoll_fd_);
     epoll_fd_ = -1;
   }
+  epoll_events_ = 0U;
   if (fd_ >= 0) {
     close(fd_);
     fd_ = -1;

@@ -5,10 +5,10 @@
 #include <string_view>
 
 #include "fix44_api.h"
+#include "nimblefix/advanced/message_data_writer.h"
 #include "nimblefix/codec/fix_codec.h"
 #include "nimblefix/codec/fix_tags.h"
 #include "nimblefix/message/fixed_layout_writer.h"
-#include "nimblefix/message/message_data_writer.h"
 
 #include "test_support.h"
 
@@ -215,13 +215,15 @@ TEST_CASE("encoded fragments drive generated api end-to-end", "[fix-codec][outbo
                                     "1=ACC-77\x01"
                                     "9999=TAIL\x01");
 
-  NewOrderSingleBuilder order;
-  order.cl_ord_id("ORD-42")
-    .symbol("AAPL")
-    .side(Side::Buy)
-    .transact_time("20260414-09:30:00.000")
-    .order_qty(100)
-    .ord_type(OrdType::Limit);
+  nimble::message::MessageDataWriter message_builder("D");
+  message_builder.set_string(kMsgType, "D")
+    .set_string(kClOrdID, "ORD-42")
+    .set_string(kSymbol, "AAPL")
+    .set_char(kSide, '1')
+    .set_string(kTransactTime, "20260414-09:30:00.000")
+    .set_int(kOrderQty, 100)
+    .set_char(kOrdType, '2');
+  const auto message = std::move(message_builder).build();
 
   nimble::codec::EncodeOptions options;
   options.begin_string = "FIX.4.4";
@@ -230,12 +232,8 @@ TEST_CASE("encoded fragments drive generated api end-to-end", "[fix-codec][outbo
   options.msg_seq_num = 17U;
   options.sending_time = "20260414-09:30:01.000";
 
-  auto message = order.ToMessage();
-  REQUIRE(message.ok());
-
   nimble::codec::EncodeBuffer buffer;
-  auto status =
-    nimble::codec::EncodeFixMessageToBuffer(message.value(), dictionary.value(), options, extras.view(), &buffer);
+  auto status = nimble::codec::EncodeFixMessageToBuffer(message, dictionary.value(), options, extras.view(), &buffer);
   REQUIRE(status.ok());
 
   auto decoded = nimble::codec::DecodeFixMessageView(buffer.bytes(), dictionary.value());

@@ -5,10 +5,10 @@
 #include <string>
 
 #include "fix44_api.h"
+#include "nimblefix/advanced/message_data_writer.h"
 #include "nimblefix/codec/fix_codec.h"
 #include "nimblefix/codec/fix_tags.h"
 #include "nimblefix/message/fixed_layout_writer.h"
-#include "nimblefix/message/message_data_writer.h"
 
 #include "test_support.h"
 
@@ -30,6 +30,28 @@ PopulateGeneratedOrderForBackendCompare(NewOrderSingleBuilder* order) -> void
     .transact_time("20260406-12:00:00.000")
     .order_qty(100)
     .ord_type(OrdType::Limit);
+}
+
+auto
+ApplicationBodyFromFrame(std::string_view frame) -> std::string_view
+{
+  const auto msg_type_pos = frame.find("35=");
+  REQUIRE(msg_type_pos != std::string_view::npos);
+  const auto msg_type_end = frame.find('\x01', msg_type_pos);
+  REQUIRE(msg_type_end != std::string_view::npos);
+
+  constexpr std::string_view kSendingTimePrefix{ "\x01"
+                                                 "52=",
+                                                 4U };
+  const auto sending_time_pos = frame.find(kSendingTimePrefix, msg_type_end);
+  REQUIRE(sending_time_pos != std::string_view::npos);
+  const auto sending_time_end = frame.find('\x01', sending_time_pos + 1U);
+  REQUIRE(sending_time_end != std::string_view::npos);
+
+  const auto checksum_pos = frame.rfind("10=");
+  REQUIRE(checksum_pos != std::string_view::npos);
+  REQUIRE(checksum_pos >= sending_time_end + 1U);
+  return frame.substr(sending_time_end + 1U, checksum_pos - (sending_time_end + 1U));
 }
 
 } // namespace
@@ -406,10 +428,8 @@ TEST_CASE("generated-api-matches-raw-fixed-layout-writer", "[message-api][genera
   PopulateGeneratedOrderForBackendCompare(&typed);
   typed.add_party().party_id("PTY1").party_id_source(PartyIdSource::Proprietary).party_role(PartyRole::ExecutingFirm);
 
-  auto typed_message = typed.ToMessage();
-  REQUIRE(typed_message.ok());
-  nimble::codec::EncodeBuffer typed_buf;
-  REQUIRE(nimble::codec::EncodeFixMessageToBuffer(typed_message.value(), dictionary.value(), options, &typed_buf).ok());
+  nimble::generated::detail::BodyEncodeBuffer typed_body;
+  REQUIRE(typed.EncodeBody(typed_body).ok());
 
-  CHECK(raw_buf.text() == typed_buf.text());
+  CHECK(ApplicationBodyFromFrame(raw_buf.text()) == typed_body.data());
 }

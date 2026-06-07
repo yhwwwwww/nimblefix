@@ -19,6 +19,13 @@ This directory is the canonical benchmark subsystem for NimbleFIX. It contains t
 ./bench/bench.sh nimblefix-nfd
 ./bench/bench.sh quickfix
 ./bench/bench.sh compare
+./bench/bench.sh parse-only
+./bench/bench.sh internal-send
+./bench/bench.sh overall-send
+./bench/bench.sh rtt-half
+./bench/bench.sh multi-client
+./bench/bench.sh busy-poll
+./bench/bench.sh acceptor-throughput
 
 # Alternative CMake path
 NIMBLEFIX_BUILD_SYSTEM=cmake NIMBLEFIX_CMAKE_PRESET=dev-release ./bench/bench.sh build
@@ -50,6 +57,13 @@ Important environment notes:
 | `nimblefix-nfd` | `--iterations 30000 --loopback 200 --replay 200` | Same NimbleFIX suite but load the `.nfd` text dictionary directly |
 | `quickfix` | `--iterations 100000 --replay 1000 --replay-span 128 --loopback 1000` | Main QuickFIX comparison suite |
 | `compare` | NimbleFIX defaults, then QuickFIX defaults | Full side-by-side report used by the README numbers |
+| `parse-only` | `--iterations 100000` | NimbleFIX raw wire parse/decode only |
+| `internal-send` | `--iterations 100000` | NimbleFIX generated body plus full-frame encode without session state |
+| `overall-send` | `--iterations 100000` | NimbleFIX typed session send without TCP |
+| `rtt-half` | `--iterations 100000 --loopback 1000` | NimbleFIX AdminProtocol/direct-TCP loopback reported as half RTT |
+| `multi-client` | `--iterations 4000 --clients 4` | Concurrent independent NimbleFIX AdminProtocol/direct-TCP loopback pairs |
+| `busy-poll` | `--iterations 100000` | Full NimbleFIX live-runtime initiator/acceptor RTT with no-sleep polling and optional CPU affinity |
+| `acceptor-throughput` | `--iterations 100000 --clients 4` | One dynamic live acceptor with multiple generated live initiator sessions |
 
 ## Where Each Metric Starts And Ends
 
@@ -66,8 +80,33 @@ flowchart LR
 	IF["START inbound:<br/>ExecutionReport bytes to initiator"] -->|inbound| PE["END inbound:<br/>initiator ProtocolEvent"]
 	RR["START replay:<br/>ResendRequest frame"] -->|replay| RF["END replay:<br/>ProtocolEvent outbound_frames"]
 
-	LS["START loopback:<br/>live initiator submits NewOrderSingle"] -->|session-outbound| LO["END session-outbound / START transport-send:<br/>encoded outbound order frame"] -->|transport-send| TX["END transport-send:<br/>bytes written to TCP socket"] --> AC["acceptor runtime handles order<br/>and sends ExecutionReport"] -->|transport-recv| RX["END transport-recv / START inbound:<br/>ack frame received by initiator"] -->|inbound| LE["END inbound and loopback:<br/>ExecutionReport ack processed"]
+	LS["START loopback:<br/>AdminProtocol initiator submits NewOrderSingle"] -->|session-outbound| LO["END session-outbound / START transport-send:<br/>encoded outbound order frame"] -->|transport-send| TX["END transport-send:<br/>bytes written to TCP socket"] --> AC["AdminProtocol acceptor handles order<br/>and sends ExecutionReport"] -->|transport-recv| RX["END transport-recv / START inbound:<br/>ack frame received by initiator"] -->|inbound| LE["END inbound and loopback:<br/>ExecutionReport ack processed"]
 	LS -.->|loopback outer timer| LE
+```
+
+### NimbleFIX Live Busy-Poll Flow
+
+```mermaid
+flowchart LR
+	BS["START busy-poll-live:<br/>after generated SimpleInitiator session is active"] --> GSend["typed generated<br/>send&lt;NewOrderSingle&gt;"]
+	GSend --> IRT["initiator live runtime<br/>poll_timeout=0, optional CPU affinity"]
+	IRT --> TCP["TCP loopback"]
+	TCP --> ART["acceptor live runtime<br/>generated NewOrderSingle handler"]
+	ART --> Ack["typed generated<br/>send&lt;ExecutionReport&gt;"]
+	Ack --> IRT2["initiator live runtime<br/>generated ExecutionReport handler"]
+	IRT2 -->|busy-poll-live| BE["END busy-poll-live:<br/>initiator records order ack"]
+```
+
+### NimbleFIX Live Acceptor Throughput Flow
+
+```mermaid
+flowchart LR
+	ATS["START acceptor-throughput-live:<br/>all generated initiators are active"] --> Fanout["release --clients live initiators"]
+	Fanout --> Orders["typed generated<br/>send&lt;NewOrderSingle&gt; streams"]
+	Orders --> Acceptor["single dynamic SimpleAcceptor<br/>multiple live sessions and workers"]
+	Acceptor --> Acks["typed generated<br/>send&lt;ExecutionReport&gt; acks"]
+	Acks --> Initiators["initiator typed callbacks<br/>record every ack"]
+	Initiators -->|acceptor-throughput-live| ATE["END acceptor-throughput-live:<br/>all requested acks recorded"]
 ```
 
 ### QuickFIX Flow
@@ -97,7 +136,9 @@ Both engines pin `SendingTime` to a fixture timestamp so the timed regions measu
 | `inbound` | immediately before decoding a prebuilt `ExecutionReport` frame into a reusable `DecodedMessageView` | when `initiator.OnInbound(decoded, NowNs())` returns | initiator-side live-style inbound decode, sequence validation, session handling, store write, and borrowed app-message extraction |
 | `parse` | immediately before `DecodeFixMessageView(sample_frame)` | when decoded `MessageView` + validation are available | full wire decode, validation, group handling |
 | `replay` | immediately before `acceptor.OnInbound(std::move(resend_request), NowNs())` | when `ProtocolEvent.outbound_frames` returns | ResendRequest handling, store-backed replay generation for `replay_span` messages |
-| `loopback` | immediately before the live initiator submits the `NewOrderSingle` | when the initiator receives the `ExecutionReport` ack | full TCP round-trip, both runtimes, both protocol stacks |
+| `loopback` | immediately before the initiator-side `AdminProtocol` submits the `NewOrderSingle` | when the initiator-side `AdminProtocol` receives the `ExecutionReport` ack | TCP round-trip through direct `AdminProtocol` session handling on both sides |
+| `busy-poll-live` | immediately after the live initiator session is active and before the next typed `send<NewOrderSingle>()` call | when the live initiator typed `ExecutionReport` callback records the ack | full `CreateInitiator` / `CreateAcceptor` runtime path, generated typed callbacks, no-sleep polling, TCP loopback, and optional CPU affinity |
+| `acceptor-throughput-live` | after one dynamic live acceptor and all requested live initiator sessions are active | when all initiator typed `ExecutionReport` callbacks have recorded their acks | aggregate multi-session live acceptor throughput across `--clients` generated initiators; `--iterations` is the total message count |
 | `peek` | immediately before `PeekSessionHeaderView(sample_frame)` | when the header view is returned | raw-frame header extraction only |
 
 ### QuickFIX Metrics
@@ -113,7 +154,7 @@ Both engines pin `SendingTime` to a fixture timestamp so the timed regions measu
 
 ## NimbleFIX Loopback Breakdown
 
-The NimbleFIX loopback benchmark prints an additional per-phase breakdown inside the end-to-end RTT window:
+The NimbleFIX loopback benchmark is an `AdminProtocol` plus direct-TCP path, not the full `Initiator` / `Acceptor` live runtime. It prints an additional per-phase breakdown inside the end-to-end RTT window:
 
 - `session-outbound`: application message submission through outbound session encode.
 - `transport-send`: bytes written to the socket.
@@ -121,6 +162,18 @@ The NimbleFIX loopback benchmark prints an additional per-phase breakdown inside
 - `session-inbound`: ack decode plus inbound session handling on the initiator side (corresponds to the top-level `inbound` metric).
 
 Those four sub-measurements are nested inside the single `loopback` percentile table.
+
+## NimbleFIX Live Busy-Poll
+
+`./bench/bench.sh busy-poll` starts a generated-first `SimpleAcceptor` and `SimpleInitiator`, waits until the session is active, then measures order-to-ack RTT through the full live runtime. Both runtimes use `poll_timeout=0`; when the OS exposes an affinity mask, the benchmark assigns the runtime workers to available CPUs through the public simple facade.
+
+This metric is intentionally separate from `compare`: it is useful for low-latency runtime tuning, but it is not part of the default NimbleFIX vs QuickFIX side-by-side report.
+
+## NimbleFIX Live Acceptor Throughput
+
+`./bench/bench.sh acceptor-throughput --clients N` starts one generated-first dynamic `SimpleAcceptor`, opens `N` generated `SimpleInitiator` sessions, waits until every session is active, then releases all initiators together. The benchmark reports per-ack latency samples and aggregate message throughput for the single acceptor runtime.
+
+This is the benchmark to use when validating acceptor worker scaling and dynamic multi-session behavior. It is intentionally different from `multi-client`, which runs independent `AdminProtocol`/direct-TCP loopback pairs and does not exercise one shared live acceptor.
 
 ## TLS Transport Baseline
 
@@ -153,7 +206,7 @@ cmake --build build/cmake/tls-bench --target nimblefix-tls-transport-bench
 
 The benchmark uses the same frame boundary detection and send/gather-send surface that the live runtime uses. If you omit `--cert`, `--key`, or `--ca`, the run intentionally records only the TCP baseline. If the binary was built without TLS support, the TLS leg is skipped explicitly rather than falling back to plaintext.
 
-## Current Local Side-By-Side Run (2026-05-30)
+## Current Local Side-By-Side Run (2026-06-06)
 
 Command used:
 
@@ -174,40 +227,62 @@ Environment:
 
 | Boundary | NimbleFIX metric | QuickFIX metric | NimbleFIX p50 | NimbleFIX p95 | QuickFIX p50 | QuickFIX p95 | NimbleFIX alloc/op | QuickFIX alloc/op |
 |----------|----------------|-----------------|-------------|-------------|--------------|--------------|------------------|-------------------|
-| user encode | `encode` | `quickfix-encode` | 391 ns | 410 ns | 1.41 us | 1.44 us | 0.0 | 29.0 |
-| session outbound | `outbound` | `quickfix-outbound` | 712 ns | 751 ns | 1.70 us | 2.95 us | 1.0 | 33 |
-| session inbound | `inbound` | `quickfix-inbound` | 1.22 us | 1.30 us | 2.46 us | 2.54 us | 0 | 12 |
-| wire → object | `parse` | `quickfix-parse` | 591 ns | 611 ns | 1.48 us | 1.51 us | 0 | 20.0 |
-| replay (`replay_span=128`) | `replay` | `quickfix-replay` | 14.45 us | 15.43 us | 265.54 us | 293.58 us | 0 | 4117.0 |
-| TCP loopback RTT | `loopback` | `quickfix-loopback` | 17.17 us | 18.68 us | 21.86 us | 24.62 us | 3.0 | 77.0 |
+| user encode | `encode` | `quickfix-encode` | 391 ns | 411 ns | 1.42 us | 1.47 us | 0.0 | 29.0 |
+| session outbound | `outbound` | `quickfix-outbound` | 702 ns | 742 ns | 1.69 us | 2.91 us | 0.0 | 33 |
+| session inbound | `inbound` | `quickfix-inbound` | 1.07 us | 1.17 us | 2.57 us | 2.67 us | 0 | 12 |
+| wire → object | `parse` | `quickfix-parse` | 621 ns | 641 ns | 1.47 us | 1.52 us | 0 | 20.0 |
+| replay (`replay_span=128`) | `replay` | `quickfix-replay` | 15.20 us | 15.43 us | 257.63 us | 267.76 us | 0 | 4117.0 |
+| TCP loopback RTT | `loopback` | `quickfix-loopback` | 15.78 us | 20.28 us | 21.77 us | 26.74 us | 3.0 | 77.0 |
 
 #### NimbleFIX-Only
 | Metric | p50 | p95 | p99 | alloc/op | ops/sec | cache/op | branch/op |
 |--------|-----|-----|-----|----------|---------|----------|-----------|
-| `peek` | 100 ns | 101 ns | 101 ns | 0 | 8.65M | 0.0 | 0.0 |
+| `peek` | 100 ns | 101 ns | 101 ns | 0 | 8.63M | 0.0 | 0.0 |
+
+### Additional Live Runtime Smoke
+
+Command used:
+
+```bash
+./bench/bench.sh busy-poll --iterations 1000
+```
+
+| Metric | p50 | p95 | p99 | alloc/op | ops/sec | cache/op | branch/op |
+|--------|-----|-----|-----|----------|---------|----------|-----------|
+| `busy-poll-live` | 33.05 us | 37.82 us | 96.49 us | 0.0 | 27.8K | 0.5 | 0.1 |
+
+Command used:
+
+```bash
+./bench/bench.sh acceptor-throughput --iterations 1000 --clients 4
+```
+
+| Metric | p50 | p95 | p99 | alloc/op | ops/sec | cache/op | branch/op |
+|--------|-----|-----|-----|----------|---------|----------|-----------|
+| `acceptor-throughput-live` | 52.23 us | 61.96 us | 81.17 us | 4.1 | 74.6K | 0.8 | 0.1 |
 
 ### NimbleFIX Snapshot
 
 | Metric | p50 | p95 | p99 | alloc/op | ops/sec | cache/op | branch/op |
 |--------|-----|-----|-----|----------|---------|----------|-----------|
-| `encode` | 391 ns | 410 ns | 411 ns | 0.0 | 2.34M | 0.0 | 0.0 |
-| `outbound` | 712 ns | 751 ns | 811 ns | 1.0 | 1.33M | 0.4 | 0.1 |
-| `inbound` | 1.22 us | 1.30 us | 2.28 us | 0 | 786.5K | 0.4 | 0.1 |
-| `parse` | 591 ns | 611 ns | 792 ns | 0 | 1.61M | 0.0 | 0.0 |
-| `replay` | 14.45 us | 15.43 us | 17.98 us | 0 | 68.2K | 1.9 | 19.7 |
-| `loopback` | 17.17 us | 18.68 us | 21.17 us | 3.0 | 56.8K | 9.7 | 186.5 |
-| `peek` | 100 ns | 101 ns | 101 ns | 0 | 8.65M | 0.0 | 0.0 |
+| `encode` | 391 ns | 411 ns | 421 ns | 0.0 | 2.35M | 0.0 | 0.0 |
+| `outbound` | 702 ns | 742 ns | 772 ns | 0.0 | 1.35M | 0.4 | 0.1 |
+| `inbound` | 1.07 us | 1.17 us | 2.24 us | 0 | 877.0K | 0.4 | 0.1 |
+| `parse` | 621 ns | 641 ns | 892 ns | 0 | 1.54M | 0.0 | 0.0 |
+| `replay` | 15.20 us | 15.43 us | 17.67 us | 0 | 65.8K | 1.9 | 18.8 |
+| `loopback` | 15.78 us | 20.28 us | 22.97 us | 3.0 | 59.8K | 8.0 | 172.9 |
+| `peek` | 100 ns | 101 ns | 101 ns | 0 | 8.63M | 0.0 | 0.0 |
 
 ### QuickFIX Snapshot
 
 | Metric | p50 | p95 | p99 | alloc/op | ops/sec | cache/op | branch/op |
 |--------|-----|-----|-----|----------|---------|----------|-----------|
-| `quickfix-encode` | 1.41 us | 1.44 us | 1.59 us | 29.0 | 657.2K | 0.0 | 0.0 |
-| `quickfix-outbound` | 1.70 us | 2.95 us | 3.20 us | 33 | 520.9K | 0.1 | 1.9 |
-| `quickfix-inbound` | 2.46 us | 2.54 us | 2.69 us | 12 | 400.4K | 0.4 | 0.1 |
-| `quickfix-parse` | 1.48 us | 1.51 us | 1.52 us | 20.0 | 636.4K | 0.0 | 0.0 |
-| `quickfix-replay` | 265.54 us | 293.58 us | 299.02 us | 4117.0 | 3.7K | 16.6 | 393.6 |
-| `quickfix-loopback` | 21.86 us | 24.62 us | 57.98 us | 77.0 | 43.3K | 24.5 | 19.5 |
+| `quickfix-encode` | 1.42 us | 1.47 us | 2.14 us | 29.0 | 647.3K | 0.1 | 4.2 |
+| `quickfix-outbound` | 1.69 us | 2.91 us | 3.19 us | 33 | 524.5K | 0.1 | 2.0 |
+| `quickfix-inbound` | 2.57 us | 2.67 us | 2.99 us | 12 | 383.7K | 0.4 | 0.2 |
+| `quickfix-parse` | 1.47 us | 1.52 us | 1.54 us | 20.0 | 640.7K | 0.0 | 0.0 |
+| `quickfix-replay` | 257.63 us | 267.76 us | 370.98 us | 4117.0 | 3.8K | 19.5 | 360.3 |
+| `quickfix-loopback` | 21.77 us | 26.74 us | 49.39 us | 77.0 | 42.7K | 54.4 | 25.3 |
 
 ## Metric Fields
 

@@ -430,12 +430,16 @@ order.add_party()
      .party_id_source(PartyIdSource::Proprietary)
      .party_role(PartyRole::ExecutingFirm);
 
-auto message = order.ToMessage();
-if (!message.ok()) {
-  return message.status();
+nimble::generated::detail::BodyEncodeBuffer body;
+auto status = order.EncodeBody(body);
+if (!status.ok()) {
+  return status;
 }
-auto status = codec::EncodeFixMessageToBuffer(message.value(), dictionary_view, options, &buf);
 ```
+
+Applications normally send through `runtime::Session<Profile>::send<Msg>(...)`,
+which builds this body buffer and lets the session layer add the managed FIX
+header, sequence number, SendingTime, BodyLength, and CheckSum.
 
 ---
 

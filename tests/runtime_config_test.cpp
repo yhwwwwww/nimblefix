@@ -12,9 +12,9 @@
 #include <string_view>
 #include <vector>
 
+#include "nimblefix/advanced/message_data_writer.h"
 #include "nimblefix/codec/fix_codec.h"
 #include "nimblefix/codec/fix_tags.h"
-#include "nimblefix/message/message_data_writer.h"
 #include "nimblefix/profile/artifact_builder.h"
 #include "nimblefix/profile/dictgen_input.h"
 #include "nimblefix/runtime/config.h"

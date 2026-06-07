@@ -2,11 +2,7 @@
 
 #include "fix44_api.h"
 #include "nimblefix/base/status.h"
-#include "nimblefix/runtime/config.h"
-#include "nimblefix/runtime/engine.h"
-#include "nimblefix/runtime/initiator.h"
-#include "nimblefix/session/session_key.h"
-#include "nimblefix/session/transport_profile.h"
+#include "nimblefix/runtime/simple.h"
 
 using namespace nimble::generated::profile_4400;
 
@@ -19,8 +15,8 @@ constexpr auto kSessionId = 1U;
 constexpr auto kHeartbeatIntervalSeconds = 30U;
 
 // Demonstrates the generated-first initiator path: lifecycle callbacks receive a
-  // typed Session<Profile>, outbound orders are populated through the generated
-  // send<Msg> API, and no raw builders or tag-level code are needed.
+// typed Session<Profile>, outbound orders are populated through the generated
+// send<Msg> API, and no raw builders or tag-level code are needed.
 class OrderSender final : public Handler
 {
 public:
@@ -69,42 +65,20 @@ public:
 int
 main()
 {
-  nimble::runtime::EngineConfig config;
-  config.worker_count = 1;
-  config.profile_artifacts = { kProfileArtifactPath };
-  config.counterparties.push_back(nimble::runtime::CounterpartyConfig{
-    .name = "venue-a",
-    .session = {
-      .session_id = kSessionId,
-      .key = nimble::session::SessionKey::ForInitiator("MY_FIRM", "VENUE_A"),
-      .profile_id = Profile::kProfileId,
-      .heartbeat_interval_seconds = kHeartbeatIntervalSeconds,
-      .is_initiator = true,
-    },
-    .transport_profile = nimble::session::TransportSessionProfile::Fix44(),
-    .reconnect_enabled = true,
-    .reconnect_initial_ms = nimble::runtime::kDefaultReconnectInitialMs,
-    .reconnect_max_ms = nimble::runtime::kDefaultReconnectMaxMs,
-    .reconnect_max_retries = nimble::runtime::kUnlimitedReconnectRetries,
-  });
-
-  nimble::runtime::Engine engine;
-  auto boot = engine.Boot(config);
-  if (!boot.ok()) {
-    return 1;
-  }
-
-  auto binding = engine.Bind<Profile>();
-  if (!binding.ok()) {
-    return 1;
-  }
-
   auto app = std::make_shared<OrderSender>();
-  nimble::runtime::Initiator<Profile> initiator(&engine, &binding.value(), { .application = app });
-
-  auto open = initiator.OpenSession(kSessionId, kVenueHost, kVenuePort);
-  if (!open.ok()) {
+  auto initiator = nimble::runtime::CreateInitiator<Profile>(nimble::runtime::SimpleInitiatorSettings<Profile>{
+    .profile_artifact = kProfileArtifactPath,
+    .name = "venue-a",
+    .session_id = kSessionId,
+    .sender_comp_id = "MY_FIRM",
+    .target_comp_id = "VENUE_A",
+    .host = kVenueHost,
+    .port = kVenuePort,
+    .heartbeat_interval_seconds = kHeartbeatIntervalSeconds,
+    .application = app,
+  });
+  if (!initiator.ok()) {
     return 1;
   }
-  return initiator.Run().ok() ? 0 : 1;
+  return initiator.value().Run().ok() ? 0 : 1;
 }

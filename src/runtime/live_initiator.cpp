@@ -407,6 +407,12 @@ public:
     return EnqueueOwnedEncodedMessageWithEnvelope(session_id, std::move(message), {});
   }
 
+  auto EnqueueOwnedEncodedMessage(std::uint64_t session_id, session::EncodedApplicationMessage&& message)
+    -> base::Status override
+  {
+    return EnqueueOwnedEncodedMessageWithEnvelope(session_id, std::move(message), {});
+  }
+
   auto EnqueueOwnedEncodedMessageWithEnvelope(std::uint64_t session_id,
                                               session::EncodedApplicationMessageRef message,
                                               session::SessionSendEnvelopeRef envelope) -> base::Status override
@@ -422,6 +428,30 @@ public:
             static_cast<std::uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count()),
           .message = {},
           .encoded_message = std::move(message),
+          .envelope = std::move(envelope),
+          .text = {},
+        })) {
+      return base::Status::IoError("runtime outbound command queue is full");
+    }
+    owner_->SignalWorkerWakeup(worker_id_);
+    return base::Status::Ok();
+  }
+
+  auto EnqueueOwnedEncodedMessageWithEnvelope(std::uint64_t session_id,
+                                              session::EncodedApplicationMessage&& message,
+                                              session::SessionSendEnvelopeRef envelope) -> base::Status override
+  {
+    auto status = ValidateSingleProducer();
+    if (!status.ok()) {
+      return status;
+    }
+    if (!queue_.TryPush(OutboundCommand{
+          .kind = OutboundCommandKind::kSendEncodedApplication,
+          .session_id = session_id,
+          .enqueue_timestamp_ns =
+            static_cast<std::uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count()),
+          .message = {},
+          .encoded_message = session::EncodedApplicationMessageRef::Take(std::move(message)),
           .envelope = std::move(envelope),
           .text = {},
         })) {
@@ -1961,37 +1991,28 @@ LiveInitiator::HandleInboundFrame(WorkerShardState& shard,
   std::optional<codec::DecodedMessageView> decoded_message;
   std::optional<message::MessageView> admin_message;
   session::ProtocolEvent event;
+  codec::DecodedMessageView decoded;
+  auto decode_status = connection.session->protocol->DecodeInboundFrame(frame, &decoded);
+  if (!decode_status.ok()) {
+    return decode_status;
+  }
+
+  auto protocol_event = [&]() -> base::Result<session::ProtocolEvent> {
+    if (options_.application != nullptr) {
+      decoded_message = std::move(decoded);
+      return connection.session->protocol->OnInbound(*decoded_message, timestamp_ns);
+    }
+    return connection.session->protocol->OnInbound(decoded, timestamp_ns);
+  }();
+  if (!protocol_event.ok()) {
+    return protocol_event.status();
+  }
   if (options_.application != nullptr) {
-    auto decoded = codec::DecodeFixMessageView(frame,
-                                               *connection.session->dictionary,
-                                               codec::kFixSoh,
-                                               connection.session->counterparty.validation_policy.verify_checksum);
-    if (!decoded.ok()) {
-      return decoded.status();
-    }
-    decoded_message = std::move(decoded).value();
-    auto protocol_event = connection.session->protocol->OnInbound(*decoded_message, timestamp_ns);
-    if (!protocol_event.ok()) {
-      return protocol_event.status();
-    }
     if (IsAdminMessage(header.msg_type)) {
       admin_message = decoded_message->message.view();
     }
-    event = std::move(protocol_event).value();
-  } else {
-    auto decoded = codec::DecodeFixMessageView(frame,
-                                               *connection.session->dictionary,
-                                               codec::kFixSoh,
-                                               connection.session->counterparty.validation_policy.verify_checksum);
-    if (!decoded.ok()) {
-      return decoded.status();
-    }
-    auto protocol_event = connection.session->protocol->OnInbound(decoded.value(), timestamp_ns);
-    if (!protocol_event.ok()) {
-      return protocol_event.status();
-    }
-    event = std::move(protocol_event).value();
   }
+  event = std::move(protocol_event).value();
 
   RecordInboundMetrics(*connection.session, header.msg_type);
 

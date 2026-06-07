@@ -45,6 +45,13 @@ class SessionStore;
 
 } // namespace nimble::store
 
+namespace nimble::runtime {
+
+class LiveAcceptor;
+class LiveInitiator;
+
+} // namespace nimble::runtime
+
 namespace nimble::session {
 
 inline constexpr std::size_t kProtocolEventOutboundFrameInlineCapacity = 4U;
@@ -732,6 +739,10 @@ public:
   [[nodiscard]] auto mutable_session() -> SessionCore&;
 
 private:
+  friend class runtime::LiveAcceptor;
+  friend class runtime::LiveInitiator;
+
+  auto DecodeInboundFrame(std::span<const std::byte> frame, codec::DecodedMessageView* output) const -> base::Status;
   auto BuildLogonFrame(std::uint64_t timestamp_ns, bool reset_seq_num) -> base::Result<EncodedFrame>;
   auto BuildHeartbeatFrame(std::uint64_t timestamp_ns, std::string_view test_request_id) -> base::Result<EncodedFrame>;
   auto BuildTestRequestFrame(std::uint64_t timestamp_ns, std::string_view test_request_id)

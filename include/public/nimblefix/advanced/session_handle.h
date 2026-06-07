@@ -7,9 +7,9 @@
 #include <string>
 #include <utility>
 
+#include "nimblefix/advanced/encoded_application_message.h"
 #include "nimblefix/base/result.h"
 #include "nimblefix/base/status.h"
-#include "nimblefix/advanced/encoded_application_message.h"
 #include "nimblefix/message/message_ref.h"
 #include "nimblefix/session/session_key.h"
 #include "nimblefix/session/session_send_envelope.h"
@@ -173,6 +173,20 @@ public:
     return base::Status::InvalidArgument("encoded send is unsupported by this runtime command sink");
   }
 
+  /// Queue an owned pre-encoded application body by direct ownership transfer.
+  ///
+  /// Implementations can override this to avoid wrapping the message in an
+  /// intermediate `EncodedApplicationMessageRef` when the caller already owns
+  /// the encoded body.
+  ///
+  /// \param session_id Runtime session id.
+  /// \param message Owned pre-encoded application message.
+  /// \return `Ok()` when accepted, otherwise an error status.
+  virtual auto EnqueueOwnedEncodedMessage(std::uint64_t session_id, EncodedApplicationMessage&& message) -> base::Status
+  {
+    return EnqueueOwnedEncodedMessage(session_id, EncodedApplicationMessageRef::Take(std::move(message)));
+  }
+
   /// Queue an owned pre-encoded application body plus envelope overrides.
   ///
   /// \param session_id Runtime session id.
@@ -186,6 +200,24 @@ public:
     if (!envelope.empty()) {
       return base::Status::InvalidArgument("session envelope encoded send is unsupported by this runtime "
                                            "command sink");
+    }
+    return EnqueueOwnedEncodedMessage(session_id, std::move(message));
+  }
+
+  /// Queue an owned pre-encoded application body plus envelope overrides by
+  /// direct ownership transfer.
+  ///
+  /// \param session_id Runtime session id.
+  /// \param message Owned pre-encoded application message.
+  /// \param envelope Optional `50/57` header overrides.
+  /// \return `Ok()` when accepted, otherwise an error status.
+  virtual auto EnqueueOwnedEncodedMessageWithEnvelope(std::uint64_t session_id,
+                                                      EncodedApplicationMessage&& message,
+                                                      SessionSendEnvelopeRef envelope) -> base::Status
+  {
+    if (!envelope.empty()) {
+      return EnqueueOwnedEncodedMessageWithEnvelope(
+        session_id, EncodedApplicationMessageRef::Take(std::move(message)), std::move(envelope));
     }
     return EnqueueOwnedEncodedMessage(session_id, std::move(message));
   }
@@ -352,6 +384,20 @@ public:
     return SubmitOwnedEncodedMessage(std::move(message), SessionSendEnvelopeRef::Own(envelope));
   }
 
+  /// Send an owned pre-encoded application body into the runtime send path.
+  ///
+  /// This overload is the generated-send fast path: it transfers the encoded
+  /// body directly to the command sink without first materializing an
+  /// `EncodedApplicationMessageRef` object at the send site.
+  ///
+  /// \param message Owned pre-encoded application message.
+  /// \param envelope Optional `50/57` header overrides.
+  /// \return `Ok()` when accepted, otherwise an error status.
+  auto SendEncoded(EncodedApplicationMessage&& message, SessionSendEnvelopeView envelope = {}) const -> base::Status
+  {
+    return SubmitOwnedEncodedMessage(std::move(message), SessionSendEnvelopeRef::Own(envelope));
+  }
+
 private:
   auto EnsureSendable() const -> base::Status
   {
@@ -395,6 +441,16 @@ private:
   }
 
   auto SubmitOwnedEncodedMessage(EncodedApplicationMessageRef message, SessionSendEnvelopeRef envelope) const
+    -> base::Status
+  {
+    auto status = EnsureSendable();
+    if (!status.ok()) {
+      return status;
+    }
+    return command_sink_->EnqueueOwnedEncodedMessageWithEnvelope(session_id_, std::move(message), std::move(envelope));
+  }
+
+  auto SubmitOwnedEncodedMessage(EncodedApplicationMessage&& message, SessionSendEnvelopeRef envelope) const
     -> base::Status
   {
     auto status = EnsureSendable();

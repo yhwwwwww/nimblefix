@@ -1,5 +1,6 @@
 #include <catch2/catch_test_macros.hpp>
 
+#include <array>
 #include <cstddef>
 #include <string>
 
@@ -107,20 +108,71 @@ ApplicationBodyFromFrame(std::string_view frame) -> std::string_view
   return frame.substr(sending_time_end + 1U, checksum_pos - (sending_time_end + 1U));
 }
 
+auto
+EncodeGeneratedOrderToBuffer(const NewOrderSingleBuilder& order,
+                             const nimble::codec::EncodeOptions& options,
+                             nimble::codec::EncodeBuffer* buffer) -> nimble::base::Status
+{
+  if (buffer == nullptr) {
+    return nimble::base::Status::InvalidArgument("encode buffer is null");
+  }
+
+  nimble::generated::detail::BodyEncodeBuffer body_buffer;
+  auto body_status = order.EncodeBody(body_buffer);
+  if (!body_status.ok()) {
+    return body_status;
+  }
+
+  auto& out = buffer->storage;
+  out.clear();
+  out.append("8=");
+  out.append(options.begin_string);
+  out.push_back('\x01');
+  out.append("9=");
+  const auto body_length_offset = out.size();
+  out.append("0000000");
+  out.push_back('\x01');
+  const auto body_start = out.size();
+
+  auto append_field = [&](std::string_view prefix, std::string_view value) {
+    out.append(prefix);
+    out.append(value);
+    out.push_back('\x01');
+  };
+  append_field("35=", NewOrderSingle::kMsgType);
+  append_field("34=", std::to_string(options.msg_seq_num));
+  append_field("49=", options.sender_comp_id);
+  append_field("56=", options.target_comp_id);
+  append_field("52=", options.sending_time);
+  out.append(body_buffer.data());
+
+  const auto body_length = std::to_string(out.size() - body_start);
+  out.replace(body_length_offset, 7U, body_length);
+
+  std::uint32_t checksum = 0U;
+  for (const char byte : out) {
+    checksum += static_cast<unsigned char>(byte);
+  }
+  checksum %= 256U;
+  std::array<char, 3> checksum_digits{
+    static_cast<char>('0' + ((checksum / 100U) % 10U)),
+    static_cast<char>('0' + ((checksum / 10U) % 10U)),
+    static_cast<char>('0' + (checksum % 10U)),
+  };
+  out.append("10=");
+  out.append(checksum_digits.data(), checksum_digits.size());
+  out.push_back('\x01');
+  return nimble::base::Status::Ok();
+}
+
 } // namespace
 
-TEST_CASE("generated typed view binds owned and parsed fix44 messages", "[typed-message]")
+TEST_CASE("generated typed view binds parsed fix44 messages", "[typed-message]")
 {
   auto dictionary_view = nimble::tests::LoadFix44DictionaryViewOrSkip();
   auto dictionary = nimble::base::Result<nimble::profile::NormalizedDictionaryView>(std::move(dictionary_view));
 
   auto order = BuildGeneratedOrder();
-
-  auto owned_message = order.ToMessage();
-  REQUIRE(owned_message.ok());
-  auto owned_view = NewOrderSingleView::Bind(owned_message.value().view());
-  REQUIRE(owned_view.ok());
-  AssertGeneratedOrderView(owned_view.value());
 
   nimble::codec::EncodeOptions options;
   options.begin_string = "FIX.4.4";
@@ -130,9 +182,7 @@ TEST_CASE("generated typed view binds owned and parsed fix44 messages", "[typed-
   options.sending_time = "20260406-12:00:01.000";
 
   nimble::codec::EncodeBuffer buffer;
-  auto encode_status =
-    nimble::codec::EncodeFixMessageToBuffer(owned_message.value(), dictionary.value(), options, &buffer);
-  REQUIRE(encode_status.ok());
+  REQUIRE(EncodeGeneratedOrderToBuffer(order, options, &buffer).ok());
 
   auto decoded = nimble::codec::DecodeFixMessageView(buffer.bytes(), dictionary.value());
   REQUIRE(decoded.ok());
@@ -141,15 +191,9 @@ TEST_CASE("generated typed view binds owned and parsed fix44 messages", "[typed-
   AssertGeneratedOrderView(parsed_view.value());
 }
 
-TEST_CASE("generated EncodeBody matches ToMessage application body bytes", "[typed-message]")
+TEST_CASE("generated EncodeBody matches application body bytes in a full frame", "[typed-message]")
 {
-  auto dictionary_view = nimble::tests::LoadFix44DictionaryViewOrSkip();
-  auto dictionary = nimble::base::Result<nimble::profile::NormalizedDictionaryView>(std::move(dictionary_view));
-
   auto order = BuildGeneratedOrder();
-
-  auto owned_message = order.ToMessage();
-  REQUIRE(owned_message.ok());
 
   nimble::codec::EncodeOptions options;
   options.begin_string = "FIX.4.4";
@@ -159,9 +203,7 @@ TEST_CASE("generated EncodeBody matches ToMessage application body bytes", "[typ
   options.sending_time = "20260406-12:00:01.000";
 
   nimble::codec::EncodeBuffer buffer;
-  auto encode_status =
-    nimble::codec::EncodeFixMessageToBuffer(owned_message.value(), dictionary.value(), options, &buffer);
-  REQUIRE(encode_status.ok());
+  REQUIRE(EncodeGeneratedOrderToBuffer(order, options, &buffer).ok());
 
   nimble::generated::detail::BodyEncodeBuffer body_buffer;
   auto body_status = order.EncodeBody(body_buffer);
@@ -185,9 +227,6 @@ TEST_CASE("generated set_tag appends raw extras consistently", "[typed-message]"
   order.set_tag<9005>(12.5);
   order.set_tag<9006>(std::string_view("RAW-EXTRA"));
 
-  auto owned_message = order.ToMessage();
-  REQUIRE(owned_message.ok());
-
   nimble::codec::EncodeOptions options;
   options.begin_string = "FIX.4.4";
   options.sender_comp_id = "BUY";
@@ -196,9 +235,7 @@ TEST_CASE("generated set_tag appends raw extras consistently", "[typed-message]"
   options.sending_time = "20260406-12:00:01.000";
 
   nimble::codec::EncodeBuffer buffer;
-  auto encode_status =
-    nimble::codec::EncodeFixMessageToBuffer(owned_message.value(), dictionary.value(), options, &buffer);
-  REQUIRE(encode_status.ok());
+  REQUIRE(EncodeGeneratedOrderToBuffer(order, options, &buffer).ok());
 
   nimble::generated::detail::BodyEncodeBuffer body_buffer;
   auto body_status = order.EncodeBody(body_buffer);

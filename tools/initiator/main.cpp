@@ -8,9 +8,9 @@
 #include <vector>
 
 #include "nimblefix/advanced/live_initiator.h"
+#include "nimblefix/advanced/message_data_writer.h"
 #include "nimblefix/advanced/runtime_application.h"
 #include "nimblefix/codec/fix_tags.h"
-#include "nimblefix/message/message_data_writer.h"
 #include "nimblefix/message/message_view.h"
 #include "nimblefix/profile/profile_loader.h"
 #include "nimblefix/runtime/engine.h"

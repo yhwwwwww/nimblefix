@@ -20,13 +20,13 @@
 #include <string_view>
 #include <unordered_set>
 
+#include "nimblefix/advanced/message_data_writer.h"
 #include "nimblefix/advanced/typed_message_view.h"
 #include "nimblefix/codec/compiled_decoder.h"
 #include "nimblefix/codec/fast_int_format.h"
 #include "nimblefix/codec/fix_tags.h"
 #include "nimblefix/codec/raw_passthrough.h"
 #include "nimblefix/codec/simd_scan.h"
-#include "nimblefix/message/message_data_writer.h"
 #include "nimblefix/profile/normalized_dictionary.h"
 #include "nimblefix/store/session_store.h"
 
@@ -815,6 +815,18 @@ auto
 AdminProtocol::mutable_session() -> SessionCore&
 {
   return *impl_->session_;
+}
+
+auto
+AdminProtocol::DecodeInboundFrame(std::span<const std::byte> frame, codec::DecodedMessageView* output) const
+  -> base::Status
+{
+  return codec::DecodeFixMessageView(frame,
+                                     *impl_->dictionary_,
+                                     impl_->decode_table_,
+                                     output,
+                                     codec::kFixSoh,
+                                     impl_->config_.validation_policy.verify_checksum);
 }
 
 auto

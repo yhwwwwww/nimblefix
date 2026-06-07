@@ -1,5 +1,6 @@
 #include <catch2/catch_test_macros.hpp>
 
+#include <array>
 #include <string>
 
 #include "fix44_api.h"
@@ -101,11 +102,52 @@ EncodeGeneratedOrder(const NewOrderSingleBuilder& order,
   if (buffer == nullptr) {
     return nimble::base::Status::InvalidArgument("buffer is null");
   }
-  auto message = order.ToMessage();
-  if (!message.ok()) {
-    return message.status();
+  (void)dictionary;
+  nimble::generated::detail::BodyEncodeBuffer body_buffer;
+  auto body_status = order.EncodeBody(body_buffer);
+  if (!body_status.ok()) {
+    return body_status;
   }
-  return nimble::codec::EncodeFixMessageToBuffer(message.value(), dictionary, options, buffer);
+
+  auto& out = buffer->storage;
+  out.clear();
+  out.append("8=");
+  out.append(options.begin_string);
+  out.push_back('\x01');
+  out.append("9=");
+  const auto body_length_offset = out.size();
+  out.append("0000000");
+  out.push_back('\x01');
+  const auto body_start = out.size();
+
+  auto append_field = [&](std::string_view prefix, std::string_view value) {
+    out.append(prefix);
+    out.append(value);
+    out.push_back('\x01');
+  };
+  append_field("35=", NewOrderSingle::kMsgType);
+  append_field("34=", std::to_string(options.msg_seq_num));
+  append_field("49=", options.sender_comp_id);
+  append_field("56=", options.target_comp_id);
+  append_field("52=", options.sending_time);
+  out.append(body_buffer.data());
+
+  out.replace(body_length_offset, 7U, std::to_string(out.size() - body_start));
+
+  std::uint32_t checksum = 0U;
+  for (const char byte : out) {
+    checksum += static_cast<unsigned char>(byte);
+  }
+  checksum %= 256U;
+  std::array<char, 3> checksum_digits{
+    static_cast<char>('0' + ((checksum / 100U) % 10U)),
+    static_cast<char>('0' + ((checksum / 10U) % 10U)),
+    static_cast<char>('0' + (checksum % 10U)),
+  };
+  out.append("10=");
+  out.append(checksum_digits.data(), checksum_digits.size());
+  out.push_back('\x01');
+  return nimble::base::Status::Ok();
 }
 
 } // namespace
@@ -146,10 +188,7 @@ TEST_CASE("generated-api-with-groups", "[message-api][generated-api]")
 
   NewOrderSingleBuilder order;
   PopulateGeneratedOrder(&order, "ACC-1", "ORD-001");
-  order.add_party()
-    .party_id("PTY1")
-    .party_id_source(PartyIdSource::Proprietary)
-    .party_role(PartyRole::ExecutingFirm);
+  order.add_party().party_id("PTY1").party_id_source(PartyIdSource::Proprietary).party_role(PartyRole::ExecutingFirm);
   order.add_party().party_id("PTY2").party_id_source(PartyIdSource::Mic).party_role(PartyRole::ClearingFirm);
 
   nimble::codec::EncodeOptions options;
@@ -218,7 +257,7 @@ TEST_CASE("generated-api-clear-and-reuse", "[message-api][generated-api]")
   CHECK(wire.find("1=ACC-1") == std::string_view::npos);
 }
 
-TEST_CASE("generated-inbound-view-supports-owned-and-parsed-messages", "[message-api][generated-api]")
+TEST_CASE("generated-inbound-view-supports-parsed-messages", "[message-api][generated-api]")
 {
   auto dictionary_view = nimble::tests::LoadFix44DictionaryViewOrSkip();
   auto dictionary = nimble::base::Result<nimble::profile::NormalizedDictionaryView>(std::move(dictionary_view));
@@ -226,12 +265,6 @@ TEST_CASE("generated-inbound-view-supports-owned-and-parsed-messages", "[message
   NewOrderSingleBuilder order;
   PopulateGeneratedOrder(&order, "ACC-1", "ORD-001");
   AddGeneratedPartyWithNestedSubId(&order);
-
-  auto owned_message = order.ToMessage();
-  REQUIRE(owned_message.ok());
-  auto owned_view = NewOrderSingleView::Bind(owned_message.value().view());
-  REQUIRE(owned_view.ok());
-  AssertGeneratedOrderView(owned_view.value());
 
   nimble::codec::EncodeOptions options;
   options.begin_string = "FIX.4.4";
@@ -255,8 +288,8 @@ TEST_CASE("generated-inbound-view-reports-unknown-enum-values", "[message-api][g
   auto dictionary_view = nimble::tests::LoadFix44DictionaryViewOrSkip();
   auto dictionary = nimble::base::Result<nimble::profile::NormalizedDictionaryView>(std::move(dictionary_view));
 
-  const auto frame = nimble::tests::EncodeFixFrame(
-    "35=D|49=BUY|56=SELL|11=ORD-001|55=AAPL|54=?|60=20260406-12:00:00.000|38=100|40=2|");
+  const auto frame =
+    nimble::tests::EncodeFixFrame("35=D|49=BUY|56=SELL|11=ORD-001|55=AAPL|54=?|60=20260406-12:00:00.000|38=100|40=2|");
   auto decoded = nimble::codec::DecodeFixMessageView(frame, dictionary.value());
   REQUIRE(decoded.ok());
   auto view = NewOrderSingleView::Bind(decoded.value().message.view());

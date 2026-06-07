@@ -5,9 +5,9 @@
 #include <thread>
 
 #include "fix44_api.h"
+#include "nimblefix/advanced/message_data_writer.h"
 #include "nimblefix/advanced/runtime_application.h"
 #include "nimblefix/codec/fix_tags.h"
-#include "nimblefix/message/message_data_writer.h"
 #include "nimblefix/runtime/live_runtime_support.h"
 #include "nimblefix/runtime/session.h"
 

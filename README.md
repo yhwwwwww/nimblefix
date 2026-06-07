@@ -45,8 +45,8 @@ NimbleFIX was designed to answer: *what if every design decision optimized for t
 
 | Feature | Details |
 |---------|---------|
-| **Codec latency** | Current local FIX44 compare run: 100 ns header peek (p50), 591 ns full parse (p50) |
-| **Low allocation pressure** | Current local compare run: parse/inbound/replay at 0 alloc/op; outbound at 1 alloc/op; loopback at 3 alloc/op |
+| **Codec latency** | Current local FIX44 compare run: 120 ns header peek (p50), 701 ns full parse (p50) |
+| **Low allocation pressure** | Current local compare run: parse/inbound/outbound/replay at 0 alloc/op; loopback at 3 alloc/op |
 | **Session management** | Core Logon/Logout/Heartbeat/TestRequest/ResendRequest/SequenceReset coverage |
 | **Repeating groups** | Nested groups fully supported via dictionary metadata |
 | **Reconnect with backoff** | Configurable exponential backoff with jitter for initiator reconnect |
@@ -225,11 +225,19 @@ External consumers should include only the exported headers under `include/publi
 Most applications only need these direct includes:
 
 - generated profile header such as `fix44_api.h`
+- `nimblefix/runtime/simple.h`
+
+Use the explicit runtime headers only when you need lower-level lifecycle control:
+
 - `nimblefix/runtime/config.h`
 - `nimblefix/runtime/engine.h`
 - `nimblefix/runtime/initiator.h` or `nimblefix/runtime/acceptor.h`
 - `nimblefix/runtime/profile_binding.h`
+
+Advanced tooling and custom integrations can also include:
+
 - `nimblefix/message/message_view.h`
+- `nimblefix/advanced/message_data_writer.h`
 - `nimblefix/codec/fix_codec.h`
 - `nimblefix/profile/profile_loader.h`
 - `nimblefix/store/memory_store.h`
@@ -385,10 +393,7 @@ Use `--contract <file> --dump`, `--markdown <file>`, or `--interop-dir <dir>` to
 #include <memory>
 
 #include "fix44_api.h"
-#include "nimblefix/runtime/config.h"
-#include "nimblefix/runtime/engine.h"
-#include "nimblefix/runtime/initiator.h"
-#include "nimblefix/runtime/profile_binding.h"
+#include "nimblefix/runtime/simple.h"
 
 using namespace nimble::generated::profile_4400;
 
@@ -419,44 +424,23 @@ public:
 };
 
 int main() {
-    nimble::runtime::EngineConfig config;
-    config.worker_count = 1;
-    config.profile_artifacts = {"build/bench/quickfix_FIX44.nfa"};
-    config.counterparties.push_back(nimble::runtime::CounterpartyConfig{
-        .name = "venue-a",
-        .session = {
-            .session_id = 1U,
-            .key = nimble::session::SessionKey::ForInitiator("MY_FIRM", "VENUE_A"),
-            .profile_id = Profile::kProfileId,
-            .heartbeat_interval_seconds = 30U,
-            .is_initiator = true,
-        },
-        .transport_profile = nimble::session::TransportSessionProfile::Fix44(),
-        .reconnect_enabled = true,
-        .reconnect_initial_ms = nimble::runtime::kDefaultReconnectInitialMs,
-        .reconnect_max_ms = nimble::runtime::kDefaultReconnectMaxMs,
-        .reconnect_max_retries = nimble::runtime::kUnlimitedReconnectRetries,
-    });
-
-    nimble::runtime::Engine engine;
-    auto boot = engine.Boot(config);
-    if (!boot.ok()) {
-        return 1;
-    }
-
-    auto binding = engine.Bind<Profile>();
-    if (!binding.ok()) {
-        return 1;
-    }
-
     auto app = std::make_shared<MyApp>();
-    nimble::runtime::Initiator<Profile, MyApp> initiator(&engine, &binding.value(), { .application = app });
-
-    auto open = initiator.OpenSession(1U, "exchange.example.com", 9876);
-    if (!open.ok()) {
+    auto initiator = nimble::runtime::CreateInitiator<Profile>(
+        nimble::runtime::SimpleInitiatorSettings<Profile, MyApp>{
+            .profile_artifact = "build/bench/quickfix_FIX44.nfa",
+            .name = "venue-a",
+            .session_id = 1U,
+            .sender_comp_id = "MY_FIRM",
+            .target_comp_id = "VENUE_A",
+            .host = "exchange.example.com",
+            .port = 9876,
+            .heartbeat_interval_seconds = 30U,
+            .application = app,
+        });
+    if (!initiator.ok()) {
         return 1;
     }
-    return initiator.Run().ok() ? 0 : 1;
+    return initiator.value().Run().ok() ? 0 : 1;
 }
 ```
 
@@ -472,10 +456,7 @@ Advanced raw encode and dynamic-message escape hatches still exist under `nimble
 #include <memory>
 
 #include "fix44_api.h"
-#include "nimblefix/runtime/config.h"
-#include "nimblefix/runtime/acceptor.h"
-#include "nimblefix/runtime/engine.h"
-#include "nimblefix/runtime/profile_binding.h"
+#include "nimblefix/runtime/simple.h"
 
 using namespace nimble::generated::profile_4400;
 
@@ -502,47 +483,24 @@ public:
     }
 };
 
-nimble::runtime::EngineConfig config;
-config.worker_count = 2;
-config.profile_artifacts = {"build/bench/quickfix_FIX44.nfa"};
-config.listeners.push_back(nimble::runtime::ListenerConfig{
-    .name = "main",
-    .host = "0.0.0.0",
-    .port = 9876,
-});
-config.accept_unknown_sessions = true;
-
-nimble::runtime::Engine engine;
-auto boot = engine.Boot(config);
-if (!boot.ok()) {
-    return 1;
+int main() {
+    auto app = std::make_shared<MyApp>();
+    auto acceptor = nimble::runtime::CreateAcceptor<Profile>(
+        nimble::runtime::SimpleAcceptorSettings<Profile, MyApp>{
+            .profile_artifact = "build/bench/quickfix_FIX44.nfa",
+            .listener_name = "main",
+            .listener_host = "0.0.0.0",
+            .listener_port = 9876,
+            .name = "dynamic-acceptor",
+            .accept_unknown_sessions = true,
+            .heartbeat_interval_seconds = 30U,
+            .application = app,
+        });
+    if (!acceptor.ok()) {
+        return 1;
+    }
+    return acceptor.value().Run().ok() ? 0 : 1;
 }
-
-// Accept sessions dynamically based on inbound Logon:
-engine.SetSessionFactory([](const nimble::session::SessionKey& key)
-    -> nimble::base::Result<nimble::runtime::CounterpartyConfig> {
-        return nimble::runtime::CounterpartyConfig{
-            .name = key.sender_comp_id,
-            .session = {
-                .profile_id = Profile::kProfileId,
-                .key = key,
-                .heartbeat_interval_seconds = 30,
-            },
-        };
-});
-
-auto binding = engine.Bind<Profile>();
-if (!binding.ok()) {
-    return 1;
-}
-
-auto app = std::make_shared<MyApp>();
-nimble::runtime::Acceptor<Profile, MyApp> acceptor(&engine, &binding.value(), { .application = app });
-auto open = acceptor.OpenListeners("main");
-if (!open.ok()) {
-    return 1;
-}
-return acceptor.Run().ok() ? 0 : 1;
 ```
 
 ### Acceptor with Pre-Configured Counterparties
@@ -852,7 +810,7 @@ QuickFIX is still the reference implementation most teams already know and alrea
 - Allocation tracking: global `operator new` interception counts heap allocations per iteration
 - CPU counters: Linux `perf_event_open` feeds cache-miss and branch-miss columns when available
 
-### Current Local Side-By-Side Run (2026-05-30)
+### Current Local Side-By-Side Run (2026-06-07)
 
 | | |
 |---|---|
@@ -865,23 +823,23 @@ QuickFIX is still the reference implementation most teams already know and alrea
 
 | Boundary | NimbleFIX metric | QuickFIX metric | NimbleFIX p50 | NimbleFIX p95 | QuickFIX p50 | QuickFIX p95 | NimbleFIX alloc/op | QuickFIX alloc/op |
 |----------|----------------|-----------------|-------------|-------------|--------------|--------------|------------------|-------------------|
-| user encode | `encode` | `quickfix-encode` | 391 ns | 410 ns | 1.41 us | 1.44 us | 0.0 | 29.0 |
-| session outbound | `outbound` | `quickfix-outbound` | 712 ns | 751 ns | 1.70 us | 2.95 us | 1.0 | 33 |
-| wire → object | `parse` | `quickfix-parse` | 591 ns | 611 ns | 1.48 us | 1.51 us | 0 | 20.0 |
-| session inbound | `inbound` | `quickfix-inbound` | 1.22 us | 1.30 us | 2.46 us | 2.54 us | 0 | 12 |
-| replay (`replay_span=128`) | `replay` | `quickfix-replay` | 14.45 us | 15.43 us | 265.54 us | 293.58 us | 0 | 4117.0 |
-| TCP loopback round-trip | `loopback` | `quickfix-loopback` | 17.17 us | 18.68 us | 21.86 us | 24.62 us | 3.0 | 77.0 |
+| user encode | `encode` | `quickfix-encode` | 471 ns | 511 ns | 1.58 us | 1.84 us | 0.0 | 29.0 |
+| session outbound | `outbound` | `quickfix-outbound` | 801 ns | 1.94 us | 1.92 us | 2.02 us | 0.0 | 33 |
+| wire → object | `parse` | `quickfix-parse` | 701 ns | 821 ns | 1.72 us | 1.76 us | 0 | 20.0 |
+| session inbound | `inbound` | `quickfix-inbound` | 1.21 us | 2.46 us | 2.84 us | 2.98 us | 0 | 12 |
+| replay (`replay_span=128`) | `replay` | `quickfix-replay` | 17.51 us | 17.92 us | 78.75 us | 83.48 us | 0 | 1043.1 |
+| TCP loopback round-trip | `loopback` | `quickfix-loopback` | 18.28 us | 22.28 us | 27.60 us | 31.29 us | 3.0 | 77.0 |
 
 #### NimbleFIX-Only Tier
 
 | Metric | p50 | p95 | p99 | alloc/op | ops/sec |
 |--------|-----|-----|-----|----------|---------|
-| `peek` | 100 ns | 101 ns | 101 ns | 0 | 8.65M |
+| `peek` | 120 ns | 121 ns | 121 ns | 0 | 7.14M |
 
 Key observations:
 
-- NimbleFIX led every shared tier in this local side-by-side run: about 3.6x on encode, 2.4x on outbound, 2.5x on parse, 2.0x on inbound, 18.4x on replay, and 1.3x on loopback RTT.
-- The replay gap is the largest structural difference: NimbleFIX re-encodes from store state with 0 alloc/op, while QuickFIX replay allocates about 4,117 times per measured iteration.
+- NimbleFIX led every shared tier in this local side-by-side run: about 3.4x on encode, 2.4x on outbound, 2.5x on parse, 2.3x on inbound, 4.5x on replay, and 1.5x on loopback RTT.
+- The replay gap is the largest structural difference: NimbleFIX re-encodes from store state with 0 alloc/op, while QuickFIX replay allocates about 1,043 times per measured iteration.
 - Loopback remains the closest tier because both engines are partly bounded by the same Linux TCP floor once the message leaves userspace.
 - `outbound` is now a paired cross-engine metric (NimbleFIX `outbound` vs QuickFIX `quickfix-outbound`); `peek` remains NimbleFIX-only.
 
@@ -893,6 +851,8 @@ Key observations:
 ./bench/bench.sh nimblefix-nfd    # NimbleFIX suite (direct .nfd loading)
 ./bench/bench.sh quickfix       # QuickFIX comparison
 ./bench/bench.sh compare        # Full cross-engine comparison
+./bench/bench.sh busy-poll --iterations 1000
+./bench/bench.sh acceptor-throughput --clients 4
 ```
 
 Every benchmark command above intentionally uses the pinned QuickFIX 4.4 inputs: `bench/vendor/quickfix/spec/FIX44.xml`, `build/bench/quickfix_FIX44.nfd`, or `build/bench/quickfix_FIX44.nfa`.

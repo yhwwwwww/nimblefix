@@ -8,8 +8,8 @@
 #include <sstream>
 #include <string_view>
 
+#include "nimblefix/advanced/message_data_writer.h"
 #include "nimblefix/codec/fix_tags.h"
-#include "nimblefix/message/message_data_writer.h"
 #include "nimblefix/runtime/engine.h"
 
 namespace nimble::runtime {

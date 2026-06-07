@@ -11,7 +11,6 @@
 #include "nimblefix/base/status.h"
 #include "nimblefix/codec/fix_codec.h"
 #include "nimblefix/generated/detail/api_support.h"
-#include "nimblefix/message/message_view.h"
 
 namespace nimble::runtime {
 
@@ -44,7 +43,8 @@ struct SendExtras
 namespace detail {
 
 template<class Msg, class Populate>
-auto EncodeAndSend(session::SessionHandle& handle, Populate&& populate, SendExtras extras) -> base::Status
+auto
+EncodeAndSend(session::SessionHandle& handle, Populate&& populate, SendExtras extras) -> base::Status
 {
   typename Msg::Builder builder;
   std::forward<Populate>(populate)(builder);
@@ -60,11 +60,12 @@ auto EncodeAndSend(session::SessionHandle& handle, Populate&& populate, SendExtr
       std::string(extras.body_fragment),
     };
   }
-  return handle.SendEncoded(session::EncodedApplicationMessageRef::Take(std::move(encoded)));
+  return handle.SendEncoded(std::move(encoded));
 }
 
 template<class Msg, class Populate>
-auto EncodeAndSendInline(session::SessionHandle& handle, Populate&& populate, SendExtras extras) -> base::Status
+auto
+EncodeAndSendInline(session::SessionHandle& handle, Populate&& populate, SendExtras extras) -> base::Status
 {
   typename Msg::Builder builder;
   std::forward<Populate>(populate)(builder);
@@ -115,11 +116,6 @@ public:
   }
   [[nodiscard]] auto raw_handle() const -> const session::SessionHandle& { return handle_; }
 
-  auto send_message(message::Message message) -> base::Status
-  {
-    return handle_.Send(message::MessageRef::Take(std::move(message)));
-  }
-
   template<class Msg, class Populate>
   auto send(Populate&& populate, SendExtras extras = {}) -> base::Status
   {
@@ -154,11 +150,6 @@ public:
     return snap.ok() && snap.value().is_warmup;
   }
   [[nodiscard]] auto raw_handle() const -> const session::SessionHandle& { return handle_; }
-
-  auto send_message(message::Message message) -> base::Status
-  {
-    return handle_.Send(message::MessageRef::Take(std::move(message)));
-  }
 
   template<class Msg, class Populate>
   auto send(Populate&& populate, SendExtras extras = {}) -> base::Status
