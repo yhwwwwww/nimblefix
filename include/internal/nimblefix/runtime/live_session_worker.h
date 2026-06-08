@@ -107,7 +107,14 @@ protected:
       return owner_->RegisterSessionSubscriber(session_id, queue_capacity);
     }
 
-    auto EnqueueLogout(std::uint64_t session_id, std::string text) -> base::Status
+    auto WakeupWorker(std::uint64_t session_id) -> base::Status override
+    {
+      (void)session_id;
+      owner_->SignalWorkerWakeup(worker_id_);
+      return base::Status::Ok();
+    }
+
+    auto EnqueueLogout(std::uint64_t session_id, std::string text) -> base::Status override
     {
       if (!queue_.TryPush(OutboundCommand{
             .kind = OutboundCommandKind::kBeginLogout,

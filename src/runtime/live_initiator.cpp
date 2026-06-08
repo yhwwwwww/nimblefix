@@ -507,7 +507,14 @@ public:
     return owner_->RegisterSessionSubscriber(session_id, queue_capacity);
   }
 
-  auto EnqueueLogout(std::uint64_t session_id, std::string text) -> base::Status
+  auto WakeupWorker(std::uint64_t session_id) -> base::Status override
+  {
+    (void)session_id;
+    owner_->SignalWorkerWakeup(worker_id_);
+    return base::Status::Ok();
+  }
+
+  auto EnqueueLogout(std::uint64_t session_id, std::string text) -> base::Status override
   {
     auto status = ValidateSingleProducer();
     if (!status.ok()) {
@@ -1336,6 +1343,13 @@ LiveInitiator::PollOnce(std::chrono::milliseconds timeout) -> base::Status
   }
 
   for (auto& shard : worker_shards_) {
+    auto status = PollApplicationSessions(shard, now);
+    if (!status.ok()) {
+      return status;
+    }
+  }
+
+  for (auto& shard : worker_shards_) {
     auto status = DrainWorkerCommands(shard.worker_id, now);
     if (!status.ok()) {
       return status;
@@ -1365,6 +1379,13 @@ LiveInitiator::PollOnce(std::chrono::milliseconds timeout) -> base::Status
   }
 
   const auto final_now = NowNs();
+  for (auto& shard : worker_shards_) {
+    auto status = PollApplicationSessions(shard, final_now);
+    if (!status.ok()) {
+      return status;
+    }
+  }
+
   for (auto& shard : worker_shards_) {
     auto status = DrainWorkerCommands(shard.worker_id, final_now);
     if (!status.ok()) {
@@ -1422,6 +1443,10 @@ LiveInitiator::PollWorkerOnce(WorkerShardState& shard, std::chrono::milliseconds
   if (!status.ok()) {
     return status;
   }
+  status = PollApplicationSessions(shard, now);
+  if (!status.ok()) {
+    return status;
+  }
   const auto t_app_done = NowNs();
 
   status = DrainWorkerCommands(shard.worker_id, now);
@@ -1443,6 +1468,10 @@ LiveInitiator::PollWorkerOnce(WorkerShardState& shard, std::chrono::milliseconds
   const auto t_timer_done = NowNs();
 
   status = PollManagedApplicationWorker(shard.worker_id);
+  if (!status.ok()) {
+    return status;
+  }
+  status = PollApplicationSessions(shard, timers_now);
   if (!status.ok()) {
     return status;
   }
@@ -2395,6 +2424,47 @@ LiveInitiator::PollManagedApplicationWorker(std::uint32_t worker_id) -> base::St
     return drained.status();
   }
 
+  return base::Status::Ok();
+}
+
+auto
+LiveInitiator::PollApplicationSessions(WorkerShardState& shard, std::uint64_t timestamp_ns) -> base::Status
+{
+  if (options_.application == nullptr) {
+    return base::Status::Ok();
+  }
+
+  for (auto& connection : shard.connections) {
+    if (connection.session == nullptr || connection.close_requested ||
+        connection.session->counterparty.dispatch_mode != AppDispatchMode::kInline) {
+      continue;
+    }
+
+    auto& active_session = *connection.session;
+    if (!active_session.protocol.has_value()) {
+      continue;
+    }
+
+    const auto snapshot = active_session.protocol->session().Snapshot();
+    if (snapshot.state != session::SessionState::kActive) {
+      continue;
+    }
+    if (shard.command_sink == nullptr) {
+      return base::Status::NotFound("runtime outbound command worker was not found");
+    }
+
+    RuntimeSessionPoll poll{
+      .handle = active_session.handle,
+      .session_key = active_session.counterparty.session.key,
+      .timestamp_ns = timestamp_ns,
+      .is_warmup = snapshot.is_warmup,
+    };
+    BorrowedSendScope scope(shard.command_sink.get());
+    auto status = options_.application->OnSessionPoll(poll);
+    if (!status.ok()) {
+      return status;
+    }
+  }
   return base::Status::Ok();
 }
 

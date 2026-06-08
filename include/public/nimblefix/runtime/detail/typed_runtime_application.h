@@ -49,6 +49,15 @@ public:
   auto OnAdminMessage(const RuntimeEvent& event) -> base::Status override { return Dispatch(event); }
   auto OnAppMessage(const RuntimeEvent& event) -> base::Status override { return Dispatch(event); }
 
+  auto OnSessionPoll(const RuntimeSessionPoll& poll) -> base::Status override
+  {
+    if (application_ == nullptr) {
+      return base::Status::InvalidArgument("application is null");
+    }
+    InlineSession<Profile> session(poll.handle, poll.is_warmup);
+    return application_->OnSessionPoll(session);
+  }
+
 private:
   auto Dispatch(const RuntimeEvent& event) -> base::Status
   {

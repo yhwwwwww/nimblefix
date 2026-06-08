@@ -260,6 +260,7 @@ enum class OutboundCommandKind : std::uint32_t
 {
   kSendApplication = 0,
   kSendEncodedApplication,
+  kBeginLogout,
 };
 
 struct OutboundCommand
@@ -270,6 +271,7 @@ struct OutboundCommand
   message::MessageRef message;
   session::EncodedApplicationMessageRef encoded_message;
   session::SessionSendEnvelopeRef envelope;
+  std::string text;
 };
 
 class SubscriberStream final : public session::SessionSubscriptionStream
@@ -554,6 +556,31 @@ public:
     -> base::Result<session::SessionSubscription> override
   {
     return owner_->RegisterSessionSubscriber(session_id, queue_capacity);
+  }
+
+  auto WakeupWorker(std::uint64_t session_id) -> base::Status override
+  {
+    (void)session_id;
+    owner_->SignalWorkerWakeup(worker_id_);
+    return base::Status::Ok();
+  }
+
+  auto EnqueueLogout(std::uint64_t session_id, std::string text) -> base::Status override
+  {
+    if (!queue_.TryPush(OutboundCommand{
+          .kind = OutboundCommandKind::kBeginLogout,
+          .session_id = session_id,
+          .enqueue_timestamp_ns =
+            static_cast<std::uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count()),
+          .message = {},
+          .encoded_message = {},
+          .envelope = {},
+          .text = std::move(text),
+        })) {
+      return base::Status::IoError("runtime outbound command queue is full");
+    }
+    owner_->SignalWorkerWakeup(worker_id_);
+    return base::Status::Ok();
   }
 
   auto TryPop() -> std::optional<OutboundCommand> { return queue_.TryPop(); }
@@ -1317,6 +1344,11 @@ LiveAcceptor::PollOnce(std::chrono::milliseconds timeout) -> base::Status
       return retry_status;
   }
   {
+    auto session_poll_status = PollApplicationSessions(shard, now);
+    if (!session_poll_status.ok())
+      return session_poll_status;
+  }
+  {
     auto drain_status = DrainWorkerCommands(shard.worker_id, now);
     if (!drain_status.ok())
       return drain_status;
@@ -1340,6 +1372,11 @@ LiveAcceptor::PollOnce(std::chrono::milliseconds timeout) -> base::Status
   }
 
   const auto final_now = NowNs();
+  {
+    auto session_poll_status = PollApplicationSessions(shard, final_now);
+    if (!session_poll_status.ok())
+      return session_poll_status;
+  }
   {
     auto drain_status = DrainWorkerCommands(shard.worker_id, final_now);
     if (!drain_status.ok())
@@ -1400,6 +1437,10 @@ LiveAcceptor::PollWorkerOnce(WorkerShardState& shard, std::chrono::milliseconds 
   if (!status.ok()) {
     return status;
   }
+  status = PollApplicationSessions(shard, now);
+  if (!status.ok()) {
+    return status;
+  }
   const auto t_app_done = NowNs();
 
   status = DrainWorkerCommands(shard.worker_id, now);
@@ -1420,6 +1461,10 @@ LiveAcceptor::PollWorkerOnce(WorkerShardState& shard, std::chrono::milliseconds 
     return status;
   }
   status = RetryPendingAppEvents(shard, timers_now);
+  if (!status.ok()) {
+    return status;
+  }
+  status = PollApplicationSessions(shard, timers_now);
   if (!status.ok()) {
     return status;
   }
@@ -2561,6 +2606,47 @@ LiveAcceptor::PollManagedApplicationWorker(std::uint32_t worker_id) -> base::Sta
 }
 
 auto
+LiveAcceptor::PollApplicationSessions(WorkerShardState& shard, std::uint64_t timestamp_ns) -> base::Status
+{
+  if (options_.application == nullptr) {
+    return base::Status::Ok();
+  }
+
+  for (auto& connection : shard.connections) {
+    if (connection.session == nullptr || connection.close_requested ||
+        connection.session->counterparty.dispatch_mode != AppDispatchMode::kInline) {
+      continue;
+    }
+
+    auto& active_session = *connection.session;
+    if (!active_session.protocol.has_value()) {
+      continue;
+    }
+
+    const auto snapshot = active_session.protocol->session().Snapshot();
+    if (snapshot.state != session::SessionState::kActive) {
+      continue;
+    }
+    if (shard.command_sink == nullptr) {
+      return base::Status::NotFound("runtime outbound command worker was not found");
+    }
+
+    RuntimeSessionPoll poll{
+      .handle = active_session.handle,
+      .session_key = active_session.counterparty.session.key,
+      .timestamp_ns = timestamp_ns,
+      .is_warmup = snapshot.is_warmup,
+    };
+    BorrowedSendScope scope(shard.command_sink.get());
+    auto status = options_.application->OnSessionPoll(poll);
+    if (!status.ok()) {
+      return status;
+    }
+  }
+  return base::Status::Ok();
+}
+
+auto
 LiveAcceptor::DrainWorkerCommands(std::uint32_t worker_id, std::uint64_t timestamp_ns) -> base::Status
 {
   auto* shard = FindWorkerShard(worker_id);
@@ -2593,6 +2679,20 @@ LiveAcceptor::DrainWorkerCommands(std::uint32_t worker_id, std::uint64_t timesta
       }
     }
     if (connection == nullptr || connection->session == nullptr || connection->close_requested) {
+      continue;
+    }
+
+    if (command->kind == OutboundCommandKind::kBeginLogout) {
+      auto outbound = connection->session->protocol->BeginLogout(command->text, timestamp_ns);
+      if (!outbound.ok()) {
+        return outbound.status();
+      }
+      auto status = SendFrame(*connection, outbound.value(), timestamp_ns);
+      if (!status.ok()) {
+        return status;
+      }
+      UpdateSessionSnapshot(*connection->session);
+      RefreshConnectionTimer(*shard, *connection, timestamp_ns);
       continue;
     }
 

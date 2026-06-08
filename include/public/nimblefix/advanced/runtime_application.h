@@ -90,6 +90,20 @@ struct RuntimeEvent
   [[nodiscard]] auto message_view() const -> message::MessageView { return message.view(); }
 };
 
+/// Worker-thread opportunity to drain application-owned session input.
+///
+/// Design intent: let an external producer push raw work into an
+/// application-owned queue, wake the owning runtime worker through
+/// SessionHandle::Wakeup(), and have the worker consume that queue before the
+/// runtime drains outbound commands.
+struct RuntimeSessionPoll
+{
+  session::SessionHandle handle;
+  session::SessionKey session_key;
+  std::uint64_t timestamp_ns{ 0 };
+  bool is_warmup{ false };
+};
+
 /// Application callback surface used by live runtimes.
 ///
 /// Design intent: give integrators one minimal virtual interface for inline
@@ -129,6 +143,17 @@ public:
   /// \param event Runtime event payload.
   /// \return Ok on success, otherwise an error propagated back into the runtime.
   virtual auto OnAppMessage(const RuntimeEvent& event) -> base::Status;
+
+  /// Drain application-owned session work on the runtime worker.
+  ///
+  /// This callback is delivered for active inline-dispatched sessions. Borrowed
+  /// sends are valid during this callback, and the runtime drains outbound
+  /// commands before returning to poll. Use SessionHandle::Wakeup() from an
+  /// external producer after pushing work into the queue this callback drains.
+  ///
+  /// \param poll Runtime session poll payload.
+  /// \return Ok on success, otherwise an error propagated back into the runtime.
+  virtual auto OnSessionPoll(const RuntimeSessionPoll& poll) -> base::Status;
 };
 
 /// Minimal demo application that echoes application messages back inline.

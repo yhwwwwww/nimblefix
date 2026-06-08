@@ -1,5 +1,7 @@
+#include <iostream>
 #include <memory>
 #include <string>
+#include <string_view>
 
 #include "fix44_api.h"
 #include "nimblefix/base/status.h"
@@ -15,14 +17,24 @@ constexpr auto kListenerHost = "127.0.0.1";
 constexpr auto kListenerPort = 9876U;
 constexpr auto kHeartbeatIntervalSeconds = 30U;
 
+auto
+PrintStatus(std::ostream& out, std::string_view prefix, const nimble::base::Status& status) -> void
+{
+  out << prefix;
+  if (!status.message().empty()) {
+    out << ": " << status.message();
+  }
+  out << '\n';
+}
+
 // Demonstrates a generated-first acceptor: sessions are onboarded dynamically
 // from inbound Logon CompIDs, and NewOrderSingle messages are handled through the
 // generated typed callback before echoing a typed ExecutionReport.
 class EchoExecutionReportApp final : public Handler
 {
 public:
-  auto OnNewOrderSingle(nimble::runtime::InlineSession<Profile>& session, NewOrderSingleView order)
-    -> nimble::base::Status override
+  auto OnTypedMessage(nimble::runtime::InlineSession<Profile>& session, NewOrderSingleView order)
+    -> nimble::base::Status
   {
     auto side = order.side();
     if (!side.ok()) {
@@ -55,18 +67,25 @@ int
 main()
 {
   auto app = std::make_shared<EchoExecutionReportApp>();
-  auto acceptor = nimble::runtime::CreateAcceptor<Profile>(nimble::runtime::SimpleAcceptorSettings<Profile>{
-    .profile_artifact = kProfileArtifactPath,
-    .listener_name = kListenerName,
-    .listener_host = kListenerHost,
-    .listener_port = kListenerPort,
-    .name = "hello-fix-dynamic",
-    .accept_unknown_sessions = true,
-    .heartbeat_interval_seconds = kHeartbeatIntervalSeconds,
-    .application = app,
-  });
+  auto acceptor = nimble::runtime::CreateAcceptor<Profile, EchoExecutionReportApp>(
+    nimble::runtime::SimpleAcceptorSettings<Profile, EchoExecutionReportApp>{
+      .profile_artifact = kProfileArtifactPath,
+      .listener_name = kListenerName,
+      .listener_host = kListenerHost,
+      .listener_port = kListenerPort,
+      .name = "hello-fix-dynamic",
+      .accept_unknown_sessions = true,
+      .heartbeat_interval_seconds = kHeartbeatIntervalSeconds,
+      .application = app,
+    });
   if (!acceptor.ok()) {
+    PrintStatus(std::cerr, "failed to create acceptor", acceptor.status());
     return 1;
   }
-  return acceptor.value().Run().ok() ? 0 : 1;
+  auto status = acceptor.value().Run();
+  if (!status.ok()) {
+    PrintStatus(std::cerr, "acceptor failed", status);
+    return 1;
+  }
+  return 0;
 }

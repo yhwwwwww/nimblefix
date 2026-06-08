@@ -264,6 +264,27 @@ public:
   /// \param queue_capacity Per-session notification queue capacity.
   /// \return Subscription handle on success, otherwise an error status.
   virtual auto Subscribe(std::uint64_t session_id, std::size_t queue_capacity) -> base::Result<SessionSubscription> = 0;
+
+  /// Wake the runtime worker that owns this session.
+  ///
+  /// This is a notification-only path for external producers that put work into
+  /// application-owned queues. It must not enqueue a FIX send command.
+  virtual auto WakeupWorker(std::uint64_t session_id) -> base::Status
+  {
+    (void)session_id;
+    return base::Status::Ok();
+  }
+
+  /// Queue a session-managed Logout request.
+  ///
+  /// Runtime support is optional because some lower-level sinks only expose the
+  /// application send path.
+  virtual auto EnqueueLogout(std::uint64_t session_id, std::string text) -> base::Status
+  {
+    (void)session_id;
+    (void)text;
+    return base::Status::InvalidArgument("session logout is unsupported by this runtime command sink");
+  }
 };
 
 /// Advanced raw send/control handle for one runtime session.
@@ -349,6 +370,38 @@ public:
       return base::Status::InvalidArgument("session handle is not bound to a runtime command sink");
     }
     return command_sink_->Subscribe(session_id_, queue_capacity);
+  }
+
+  /// Wake the runtime worker that owns this session.
+  ///
+  /// Use this after an external producer has pushed work into an
+  /// application-owned queue that is drained by a worker-thread callback. This
+  /// call does not send or enqueue a FIX message, so it does not participate in
+  /// the session send single-producer contract.
+  auto Wakeup() const -> base::Status
+  {
+    if (!valid()) {
+      return base::Status::InvalidArgument("session handle is invalid");
+    }
+    if (command_sink_ == nullptr) {
+      return base::Status::InvalidArgument("session handle is not bound to a runtime command sink");
+    }
+    return command_sink_->WakeupWorker(session_id_);
+  }
+
+  /// Request a session-managed Logout.
+  ///
+  /// Like sends, this follows the runtime command path. Use it from the same
+  /// producer context that owns sends for this session.
+  auto Logout(std::string text = {}) const -> base::Status
+  {
+    if (!valid()) {
+      return base::Status::InvalidArgument("session handle is invalid");
+    }
+    if (command_sink_ == nullptr) {
+      return base::Status::InvalidArgument("session handle is not bound to a runtime command sink");
+    }
+    return command_sink_->EnqueueLogout(session_id_, std::move(text));
   }
 
 public:

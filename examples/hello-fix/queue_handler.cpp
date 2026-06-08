@@ -1,4 +1,6 @@
+#include <iostream>
 #include <memory>
+#include <string_view>
 
 #include "fix44_api.h"
 #include "nimblefix/base/status.h"
@@ -18,6 +20,16 @@ constexpr auto kListenerHost = "127.0.0.1";
 constexpr auto kListenerPort = 9877U;
 constexpr auto kSessionId = 1U;
 constexpr auto kHeartbeatIntervalSeconds = 30U;
+
+auto
+PrintStatus(std::ostream& out, std::string_view prefix, const nimble::base::Status& status) -> void
+{
+  out << prefix;
+  if (!status.message().empty()) {
+    out << ": " << status.message();
+  }
+  out << '\n';
+}
 
 struct MatchResult
 {
@@ -51,8 +63,8 @@ public:
 class QueuedOrderApp final : public Handler
 {
 public:
-  auto OnNewOrderSingle(nimble::runtime::InlineSession<Profile>& session, NewOrderSingleView order)
-    -> nimble::base::Status override
+  auto OnTypedMessage(nimble::runtime::InlineSession<Profile>& session, NewOrderSingleView order)
+    -> nimble::base::Status
   {
     auto side = order.side();
     if (!side.ok()) {
@@ -114,20 +126,28 @@ main()
   nimble::runtime::Engine engine;
   auto boot = engine.Boot(config);
   if (!boot.ok()) {
+    PrintStatus(std::cerr, "failed to boot engine", boot);
     return 1;
   }
 
   auto binding = engine.Bind<Profile>();
   if (!binding.ok()) {
+    PrintStatus(std::cerr, "failed to bind profile", binding.status());
     return 1;
   }
 
   auto app = std::make_shared<QueuedOrderApp>();
-  nimble::runtime::Acceptor<Profile> acceptor(&engine, &binding.value(), { .application = app });
+  nimble::runtime::Acceptor<Profile, QueuedOrderApp> acceptor(&engine, &binding.value(), { .application = app });
 
   auto open = acceptor.OpenListeners(kListenerName);
   if (!open.ok()) {
+    PrintStatus(std::cerr, "failed to open listener", open);
     return 1;
   }
-  return acceptor.Run().ok() ? 0 : 1;
+  auto status = acceptor.Run();
+  if (!status.ok()) {
+    PrintStatus(std::cerr, "acceptor failed", status);
+    return 1;
+  }
+  return 0;
 }

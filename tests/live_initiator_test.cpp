@@ -423,6 +423,82 @@ private:
   std::atomic<std::uint64_t> application_events_{ 0 };
 };
 
+class PollDrivenInitiatorApplication final : public nimble::runtime::ApplicationCallbacks
+{
+public:
+  explicit PollDrivenInitiatorApplication(std::uint64_t session_id)
+    : session_id_(session_id)
+  {
+  }
+
+  auto OnSessionEvent(const nimble::runtime::RuntimeEvent& event) -> nimble::base::Status override
+  {
+    if (event.handle.session_id() != session_id_) {
+      return nimble::base::Status::Ok();
+    }
+    ++session_events_;
+    if (event.session_event != nimble::runtime::SessionEventKind::kActive) {
+      return nimble::base::Status::Ok();
+    }
+    active_seen_.store(true);
+    return event.handle.Wakeup();
+  }
+
+  auto OnAdminMessage(const nimble::runtime::RuntimeEvent& event) -> nimble::base::Status override
+  {
+    if (event.handle.session_id() == session_id_) {
+      ++admin_events_;
+    }
+    return nimble::base::Status::Ok();
+  }
+
+  auto OnSessionPoll(const nimble::runtime::RuntimeSessionPoll& poll) -> nimble::base::Status override
+  {
+    if (poll.handle.session_id() != session_id_) {
+      return nimble::base::Status::Ok();
+    }
+    ++session_poll_events_;
+    if (sent_application_.exchange(true)) {
+      return nimble::base::Status::Ok();
+    }
+    return poll.handle.Send(nimble::message::MessageRef::Take(BuildInitiatorMessage()));
+  }
+
+  auto OnAppMessage(const nimble::runtime::RuntimeEvent& event) -> nimble::base::Status override
+  {
+    if (event.handle.session_id() != session_id_) {
+      return nimble::base::Status::Ok();
+    }
+
+    ++application_events_;
+    auto status = ValidateInitiatorEcho(event.message.view());
+    if (!status.ok()) {
+      return status;
+    }
+
+    received_echo_.store(true);
+    return event.handle.Logout();
+  }
+
+  [[nodiscard]] auto active_seen() const -> bool { return active_seen_.load(); }
+  [[nodiscard]] auto sent_application() const -> bool { return sent_application_.load(); }
+  [[nodiscard]] auto received_echo() const -> bool { return received_echo_.load(); }
+  [[nodiscard]] auto session_events() const -> std::uint64_t { return session_events_.load(); }
+  [[nodiscard]] auto admin_events() const -> std::uint64_t { return admin_events_.load(); }
+  [[nodiscard]] auto session_poll_events() const -> std::uint64_t { return session_poll_events_.load(); }
+  [[nodiscard]] auto application_events() const -> std::uint64_t { return application_events_.load(); }
+
+private:
+  std::uint64_t session_id_{ 0 };
+  std::atomic<bool> active_seen_{ false };
+  std::atomic<bool> sent_application_{ false };
+  std::atomic<bool> received_echo_{ false };
+  std::atomic<std::uint64_t> session_events_{ 0 };
+  std::atomic<std::uint64_t> admin_events_{ 0 };
+  std::atomic<std::uint64_t> session_poll_events_{ 0 };
+  std::atomic<std::uint64_t> application_events_{ 0 };
+};
+
 class MultiInitiatorApplication final : public nimble::runtime::ApplicationCallbacks
 {
 public:
@@ -1109,6 +1185,73 @@ TEST_CASE("live-initiator", "[live-initiator]")
   const auto* timer_metrics = timer_engine.metrics().FindSession(1203U);
   REQUIRE(timer_metrics != nullptr);
   REQUIRE(timer_metrics->outbound_messages > 0U);
+}
+
+TEST_CASE("live-initiator-session-poll", "[live-initiator]")
+{
+  auto dictionary = nimble::tests::LoadFix44DictionaryView();
+  if (!dictionary.ok()) {
+    SKIP("FIX44 artifact not available: " << dictionary.status().message());
+  }
+  const auto artifact_path = std::filesystem::path(NIMBLEFIX_PROJECT_DIR) / "build" / "bench" / "quickfix_FIX44.nfa";
+  const auto profile_id = dictionary.value().profile().header().profile_id;
+
+  auto acceptor = nimble::transport::TcpAcceptor::Listen("127.0.0.1", 0U);
+  REQUIRE(acceptor.ok());
+  const auto listen_port = acceptor.value().port();
+
+  std::promise<nimble::base::Status> acceptor_result;
+  auto acceptor_future = acceptor_result.get_future();
+  std::jthread acceptor_thread(
+    [acceptor_socket = std::move(acceptor).value(), dictionary = dictionary.value(), &acceptor_result]() mutable {
+      acceptor_result.set_value(
+        RunAcceptorEchoSession(std::move(acceptor_socket), std::move(dictionary), 2210U, "SELL", "BUY"));
+    });
+
+  nimble::runtime::EngineConfig config;
+  config.worker_count = 1U;
+  config.profile_artifacts.push_back(artifact_path);
+  config.counterparties.push_back(nimble::runtime::CounterpartyConfig{
+    .name = "buy-sell-initiator-session-poll",
+    .session =
+      nimble::session::SessionConfig{
+        .session_id = 1210U,
+        .key = nimble::session::SessionKey{ "FIX.4.4", "BUY", "SELL" },
+        .profile_id = profile_id,
+        .default_appl_ver_id = {},
+        .heartbeat_interval_seconds = 1U,
+        .is_initiator = true,
+      },
+    .store_path = {},
+    .default_appl_ver_id = {},
+    .store_mode = nimble::runtime::StoreMode::kMemory,
+    .recovery_mode = nimble::session::RecoveryMode::kMemoryOnly,
+    .dispatch_mode = nimble::runtime::AppDispatchMode::kInline,
+    .validation_policy = nimble::session::ValidationPolicy::Permissive(),
+  });
+
+  nimble::runtime::Engine engine;
+  REQUIRE(engine.Boot(config).ok());
+
+  auto application = std::make_shared<PollDrivenInitiatorApplication>(1210U);
+  nimble::runtime::LiveInitiator runtime(&engine,
+                                         nimble::runtime::LiveInitiator::Options{
+                                           .poll_timeout = std::chrono::milliseconds(25),
+                                           .io_timeout = std::chrono::seconds(5),
+                                           .application = application,
+                                         });
+
+  REQUIRE(runtime.OpenSession(1210U, "127.0.0.1", listen_port).ok());
+  REQUIRE(runtime.Run(1U, std::chrono::seconds(10)).ok());
+  REQUIRE(acceptor_future.get().ok());
+  REQUIRE(runtime.completed_session_count() == 1U);
+  REQUIRE(application->active_seen());
+  REQUIRE(application->sent_application());
+  REQUIRE(application->received_echo());
+  REQUIRE(application->session_poll_events() > 0U);
+  REQUIRE(application->session_events() >= 3U);
+  REQUIRE(application->admin_events() >= 2U);
+  REQUIRE(application->application_events() == 1U);
 }
 
 TEST_CASE("live-initiator-queue", "[live-initiator-queue]")

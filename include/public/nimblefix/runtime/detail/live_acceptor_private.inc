@@ -86,6 +86,8 @@ RestoreAppliedSequenceState(ActiveSession& session) const -> base::Status;
 auto
 PollManagedApplicationWorker(std::uint32_t worker_id) -> base::Status;
 auto
+PollApplicationSessions(WorkerShardState& shard, std::uint64_t timestamp_ns) -> base::Status;
+auto
 DrainWorkerCommands(std::uint32_t worker_id, std::uint64_t timestamp_ns) -> base::Status;
 auto
 RefreshConnectionTimer(WorkerShardState& shard, ConnectionState& connection, std::uint64_t timestamp_ns) -> void;

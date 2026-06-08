@@ -50,6 +50,12 @@ public:
     return base::Status::Ok();
   }
 
+  virtual auto OnSessionPoll(InlineSession<Profile>& session) -> base::Status
+  {
+    (void)session;
+    return base::Status::Ok();
+  }
+
   virtual auto OnSessionClosed(Session<Profile>& session, std::string_view text) -> base::Status
   {
     (void)session;

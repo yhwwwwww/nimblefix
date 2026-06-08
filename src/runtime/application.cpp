@@ -91,6 +91,13 @@ ApplicationCallbacks::OnAppMessage(const RuntimeEvent& event) -> base::Status
 }
 
 auto
+ApplicationCallbacks::OnSessionPoll(const RuntimeSessionPoll& poll) -> base::Status
+{
+  (void)poll;
+  return base::Status::Ok();
+}
+
+auto
 EchoApplication::OnAppMessage(const RuntimeEvent& event) -> base::Status
 {
   return event.handle.Send(message::MessageRef::Borrow(event.message_view()));

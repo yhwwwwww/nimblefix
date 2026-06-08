@@ -116,6 +116,9 @@ public:
   }
   [[nodiscard]] auto raw_handle() const -> const session::SessionHandle& { return handle_; }
 
+  auto wakeup() const -> base::Status { return handle_.Wakeup(); }
+  auto logout(std::string text = {}) const -> base::Status { return handle_.Logout(std::move(text)); }
+
   template<class Msg, class Populate>
   auto send(Populate&& populate, SendExtras extras = {}) -> base::Status
   {
@@ -150,6 +153,9 @@ public:
     return snap.ok() && snap.value().is_warmup;
   }
   [[nodiscard]] auto raw_handle() const -> const session::SessionHandle& { return handle_; }
+
+  auto wakeup() const -> base::Status { return handle_.Wakeup(); }
+  auto logout(std::string text = {}) const -> base::Status { return handle_.Logout(std::move(text)); }
 
   template<class Msg, class Populate>
   auto send(Populate&& populate, SendExtras extras = {}) -> base::Status
