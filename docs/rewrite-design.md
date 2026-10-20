@@ -1,12 +1,13 @@
 # NimbleFIX 從零重寫設計提案
 
 - 日期：2026-10-20
+- 最近修訂：2026-10-21
 - 分支：`rewrite/usability-first`
 - 原版基準：`d74031b85af5cb9dbb11eec62a11881d99cae594`
 
 本文件是新實作的設計基線。本分支目前只有設計文檔；文中的 API、命令、檔案結構與驗收目標均為提案，尚未實作，也不代表已有相應效能或相容性成果。
 
-本次修訂確定三項基線：正式 session 一律使用檔案支援的 mmap queue；initiator 與 acceptor 都有完整的使用流程；業務字典為可選能力，基本 tag-value 收發不要求載入字典或執行 codegen。
+設計基線：正式 session 一律使用檔案支援的 mmap queue；initiator 與 acceptor 都有完整的使用流程；業務字典可選且只使用 XML；generated getter/setter 與編譯期已知 tag 的收發介面共用 slot 表示與編碼後端。基本收發不要求使用者提供字典或執行 codegen，只有運行期才確定的動態 tag / 欄位結構允許使用字串追加路徑。
 
 ## 1. 我會把 NimbleFIX 做成甚麼
 
@@ -21,6 +22,7 @@
 - 完整的 session 生命週期、序號、重發與恢復能力。
 - 每個正式 session 都有可恢復的 mmap queue store，沒有 memory store 選項。
 - 不依賴業務字典的基本收發，以及可選的字典驅動型別化訊息與多層 repeating group。
+- 字典統一為 XML；預生成的欄位名稱與直接使用靜態 tag 都在編譯期歸一為 slot 存取，不形成兩套不同成本的編碼器。
 - 對效能作分層量測，對第三方提供簡單且有文件的介面。
 
 設計決策按以下順序取捨：
@@ -61,7 +63,8 @@ Router、HA、自動接管、熱更新、Orchestra 行為規則、Web 管理介�
 | 接受多個客戶端 | listener、允許的 session 身份、認證和資源上限可以分開配置 | 多個 initiator 同時登入、隔離錯誤，並回覆原 session |
 | 重啟 acceptor | 同一客戶端重新登入時恢復自己的序號和重發資料，不受 TCP 來源端口改變影響 | 停止或終止服務後重新接入，驗證 session 身份與雙向 replay |
 | 從其他執行緒下單 | 一般發送 handle 能安全使用，不受 callback 曾在哪條執行緒發送所影響 | 多生產者、callback 同時回覆及重連壓力測試 |
-| 加入自訂欄位 | 修改一份可閱讀的 schema 輸入，建置系統自動生成並驗證 | 修改 schema 後只觸發必要的重新生成與編譯 |
+| 加入自訂欄位 | 修改 XML 字典，建置系統自動生成並驗證；不區分基底與擴充字典角色 | 修改 XML 後只觸發必要的重新生成與編譯 |
+| 直接按 tag 填值 | 編譯期已知的 tag 與 generated setter 共用 slot 與 encoder，運行期值不影響這項保證 | 比較相同消息形狀的 layout、wire 結果、配置次數與效能 |
 | 發送失敗 | 能區分尚未接受、已接受但傳送失敗，以及對手方業務拒絕 | 針對各故障點驗證結果、事件與日誌 |
 | 部署工具 | 執行檔離開原始碼目錄後仍可使用 | 移走原始碼、變更工作目錄後重跑案例 |
 | 調校延遲 | 知道預設成本，能明確選擇 inline 與資源上限 | 對每種模式公布完整量測條件與結果 |
@@ -84,7 +87,7 @@ Router、HA、自動接管、熱更新、Orchestra 行為規則、Web 管理介�
 
 不再要求使用者自行安排 Boot、LoadProfiles、Bind、建構 live wrapper 和開啟 listener 的順序。schema 綁定、資源初始化與執行緒建立都屬於引擎生命週期的一部分。
 
-無字典與 typed 模式都使用相同的 session、發送結果與恢復契約；差別集中在業務訊息的建構、存取與驗證能力。codec-only、raw inspection 與手動驅動迴圈仍可獨立使用。
+無字典與 typed 模式都使用相同的 session、發送結果與恢復契約。generated 欄位名稱提供便利的開發介面；編譯期已知的 tag 也直接填 slot，不因缺少業務字典而改用字串拼接。真正運行期決定的 tag / 欄位結構使用明確的動態入口。codec-only、raw inspection 與手動驅動迴圈仍可獨立使用。
 
 ### 4.1 目標 API：typed initiator
 
@@ -370,7 +373,7 @@ callback 的 `context.send()` 依具體 execution policy 選擇正確路徑：in
 | --- | --- | --- |
 | framing、BodyLength、CheckSum | 支援 | 支援 |
 | Logon、心跳、序號、重發與 mmap queue 恢復 | 支援，由內建 session 規則處理 | 相同契約 |
-| 發送不帶 group 的有序 tag-value | 支援，使用者提供業務 tag 與值 | 支援，另提供 generated setter |
+| 發送不帶 group 的有序 tag-value | 支援；靜態 tag 在編譯期形成 slot plan，值可在運行期填入 | 相同 slot / encoder，另提供 generated setter |
 | 解析一般不含內嵌 SOH 的欄位 | 支援，保留有序欄位與原始值 | 支援，另提供型別與名稱 |
 | 依明確型別轉換數值 / 時間 | 支援，呼叫者指定轉換型別並檢查結果 | 可由 schema 選擇型別 |
 | 業務 required field、enum、欄位歸屬與順序驗證 | 沒有業務定義便無法完整驗證 | 依 schema 驗證 |
@@ -379,20 +382,20 @@ callback 的 `context.send()` 依具體 execution policy 選擇正確路徑：in
 
 因此，最小接入入口是 `Engine<>`，不必先提供字典。相同的 `add_initiator()` / `add_listener()` / `add_acceptor()` 適用；儲存與恢復也不能因採 flat 模式而被省略。
 
-下面示意 `Engine<>` 啟動前註冊的基本收發邏輯，不 include generated schema 頭文件：
+下面示意 `Engine<>` 啟動前註冊的基本收發邏輯，不 include generated schema 頭文件。MsgType 與 tag 透過 template 參數成為編譯期資訊；欄位值可以來自實際業務資料：
 
 ```cpp
 // engine 的建立、storage.directory、session 註冊與錯誤檢查同第 4 節。
 engine.on_session_active([](auto& context) {
-    nf::FlatMessage order{"D"};
-    order.field(11, "DEMO-001")
-        .field(21, '1')
-        .field(55, "AAPL")
-        .field(54, '1')
-        .field(60, nf::UtcTimestamp::now())
-        .field(38, 100)
-        .field(40, '2')
-        .field(44, "150.25");
+    auto order = nf::message<"D">()
+        .set<11>("DEMO-001")
+        .set<21>('1')
+        .set<55>("AAPL")
+        .set<54>('1')
+        .set<60>(nf::UtcTimestamp::now())
+        .set<38>(100)
+        .set<40>('2')
+        .set<44>("150.25"_dec);
     return context.send(std::move(order)).status();
 });
 
@@ -407,37 +410,93 @@ engine.on_message([](auto& context, nf::FlatMessageView message) {
 
 上述 raw tag 是使用者明確選擇的業務表達方式；generated API 才負責消除這些數字。引擎管理 8、9、35、34、49、56、52、10 等 session / framing 欄位，禁止以業務欄位重複注入，並自動計算長度與校驗碼。
 
-`FlatMessage::field()` 保留插入順序、取得欄位值的所有權，拒絕非法 tag、受管理欄位、重複的 flat 欄位及非法分隔符；它不宣稱已驗證 NewOrderSingle 的完整業務內容。發送端需按對手方要求填入欄位並保持必要順序。
+`message<MsgType>().set<Tag>()...` 以型別攜帶有序的欄位集合，形成編譯期 slot layout；沒有 XML 時，宣告順序就是 wire plan 的欄位順序。它取得欄位值的所有權，拒絕非法 tag、受管理欄位、重複宣告的 flat 欄位及非法分隔符，但不宣稱已驗證 NewOrderSingle 的完整業務內容。發送端需按對手方要求填入欄位並保持必要順序。
 
 接收 view 保留原始欄位次序，不把重複 tag 壓成一個 map 值。`find_unique(tag)` 只有在整個 frame 恰有一個該 tag 時才返回值，缺少與重複分開表示；它不證明欄位屬於最外層。帶 count=1 的未知 group 也可能沒有重複 tag，不能靠「沒有重複 tag」證明沒有 group。
 
-acceptor 同樣可以使用 `on_message()`，在收到的 context 中建立 `FlatMessage` 回覆；不需要先生成所有客戶端業務型別，也不需要透過全域連線表發送。
+acceptor 同樣可以使用 `on_message()`，在收到的 context 中以 `message<MsgType>().set<Tag>()...` 填 slot 並回覆；不需要先生成所有客戶端業務型別，也不需要透過全域連線表發送。
 
 純 codec 使用者另可執行無字典的 frame 編碼與 flat 解析，不啟動 engine。這類無狀態工具可以不開 store；一旦使用正式 FIX session 收發，就仍須使用 mmap queue 並由 session core 管理序號。
 
-### 7.2 型別化與自訂 schema 是可逐步加入的能力
+### 7.2 XML 是唯一的字典文件格式
 
-套件提供建置時生成的 FIX 4.4 型別及描述資料，範例與一般使用者直接 include。標準使用路徑不要求 runtime 尋找來源倉庫內的 `.nfa`。
+放棄 `.nfa`、`.nfd`、`.nfo` 及其編譯、載入和部署流程；字典只使用 FIX XML，不另設 overlay 格式或身分。schema 可以來自一份 XML，也可以由多份相同格式的 XML 共同提供定義；venue 擴充也直接用 XML 表達，不把第一份視為基底、後續份視為隱含覆寫層。
 
-自訂 schema 保留 codegen，但輸入從使用者已經持有的 FIX XML 字典開始；以一種有版本的 overlay 表達 venue 擴充。第一版不另要求學習中介 `.nfd` 格式。
+多份輸入依欄位、component、message 與 group 的識別合併，最終引用必須完整。完全相同的定義可去重，互相衝突的定義回報雙方 XML 來源位置，不能靠輸入次序靜默覆寫。wire 欄位順序來自 XML 中明確的結構定義，不來自載入文件的先後。
 
-生成器輸出：型別化欄位、enum、message builder/view、group 描述、驗證資料與 schema fingerprint。標準與自訂 schema 使用同一生成器，不維護兩套手寫訊息模型。
+使用方式只有以下三種，不產生額外的字典 artifact：
 
-建置 helper 自動安排生成依賴、include 路徑及增量重建。輸出放在目前 build directory，內容可重現；來源目錄保持可唯讀。
+- 不提供 XML：使用編譯期 tag / 欄位集合進行基本收發，協議核心保留內建的最小 wire 規則。
+- 事先從 XML 生成 C++：取得有名稱的 getter/setter、enum、訊息與 group 描述，以及編譯期 slot layout。套件提供已生成的標準 FIX44 元件，使用者直接 include。
+- 在需要的工具或應用啟動時直接讀 XML：建立必要的驗證與解析 metadata；它不能讓編譯期已知的 tag 改走動態字串建構。
 
-fingerprint 由正規化 schema 內容及生成器格式版本決定。需要外部 schema 資產的工具在啟動時檢查一致性；錯誤包含預期與實際 fingerprint、來源路徑及重新生成指令。使用者不必手工管理數字 profile id。
+內部正規化的 schema 模型只存在於生成器或程序記憶體中，不成為另一種使用者需要維護或部署的文件格式。`Fields`、slot descriptor 與 `WireHints` 是 C++ 型別或記憶體內的設定，不是替代 XML 的另一套外部字典語言。
 
-### 7.3 Builder 安全地接受一般 C++ 值
+生成器輸出 C++ getter/setter、slot 描述、group 描述與驗證 metadata。標準與自訂 XML 使用同一生成器；名稱存取與數字 tag 存取使用相同的底層欄位模型。
 
-- 使用者傳入的字串與欄位值在 setter 返回前取得穩定儲存，不能悄悄保留短命的 `string_view`。
+建置 helper 自動安排 XML 依賴、include 路徑及增量重建。生成的 C++ 放在目前 build directory，內容可重現；來源目錄保持可唯讀。使用者不需額外生成、安裝或尋找二進位字典。
+
+若同時使用預生成 C++ 與運行期 XML，fingerprint 僅用來比對正規化 XML 定義與生成器版本，避免定義不一致；錯誤包含預期與實際 fingerprint、XML 來源位置及重新生成指令。不引入手工 profile id 或額外的 fingerprint 文件。
+
+### 7.3 靜態 tag 與 generated API 在編譯期歸一為 slot
+
+發送路徑的分界是 **tag / 欄位結構是否在編譯期已知**，與欄位值是不是運行期產生無關。來自交易流程的 ClOrdID、價格、數量與時間通常在運行期改變，仍然填入既定 slot。
+
+例如，同一個 XML message builder 的兩種寫法：
+
+```cpp
+using Order = nf::fix44::NewOrderSingle::Builder;
+
+Order named;
+named.cl_ord_id(client_order_id).symbol(symbol);
+
+Order tagged;
+tagged.set<11>(client_order_id).set<55>(symbol);
+```
+
+兩者的結構都歸一為：
+
+```text
+generated setter: cl_ord_id(value) ─┐
+                                   ├─ set_slot<SlotOf<11>>(value)
+static tag:       set<11>(value) ───┘
+                                         │
+                               SlotStorage + presence bits
+                                         │
+                              compile-time EncodingPlan
+                                         │
+                                  bounded frame encoder
+```
+
+getter 同理：在已知 message layout 下，有名稱的 `view.cl_ord_id()` 與 `view.get<11>()` 使用同一個接收 slot / offset，不各自實作查找和轉換。在無 schema 的通用 view 中，parser 仍保留有序欄位與 offset 索引；不能憑靜態 tag 就假設 wire 上的欄位位置固定。
+
+內部契約如下：
+
+- `SlotLayout` 在編譯期決定欄位的 slot 索引、儲存型別、presence bit、group 子結構及輸出次序；相同 XML message 的兩種存取方式共用同一 layout。
+- `SlotStorage` 保存整數、decimal、時間、enum 的值及變長資料的穩定 byte 儲存。slot 是邏輯欄位位置，不表示變長 FIX frame 中的 byte offset 都是常數。
+- `set<Tag>()` 在編譯期解析到 slot，不能在每次呼叫時查 map、建立 tag 的文字或組裝 `tag=value` 片段。generated setter 只是這個操作的具名入口。
+- `EncodingPlan` 包含編譯期已知的 tag prefix、欄位 / group 次序及對應值編碼器。XML 模式依字典 wire 規則排列；無字典模式依明確的欄位宣告順序排列。
+- setter 階段只填 slot、取得值的穩定所有權及記錄建構錯誤，不產生中間 FIX 字串。最終 encoder 才將值寫入有界的連續 frame buffer。
+- 變動值的數字格式化、實際長度、BodyLength、SendingTime、序號和 CheckSum 仍在需要時求值；不能把「編譯期 layout」描述成所有 wire bytes 都能在編譯期決定。
+- 最終 frame 寫入包含必要的 byte copy 與數字輸出，但不經過 `std::string` 加號、`ostringstream` 或逐欄位文字片段追加來建構靜態訊息。
+- 跨執行緒發送攜帶擁有化的 slot payload 與對應 plan，session owner 再填入管理欄位並編碼、提交 mmap queue；不能先拼成字串，之後再解析回 slot。
+- slot 佈局與生成的 C++ 不是磁碟格式；mmap queue 仍保存已定義的記錄及 wire bytes，不保存程序內指標或 C++ 物件佈局。
+
+無 XML 的 `message<MsgType>().set<Tag>()...` 透過有序的 template 欄位集合形成自己的 layout，也進入相同的 slot / encoder 後端。具體做法是讓 fluent expression 的返回型別攜帶欄位形狀；不能假設一般的命令式 lambda 會自動向外回傳它呼叫過的 tag 清單。
+
+需要在運行期條件分支中選填欄位時，先以 `Fields<Field<Tag, Type>...>` 宣告固定 layout，再由 `set<Tag>()` 與 presence bits 決定哪些欄位存在。不能因為某個 optional 欄位這次不填，就把整個訊息降為動態字串路徑。schema-known group 的 entry 數量和欄位值可以在運行期改變，其成員 layout 與編碼 plan 仍然是靜態的。
+
+公開介面以 `set<11>(value)` 明示靜態 tag；不以「希望 compiler 把 `field(11, value)` 內聯折疊」代替這項保證。靜態 builder 不接受運行期 tag 參數，也不提供自動降級 overload；真正需要這項能力時使用 7.7 的動態入口。
+
+### 7.4 Builder 與 view 的所有權契約
+
+- 使用者傳入的字串與欄位值在 setter 返回前取得穩定儲存，不能悄悄保留短命的 `string_view`；把字串內容複製到 byte arena 不等於把欄位提前拼成 FIX 文字。
 - `send()` 返回後不保留 populate lambda 或其引用捕獲。
-- 以預配置的訊息儲存與 byte arena 控制分配；超過設定容量會明確失敗，沒有隱藏的熱路徑 heap fallback。
+- 以預配置的 slot、訊息儲存與 byte arena 控制分配；超過設定容量會明確失敗，沒有隱藏的熱路徑 heap fallback。
 - fluent setter 可以累積第一個建構錯誤，`send()` 統一驗證並回傳欄位路徑；錯誤不會被後續 setter 清除。
 - 有 schema 時，型別、required field、enum、group count、管理欄位衝突在接受發送前完成檢查；無 schema 時只承諾當前 wire / 欄位格式可以驗證的部分。
 - 價格與數量以 decimal / fixed-point 表達；示例的 `"150.25"_dec` 在編譯期解析，外部文字輸入則以可失敗的解析函數處理，避免預設經過二進位浮點數轉換。
 - 時間欄位有明確的 UTC 與精度型別，不把格式化字串當成唯一介面。
-
-### 7.4 View 的生命週期只有一條主要規則
 
 callback 內的 view 有效至 callback 返回。callback context 不可複製或移動，不作為可長期保存的 session handle；需要在外部發送時取得 sender。需要跨 callback、跨執行緒或長期保存訊息時，呼叫明確的 `copy()` / 擁有化入口。
 
@@ -463,17 +522,38 @@ FIX 版本、schema 方言和驗證政策分開建模。多 schema 接收端在�
 
 - `Engine<>` 的基本 flat-text 路徑支援對手方約定不含 group、一般值不含內嵌 SOH 的訊息，不進行業務 schema 驗證。
 - 內建支援版本的管理訊息與標準 Length/Data 配對由小型 wire 規則表處理，不要求載入整份業務字典。
-- 自訂二進位欄位可另外宣告 `WireHints` 的 Length/Data 配對，發送使用明確的 `data(length_tag, data_tag, bytes)` 入口；這不等於啟用整份業務 schema。
+- 自訂二進位欄位可另外宣告 `WireHints` 的 Length/Data 配對；靜態發送使用 `data<LengthTag, DataTag>(bytes)` 填入對應 slot，長度可在運行期決定。這不等於啟用整份業務 schema。
 - 既沒有配對又可能收到自訂 Data 時，不宣稱支援完整欄位解析。可以保留依 BodyLength 取得的 opaque frame 作檢視，不能猜測二進位邊界。
 - 不能自動辨識所有未知 group 或自訂 Data。flat-text 模式的輸入範圍是與對手方的明確契約，不是 parser 可以無中生有驗證的條件。
 - 需要讀取 group、檢查欄位歸屬或完整業務有效性時，補上相應結構定義，仍沿用相同的 session、store 與發送結果契約。
+
+### 7.7 只有真正的運行期 tag / 欄位結構允許字串追加
+
+當 tag、欄位集合或次序只能由運行期資料決定，例如讀取未知欄位表、互動式工具或通用轉接器時，才使用顯式的 `DynamicMessage` / 動態欄位入口：
+
+```cpp
+nf::DynamicMessage message{runtime_msg_type};
+for (const auto& field : runtime_fields) {
+    message.field(field.tag, field.value);
+}
+auto sent = context.send(std::move(message));
+```
+
+這個入口允許有界的 tag-value 文字追加，也可在合適時使用運行期 slot；不強制使用低效率的通用字串串接實作。其容量、配置、欄位順序與格式化成本必須單獨量測。
+
+值在運行期改變，甚至 MsgType 的文字在運行期改變，都不足以把已知欄位 layout 降級為動態拼接。是否採動態欄位路徑取決於欄位結構是否真的未知，以及使用者是否明確選擇這個入口。
+
+動態入口仍取得值的所有權、拒絕管理欄位注入並遵守 Data 配對、容量和 session 規則；它不能接收任意片段繞過 framing、序號或 mmap queue。若日後支援靜態與動態欄位混合，只有明確的動態節點可以追加文字，已知部分仍使用原來的 slot plan，不能整體降級。
 
 ## 8. 內部架構：讓核心足夠小、足夠可驗證
 
 ```mermaid
 flowchart TD
     App[使用者程式 / CLI] --> API[Engine / SessionConfig / Sender]
-    API --> Runtime[Runtime 與執行策略]
+    API --> Slots[靜態 Slot payload / EncodingPlan]
+    API --> Dynamic[明確的運行期動態欄位]
+    Slots --> Runtime[Runtime 與執行策略]
+    Dynamic --> Runtime
     Runtime --> Delivery[Callback 投遞與命令通道]
     Runtime --> Driver[Session driver]
     Driver --> Core[確定性的 Session core]
@@ -487,6 +567,7 @@ flowchart TD
 依賴方向保持單向：
 
 - codec 不依賴 socket、執行緒、store 或 engine。
+- message 層統一定義 slot layout、欄位值、view offset 與編碼 plan；XML 生成的介面和直接靜態 tag 共用此層。動態欄位入口與靜態 slot 路徑有明確邊界。
 - session core 接收已定義的事件，輸出明確的 action，不直接讀時鐘、開 socket 或同步呼叫業務程式。
 - driver 解譯 action、協調 mmap queue 與 transport，將 append、同步完成或失敗結果送回 core。
 - runtime 安排 session owner、命令與投遞資源，不複製 initiator / acceptor 的協議邏輯。
@@ -593,7 +674,7 @@ group commit 是同步排程政策，不是第三種 store。一次同步可以�
 | `nimblefix init` | 產生配對的 initiator / acceptor 設定與獨立 store 目錄配置；遇到既有檔案預設拒絕覆寫 |
 | `nimblefix validate --config PATH` | 離線檢查格式、跨欄位規則、資源與本機功能相容性 |
 | `nimblefix run --config PATH` | 執行 initiator / acceptor，顯示生命週期與結構化錯誤 |
-| `nimblefix schema ...` | 自訂字典生成、檢查及摘要 |
+| `nimblefix schema ...` | XML 字典檢查、摘要及 C++ getter/setter 生成，不產出另一種字典格式 |
 | `nimblefix inspect ...` | 查看 flat 訊息、schema 或 mmap queue，預設唯讀；無 schema 時不假造 group 結構 |
 | `nimblefix doctor` | 顯示編譯能力、TLS/backend 狀態與本機設定問題 |
 | `nimblefix bench ...` | 執行明確指定邊界的量測；屬於可選開發元件 |
@@ -661,7 +742,9 @@ password_env = "FIX_PASSWORD"
 
 加入另一位客戶時，在同一 listener 下新增 session 與自己的認證政策；store 依協議身份分開，不以 listener 的一個序號服務全部客戶。
 
-CLI 的 `dispatch` 在啟動時選擇 queued 或 inline engine 實例；`schema = "none"` 或省略 schema 選擇無業務字典的 flat 模式，`schema = "fix44"` 選擇內建 typed 模式。兩種角色都適用，其他連線與儲存設定不變。第一版同一 engine 使用一個業務模式；多 schema listener 路由屬後續擴充，不能用尚未實作的混合設定暗示支援。設定不能在穩態收發時改變 execution policy。
+CLI 的 `dispatch` 在啟動時選擇 queued 或 inline engine 實例；`schema = "fix44"` 選擇預生成的 C++ typed 綁定，`schema = "none"` 或省略 schema 不啟用具名綁定。兩種角色都適用，其他連線與儲存設定不變。第一版同一 engine 使用一個業務模式；多 schema listener 路由屬後續擴充，不能用尚未實作的混合設定暗示支援。設定不能在穩態收發時改變 execution policy。
+
+若需要直接讀取業務字典，使用 `dictionary = "./venue-FIX44.xml"` 指定 XML，不另提供基底 / 擴充模式。`schema` 指已生成的 C++ 綁定，`dictionary` 指 XML 來源；兩者同時存在時檢查定義一致性，兩者都沒有時才完全不啟用業務 schema。沒有預生成綁定但有 XML 的工具可使用通用 callback 與 XML 驗證資料，不能假造有名稱的 C++ 方法。
 
 設定契約：
 
@@ -690,7 +773,7 @@ venue.toml:12:12: invalid_value [sessions.venue-a.endpoint]
   fix: set endpoint to a valid remote host and port
 ```
 
-同樣要求適用於 XML、overlay、schema 與 journal 診斷。提供穩定的錯誤代碼及 JSON 輸出；人類可讀文字可以改善，不作為程式解析介面。
+同樣要求適用於 XML 字典、schema 綁定與 journal 診斷。提供穩定的錯誤代碼及 JSON 輸出；人類可讀文字可以改善，不作為程式解析介面。
 
 ## 11. 可觀察性是基本能力
 
@@ -730,20 +813,20 @@ xmake run hello-fix --self-test
 
 TLS、系統執行緒或可選 backend 的依賴由 target 傳遞，不要求使用者手工猜測 `-lssl`、`-lcrypto` 或 `-luring`。套件檢查版本與必要 component；不支援的功能在預檢時列出。
 
-自訂 schema 提供 xmake rule 與 CMake helper；兩者呼叫同一生成器並驗證其版本。優先支援建置主機與執行目標相同的環境；交叉編譯需要可顯式指定的 host codegen 工具，不能嘗試執行目標平台二進位。
+自訂 XML 字典提供 xmake rule 與 CMake helper；兩者直接從 XML 生成 C++ getter/setter 與 slot plan，不要求中介字典檔。生成器與編譯器共用 slot 定義及驗證型別，不能各自產生行為不同的 backend。優先支援建置主機與執行目標相同的環境；交叉編譯需要可顯式指定的 host codegen 工具，不能嘗試執行目標平台二進位。
 
 公開頭不包含原始碼路徑，不透過可選巨集改變公開物件佈局。第一版公開聲明原始碼相容性範圍，暫不承諾跨 compiler / 標準函式庫的二進位 ABI。
 
 ### 12.3 依賴與生成物保持乾淨
 
 - 核心協議與 codec 的依賴保持精簡；XML / TOML 解析器限於需要的工具或設定元件。
-- 無業務字典模式不需要 XML 解析器、codegen 或完整 FIX application schema；標準管理訊息與 wire 規則直接隨核心提供。typed schema 是可選的已生成元件。
+- 無業務字典模式不需要 XML 解析器、codegen 或完整 FIX application schema；標準管理訊息與 wire 規則直接隨核心提供。直接靜態 tag 的 slot 模板可獨立使用；具名 getter/setter 是從 XML 生成的可選元件。
 - TLS 為明確的建置能力；基本 TCP 不依賴 TLS。
 - Catch2、QuickFIX 與 fuzz 工具只屬於測試或可選 benchmark，關閉相關目標後不能阻礙核心函式庫的 configure / build。
 - 依賴版本與來源固定，離線發行包包含相應來源及授權資訊；建置過程不能暗中下載。
 - 所有輸出寫入 build directory，不同建置目錄互不污染，支援唯讀 source tree。
 - 重建時恢復必要的生成物，不把測試生成資產寫回來源 fixture。
-- 載入 XML 或 overlay 的生成器也要限制深度、項目數與輸入大小，並拒絕未明確允許的外部資源解析。
+- 直接載入 XML 的生成器與工具都要限制深度、項目數與輸入大小，並拒絕未明確允許的外部資源解析；錯誤指向 XML 的檔案、位置與定義名稱。
 - 開始實作時恢復適用的 LICENSE，保留原專案及重新採用之第三方內容的授權與歸屬。
 
 ## 13. 以使用者流程組織測試
@@ -764,6 +847,10 @@ TLS、系統執行緒或可選 backend 的依賴由 target 傳遞，不要求使
 - 短命字串、臨時值、view 複製、巢狀 group 和保留訊息都以生命週期工具驗證。
 - 啟動失敗的資源回收、callback 內停止、重複停止與析構不會死鎖。
 - flat 與 typed 模式都經過相同的 session 和 mmap queue 路徑；不提供記憶體 store 讓部分測試繞過恢復契約。
+- 同一 XML message 的 generated setter 與 `set<Tag>()` 必須填入相同 slot，對相同值產生相同 wire bytes、相同驗證結果及相同生命週期行為；getter 與 `get<Tag>()` 同樣比對。
+- 無 XML 的靜態 tag 形狀也必須使用 slot / EncodingPlan 後端。以可觀察的編碼入口驗證：即使值在運行期改變，靜態案例對動態文字 encoder 的呼叫次數仍須為零。
+- optional presence、變動字串長度、運行期 group entry 數量與分支選填都不能觸發靜態訊息降級；使用運行期 tag 呼叫靜態 builder 則應給出聚焦的編譯失敗。
+- 真正的運行期 tag / 欄位集合只經顯式動態入口，與靜態 encoder 比對相同輸入的 wire 結果及容量錯誤，另測動態欄位的配置與追加成本。
 
 ### 13.3 真實使用流程
 
@@ -779,6 +866,8 @@ store 案例包括程序中止時各 append / commit / 同步邊界、損壞或�
 
 CI 把套件安裝到臨時 prefix，再在倉庫外建置獨立應用。驗證時不提供內部 include、原始碼根目錄或倉庫 build 產物，並測試 TLS 開關、可選 backend 和支援的 build configuration。
 
+分別驗證只有核心元件的靜態 tag 應用，以及直接從 XML 生成 getter/setter 的應用；兩者都不能依賴額外的自訂字典 artifact。XML 修改後必須正確觸發增量生成、編譯與一致性檢查；多份 XML 的角色相同，調換輸入文件次序不改變相容定義的生成結果，衝突則報出來源。
+
 README 的程式碼片段、上手命令和預期輸出由同一批可執行範例產生或檢查。文件中的程式碼若無法編譯，視為產品回歸。
 
 舊版可以作為差異比較對象；協議相容性另以獨立對手方和經核對的標準案例驗證，避免兩端同時存在相同錯誤而互相通過。
@@ -790,11 +879,16 @@ README 的程式碼片段、上手命令和預期輸出由同一批可執行範�
 | 量測邊界 | 包含 | 必須額外標示 |
 | --- | --- | --- |
 | codec | framing、flat / typed 解析、驗證、group 存取、建構與編碼 | 無字典或 schema、訊息大小、group 數、字串複製成本 |
+| 靜態訊息建構 | generated setter、靜態 tag、slot 填充與最終 frame 編碼 | 相同消息形狀、運行期值、presence、配置與複製次數；另列動態路徑 |
 | session | protocol transition、timer、序號、queue 提交、重發 action | mmap queue 確認政策、管理或業務訊息、正常或恢復路徑 |
 | 應用交付 | flat / typed dispatch、queue reader、sender 提交 | queued / inline、producer 數量、callback 工作量 |
 | 端到端 | 真實 socket、重連、TLS、儲存與應用交付 | 機器、核心綁定、負載模型、同步政策、網路條件 |
 
 每層提供 throughput、p50 / p99 / p99.9、分配次數、記憶體與飽和點；同步儲存和恢復路徑不能混進「純 codec」數字。
+
+同一 layout 的具名 setter 與靜態 tag 先驗證共用 slot / plan，再比較完整成本；不能只因某次 compiler 最佳化後數字接近，就認定兩條實作已經統一。API 的型別與後端結構提供這項保證，不承諾所有 compiler 都輸出逐 byte 相同的機器碼。
+
+同時追蹤 XML 生成時間、C++ 編譯時間、template 實例數和 binary 大小。共用相同 layout 的介面應重用 plan，不能為每種 getter/setter 拼法建立一套重複的巨型 encoder；fluent 靜態形狀的中間值搬移也必須納入成本。
 
 正式 session benchmark 一律啟用 mmap queue，分別公布 appended、synced 及 group commit 的結果；不能用 memory store 的成績宣傳可恢復 session 的效能。initiator 與多客戶端 acceptor 分開量測，另外列出 append、同步、page fault、segment 輪替、reader lag 與重啟掃描的成本。
 
@@ -812,6 +906,8 @@ README 的程式碼片段、上手命令和預期輸出由同一批可執行範�
 
 ```text
 include/nimblefix/        少量公開頭與標準 schema 入口
+include/nimblefix/detail/ 安裝所需的 slot / plan 模板支援，不作為直接使用入口
+src/message/             slot、欄位值、view 與共用編碼 plan
 src/codec/               framing、欄位與 group 編解碼
 src/session/             狀態機、版本規則與 action
 src/runtime/             owner、driver、執行策略與命令通道
@@ -821,7 +917,7 @@ src/schema/              生成器共用的 schema 模型
 src/diagnostics/         錯誤、事件與 snapshot
 tools/nimblefix/          單一 CLI
 tools/schema/             字典生成器
-schemas/                 固定版本來源與自訂 overlay 範例
+schemas/                 固定版本及 venue 自訂的 XML 字典
 examples/                flat / typed 收發、acceptor、多客戶端、認證、TLS、重啟、外部 sender
 tests/                   契約、協議、整合與外部消費者驗收
 bench/                   分層量測與固定負載資料
@@ -829,7 +925,7 @@ cmake/                   匯出套件與 schema helper
 docs/                    使用者文件與設計決策
 ```
 
-公開頭直接位於可安裝的 `include/nimblefix`，私有頭留在 `src` 的相應模組。生成細節不作為使用者需要 include 的文件入口。
+公開頭直接位於可安裝的 `include/nimblefix`，私有的非模板實作留在 `src` 的相應模組。需要讓外部應用實例化的 slot / plan 模板支援隨套件安裝於 `detail`，不要求使用者直接 include 或依賴其穩定性；生成細節不作為主要文件入口。
 
 README 聚焦產品定位與第一筆收發，讓使用者分別找到「我要主動連線」及「我要接受客戶連線」的入口。後續文件依任務安排：無字典收發、typed 收發、acceptor 接入與隔離、執行緒、認證/TLS、mmap queue 恢復、自訂 schema、部署排查及效能。各選項都寫出預設值、效果、成本和失敗行為。
 
@@ -840,10 +936,10 @@ README 聚焦產品定位與第一筆收發，讓使用者分別找到「我要�
 | 階段 | 交付內容 | 進入下一階段的條件 |
 | --- | --- | --- |
 | 0：設計基線 | 本提案、公開契約、錯誤與支援範圍 | 對 API 和容量/所有權契約完成審查；尚無可執行產品 |
-| 1：第一條垂直流程 | build / install、無字典 codec、內建 FIX44 schema、基本 core/runtime、真實 mmap queue、雙角色 hello-fix | flat / typed 與 queued / inline 都完成登入、下單、回報、登出；重啟基本序號恢復；外部應用能連結 |
+| 1：第一條垂直流程 | build / install、共用 slot / encoder、靜態 tag、XML 預生成 FIX44 getter/setter、基本 core/runtime、真實 mmap queue、雙角色 hello-fix | 靜態 tag / generated API 與 queued / inline 都完成登入、下單、回報、登出；共用編碼 plan；重啟基本序號恢復；外部應用能連結 |
 | 2：完整 FIX44 session | 全部宣稱的 session 行為、group、分層驗證、acceptor 多客戶端與 backpressure | 支援矩陣、雙角色協議案例、故障注入及獨立對手方驗收通過 |
 | 3：部署與恢復加固 | queue 完整故障恢復、索引、輪替、reader、認證、TLS、時段與診斷 CLI | 雙角色重啟、損壞與同步邊界、資源回收、錯誤輸出及離開來源目錄部署全部通過 |
-| 4：方言與擴充 | XML / overlay、建置 helper、其他 FIX 版本、手動驅動 | 各版本獨立驗收，自訂 schema 增量生成，公開 API 維持一致 |
+| 4：方言與擴充 | 自訂 XML、運行期 XML 載入、建置 helper、明確動態欄位入口、其他 FIX 版本、手動驅動 | 各版本獨立驗收，XML 增量生成與一致性檢查，動態成本獨立量測，公開 API 維持一致 |
 | 5：效能與發布 | 壓測、benchmark、依證據優化、文件與套件穩定化 | 預設模式與 inline 都有數據，回歸預算達標，正式發布範圍完全通過驗收 |
 
 階段交付可以只有部分功能，但必須使用最終架構中的真實元件，標明尚未支援的能力；不以固定回應或空實作假裝功能完成。第一階段的連通性示範不等於可投入交易使用。
@@ -867,14 +963,16 @@ README 聚焦產品定位與第一筆收發，讓使用者分別找到「我要�
 | memory store 不能提供程序重啟恢復 | 移除正式 memory backend，從第一個 session 開始使用 mmap append-only queue |
 | 使用方式偏重 initiator | acceptor 有配對程式、獨立 listener / session 設定、多客戶端與重啟驗收 |
 | 字典成為簡單收發的前置障礙 | `Engine<>` 支援 flat 收發；group 與二進位欄位依各自所需結構資訊逐步擴充 |
+| 字典有多種自訂格式與擴充角色 | 只使用 XML，直接生成 C++，不區分基底和覆寫層，不要求二進位字典部署 |
+| 按 tag 填值退化成文字組裝 | generated setter 與靜態 `set<Tag>()` 編譯期歸一為 slot / EncodingPlan，只有顯式動態 tag 入口允許文字追加 |
 
 ## 18. 仍需用實作與量測回答的問題
 
-本提案已選定 mmap queue 作為唯一正式 store、預設同步確認、initiator / acceptor 對等使用、可選業務字典、預設 queued、可選 inline、可多生產者的普通 sender、純 session core、有版本 TOML 及完整安裝套件等方向。以下細節在建立 baseline 後決定，不能先用無依據的 magic number 固化：
+本提案已選定 mmap queue 作為唯一正式 store、預設同步確認、initiator / acceptor 對等使用、可選且只用 XML 的業務字典、靜態 tag 與 generated API 共用 slot / plan、顯式動態入口、預設 queued、可選 inline、可多生產者的普通 sender、純 session core、有版本 TOML 及完整安裝套件等方向。以下細節在建立 baseline 後決定，不能先用無依據的 magic number 固化：
 
 - 每種負載的預設 queue、frame、group、slab 與擁有化容量，以及對應記憶體預算。
 - 多生產者命令通道的實作、爭用成本與 producer lane 的實際收益。
-- builder 的穩定欄位儲存與最終編碼之間，哪些複製可以安全消除。
+- slot 的變長資料儲存、fluent 靜態形狀的中間值搬移、layout / plan 重用，以及最終 frame 編碼之間可安全消除的複製。
 - mmap queue record / segment / index / checkpoint 佈局、讀取 lease、同步與批次政策的成本及故障驗證。
 - 無字典 wire 規則表的支援範圍、局部 group descriptor 介面，以及 flat / typed 共享的解析資料模型。
 - 每個 execution policy 的效能回歸預算、長時間負載下的尾延遲與飽和行為。
