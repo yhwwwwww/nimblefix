@@ -1,8 +1,0 @@
-#pragma once
-
-// Thin re-export of the generated profile API header for test usage.
-// Regenerate via: nimblefix-dictgen --input samples/basic_profile.nfd
-//   --merge samples/basic_overlay.nfd --output build/sample-basic.nfa
-//   --cpp-api build/generated/sample_basic_api.h
-
-#include "sample_basic_api.h"

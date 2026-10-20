@@ -1,5 +1,0 @@
-.xmake/
-build/
-audits/
-__pycache__/
-compile_commands.json

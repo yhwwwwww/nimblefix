@@ -1,6 +1,0 @@
-config=../configs/fix44-acceptor.nfcfg
-action|protocol-connect|4401|ts=1
-expect-action|1|outbound=0|disconnect=0
-action|protocol-inbound|4401|seq=1|ts=10|body=35=0
-expect-action|2|outbound=0|disconnect=1|error=1|next-in-after=1
-expect-session|4401|disconnected|1|1|0
