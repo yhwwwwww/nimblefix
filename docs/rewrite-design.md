@@ -23,6 +23,7 @@
 - 每個正式 session 都有可恢復的 mmap queue store，沒有 memory store 選項。
 - 不依賴業務字典的基本收發，以及可選的字典驅動型別化訊息與多層 repeating group。
 - 字典統一為 XML；預生成的欄位名稱與直接使用靜態 tag 都在編譯期歸一為 slot 存取，不形成兩套不同成本的編碼器。
+- slot 是按實際訊息形狀壓縮的邏輯欄位位置；儲存、初始化與編碼成本不能隨最大 tag 或整份 XML 字典大小增長。
 - 對效能作分層量測，對第三方提供簡單且有文件的介面。
 
 設計決策按以下順序取捨：
@@ -127,16 +128,15 @@ int main()
         });
 
     engine.on_session_active([](auto& context) {
-        auto sent = context.template send<nf::fix44::NewOrderSingle>(
-            [](auto& order) {
-                order.cl_ord_id("DEMO-001")
-                    .symbol("AAPL")
-                    .side(nf::fix44::Side::buy)
-                    .transact_time(nf::UtcTimestamp::now())
-                    .order_qty(100)
-                    .ord_type(nf::fix44::OrdType::limit)
-                    .price("150.25"_dec);
-            });
+        auto order = nf::fix44::NewOrderSingle::make()
+            .cl_ord_id("DEMO-001")
+            .symbol("AAPL")
+            .side(nf::fix44::Side::buy)
+            .transact_time(nf::UtcTimestamp::now())
+            .order_qty(100)
+            .ord_type(nf::fix44::OrdType::limit)
+            .price("150.25"_dec);
+        auto sent = context.send(std::move(order));
         return sent.status();
     });
 
@@ -215,18 +215,17 @@ int main()
 
     engine.on<nf::fix44::NewOrderSingle>(
         [](auto& context, nf::fix44::NewOrderSingleView order) {
-            auto sent = context.template send<nf::fix44::ExecutionReport>(
-                [&](auto& report) {
-                    report.order_id(order.cl_ord_id())
-                        .exec_id(order.cl_ord_id())
-                        .cl_ord_id(order.cl_ord_id())
-                        .exec_type(nf::fix44::ExecType::new_order)
-                        .ord_status(nf::fix44::OrdStatus::new_order)
-                        .side(order.side())
-                        .leaves_qty(order.order_qty().value_or(0))
-                        .cum_qty(0)
-                        .avg_px("0"_dec);
-                });
+            auto report = nf::fix44::ExecutionReport::make()
+                .order_id(order.cl_ord_id())
+                .exec_id(order.cl_ord_id())
+                .cl_ord_id(order.cl_ord_id())
+                .exec_type(nf::fix44::ExecType::new_order)
+                .ord_status(nf::fix44::OrdStatus::new_order)
+                .side(order.side())
+                .leaves_qty(order.order_qty().value_or(0))
+                .cum_qty(0)
+                .avg_px("0"_dec);
+            auto sent = context.send(std::move(report));
             return sent.status();
         });
 
@@ -442,26 +441,26 @@ acceptor 同樣可以使用 `on_message()`，在收到的 context 中以 `messag
 
 發送路徑的分界是 **tag / 欄位結構是否在編譯期已知**，與欄位值是不是運行期產生無關。來自交易流程的 ClOrdID、價格、數量與時間通常在運行期改變，仍然填入既定 slot。
 
-例如，同一個 XML message builder 的兩種寫法：
+例如，同一個 XML message 的兩種寫法。fluent expression 同時攜帶實際欄位形狀，不建立涵蓋整個 XML message 的巨型 builder：
 
 ```cpp
-using Order = nf::fix44::NewOrderSingle::Builder;
+auto named = nf::fix44::NewOrderSingle::make()
+    .cl_ord_id(client_order_id)
+    .symbol(symbol);
 
-Order named;
-named.cl_ord_id(client_order_id).symbol(symbol);
-
-Order tagged;
-tagged.set<11>(client_order_id).set<55>(symbol);
+auto tagged = nf::fix44::NewOrderSingle::make()
+    .set<11>(client_order_id)
+    .set<55>(symbol);
 ```
 
 兩者的結構都歸一為：
 
 ```text
 generated setter: cl_ord_id(value) ─┐
-                                   ├─ set_slot<SlotOf<11>>(value)
+                                   ├─ set_slot<SlotOf<Shape, 11>>(value)
 static tag:       set<11>(value) ───┘
                                          │
-                               SlotStorage + presence bits
+                              compact SlotStorage<Shape>
                                          │
                               compile-time EncodingPlan
                                          │
@@ -472,7 +471,7 @@ getter 同理：在已知 message layout 下，有名稱的 `view.cl_ord_id()` �
 
 內部契約如下：
 
-- `SlotLayout` 在編譯期決定欄位的 slot 索引、儲存型別、presence bit、group 子結構及輸出次序；相同 XML message 的兩種存取方式共用同一 layout。
+- `SlotLayout<Shape>` 在編譯期決定該形狀的緊湊 slot 索引、儲存型別、presence bit、group 子結構及輸出次序；相同 schema、message 與 shape 的兩種存取方式共用同一 layout。XML 中其他允許欄位不佔用此實例的 slot。
 - `SlotStorage` 保存整數、decimal、時間、enum 的值及變長資料的穩定 byte 儲存。slot 是邏輯欄位位置，不表示變長 FIX frame 中的 byte offset 都是常數。
 - `set<Tag>()` 在編譯期解析到 slot，不能在每次呼叫時查 map、建立 tag 的文字或組裝 `tag=value` 片段。generated setter 只是這個操作的具名入口。
 - `EncodingPlan` 包含編譯期已知的 tag prefix、欄位 / group 次序及對應值編碼器。XML 模式依字典 wire 規則排列；無字典模式依明確的欄位宣告順序排列。
@@ -487,6 +486,62 @@ getter 同理：在已知 message layout 下，有名稱的 `view.cl_ord_id()` �
 需要在運行期條件分支中選填欄位時，先以 `Fields<Field<Tag, Type>...>` 宣告固定 layout，再由 `set<Tag>()` 與 presence bits 決定哪些欄位存在。不能因為某個 optional 欄位這次不填，就把整個訊息降為動態字串路徑。schema-known group 的 entry 數量和欄位值可以在運行期改變，其成員 layout 與編碼 plan 仍然是靜態的。
 
 公開介面以 `set<11>(value)` 明示靜態 tag；不以「希望 compiler 把 `field(11, value)` 內聯折疊」代替這項保證。靜態 builder 不接受運行期 tag 參數，也不提供自動降級 overload；真正需要這項能力時使用 7.7 的動態入口。
+
+#### 7.3.1 先區分兩種稀疏，不能只把 tag 改名為 slot
+
+- **tag 數字稀疏**：只有 `11、55、900001` 三個欄位。對應的實體 slot 是 `0、1、2`，不能配置 `max_tag + 1` 格陣列或以 tag 數值作 byte offset。靜態 tag 到 shape-local slot 的關係在編譯期求得。
+- **欄位出現稀疏**：XML 允許某訊息有很多 optional 欄位，但每次只填少量。即使 tag 已壓縮成連續編號，若每個實例仍為全部允許欄位配置、初始化和掃描，也會浪費記憶體及時間。
+
+以下成本模型區分幾個量：`N` 是 XML 中該 message 允許的欄位數，`S` 是發送 shape 宣告的欄位數，`K` 是本次實際存在的欄位數，`B` 是實際欄位內容與 wire bytes。正常稀疏發送應使 `S` 接近 `K`，而不是讓 `S = N`。
+
+| 做法 | 實例成本 | 問題或適用範圍 |
+| --- | --- | --- |
+| 以 tag 數字索引大陣列 | 隨最大 tag 增長 | 數字稀疏時不可接受 |
+| 全 XML message 的 dense slots | 儲存 / 初始化隨 `N` 增長，完整編碼掃描也隨 `N` 增長 | 壓縮了 tag 數字，仍未處理 optional 欄位稀疏 |
+| shape-local compact slots，主要快路徑 | 儲存與建構隨 `S` 及使用的 byte 儲存增長；只處理 shape 或存在欄位 | `S` 小且接近 `K`，不依賴字典的其他欄位 |
+| 大範圍 mutable builder 的稀疏儲存 | 實際值可隨 `K` 增長，但需付索引、首次觸碰及有序列舉成本 | 只有確實需要此能力時提供，不宣稱與緊湊 shape 成本相同 |
+
+例如，純為說明成本，假設每格均為 16 bytes：一份允許 2,000 個欄位的 message 若只填 12 個，完整 dense slots 為 32,000 bytes，12-slot shape 則為 192 bytes。這尚未計入對齊、presence、metadata、變長內容與管理 header，並非實際實作尺寸或量測結果。
+
+真正的收益來自避開運行期 tag 查找、提前確定 prefix 與欄位編碼器，以及減少無用的初始化、掃描和資料搬移。slot 本身的名稱或一次 `O(1)` setter，不能證明整筆訊息更快。
+
+#### 7.3.2 完整 schema 與每個發送實例分開
+
+XML 生成的 `SchemaDescriptor` 保存完整合法欄位、canonical wire rank、required / conditional 規則及 group 定義，作為共享、唯讀的 metadata。它不決定每個訊息實例都要配置多少欄位值。
+
+`Shape` 保存這個發送形式會使用的欄位集合。named setter 與 `set<Tag>()` 對相同 shape 產生同一 layout；值、presence 組合和 group entry 數量不各自生成新的 shape。以 schema 和 shape 共用 plan，不按 lambda 的來源位置重複生成，也不展開所有 optional 欄位組合。
+
+常規快路徑採 `make().named_setter(...)...` 或 `message<MsgType>().set<Tag>()...` 的型別化 expression。需要命令式條件填值時，先宣告小型 `Shape` / `Fields`，再使用 `send<Message, Shape>(populate)`；以少量可選 slot 表達必要的分支。
+
+不把無 shape 限制的 mutable lambda 宣稱為零額外成本的 shape 推導方式。C++ 呼叫介面若沒有攜帶其欄位集合，就不能假設 compiler 能把一份涵蓋全 XML 的大 builder 自動縮到實際使用的幾格。若後續提供全 schema mutable builder，它仍填 slot，必須使用另外驗證過的稀疏儲存策略並揭露成本，不能默默改走文字追加。
+
+slot 的值儲存依型別對齊與壓縮，讓常用欄位集中在少量 cache lines；不要求每格使用能容納所有型別的巨大 variant。字串等變長資料放在只記錄實際使用量的 byte arena，不為每個 optional 字串配置其最大長度。重用 pool 可以有明確容量上限，但每次不能清零整個容量、複製整個 builder 或把未使用的容量送進命令佇列。
+
+fluent expression 也有自己的風險：若每追加一個欄位都重建 tuple 並搬移之前的所有值，`K` 次 setter 可累積成 `O(K²)` 次欄位搬移，變長內容更可能反覆複製。需驗證暫存節點、arena handle 與一次物化的實作，並提供可重用的明確 shape 建構方式；不能把 compiler 必定消除全部中間搬移當作 API 保證。
+
+inline 情境允許 compiler 在遵守所有權與錯誤契約下消除中間 slot 物件或搬移；queued 情境則只擁有化並交接所需的 slot 與 bytes。統一 slot 中間表示不代表所有模式都必須經過一次實體的大物件複製。
+
+#### 7.3.3 初始化、presence 與有序編碼一起處理
+
+小型固定 shape 可直接使用緊湊 presence bits 和短 plan；只有真正的 optional 欄位需要 presence 判斷。大量可能欄位而 `K` 很小的情境，不能只增加一個大 bitmap 然後仍逐格或逐 word 掃描。
+
+掃描 `S` 個 slot 的成本是 `O(S)`；掃描所有 bitmap word 仍是 `O(S / word_bits)` 加上輸出成本。bit scan 能加速列舉已存在欄位，但不會自動消除未碰觸 word 的掃描。
+
+大而稀疏的已宣告集合需比較 active-slot list、touched-word list、分層 presence 或分塊儲存等策略。重複 setter 不可重複登記同一 active slot；一輪結束只清除本輪觸碰或建構的狀態，不讀取未初始化值，也不殘留上一筆的 presence 或資料。若使用 generation stamp，需計入 stamp 索引空間、併發隔離和計數回繞的處理，不能把成本藏進全域表。
+
+canonical wire order 不能被 setter 呼叫順序取代。小型 shape 在編譯期生成正確順序；全 schema 的稀疏 fallback 若採 active list，必須計入按 wire rank 排序或有序列舉的成本，不能把 `O(K log K)` 排序隱藏在聲稱 `O(K)` 的編碼中。排序只操作索引，不搬動變長值。
+
+required / conditional 驗證仍依承諾執行：能由 shape 判定的缺失在編譯期診斷，其餘依已生成的規則與存在欄位檢查。不能為了宣稱成本與 `K` 成正比就略過協議或業務驗證；任意條件規則的成本應另外量測。
+
+此策略同樣適用於 repeating group：依實際 entry 與各 entry 的 shape 儲存，不把所有可能成員與最大 entry 數的乘積配置成每筆訊息的實例大小。
+
+#### 7.3.4 接收端不為整份字典清零或物化
+
+接收仍須掃過實際 wire bytes，至少支付與訊息內容相關的解析成本；靜態 getter 不能消除這項工作。parser 對本筆出現的欄位建立緊湊 offset / length 索引，或依已宣告的接收 projection 填入小型 slot 集合，避免每筆建立或清零全 schema 的值物件。
+
+tag 值分布很稀疏時，wire tag 到 schema 欄位或 projection 的識別成本也要計入。靜態 decoder 可以共用生成的分派資料，但不因此默認使用按最大 tag 配置的大表。已知 layout 的具名 getter 與 `get<Tag>()` 共用存取路徑；通用 flat view 保留明確的查找成本，不能把缺少 projection 的通用查找也宣稱為直接 slot 存取。
+
+解析、保留原始欄位、型別轉換與驗證分別量測；不把「只讀少量 getter」和「只驗證少量欄位」混為一談。沒有被應用讀取的欄位，仍可能需要為 framing、group、合法性及 replay 保留或檢查。
 
 ### 7.4 Builder 與 view 的所有權契約
 
@@ -847,10 +902,14 @@ TLS、系統執行緒或可選 backend 的依賴由 target 傳遞，不要求使
 - 短命字串、臨時值、view 複製、巢狀 group 和保留訊息都以生命週期工具驗證。
 - 啟動失敗的資源回收、callback 內停止、重複停止與析構不會死鎖。
 - flat 與 typed 模式都經過相同的 session 和 mmap queue 路徑；不提供記憶體 store 讓部分測試繞過恢復契約。
-- 同一 XML message 的 generated setter 與 `set<Tag>()` 必須填入相同 slot，對相同值產生相同 wire bytes、相同驗證結果及相同生命週期行為；getter 與 `get<Tag>()` 同樣比對。
+- 相同 schema、message 與 shape 的 generated setter 和 `set<Tag>()` 必須填入相同的緊湊 slot，對相同值產生相同 wire bytes、相同驗證結果及相同生命週期行為；getter 與 `get<Tag>()` 同樣比對。
 - 無 XML 的靜態 tag 形狀也必須使用 slot / EncodingPlan 後端。以可觀察的編碼入口驗證：即使值在運行期改變，靜態案例對動態文字 encoder 的呼叫次數仍須為零。
 - optional presence、變動字串長度、運行期 group entry 數量與分支選填都不能觸發靜態訊息降級；使用運行期 tag 呼叫靜態 builder 則應給出聚焦的編譯失敗。
 - 真正的運行期 tag / 欄位集合只經顯式動態入口，與靜態 encoder 比對相同輸入的 wire 結果及容量錯誤，另測動態欄位的配置與追加成本。
+- 固定實際 shape，只增加 XML 中不參與該訊息的 optional 欄位或擴大 tag 數字間距時，實例 slot 數、清零量與靜態 plan 遍歷數不能跟著增長；tag 文字位數變化所增加的 wire bytes 另外核對。
+- 重用同一儲存池交替發送不同 presence、不同長度及不同 group entry 數的訊息，確認不輸出上一筆留下的欄位、未初始化值或過期 arena offset。
+- setter 呼叫順序與 XML canonical wire rank 不同時仍輸出正確順序；重複 setter 的 active 登記、索引排序與 generation stamp 回繞有獨立案例。
+- 排入命令佇列的 slot / byte payload 按實際使用量交接，不以完整 schema builder 或最大 arena 容量作為複製大小；owned 與 borrowed 生命週期契約維持一致。
 
 ### 13.3 真實使用流程
 
@@ -886,9 +945,32 @@ README 的程式碼片段、上手命令和預期輸出由同一批可執行範�
 
 每層提供 throughput、p50 / p99 / p99.9、分配次數、記憶體與飽和點；同步儲存和恢復路徑不能混進「純 codec」數字。
 
-同一 layout 的具名 setter 與靜態 tag 先驗證共用 slot / plan，再比較完整成本；不能只因某次 compiler 最佳化後數字接近，就認定兩條實作已經統一。API 的型別與後端結構提供這項保證，不承諾所有 compiler 都輸出逐 byte 相同的機器碼。
+同一 shape-local layout 的具名 setter 與靜態 tag 先驗證共用 slot / plan，再比較完整成本；不能只因某次 compiler 最佳化後數字接近，就認定兩條實作已經統一。API 的型別與後端結構提供這項保證，不承諾所有 compiler 都輸出逐 byte 相同的機器碼。
 
-同時追蹤 XML 生成時間、C++ 編譯時間、template 實例數和 binary 大小。共用相同 layout 的介面應重用 plan，不能為每種 getter/setter 拼法建立一套重複的巨型 encoder；fluent 靜態形狀的中間值搬移也必須納入成本。
+同時追蹤 XML 生成時間、C++ 編譯時間、template 實例數和 binary 大小。共用相同 layout 的介面應重用 plan，不能為每種 getter/setter 拼法建立一套重複的巨型 encoder；fluent 靜態形狀的中間值搬移也必須納入成本，檢查增加 `K` 時有沒有反覆搬移前綴而形成平方成長。
+
+### 14.1 專門驗證稀疏 slot 的成本
+
+slot 是候選的統一中間表示，不是已經量測過的效能結論。基準必須拆開初始化、填值、驗證、presence 列舉、長度計算、編碼、reset 及跨執行緒交接，避免只量最快的一次 setter。
+
+| 測試軸 | 固定條件 | 要找出的退化 |
+| --- | --- | --- |
+| tag 數字間距增大 | 欄位數、值長度、順序和驗證規則不變 | 按最大 tag 配置陣列、識別資料變大；tag 位數增加造成的 wire bytes 另計 |
+| XML 允許欄位數 `N` 增大 | 實際 shape `S`、presence `K` 和相同相關驗證規則不變 | 每實例隱含的完整 builder、全 schema 清零或掃描 |
+| 宣告的 `S` 很大但存在的 `K` 很小 | 實際 payload 與 wire 結果不變 | 大 bitmap 掃描、active 索引、排序與稀疏儲存的真正成本 |
+| 實際 `K` 增加 | tag 位數、值型別和相關規則受控 | slot 建構、遍歷與 reset 的成長曲線，以及 shape / plan 的 code size |
+| 變長內容 `B` 增加 | 相同 shape 與 presence | arena 複製、長度計算、編碼及 queue 交接是否重複搬移 |
+| group 數量與稀疏度改變 | 成員 schema 相同 | 按最大 entry 數或完整成員集合配置與清零 |
+
+候選比較至少包括 shape-local slots、完整 schema dense slots 的測試參考、以 active 索引處理的大型稀疏集合，以及直接生成的有界定序 writer。後者只作內部效能對照，不提供另一套公共訊息 API，也不使用通用字串拼接代替靜態編碼。
+
+除了 latency 與 throughput，記錄實例大小、實際配置量、初始化 / reset bytes、搬移 bytes、slot / bitmap word 遍歷數、active 索引及排序成本，並在可用的量測環境記錄 cache miss 和指令成本。hot / cold 工作集、多 session 並行和排隊後交接都要測，不能只反覆重用一個永遠熱的 message。
+
+固定 `S、K、B` 增加 `N` 時，主要快路徑的實例儲存、清零及 plan 遍歷量應保持不變；這是可直接檢查的結構要求。接收端的 tag 識別、完整驗證規則及共享 metadata 的成本則獨立報告，不承諾它們完全不受 schema 影響。
+
+如果短小訊息的 slot 物化、presence 或二階段編碼比直接定序 writer 更慢，應優先縮小 shape、融合可消除的中間表示與避免重複長度計算；不能僅以「set 是 O(1)」忽略完整路徑的退化。所有消除中間狀態的優化都必須維持 setter 所有權、錯誤檢查與 session 提交契約。
+
+### 14.2 端到端與發布基線
 
 正式 session benchmark 一律啟用 mmap queue，分別公布 appended、synced 及 group commit 的結果；不能用 memory store 的成績宣傳可恢復 session 的效能。initiator 與多客戶端 acceptor 分開量測，另外列出 append、同步、page fault、segment 輪替、reader lag 與重啟掃描的成本。
 
@@ -936,7 +1018,7 @@ README 聚焦產品定位與第一筆收發，讓使用者分別找到「我要�
 | 階段 | 交付內容 | 進入下一階段的條件 |
 | --- | --- | --- |
 | 0：設計基線 | 本提案、公開契約、錯誤與支援範圍 | 對 API 和容量/所有權契約完成審查；尚無可執行產品 |
-| 1：第一條垂直流程 | build / install、共用 slot / encoder、靜態 tag、XML 預生成 FIX44 getter/setter、基本 core/runtime、真實 mmap queue、雙角色 hello-fix | 靜態 tag / generated API 與 queued / inline 都完成登入、下單、回報、登出；共用編碼 plan；重啟基本序號恢復；外部應用能連結 |
+| 1：第一條垂直流程 | build / install、shape-local slot / encoder、靜態 tag、XML 預生成 FIX44 getter/setter、基本 core/runtime、真實 mmap queue、雙角色 hello-fix | 靜態 tag / generated API 與 queued / inline 都完成登入、下單、回報、登出；共用編碼 plan，稀疏 shape 不配置完整 schema；重啟基本序號恢復；外部應用能連結 |
 | 2：完整 FIX44 session | 全部宣稱的 session 行為、group、分層驗證、acceptor 多客戶端與 backpressure | 支援矩陣、雙角色協議案例、故障注入及獨立對手方驗收通過 |
 | 3：部署與恢復加固 | queue 完整故障恢復、索引、輪替、reader、認證、TLS、時段與診斷 CLI | 雙角色重啟、損壞與同步邊界、資源回收、錯誤輸出及離開來源目錄部署全部通過 |
 | 4：方言與擴充 | 自訂 XML、運行期 XML 載入、建置 helper、明確動態欄位入口、其他 FIX 版本、手動驅動 | 各版本獨立驗收，XML 增量生成與一致性檢查，動態成本獨立量測，公開 API 維持一致 |
@@ -965,14 +1047,16 @@ README 聚焦產品定位與第一筆收發，讓使用者分別找到「我要�
 | 字典成為簡單收發的前置障礙 | `Engine<>` 支援 flat 收發；group 與二進位欄位依各自所需結構資訊逐步擴充 |
 | 字典有多種自訂格式與擴充角色 | 只使用 XML，直接生成 C++，不區分基底和覆寫層，不要求二進位字典部署 |
 | 按 tag 填值退化成文字組裝 | generated setter 與靜態 `set<Tag>()` 編譯期歸一為 slot / EncodingPlan，只有顯式動態 tag 入口允許文字追加 |
+| tag 數字或 optional 欄位很稀疏，slot 仍浪費空間與掃描 | 完整 XML metadata 與 shape-local payload 分離；初始化、presence、排序、reset、group 與交接成本獨立驗收 |
 
 ## 18. 仍需用實作與量測回答的問題
 
-本提案已選定 mmap queue 作為唯一正式 store、預設同步確認、initiator / acceptor 對等使用、可選且只用 XML 的業務字典、靜態 tag 與 generated API 共用 slot / plan、顯式動態入口、預設 queued、可選 inline、可多生產者的普通 sender、純 session core、有版本 TOML 及完整安裝套件等方向。以下細節在建立 baseline 後決定，不能先用無依據的 magic number 固化：
+本提案已選定 mmap queue 作為唯一正式 store、預設同步確認、initiator / acceptor 對等使用、可選且只用 XML 的業務字典、靜態 tag 與 generated API 共用 shape-local slot / plan、顯式動態入口、預設 queued、可選 inline、可多生產者的普通 sender、純 session core、有版本 TOML 及完整安裝套件等方向。以下細節在建立 baseline 後決定，不能先用無依據的 magic number 固化：
 
 - 每種負載的預設 queue、frame、group、slab 與擁有化容量，以及對應記憶體預算。
 - 多生產者命令通道的實作、爭用成本與 producer lane 的實際收益。
 - slot 的變長資料儲存、fluent 靜態形狀的中間值搬移、layout / plan 重用，以及最終 frame 編碼之間可安全消除的複製。
+- 大型已宣告集合在低 presence 下應選擇哪種稀疏儲存、列舉與 reset 策略；是否值得提供全 schema mutable builder，以及應公開的成本界線。
 - mmap queue record / segment / index / checkpoint 佈局、讀取 lease、同步與批次政策的成本及故障驗證。
 - 無字典 wire 規則表的支援範圍、局部 group descriptor 介面，以及 flat / typed 共享的解析資料模型。
 - 每個 execution policy 的效能回歸預算、長時間負載下的尾延遲與飽和行為。
