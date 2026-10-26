@@ -67,7 +67,7 @@ def main():
         "allocation_scope": "linker-wrapped direct malloc and overridden C++ new; excludes shared-library internal allocations and aligned new",
         "boundary": "L1 codec only; no session, store, network, syscall tracing, or locks measured",
         "dispatch": "none", "schema": "flat and two-message FIX44 XML subset",
-        "workload": "hot seven-field order; runtime quantity; 1000 warmup per case; timestamp fixed",
+        "workload": "hot seven-field order plus controlled S/K/B matrix and 8192-message rotating working set; 1000 warmup per case; timestamp fixed",
         "storage": "none (stateless codec)",
         "runs": [],
     }
@@ -91,7 +91,7 @@ def main():
                 "loop_ops_per_second": len(samples) * 1e9 / info["wall_ns"],
                 "allocation_calls_per_operation": statistics.mean(int(row["allocation_calls"]) for row in samples),
                 "allocation_bytes_per_operation": statistics.mean(int(row["allocation_bytes"]) for row in samples)})
-            if case in {"fixed_encode", "fixed_build_encode", "frame_flat_parse"} and info["allocation_calls_per_operation"] != 0:
+            if (case in {"fixed_encode", "fixed_build_encode", "frame_flat_parse", "rotating_8192_fixed_encode"} or case.startswith("shape_")) and info["allocation_calls_per_operation"] != 0:
                 raise RuntimeError(f"{case} unexpectedly allocated")
             if len(samples) >= 100000:
                 info["p9999_ns"] = percentile(latencies, .9999)

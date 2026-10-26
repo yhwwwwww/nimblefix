@@ -4,6 +4,9 @@ This records the first implementation slice in §16 of the rewrite design.
 The public surface is experimental C++20: message slots, exact decimal values,
 bounded FIX 4.4 encoding, frame inspection, flat parsing, and a minimal XML
 generator. This slice does not start a FIX session or open a store or socket.
+The subsequent [session/TCP record](session-tcp-slice.md) closes stages 2–3;
+its support matrix describes the current runtime rather than this historical
+codec-only boundary.
 
 ## Public API and invariants
 
@@ -28,6 +31,8 @@ index; a builder view borrows the builder's current storage. A mutation, move,
 reset or destruction can invalidate borrowed views. Builders support exclusive
 ownership and transfer; concurrent mutation/use of the same object is not
 supported. There is no thread-local message lifetime dependency.
+The replay encoder similarly requires distinct output storage from its
+borrowed original frame and header strings.
 
 The XML sample is a two-message subset, not a complete FIX44 dictionary. The
 generator supports `STRING`, `CHAR`, `INT`, `PRICE`, `QTY`, `UTCTIMESTAMP`,
@@ -52,10 +57,11 @@ python3 tests/install_test.py --cxx clang++
 python3 tests/schema_size_test.py
 ```
 
-`xmake check` runs parser, message, generated API and public contract test
-executables, 20 XML generator tests, 12 positive-control-backed compile-fail
-cases, and the codec self-test. GCC 16.2.1 and Clang 23 are verified on Linux.
-The CMake suite has seven CTest entries covering the same contracts.
+`xmake check` now runs the codec contracts together with journal/session/TCP
+tests, 20 XML generator tests, 15 positive-control-backed compile-fail cases,
+and executable examples. GCC 16.2.1 and Clang 23 are verified on Linux.
+CMake runs the corresponding core contracts and installed-consumer tests
+remain separate commands.
 
 The public contract fixture fixes BodyLength=122 and CheckSum=212 independently
 of the encoder. Every truncated prefix, coalesced frames, exact capacity
@@ -131,17 +137,17 @@ fixed-shape construction/encode and flat parse are the allocation-free paths.
 Pooling/reusable fluent storage remains work before claiming an allocation-free
 default engine path.
 
-QuickFIX wire/interoperability checks, cold and mixed working sets, the full
-`S/K/B` matrix, instruction/cache/syscall/lock tracing and dedicated-machine
-repeatability remain gates. The current null case is a fixed-frame byte copy;
-the network echo and independent minimal parse/encode baselines belong to
-the network and performance slices. No relative speedup claim is made.
+Stage 3 adds independent QuickFIX dictionary/wire and TCP interoperability,
+an initial controlled `S/K/B` matrix, an 8,192-message rotating working set,
+independent minimal parse/encode and network echo baselines. These extend the
+initial record rather than changing its old measurements. Full workload
+coverage, instruction/cache/syscall/lock tracing and dedicated-machine
+repeatability remain later gates. No relative speedup claim is made.
 
-Next is §16 stage 2: appended mmap journal, deterministic session core,
-fake clock/transport, receipt and delivery dependency tracking, and crash/short
-write/EAGAIN recovery tests. Production sessions must use the journal from
-their first implementation. The design-baseline commit is the rollback point
-before this stateless implementation.
+The real appended journal, deterministic session core, fake time/transport,
+receipt/delivery tracking and crash/short-write/EAGAIN tests are documented
+in the [stage 2–3 acceptance record](session-tcp-slice.md). The design-baseline
+commit remains the rollback point before this stateless implementation.
 
 Protocol expectations were checked against the FIX Trading Community's
 [TagValue standard](https://fixtrading.org/packages/fix-tagvalue-encoding/),

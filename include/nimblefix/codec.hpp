@@ -81,12 +81,21 @@ struct SessionHeader {
     std::string_view target_comp_id{};
     std::uint64_t msg_seq_num{};
     std::string_view sending_time{};
+    bool poss_dup{};
+    std::string_view orig_sending_time{};
 };
 
 // Encode one complete FIX 4.4 frame into caller-owned storage. On any error the
 // destination span is left unchanged. The result is the number of bytes written.
 // The destination must not overlap message or header input storage.
 [[nodiscard]] Result<std::size_t> encode_fix44(detail::MessageView message,
+    SessionHeader header, std::span<char> output) noexcept;
+
+// Re-encodes a previously parsed FIX 4.4 message for replay. It retains the
+// original MsgSeqNum and OrigSendingTime, sets PossDupFlag=Y and uses the new
+// SendingTime supplied in header. Non-managed body fields are copied verbatim
+// from the original frame, including Length/Data fields.
+[[nodiscard]] Result<std::size_t> encode_fix44_replay(const FlatMessageView& original,
     SessionHeader header, std::span<char> output) noexcept;
 
 template <class Message>

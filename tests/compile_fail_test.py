@@ -27,6 +27,12 @@ GENERATED_CASES = {
     "unknown_generated_field": ('auto x = nf::fix44_sample::NewOrderSingle::make().set<900001>("x");', "not allowed"),
 }
 
+ENGINE_CASES = {
+    "unsupported_engine_schema": ('(void)sizeof(nf::Engine<int>);', "typed Engine<Schema> dispatch is not implemented"),
+    "wrong_message_callback": ('nf::Engine<>& engine = *static_cast<nf::Engine<>*>(nullptr); (void)engine.on_message([](int) {});', "on_message"),
+    "wrong_active_callback": ('nf::Engine<>& engine = *static_cast<nf::Engine<>*>(nullptr); (void)engine.on_session_active([]() {});', "on_session_active"),
+}
+
 
 def main():
     parser = argparse.ArgumentParser()
@@ -47,13 +53,15 @@ def main():
             "--namespace", "nimblefix::fix44_sample", "--output", str(generated),
             str(ROOT / "schemas/fix44-sample.xml")], check=True)
         command.extend(["-I", temp])
-        for name, (body, diagnostic) in (CASES | GENERATED_CASES).items():
+        for name, (body, diagnostic) in (CASES | GENERATED_CASES | ENGINE_CASES).items():
             includes = '#include <nimblefix/fix44_sample.hpp>\n' if name in GENERATED_CASES else ""
+            if name in ENGINE_CASES:
+                includes = '#include <nimblefix/engine.hpp>\n'
             source.write_text(prefix + includes + "int main() { " + body + " }\n")
             result = subprocess.run(command, text=True, capture_output=True)
             if result.returncode == 0 or diagnostic not in result.stderr:
                 raise RuntimeError(f"{name}: expected compile failure containing {diagnostic!r}\n{result.stderr}")
-    print(f"{len(CASES) + len(GENERATED_CASES)} compile-fail contracts passed ({args.cxx})")
+    print(f"{len(CASES) + len(GENERATED_CASES) + len(ENGINE_CASES)} compile-fail contracts passed ({args.cxx})")
 
 
 if __name__ == "__main__":

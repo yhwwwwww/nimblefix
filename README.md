@@ -1,102 +1,106 @@
 # NimbleFIX
 
-An embedded C++20 FIX engine under development, following the
-[rewrite design](docs/rewrite-design.md). The current slice implements the
-stateless FIX 4.4 codec and compact message slots. Session, mmap journal, TCP,
-and `Engine` are scheduled in the subsequent slices; `codec-demo` exercises
-encoding and parsing locally.
+An embedded C++20 FIX engine under development. Stages 1–3 of the
+[rewrite design](docs/rewrite-design.md#16-實作順序與完成條件) provide compact
+message slots, a recoverable appended mmap journal, inline sessions, and
+nonblocking TCP initiator/acceptor flows. Every session uses a file-backed
+journal. The default confirmation is `appended`, without per-message disk sync.
 
-开发按[设计文档第 16 节](docs/rewrite-design.md#16-實作順序與完成條件)推进。
-当前交付 codec / slot 切片；这里的示例还不进行网络登录或交易。
-中文使用说明见 [入门说明](docs/getting-started.zh-CN.md)。
+中文使用说明见[入门说明](docs/getting-started.zh-CN.md)。当前支持范围、验收证据和后续阶段见
+[阶段 2–3 记录](docs/session-tcp-slice.md)及[协议支持表](docs/session-support.md)。
 
-## Build and check
+## First round trip
 
-Linux, a C++20 compiler, xmake 2.9.8 or newer, and Python 3.10 or newer for the
-optional XML generator and its tests. The core library has no third-party
-dependencies and does not download packages. GCC 16.2 and Clang 23 are the
-currently verified compilers.
+Linux, a C++20 compiler, xmake 2.9.8+, and Python 3.10+ for sample generation
+and tests. The core has no third-party dependencies and downloads nothing.
+GCC 16.2 and Clang 23 are the verified compilers.
 
 ```sh
 xmake f -m release
-xmake check
-xmake run codec-demo
+xmake build hello-fix
+xmake run hello-fix --self-test --restart
+xmake run hello-fix --self-test --typed --restart
 ```
 
-`xmake check` builds the library, runs four C++ test executables, checks the XML
-generator and expected compiler diagnostics, and runs `codec-demo --self-test`.
-Set `--tests=n` to build only the core and example. The sample schema is
-generated into the build directory only when a target needs it.
+Each command creates paired TCP endpoints, exchanges Logon, NewOrderSingle,
+a matching New ExecutionReport and Logout, then reopens the same journals
+and repeats with continuing sequence numbers. The harness owns its temporary
+state directory. `--typed` uses generated sample send builders and the same
+encoder; receive callbacks currently use `FlatMessageView` through `Engine<>`.
+
+For two separate terminals, build `acceptor-example` and `initiator-example`,
+then run:
+
+```sh
+# Terminal 1: waits for clients; Ctrl-C requests a bounded Logout shutdown.
+xmake run acceptor-example --state ./state/sell --port 9876
+# Terminal 2: sends one order, checks the matching report, and exits.
+xmake run initiator-example --state ./state/buy --port 9876 --cl-ord-id DEMO-001
+```
+
+Keep each side's state directory across restarts. A new initiator process
+submits a new business order; choose a new ClOrdID when that is intended.
+Application idempotency across process restarts remains application logic.
+Endpoints accept numeric IPv4/IPv6 addresses. The examples' `--help` lists
+their timeout and address options.
+
+## Embed and send
+
+The complete public-API examples are [initiator](examples/initiator.cpp),
+[acceptor](examples/acceptor.cpp), and [paired harness](examples/hello_fix.cpp).
+Create `Engine<>` with an explicit storage directory, register callbacks,
+add endpoints, validate, and run it on one owner thread. `request_stop()`
+can be called from another application thread. Callback context and received
+views are borrowed for that callback only; callback work must stay bounded.
 
 ```cpp
-#include <array>
-#include <nimblefix/codec.hpp>
-
 using namespace nimblefix::literals;
 
 auto order = nimblefix::message<"D">()
-    .set<11>("DEMO-001")
-    .set<55>("AAPL")
-    .set<54>('1')
-    .set<60>("20261026-12:00:00.000")
-    .set<38>(100)
-    .set<40>('2')
-    .set<44>("150.25"_dec);
-
-std::array<char, 1024> buffer;
-auto encoded = nimblefix::encode_fix44(order,
-    {"BUY", "SELL", 1, "20261026-12:00:00.000"}, buffer);
-// Check encoded.ok() before using encoded.value().
+    .set<11>("DEMO-001").set<55>("AAPL").set<54>('1')
+    .set<60>("20261027-12:00:00.000").set<38>(100)
+    .set<40>('2').set<44>("150.25"_dec);
+// Inside an active callback:
+auto accepted = context.send(order);
+// Check accepted.ok(); success means encoded and journaled, not peer receipt.
 ```
 
-The compilable example is [examples/codec.cpp](examples/codec.cpp). These are
-explicit codec header values; a future session owns sequencing and timestamps.
-Flat messages preserve declared field order and do not validate business rules.
-Setters copy strings before returning. Tags are compile-time values; managed
-header/trailer tags and duplicate fluent tags produce compiler diagnostics.
+Strings are copied by setters. Fluent builders are move-only and bounded
+(64 fields / 4096 value bytes by default), with growing owned storage.
+`FixedMessage` provides a fixed arena and allocation-free reset/build/encode.
+The stateless `encode_fix44` API remains available for explicit headers and
+caller buffers; sessions own their sequence numbers and SendingTime.
+See the [codec contracts](docs/codec-slice.md).
 
-Fluent builders own a bounded growing allocation: the defaults are 64 fields
-and 4096 value bytes. They are move-only; allocation failures and capacity
-limits become a sticky `Status`. The explicit `FixedMessage` / `Fields` path
-stores only its declared slots, uses a fixed byte arena, and supports
-allocation-free reuse with `reset()`. Replacing text reclaims its previous
-arena segment. See [contracts and limits](docs/codec-slice.md).
+The optional XML generator supports two sample messages, required fields,
+enums and six scalar types. Named setters and `set<Tag>()` share slots and
+encoding plans. It is a sample FIX44 binding; full FIX44, typed receive
+dispatch, repeating groups, queued callbacks and MPSC senders are stage 4.
+Authentication, TLS, rotation and diagnostic tooling follow in stage 5.
 
-`inspect_frame` handles incomplete/coalesced input. `parse_flat` fills a
-caller-owned `FieldView` span and preserves duplicates in wire order.
-`find_unique` distinguishes missing and duplicate fields. Views borrow both the
-frame and scratch; keep both alive and unchanged while using the view.
-The built-in Length/Data table and optional `WireHints` support binary receive
-values containing SOH; group boundaries require schema information.
-
-## Optional typed schema
-
-The checked-in XML describes two sample messages, rather than a complete FIX44
-dictionary. Named setters and `set<Tag>()` share slots, validation and the
-encoder. XML order determines canonical wire order. Required fields, enums,
-and the supported `STRING`, `CHAR`, `INT`, `PRICE`, `QTY`, `UTCTIMESTAMP` types are
-validated. Groups, components, typed receive getters, and conditional business
-rules are outside this slice. Unsupported XML structures/types fail explicitly.
+## Check, install and deploy
 
 ```sh
-python3 tools/schema/generate.py --namespace venue \
-  --output build/generated/venue.hpp schemas/fix44-sample.xml
+xmake check
+python3 tests/install_test.py --examples
+python3 tests/install_test.py --core-only --examples
 ```
 
-Multiple XML inputs have equal roles: compatible definitions merge regardless
-of input-file order; conflicts include source locations. External resources,
-DTD/entities, excessive nesting and oversized inputs are rejected.
+`xmake check` covers codec/schema contracts, journal kill boundaries,
+deterministic session recovery, real TCP fairness and independent reconnect
+peers, plus separate example processes. Optional independent QuickFIX tests
+use a locally installed prefix: `xmake f --quickfix_dir=/path/to/quickfix`.
+They are separate from the dependency-free core build.
 
-## Install and consume
-
-CMake is provided for installation and external projects:
+CMake supplies the installed package and executables:
 
 ```sh
 cmake -S . -B build-cmake -DCMAKE_BUILD_TYPE=Release
 cmake --build build-cmake -j2
 ctest --test-dir build-cmake --output-on-failure
 cmake --install build-cmake --prefix /tmp/nimblefix-install
-python3 tests/install_test.py
+cd /tmp
+/tmp/nimblefix-install/bin/hello-fix --self-test --restart
 ```
 
 ```cmake
@@ -104,35 +108,28 @@ find_package(NimbleFIX 0.1 CONFIG REQUIRED COMPONENTS core)
 target_link_libraries(my_app PRIVATE NimbleFIX::nimblefix)
 ```
 
-`NIMBLEFIX_BUILD_SAMPLE_SCHEMA=OFF` and `NIMBLEFIX_BUILD_TESTS=OFF` remove the
-Python dependency from a core-only build. The installed
-`nimblefix_generate_schema(TARGET ... NAMESPACE ... HEADER ... XML_FILES ...)`
-helper generates custom headers and tracks XML dependencies. The installation
-test also relocates the package, hides original source/build paths, compiles an
-external consumer, and checks XML regeneration.
+Turn off `NIMBLEFIX_BUILD_SAMPLE_SCHEMA` and `NIMBLEFIX_BUILD_TESTS` for a
+core-only build without Python. The installed `nimblefix_generate_schema`
+helper tracks custom XML inputs. Install tests use a read-only source copy,
+relocate the prefix, hide original source/build paths, compile external
+consumers and run the installed TCP examples elsewhere.
 
-## Verification and measurements
+## Measurements
 
 ```sh
-xmake f -m debug --toolchain=clang --sanitize=y --benchmarks=n -o build-sanitize
-ASAN_OPTIONS=detect_leaks=0 xmake check
-xmake f -m release --toolchain=gcc --sanitize=n --benchmarks=y -o build
-xmake build codec-bench
-python3 bench/run.py --binary build/linux/x86_64/release/codec-bench \
-  --output /tmp/nimblefix-codec-results
-python3 tests/schema_size_test.py
+xmake f -m release --benchmarks=y
+xmake build
+python3 bench/run.py --binary build/linux/x86_64/release/codec-bench --output build/results/codec
+python3 bench/session_run.py --binary build/linux/x86_64/release/session-bench --output build/results/session
+python3 bench/tcp_run.py --binary build/linux/x86_64/release/tcp-bench-server --output build/results/tcp
+python3 bench/tcp_run.py --binary build/linux/x86_64/release/null-tcp-server --echo --output build/results/echo
 ```
 
-LeakSanitizer needs to be disabled only in environments where ptrace prevents
-it from running; AddressSanitizer and UndefinedBehaviorSanitizer remain enabled.
-The optional `--fuzzers=y` Clang configuration builds `parser-fuzz` with
-libFuzzer, ASan and UBSan.
-
-The benchmark preserves compressed raw samples and environment metadata.
-Allocation counts cover wrapped direct `malloc` and C++ `new` in the
-executable; clock overhead and a byte-copy baseline are separate cases.
-These are hot codec measurements, with no session, storage or network result.
-QuickFIX interoperability and dedicated-machine performance gates remain
-pending. See the [slice acceptance record](docs/codec-slice.md).
+The harnesses preserve raw samples and environment metadata, separating codec,
+real-journal session, open-loop TCP and byte-echo boundaries. Journal state
+defaults to `build/bench-state` on the workspace filesystem. The
+[acceptance record](docs/session-tcp-slice.md) explains allocation/sync checks,
+measured conditions and remaining performance work. Development-host baselines
+carry no latency SLO or relative speed claim.
 
 MIT licensed; the original project's copyright is retained in [LICENSE](LICENSE).

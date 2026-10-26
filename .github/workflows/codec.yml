@@ -1,4 +1,4 @@
-name: codec
+name: contracts
 on: [push, pull_request]
 permissions:
   contents: read
@@ -26,10 +26,14 @@ jobs:
         run: xmake check
       - name: Installed consumers
         run: |
-          python3 tests/install_test.py
+          python3 tests/install_test.py --examples
           python3 tests/install_test.py --core-only
       - name: Benchmark smoke
-        run: python3 bench/run.py --binary build/linux/x86_64/release/codec-bench --compiler "$CXX" --samples 100 --runs 1 --output /tmp/codec-smoke
+        run: |
+          python3 bench/run.py --binary build/linux/x86_64/release/codec-bench --compiler "$CXX" --samples 100 --runs 1 --output /tmp/codec-smoke
+          python3 bench/session_run.py --binary build/linux/x86_64/release/session-bench --samples 100 --runs 1 --output /tmp/session-smoke
+          python3 bench/tcp_run.py --binary build/linux/x86_64/release/tcp-bench-server --samples 100 --rate 1000 --output /tmp/tcp-smoke
+          python3 bench/tcp_run.py --binary build/linux/x86_64/release/null-tcp-server --echo --samples 100 --rate 1000 --output /tmp/echo-smoke
 
   sanitizer:
     runs-on: ubuntu-24.04

@@ -1,11 +1,11 @@
 # NimbleFIX 從零重寫設計提案
 
 - 日期：2026-10-20
-- 最近修訂：2026-10-26
+- 最近修訂：2026-10-27
 - 分支：`rewrite/usability-first`
 - 原版基準：`d74031b85af5cb9dbb11eec62a11881d99cae594`
 
-本文件是新實作的設計基線。目前已交付第 16 節的首個 codec / slot 實作切片，實際 API、驗收證據與限制見 [切片記錄](codec-slice.md)。其餘目標 API、命令、檔案結構與驗收目標仍為提案，不代表已有相應功能、效能或相容性成果。
+本文件是新實作的設計基線。目前實作覆蓋第 16 節的階段 1–3：codec / slot、appended mmap journal / inline session，以及首條真實 TCP 雙角色流程。實際 API、驗收證據與限制見 [codec 記錄](codec-slice.md)、[session / TCP 記錄](session-tcp-slice.md)和[支援表](session-support.md)。後文完整目標 API（包括 typed receive、Sender、queued、TLS）與檔案結構仍為提案，未列入實際支援表的能力不代表已有實作。
 
 設計基線：低延遲是首要優化目標，協議正確性、程序崩潰恢復與易用性是產品必須滿足的約束。預設使用 inline callback 與 appended 確認；正式 session 一律使用檔案支援的 mmap queue，保留程序崩潰後重啟與重發所需資料，收發熱路徑不等待逐筆磁碟同步。TCP 背壓、有限資源與恢復從第一個真實網路流程開始驗收。initiator 與 acceptor 都有完整的使用流程；業務字典可選且只使用 XML；generated getter/setter 與編譯期已知 tag 的收發介面共用 slot 表示與編碼後端。基本收發不要求使用者提供字典或執行 codegen，只有運行期才確定的動態 tag / 欄位結構允許使用字串追加路徑。
 
@@ -1097,7 +1097,7 @@ QuickFIX 互通是獨立的正確性驗收，快於 QuickFIX 只代表該配置�
 
 ## 15. 建議的程式碼與文檔結構
 
-下列是完整實作的目標結構；已交付部分與待完成能力以 [切片記錄](codec-slice.md) 為準。
+下列是完整實作的目標結構；已交付部分與待完成能力以 [codec 記錄](codec-slice.md)及 [session / TCP 記錄](session-tcp-slice.md)為準。
 
 ```text
 include/nimblefix/        少量公開頭與標準 schema 入口

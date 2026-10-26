@@ -25,6 +25,27 @@ enum class ErrorCode {
     invalid_decimal,
     invalid_timestamp,
     required_field_missing,
+    io_error,
+    storage_full,
+    store_locked,
+    corrupt_store,
+    identity_mismatch,
+    unsupported_version,
+    invalid_config,
+    not_ready,
+    queue_full,
+    engine_stopped,
+    callback_failed,
+    protocol_error,
+    sequence_gap,
+    duplicate_sequence,
+    write_stalled,
+    logon_timeout,
+    heartbeat_timeout,
+    connection_closed,
+    receipt_expired,
+    wrong_thread,
+    logout_timeout,
 };
 
 struct [[nodiscard]] Status {
@@ -53,6 +74,27 @@ struct [[nodiscard]] Status {
         case ErrorCode::invalid_decimal: return "invalid exact decimal";
         case ErrorCode::invalid_timestamp: return "invalid UTC timestamp";
         case ErrorCode::required_field_missing: return "required field is missing";
+        case ErrorCode::io_error: return "system I/O operation failed";
+        case ErrorCode::storage_full: return "bounded journal capacity exhausted";
+        case ErrorCode::store_locked: return "journal already has a writer";
+        case ErrorCode::corrupt_store: return "committed journal data is corrupt";
+        case ErrorCode::identity_mismatch: return "persistent session identity differs";
+        case ErrorCode::unsupported_version: return "unsupported storage format version";
+        case ErrorCode::invalid_config: return "invalid engine or session configuration";
+        case ErrorCode::not_ready: return "session is not active";
+        case ErrorCode::queue_full: return "bounded send capacity exhausted";
+        case ErrorCode::engine_stopped: return "engine has stopped";
+        case ErrorCode::callback_failed: return "application callback failed";
+        case ErrorCode::protocol_error: return "FIX session protocol violation";
+        case ErrorCode::sequence_gap: return "FIX sequence gap requires recovery";
+        case ErrorCode::duplicate_sequence: return "unexpected lower FIX sequence";
+        case ErrorCode::write_stalled: return "transport write progress timed out";
+        case ErrorCode::logon_timeout: return "FIX Logon timed out";
+        case ErrorCode::heartbeat_timeout: return "FIX heartbeat response timed out";
+        case ErrorCode::connection_closed: return "transport connection closed";
+        case ErrorCode::receipt_expired: return "send receipt retention expired";
+        case ErrorCode::wrong_thread: return "operation requires the session owner thread";
+        case ErrorCode::logout_timeout: return "FIX Logout acknowledgement timed out";
         }
         return "unknown error";
     }

@@ -20,12 +20,13 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--cxx", default=os.environ.get("CXX", "g++"))
     parser.add_argument("--core-only", action="store_true")
+    parser.add_argument("--examples", action="store_true")
     args = parser.parse_args()
     with tempfile.TemporaryDirectory(prefix="nimblefix-install-") as temporary:
         base = Path(temporary)
         source, build, prefix = base / "source", base / "build", base / "prefix"
         source.mkdir()
-        for directory in ("include", "src", "cmake", "tools/schema", "schemas"):
+        for directory in ("include", "src", "cmake", "tools/schema", "schemas", "examples"):
             shutil.copytree(ROOT / directory, source / directory)
         for filename in ("CMakeLists.txt", "LICENSE"):
             shutil.copyfile(ROOT / filename, source / filename)
@@ -35,7 +36,7 @@ def main():
         try:
             run("cmake", "-S", str(source), "-B", str(build),
                 "-DCMAKE_BUILD_TYPE=Release", f"-DCMAKE_CXX_COMPILER={args.cxx}",
-                "-DNIMBLEFIX_BUILD_TESTS=OFF", "-DNIMBLEFIX_BUILD_EXAMPLES=OFF",
+                "-DNIMBLEFIX_BUILD_TESTS=OFF", f"-DNIMBLEFIX_BUILD_EXAMPLES={'ON' if args.examples else 'OFF'}",
                 f"-DNIMBLEFIX_BUILD_SAMPLE_SCHEMA={'OFF' if args.core_only else 'ON'}")
             run("cmake", "--build", str(build), "-j", "2")
             run("cmake", "--install", str(build), "--prefix", str(prefix))
@@ -51,6 +52,13 @@ def main():
                 f"-DCONSUMER_SCHEMA={'OFF' if args.core_only else 'ON'}")
             run("cmake", "--build", str(external_build), "-j", "2")
             run(str(external_build / "consumer"), cwd=base)
+            if args.examples:
+                run(str(relocated / "bin/hello-fix"), "--self-test", "--restart", cwd=base)
+                if not args.core_only:
+                    run(str(relocated / "bin/hello-fix"), "--self-test", "--typed", "--restart", cwd=base)
+                run("python3", str(ROOT / "tests/endpoint_test.py"),
+                    "--acceptor", str(relocated / "bin/acceptor-example"),
+                    "--initiator", str(relocated / "bin/initiator-example"), cwd=base)
             if not args.core_only:
                 run(str(external_build / "schema-consumer"), cwd=base)
                 generated = external_build / "generated/venue_schema/venue.hpp"

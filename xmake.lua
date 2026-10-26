@@ -8,7 +8,12 @@ set_warnings("allextra")
 option("tests")
     set_default(true)
     set_showmenu(true)
-    set_description("Build codec contract tests")
+    set_description("Build codec, journal, session and TCP contract tests")
+option_end()
+
+option("quickfix_dir")
+    set_showmenu(true)
+    set_description("Optional installed QuickFIX prefix for independent oracle tests")
 option_end()
 
 option("fuzzers")
@@ -20,7 +25,7 @@ option_end()
 option("benchmarks")
     set_default(false)
     set_showmenu(true)
-    set_description("Build the codec microbenchmark")
+    set_description("Build codec, appended session and TCP benchmarks")
 option_end()
 
 option("sanitize")
@@ -42,6 +47,17 @@ target("nimblefix")
     add_includedirs("include", {public = true})
     add_headerfiles("include/(nimblefix/**.hpp)")
     add_files("src/codec/parser.cpp", "src/codec/encoder.cpp", "src/message/decimal.cpp")
+    add_files("src/store/*.cpp", "src/session/*.cpp", "src/runtime/*.cpp", "src/transport/*.cpp")
+    add_syslinks("pthread", {public = true})
+target_end()
+
+target("hello-fix")
+    set_kind("binary")
+    set_rundir("$(projectdir)")
+    add_files("examples/hello_fix.cpp")
+    add_deps("nimblefix", "fix44-sample")
+    add_includedirs(generated_dir)
+    add_defines("NIMBLEFIX_SAMPLE_SCHEMA=1")
 target_end()
 
 target("fix44-sample")
@@ -59,8 +75,22 @@ target("codec-demo")
     add_deps("nimblefix")
 target_end()
 
+for _, role in ipairs({"initiator", "acceptor"}) do
+    target(role .. "-example")
+        set_kind("binary")
+        set_rundir("$(projectdir)")
+        add_files("examples/" .. role .. ".cpp")
+        add_deps("nimblefix")
+    target_end()
+end
+
 if has_config("tests") then
-    for _, name in ipairs({"parser", "message", "generated", "contract"}) do
+    target("initiator-probe")
+        set_kind("binary")
+        add_files("tests/initiator_probe.cpp")
+        add_deps("nimblefix")
+    target_end()
+    for _, name in ipairs({"parser", "message", "generated", "contract", "journal", "session", "session_boundary", "session_limits", "network"}) do
         target(name .. "-test")
             set_kind("binary")
             add_files("tests/" .. name .. "_test.cpp")
@@ -69,12 +99,42 @@ if has_config("tests") then
                 add_deps("fix44-sample")
                 add_includedirs(generated_dir)
             end
-            add_tests("default")
+            add_tests("default", {run_timeout = 30000})
         target_end()
     end
 end
 
+if has_config("quickfix_dir") then
+    for _, quickfix_name in ipairs({"quickfix", "quickfix_network"}) do
+    target(quickfix_name .. "-test")
+        set_kind("binary")
+        add_files("tests/" .. quickfix_name .. "_test.cpp")
+        add_deps("nimblefix")
+        add_includedirs(path.join(get_config("quickfix_dir"), "include"))
+        add_linkdirs(path.join(get_config("quickfix_dir"), "lib"))
+        add_links("quickfix")
+        add_syslinks("pthread")
+        add_tests("oracle", {runargs = {path.join(get_config("quickfix_dir"), "share", "quickfix", "FIX44.xml")}})
+    target_end()
+    end
+end
+
 if has_config("benchmarks") then
+    target("session-bench")
+        set_kind("binary")
+        add_files("bench/session_bench.cpp")
+        add_deps("nimblefix")
+        add_ldflags("-Wl,--wrap=malloc", "-Wl,--wrap=fsync", "-Wl,--wrap=fdatasync", "-Wl,--wrap=msync", {force=true})
+    target_end()
+    target("null-tcp-server")
+        set_kind("binary")
+        add_files("bench/null_tcp_server.cpp")
+    target_end()
+    target("tcp-bench-server")
+        set_kind("binary")
+        add_files("bench/tcp_server.cpp")
+        add_deps("nimblefix")
+    target_end()
     target("codec-bench")
         set_kind("binary")
         add_files("bench/codec_bench.cpp")
@@ -87,6 +147,7 @@ end
 if has_config("fuzzers") then
     target("parser-fuzz")
         set_kind("binary")
+        set_rundir("$(projectdir)")
         add_files("tests/fuzz_parser.cpp", "src/codec/parser.cpp", "src/message/decimal.cpp")
         add_includedirs("include")
         add_cxxflags("-fsanitize=fuzzer,address,undefined", "-fno-omit-frame-pointer", {force = true})
@@ -95,13 +156,23 @@ if has_config("fuzzers") then
 end
 
 task("check")
-    set_menu {usage = "xmake check", description = "Build and run codec, XML, and compile-fail contracts"}
+    set_menu {usage = "xmake check", description = "Build and run codec, session, TCP, XML and compile-fail contracts"}
     on_run(function ()
+        import("core.project.config")
+        config.load()
         os.vrunv(os.programfile(), {"build"})
         os.vrunv(os.programfile(), {"test"})
         os.vrunv("python3", {"tests/codegen_test.py"})
         os.vrunv("python3", {"tests/compile_fail_test.py"})
         os.vrunv(os.programfile(), {"run", "codec-demo", "--self-test"})
-        print("All codec, schema, and compile-fail contracts passed.")
+        os.vrunv(os.programfile(), {"run", "hello-fix", "--self-test", "--restart"})
+        os.vrunv(os.programfile(), {"run", "hello-fix", "--self-test", "--typed", "--restart"})
+        import("core.project.project")
+        local probe = project.target("initiator-probe")
+        os.vrunv("python3", {"tests/initiator_reconnect_test.py", "--binary", probe:targetfile()})
+        os.vrunv("python3", {"tests/outbound_reconnect_test.py", "--binary", probe:targetfile()})
+        os.vrunv("python3", {"tests/endpoint_test.py", "--acceptor", project.target("acceptor-example"):targetfile(),
+            "--initiator", project.target("initiator-example"):targetfile()})
+        print("All codec, journal, session, TCP, schema, and compile-fail contracts passed.")
     end)
 task_end()

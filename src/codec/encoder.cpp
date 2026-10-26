@@ -236,6 +236,12 @@ private:
     if (!valid_text(header.sending_time) || !detail::is_valid_utc_timestamp(header.sending_time)) {
         return Status{ErrorCode::invalid_timestamp, 52};
     }
+    if (header.poss_dup && (!valid_text(header.orig_sending_time) ||
+        !detail::is_valid_utc_timestamp(header.orig_sending_time) ||
+        header.orig_sending_time > header.sending_time)) {
+        return Status{ErrorCode::invalid_timestamp, 122};
+    }
+    if (!header.poss_dup && !header.orig_sending_time.empty()) return Status{ErrorCode::invalid_header, 122};
     (void)message;
     return Status::success();
 }
@@ -253,8 +259,8 @@ Result<std::size_t> encode_fix44(detail::MessageView message, SessionHeader head
         body_length += amount;
         return true;
     };
-    const auto add_header_field = [&add_size](std::size_t value_size) noexcept {
-        constexpr std::size_t prefix_and_delimiter = 4; // three-byte tag prefix plus SOH
+    const auto add_header_field = [&add_size](std::size_t value_size,
+        std::size_t prefix_and_delimiter = 4) noexcept {
         if (value_size > std::numeric_limits<std::size_t>::max() - prefix_and_delimiter) return false;
         return add_size(prefix_and_delimiter + value_size);
     };
@@ -264,6 +270,10 @@ Result<std::size_t> encode_fix44(detail::MessageView message, SessionHeader head
         !add_header_field(header.target_comp_id.size()) ||
         !add_header_field(decimal_digits(header.msg_seq_num)) ||
         !add_header_field(header.sending_time.size())) {
+        return Status{ErrorCode::too_large};
+    }
+    if ((header.poss_dup && !add_header_field(1)) ||
+        (header.poss_dup && !add_header_field(header.orig_sending_time.size(), 5))) {
         return Status{ErrorCode::too_large};
     }
     for (std::size_t i = 0; i < message.field_count; ++i) {
@@ -310,15 +320,176 @@ Result<std::size_t> encode_fix44(detail::MessageView message, SessionHeader head
     writer.append("34=");
     writer.append_unsigned(header.msg_seq_num);
     writer.append(soh);
+    if (header.poss_dup) {
+        writer.append("43=Y");
+        writer.append(soh);
+    }
     writer.append("52=");
     writer.append(header.sending_time);
     writer.append(soh);
+    if (header.poss_dup) {
+        writer.append("122=");
+        writer.append(header.orig_sending_time);
+        writer.append(soh);
+    }
     for (std::size_t i = 0; i < message.field_count; ++i) {
         const auto& field = message.plan[i];
         if (!detail::is_present(message, field.slot_index)) continue;
         writer.append(std::string_view{field.tag_prefix.data(), field.prefix_size});
         writer.append_value(message, field);
         writer.append(soh);
+    }
+    writer.append_checksum_suffix();
+    return total_size;
+}
+
+Result<std::size_t> encode_fix44_replay(const FlatMessageView& original,
+    SessionHeader header, std::span<char> output) noexcept {
+    const auto fields = original.fields();
+    const auto frame = original.frame();
+    if (fields.empty() || frame.empty() || frame.size() < checksum_suffix_size ||
+        !valid_text(header.sender_comp_id) || !valid_text(header.target_comp_id) ||
+        !detail::is_valid_utc_timestamp(header.sending_time)) {
+        return Status{ErrorCode::invalid_header};
+    }
+
+    std::uint32_t duplicate_header_tag = 0;
+    const auto find_optional = [&fields, &duplicate_header_tag](std::uint32_t tag) noexcept -> const FieldView* {
+        const FieldView* found = nullptr;
+        for (const auto& field : fields) {
+            if (field.tag != tag) continue;
+            if (found != nullptr) {
+                duplicate_header_tag = tag;
+                return nullptr;
+            }
+            found = &field;
+        }
+        return found;
+    };
+    const auto* msg_type_field = find_optional(35);
+    const auto* seq_field = find_optional(34);
+    const auto* sending_time_field = find_optional(52);
+    const auto* original_time_field = find_optional(122);
+    const auto* poss_dup_field = find_optional(43);
+    if (duplicate_header_tag != 0)
+        return Status{ErrorCode::duplicate_field, static_cast<int>(duplicate_header_tag)};
+    if (msg_type_field == nullptr || seq_field == nullptr || sending_time_field == nullptr) {
+        return Status{ErrorCode::invalid_header};
+    }
+    const bool was_replay = poss_dup_field != nullptr && poss_dup_field->value == "Y";
+    if (poss_dup_field != nullptr && poss_dup_field->value != "Y" && poss_dup_field->value != "N")
+        return Status{ErrorCode::invalid_value, 43};
+    if (was_replay != (original_time_field != nullptr))
+        return Status{ErrorCode::invalid_header, 122};
+    std::uint64_t sequence{};
+    const auto seq_parse = std::from_chars(seq_field->value.data(),
+        seq_field->value.data() + seq_field->value.size(), sequence);
+    if (seq_parse.ec != std::errc{} || seq_parse.ptr != seq_field->value.data() + seq_field->value.size() ||
+        sequence == 0) {
+        return Status{ErrorCode::invalid_value, 34, seq_field->offset};
+    }
+    if (!detail::is_valid_utc_timestamp(sending_time_field->value)) {
+        return Status{ErrorCode::invalid_timestamp, 52, sending_time_field->offset};
+    }
+    const auto original_sending_time = original_time_field == nullptr
+        ? sending_time_field->value : original_time_field->value;
+    if (!detail::is_valid_utc_timestamp(original_sending_time)) {
+        return Status{ErrorCode::invalid_timestamp, 122,
+            original_time_field == nullptr ? sending_time_field->offset : original_time_field->offset};
+    }
+    if (!valid_text(msg_type_field->value)) return Status{ErrorCode::invalid_value, 35};
+    if (original_sending_time > header.sending_time) return Status{ErrorCode::invalid_timestamp, 122};
+    if (header.msg_seq_num != 0 && header.msg_seq_num != sequence) {
+        return Status{ErrorCode::invalid_value, 34, seq_field->offset};
+    }
+
+    const auto checksum_offset = frame.size() - checksum_suffix_size;
+    std::size_t body_length = 0;
+    const auto add_size = [&body_length](std::size_t amount) noexcept {
+        if (amount > std::numeric_limits<std::size_t>::max() - body_length) return false;
+        body_length += amount;
+        return true;
+    };
+    const auto add_header_field = [&add_size](std::size_t value_size,
+        std::size_t prefix_and_delimiter = 4) noexcept {
+        return value_size <= std::numeric_limits<std::size_t>::max() - prefix_and_delimiter &&
+            add_size(prefix_and_delimiter + value_size);
+    };
+    if (!add_header_field(msg_type_field->value.size()) ||
+        !add_header_field(header.sender_comp_id.size()) ||
+        !add_header_field(header.target_comp_id.size()) ||
+        !add_header_field(decimal_digits(sequence)) ||
+        !add_header_field(1) || // PossDupFlag=Y
+        !add_header_field(header.sending_time.size()) ||
+        !add_header_field(original_sending_time.size(), 5)) {
+        return Status{ErrorCode::too_large};
+    }
+
+    for (std::size_t i = 0; i < fields.size(); ++i) {
+        const auto& field = fields[i];
+        if (field.tag == 8 || field.tag == 9 || field.tag == 10 || field.tag == 35 ||
+            field.tag == 34 || field.tag == 43 || field.tag == 49 || field.tag == 52 ||
+            field.tag == 56 || field.tag == 122) {
+            continue;
+        }
+        const auto start = field.offset;
+        const auto end = i + 1 < fields.size() ? fields[i + 1].offset : checksum_offset;
+        if (start >= end || end > checksum_offset) {
+            return Status{ErrorCode::invalid_frame, static_cast<int>(field.tag), start};
+        }
+        if (!add_size(end - start)) return Status{ErrorCode::too_large, static_cast<int>(field.tag)};
+    }
+
+    const auto body_length_digits = decimal_digits(body_length);
+    constexpr std::size_t body_length_prefix_size = 2;
+    constexpr auto fixed_size = begin_string.size() + body_length_prefix_size + 1;
+    if (body_length_digits > std::numeric_limits<std::size_t>::max() - fixed_size) {
+        return Status{ErrorCode::too_large};
+    }
+    const auto header_size = fixed_size + body_length_digits;
+    if (body_length > std::numeric_limits<std::size_t>::max() - header_size) return Status{ErrorCode::too_large};
+    const auto total_without_checksum = header_size + body_length;
+    if (total_without_checksum > std::numeric_limits<std::size_t>::max() - checksum_suffix_size) {
+        return Status{ErrorCode::too_large};
+    }
+    const auto total_size = total_without_checksum + checksum_suffix_size;
+    if (output.size() < total_size) return Status{ErrorCode::capacity_exceeded};
+
+    Writer writer{output};
+    writer.append(begin_string);
+    writer.append("9=");
+    writer.append_unsigned(body_length);
+    writer.append(soh);
+    writer.append("35=");
+    writer.append(msg_type_field->value);
+    writer.append(soh);
+    writer.append("49=");
+    writer.append(header.sender_comp_id);
+    writer.append(soh);
+    writer.append("56=");
+    writer.append(header.target_comp_id);
+    writer.append(soh);
+    writer.append("34=");
+    writer.append_unsigned(sequence);
+    writer.append(soh);
+    writer.append("43=Y");
+    writer.append(soh);
+    writer.append("52=");
+    writer.append(header.sending_time);
+    writer.append(soh);
+    writer.append("122=");
+    writer.append(original_sending_time);
+    writer.append(soh);
+    for (std::size_t i = 0; i < fields.size(); ++i) {
+        const auto& field = fields[i];
+        if (field.tag == 8 || field.tag == 9 || field.tag == 10 || field.tag == 35 ||
+            field.tag == 34 || field.tag == 43 || field.tag == 49 || field.tag == 52 ||
+            field.tag == 56 || field.tag == 122) {
+            continue;
+        }
+        const auto start = field.offset;
+        const auto end = i + 1 < fields.size() ? fields[i + 1].offset : checksum_offset;
+        writer.append(frame.substr(start, end - start));
     }
     writer.append_checksum_suffix();
     return total_size;

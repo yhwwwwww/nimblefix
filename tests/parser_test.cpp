@@ -328,6 +328,51 @@ void test_deterministic_malformed_buffer_sweep() {
     }
 }
 
+void test_replay_binary_and_header_contract() {
+    constexpr std::string_view original_time = "20261027-00:00:00.000";
+    constexpr std::string_view later_time = "20261027-00:01:00.000";
+    std::string body = "35=Z\00149=BUY\00156=SELL\00134=7\00152=";
+    body.append(original_time).append("\00195=5\00196=");
+    const std::string binary{"A\001\0=B", 5};
+    body.append(binary).append("\00158=first\00158=second\001");
+    const auto wire = make_frame(body);
+    FlatMessageView original;
+    std::array<FieldView, 24> scratch{};
+    CHECK(parse(wire, original, scratch).ok());
+    std::array<char, 1024> output{};
+    const auto encoded = nimblefix::encode_fix44_replay(original,
+        {"BUY", "SELL", 7, later_time}, output);
+    CHECK(encoded.ok());
+    if (!encoded.ok()) return;
+    FlatMessageView replay;
+    std::array<FieldView, 24> replay_scratch{};
+    CHECK(parse({output.data(), encoded.value()}, replay, replay_scratch).ok());
+    CHECK(replay.find_unique(34).value().value == "7");
+    CHECK(replay.find_unique(43).value().value == "Y");
+    CHECK(replay.find_unique(122).value().value == original_time);
+    CHECK(replay.find_unique(96).value().value == binary);
+    CHECK(replay.find_unique(58).status().code == ErrorCode::duplicate_field);
+    std::array<char, 1024> second_output{};
+    const auto second = nimblefix::encode_fix44_replay(replay,
+        {"BUY", "SELL", 7, "20261027-00:02:00.000"}, second_output);
+    CHECK(second.ok());
+    CHECK(std::string_view(second_output.data(), second.ok() ? second.value() : 0)
+        .find("122=20261027-00:00:00.000\001") != std::string_view::npos);
+
+    std::array<char, 8> small{};
+    small.fill('#');
+    CHECK(nimblefix::encode_fix44_replay(original, {"BUY", "SELL", 7, later_time}, small)
+        .status().code == ErrorCode::capacity_exceeded);
+    CHECK(std::string_view(small.data(), small.size()) == "########");
+    const auto duplicate_wire = make_frame(
+        "35=Z\00149=BUY\00156=SELL\00134=7\00143=Y\00152=20261027-00:01:00.000\001"
+        "122=20261027-00:00:00.000\001122=20261027-00:00:00.000\001");
+    CHECK(parse(duplicate_wire, original, scratch).ok());
+    const auto duplicate = nimblefix::encode_fix44_replay(original,
+        {"BUY", "SELL", 7, later_time}, output);
+    CHECK(duplicate.status().code == ErrorCode::duplicate_field && duplicate.status().tag == 122);
+}
+
 } // namespace
 
 int main() {
@@ -339,6 +384,7 @@ int main() {
     test_duplicate_order_and_capacity();
     test_plain_value_rules();
     test_deterministic_malformed_buffer_sweep();
+    test_replay_binary_and_header_contract();
     if (failures != 0) {
         std::cerr << failures << " parser test(s) failed\n";
         return 1;
