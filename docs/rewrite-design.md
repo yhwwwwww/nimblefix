@@ -1,17 +1,17 @@
 # NimbleFIX 從零重寫設計提案
 
 - 日期：2026-10-20
-- 最近修訂：2026-10-21
+- 最近修訂：2026-10-26
 - 分支：`rewrite/usability-first`
 - 原版基準：`d74031b85af5cb9dbb11eec62a11881d99cae594`
 
 本文件是新實作的設計基線。本分支目前只有設計文檔；文中的 API、命令、檔案結構與驗收目標均為提案，尚未實作，也不代表已有相應效能或相容性成果。
 
-設計基線：正式 session 一律使用檔案支援的 mmap queue；initiator 與 acceptor 都有完整的使用流程；業務字典可選且只使用 XML；generated getter/setter 與編譯期已知 tag 的收發介面共用 slot 表示與編碼後端。基本收發不要求使用者提供字典或執行 codegen，只有運行期才確定的動態 tag / 欄位結構允許使用字串追加路徑。
+設計基線：低延遲是首要優化目標，協議正確性、程序崩潰恢復與易用性是產品必須滿足的約束。預設使用 inline callback 與 appended 確認；正式 session 一律使用檔案支援的 mmap queue，保留程序崩潰後重啟與重發所需資料，收發熱路徑不等待逐筆磁碟同步。TCP 背壓、有限資源與恢復從第一個真實網路流程開始驗收。initiator 與 acceptor 都有完整的使用流程；業務字典可選且只使用 XML；generated getter/setter 與編譯期已知 tag 的收發介面共用 slot 表示與編碼後端。基本收發不要求使用者提供字典或執行 codegen，只有運行期才確定的動態 tag / 欄位結構允許使用字串追加路徑。
 
 ## 1. 我會把 NimbleFIX 做成甚麼
 
-**一個讓 C++ 開發者容易接入、能清楚理解執行行為、並能按需要降低延遲的嵌入式 FIX 引擎。**
+**一個以低延遲為首要目標，同時具備協議正確性、程序崩潰恢復與清楚使用契約的嵌入式 C++ FIX 引擎。**
 
 使用者應能把時間用在訂單與回報邏輯，從公開 API 看懂何時可以發送、誰擁有訊息、失敗之後會發生甚麼。字典、執行緒、儲存與編碼策略由引擎提供一致且可驗證的契約。
 
@@ -20,20 +20,21 @@
 - C++20、可嵌入、低延遲、可控制資源使用。
 - initiator 與 acceptor 都是第一級使用情境，共用協議核心。
 - 完整的 session 生命週期、序號、重發與恢復能力。
-- 每個正式 session 都有可恢復的 mmap queue store，沒有 memory store 選項。
+- 每個正式 session 都有可恢復的 mmap queue store，預設先提交記錄再發送或交付，不等待逐筆 fsync / msync，沒有 memory store 選項。
+- 收發皆有界，TCP 與應用背壓遵守 FIX 序號、心跳及重發規則；慢 session 不得無限制佔用其他 session 的資源。
 - 不依賴業務字典的基本收發，以及可選的字典驅動型別化訊息與多層 repeating group。
 - 字典統一為 XML；預生成的欄位名稱與直接使用靜態 tag 都在編譯期歸一為 slot 存取，不形成兩套不同成本的編碼器。
 - slot 是按實際訊息形狀壓縮的邏輯欄位位置；儲存、初始化與編碼成本不能隨最大 tag 或整份 XML 字典大小增長。
 - 對效能作分層量測，對第三方提供簡單且有文件的介面。
 
-設計決策按以下順序取捨：
+設計決策按以下原則取捨：
 
-1. 協議與資料恢復的正確性。
-2. API 的可理解性、錯誤可診斷性與行為一致性。
-3. 延遲、尾延遲、分配次數與記憶體用量。
-4. 功能廣度。
+1. 協議正確性與已聲明的程序崩潰恢復保證是准入條件，不能用丟棄消息、破壞序號或隱藏失敗換取速度。
+2. 在上述條件內，優先降低延遲與尾延遲，同時控制配置、複製、鎖、系統呼叫及資源用量；預設路徑就是主要低延遲路徑。
+3. 易用性約束 API、預設值與診斷，讓使用者能理解成本、背壓與失敗後的處理，不必先掌握內部排程才能正確收發。
+4. 功能廣度按依賴與證據逐步增加，不反向拖慢核心路徑。
 
-不以犧牲前兩項換取局部 benchmark 數字。每項優化必須同時通過協議、生命週期與使用者流程驗收。
+每項優化必須同時通過協議、生命週期與使用者流程驗收。恢復的首要故障模型是程序異常退出、abort 或 kill 後，在 OS、檔案系統與儲存裝置仍正常的同一主機重新啟動程序；斷電、OS crash、磁碟損壞與跨主機災難恢復不列入首版保證或發布門檻，不為這些情境增加預設收發的同步等待。
 
 ## 2. 這次重寫的邊界
 
@@ -41,12 +42,13 @@
 
 可以重新表達已確認的協議案例及需求，但新測試的預期結果必須經過規範核對。舊實作的輸出不能直接成為正確性的唯一依據。
 
-第一個可交付版本聚焦：
+首個正式發布版本聚焦；中途以第 16 節的可驗收切片交付：
 
 - Linux 上的 C++20 函式庫、命令列工具與可直接執行的範例。
 - FIX 4.4 tag-value、initiator、acceptor、完整 session 處理。
 - 無業務字典的 flat 收發、可選型別化收發、巢狀 group、有限容量佇列。
-- 從第一個 session 開始使用 mmap queue，持續保留序號、必要訊息與恢復狀態。
+- 從第一個 session 開始使用 mmap queue，持續保留序號、必要訊息與程序重啟恢復狀態，預設使用 appended 確認。
+- 預設 inline 收發，以及發送端快於接收端時的有界背壓、短寫、停滯期限與重連恢復。
 - TCP 與可選 TLS、重連、基本 session 時段設定。
 - 真實外部程式的安裝、連結與部署驗證。
 
@@ -67,8 +69,10 @@ Router、HA、自動接管、熱更新、Orchestra 行為規則、Web 管理介�
 | 加入自訂欄位 | 修改 XML 字典，建置系統自動生成並驗證；不區分基底與擴充字典角色 | 修改 XML 後只觸發必要的重新生成與編譯 |
 | 直接按 tag 填值 | 編譯期已知的 tag 與 generated setter 共用 slot 與 encoder，運行期值不影響這項保證 | 比較相同消息形狀的 layout、wire 結果、配置次數與效能 |
 | 發送失敗 | 能區分尚未接受、已接受但傳送失敗，以及對手方業務拒絕 | 針對各故障點驗證結果、事件與日誌 |
+| 對手方接收變慢 | 有限容量與明確的 queue_full、容量恢復通知及停滯期限，不阻塞其他 session | 對端限速或停止讀取，驗證短寫、記憶體上限、延遲與恢復 |
+| 本地業務處理變慢 | 在有界 journal / 投遞預算內吸收短暫突發，必要時透過 TCP 背壓或斷線停止積壓 | 慢 callback、接收暫停、心跳及重啟後交付游標驗收 |
 | 部署工具 | 執行檔離開原始碼目錄後仍可使用 | 移走原始碼、變更工作目錄後重跑案例 |
-| 調校延遲 | 知道預設成本，能明確選擇 inline 與資源上限 | 對每種模式公布完整量測條件與結果 |
+| 調校延遲 | 預設即使用 inline + appended，能明確選擇 queued 隔離及資源上限 | 對每種模式公布完整量測條件與結果 |
 
 上手文檔的時間目標是：在支援的工具鏈已就緒時，讓未接觸過專案的 C++ 開發者在十分鐘內完成第一筆本機收發。這是需要實測的產品目標，不能把下載依賴或編譯時間隱藏在計時之外。
 
@@ -120,9 +124,7 @@ int main()
     });
 
     engine.on<nf::fix44::ExecutionReport>(
-        [&engine](auto& context, nf::fix44::ExecutionReportView report) {
-            std::cout << context.session_name()
-                      << " execution=" << report.exec_id() << '\n';
+        [&engine](auto&, nf::fix44::ExecutionReportView) {
             engine.request_stop();
             return nf::Status::success();
         });
@@ -162,7 +164,7 @@ int main()
 
 範例刻意只在 session active 事件中發送第一筆訊息。真實應用需自行決定重新登入後是否再次下單；引擎不替業務層決定訂單唯一性或自動重送策略。
 
-範例的 store 是 mmap queue，預設採用同步確認。上手程式不需要先選擇 store backend，但必須提供明確的儲存目錄；測試範例由 harness 配置臨時目錄。
+範例預設使用 inline callback 與 appended mmap queue，先提交記錄再發送，不等待磁碟同步。業務 callback 不輸出終端文字；需要顯示結果時交給非 owner 執行緒的有界事件 sink。上手程式不需要先選擇 store backend，但必須提供明確的儲存目錄；測試範例由 harness 配置臨時目錄。
 
 ### 4.2 Callback 必須被可靠地綁定
 
@@ -173,6 +175,7 @@ int main()
 - 管理訊息由協議核心處理，業務 callback 不需要接管心跳或序號。
 - typed 模式對有效但未支援的業務訊息套用明確的拒絕政策；flat 模式使用明確的 MsgType 註冊或 `on_message()` 通用入口。刻意忽略必須透過帶原因的 ignore 註冊聲明，不能因無字典而無聲丟棄。
 - callback 回傳的失敗會觸發明確的 session 處理及 error event，不把業務邏輯故障偽裝成網路 EOF。
+- 發送被拒絕不會自行變成 callback failure。範例中的 `return sent.status()` 是刻意選擇「回覆未被接受便停止受影響 session，保留未完成交付」；實際應用也可使用有界、可恢復的業務流程等待容量，但不能吞掉發送失敗後宣稱處理完成。業務拒單依消息語義明確回覆，不把所有失敗自動映射成 Reject 或 BusinessMessageReject。
 
 ### 4.3 設定應覆蓋日常接入需求
 
@@ -272,7 +275,7 @@ int main()
 | 恢復 | 開啟自己的 mmap queue，與對手方協調序號 | 依穩定 session key 找回 queue，在回覆登入成功前完成恢復與序號處理 |
 | 業務 | active 後發送訂單並接收回報 | 接收訂單，在原 session 回覆回報；不同客戶端互相隔離 |
 | 斷線 | 根據政策發起重連 | 釋放舊連線但保留 session 與 queue，等待同一身份重新登入 |
-| 停止 | 嘗試 Logout、同步必要記錄及停止重連 | 停止接入新連線，逐個 session Logout / 同步；達到期限後回收剩餘連線 |
+| 停止 | 嘗試 Logout、提交必要 journal 記錄及停止重連 | 停止接入新連線，逐個 session Logout / 提交；達到期限後回收剩餘連線 |
 
 acceptor 還必須明確處理以下情況：
 
@@ -310,47 +313,56 @@ configured → connecting / listening → logging_on → active
 `send()` 成功表示引擎已取得完整訊息的所有權並接受處理，**不表示已寫入磁碟、已寫入 socket，或已被對手方接受**。
 
 - 回傳 `SendReceipt`，提供本機關聯識別碼；它不是 FIX 序號或訂單識別碼。
-- 未 active 時預設回傳 `not_ready`；容量不足回傳 `queue_full`，不靜默丟棄或無限堆積。
-- 編碼、當前模式可驗證的 schema / 欄位錯誤在接受前回傳；拒絕接受的訊息不取得 FIX 序號。flat 模式不虛構 required field 或 enum 語義檢查。
+- 未 active 時預設回傳 `not_ready`；命令、待發送 byte 預算或背壓准入容量不足時回傳 `queue_full`，不等待 socket、不靜默丟棄或無限堆積。被拒絕的結果須讓呼叫者保留或取回原訊息，不能要求從已消耗的 builder 重試。
+- 接受前驗證欄位、數值格式、當前模式可驗證的 schema 規則與最終 frame 長度上界，並保留命令、payload 與待發送所需容量。長度上界涵蓋 owner 稍後填入的序號、時間及管理欄位；owner 最終編碼不得再因輸入格式或 buffer 不足而失敗。不以完整編碼兩次實現此保證，預驗證與資源預留成本納入基準。
+- 拒絕接受的訊息不取得 FIX 序號。flat 模式不虛構 required field 或 enum 語義檢查。
 - 接受後的持久化或傳輸失敗透過可關聯的事件回報，並保留可查詢的 session 錯誤狀態。
 - 對手方業務接受與否由 ExecutionReport / Reject 等協議訊息表達。
-- 預設不自動重試業務 `send()`；不能讓不明確的超時結果造成重複訂單。
+- 預設不自動重新提交業務 `send()`。接受前的 `queue_full` 可以等待容量後重試；已接受消息的 socket 短寫與 EAGAIN 由引擎繼續，應用不能再次提交同一訂單。接受後失敗或結果不明時，依 receipt、恢復及業務去重處理，不能把超時當成未發送。
 - 所有失敗結果使用 `[[nodiscard]]`；文件明確說明每個錯誤是否可以原樣重試。
 
-session owner 在首次對外寫出訊息之前，必須把對應的 outbound 記錄及序號決策提交到 mmap queue，並滿足該 session 選定的同步邊界。跨執行緒的 `send()` 可先只回覆命令已被接受；需要等待記錄提交或同步完成時，使用獨立的 receipt 進度通知，不能把 API 返回值混同於磁碟確認。
+session owner 在首次對外寫出訊息之前，必須把對應的 outbound 記錄及序號決策一起提交到 mmap queue。預設以完整記錄已提交的 appended 邊界繼續，不等待 fsync / msync。跨執行緒的 `send()` 可先只回覆命令已被接受；程序重啟恢復保證從 appended 開始，不從記憶體命令入隊開始。
+
+| Receipt 進度 | 含義 |
+| --- | --- |
+| `accepted` | 取得完整訊息與所需容量，尚不保證程序崩潰後存在 |
+| `appended` | 訊息與序號決策已提交到 mmap journal，可在既定程序故障模型下恢復 |
+| `written` | 完整 frame 已交給本機 transport；TCP 模式表示本機 socket 已接受全部 bytes，不代表對端已接收或業務已處理 |
+
+進度以有界通知或查詢取得，不要求每筆消息配置 promise / future 或同步等待。斷線或停止可能使已接受消息進入未完成狀態，必須保留可關聯的結果；通知丟失不改變保留期間內可查詢的進度。receipt 查詢有明確保留容量與期限，過期回報具體狀態，不能把查不到當成未發送或無限制保留所有 receipt。若日後增加顯式同步模式，另提供 `synced` watermark，不改變上述進度含義。
 
 斷線期間的離線排隊是明確選項。啟用時需要容量、過期時間及恢復政策；尚未進入 session 發送順序的訊息不提前取得 FIX 序號，發送時間在實際發送流程中產生。
 
 ### 5.3 停止與資源擁有權
 
 - `request_stop()` 可從普通應用執行緒呼叫，提出有期限的優雅停止要求。
-- 引擎停止接收新業務發送，依政策處理已接受訊息，嘗試 Logout，完成必要儲存並 join 所有自有執行緒。
+- 引擎停止接收新業務發送，依政策處理已接受訊息，嘗試 Logout，完成必要 journal 提交與交付 checkpoint 並 join 所有自有執行緒；預設不以逐筆同步磁碟作為停止前的收發門檻。
 - 超時、強制停止與未完成訊息的處理都有事件和最終結果。
 - callback 內只提出停止要求，不能等待自己所屬的工作執行緒退出。
-- engine 析構保證資源被回收；需要確認最後發送和落盤狀態的程式，必須顯式停止並檢查結果。
+- engine 析構保證資源被回收；需要確認最後發送、journal 提交與未完成消息的程式，必須顯式停止並檢查結果。
 - engine 已結束後仍保留的 sender 回傳 `engine_stopped`，不解參照失效的 runtime。
 
 ## 6. 執行緒模型：把易用性成本說清楚
 
-### 6.1 預設使用 queued callback
+### 6.1 預設使用 inline callback
 
-`Engine<>` / `Engine<Schema>` 預設把業務 callback 放在與 session I/O 分離的應用 executor。每個 session 的事件保持順序，callback 不會對同一 session 並行執行；不同 worker 可並行處理不同 session。
+`Engine<>` / `Engine<Schema>` 預設等同 `Engine<Schema, Inline>`，在 session owner 執行緒執行業務 callback。接收消息提交 journal 後直接交付；callback 的 `context.send()` 可直接交給 owner，不增加一次跨執行緒命令往返。
 
-這讓一般應用不必因一次稍慢的業務處理直接停止協議收發。預設也必須明說：有限佇列會飽和，同一應用 worker 上的其他 session 仍可能受慢 callback 影響；獨立 executor 不能消除無限阻塞的後果。
+callback 必須有界，不得等待 socket 可寫、磁碟、外部服務、其他 callback 或 engine 停止，也不在 owner 上格式化及輸出文字日誌。需要這些工作時顯式使用 queued 或外部工作執行緒。單一 callback 過慢會阻塞同一 owner 上其他 session 的 I/O 與 timer，執行緒拓撲與隔離見 8.2。
 
-佇列容量、深度、高水位與 callback 執行時間都可觀察。可靠業務收發預設不使用 drop-newest；飽和時暫停相應投遞並執行有界的 backpressure。若持續飽和導致協議無法服務，明確關閉受影響 session 並記錄原因。
+提供 callback 執行時間量測與 debug 告警；同執行緒計時只能在 callback 返回後發現超時，不能承諾強制中止任意阻塞的 C++ callback。故意永久阻塞的業務程式不在 inline 隔離保證內。
 
-queued 投遞可使用 mmap queue 的獨立 reader cursor，加上有界的喚醒通知。通知是加速提示，已提交記錄和可恢復 cursor 才是交付依據；通知遺失不等於訊息遺失。它與非持久化的跨執行緒命令通道有不同職責，不能混稱為同一種 queue。
+### 6.2 明確選擇 queued 隔離業務處理
 
-### 6.2 低延遲模式明確選擇 inline
+`Engine<Schema, Queued>` 把業務 callback 放在與 session I/O 分離的有界應用 executor。每個 session 的事件保持順序，callback 不對同一 session 並行執行；不同 worker 可並行處理不同 session。同一應用 worker 仍會受慢 callback 影響，獨立 executor 不能解決永久阻塞。
 
-`Engine<Schema, Inline>` 在 session owner 執行緒執行 callback。它保持相同的業務欄位與發送語義，但文件明確要求 callback 有界、不可阻塞。
+queued 穩態投遞比較兩種候選：直接以 mmap journal reader cursor 交付，或以預配置 ring 傳遞記錄描述符並提供有界喚醒。ring 若持有 journal 位置，同樣受 lease 與 retention 約束；若複製消息，需計入複製與儲存成本。以相同負載、積壓、工作集及恢復契約量測後選定，不預先宣稱其中一種一定更快。
 
-兩種模式採用同一套協議狀態機及訊息模型，內部以 execution policy 實例化 worker 與 callback context。模式在建構或啟動邊界選定，穩態迴圈不反覆判斷 dispatch mode。
+已提交記錄與完成交付 cursor 是恢復依據，ring 和喚醒通知不成為另一份權威狀態。穩態通知不要求逐筆 eventfd 系統呼叫；通知遺失不得讓已提交消息永久失去投遞機會。投遞資源達高水位時先停止排入更多 callback，接收端依 8.5 的有界預算繼續或暫停讀取，不使用 drop-newest。
 
-callback 的 `context.send()` 依具體 execution policy 選擇正確路徑：inline 可直接交給 session owner；queued 必須提交已擁有的訊息。公開 API 不會給 queued callback 一個只能在 inline 執行的 handle。
+兩種模式共用同一 session core 及消息模型，execution policy 在建構或啟動時選定，穩態迴圈不反覆判斷模式。協議核心不因策略模板複製成兩套實作；策略包裝、分派與是否內聯以編譯體積及延遲量測決定。
 
-預設 queued 與可選 inline 都是正式產品路徑，必須分別量測與測試。對外效能宣稱必須標示使用哪一種模式。
+`context.send()` 依具體 policy 選擇正確路徑：inline 直接交給 owner；queued 提交已擁有的消息。兩者保持相同的接受、提交、失敗與恢復契約。預設 inline 與可選 queued 都是正式產品路徑，對外數據必須標明模式。
 
 ### 6.3 普通執行緒發送有安全的預設
 
@@ -398,10 +410,10 @@ engine.on_session_active([](auto& context) {
     return context.send(std::move(order)).status();
 });
 
-engine.on_message([](auto& context, nf::FlatMessageView message) {
-    std::cout << context.session_name() << " type=" << message.msg_type() << '\n';
+engine.on_message([](auto&, nf::FlatMessageView message) {
     for (auto field : message.fields()) {
-        std::cout << field.tag << '=' << field.value << '\n';
+        // 在此以 field.tag / field.value 執行有界處理；終端檢視交給非 owner 的 sink。
+        (void)field;
     }
     return nf::Status::success();
 });
@@ -511,6 +523,8 @@ XML 生成的 `SchemaDescriptor` 保存完整合法欄位、canonical wire rank�
 
 `Shape` 保存這個發送形式會使用的欄位集合。named setter 與 `set<Tag>()` 對相同 shape 產生同一 layout；值、presence 組合和 group entry 數量不各自生成新的 shape。以 schema 和 shape 共用 plan，不按 lambda 的來源位置重複生成，也不展開所有 optional 欄位組合。
 
+有 schema 時，最終 shape / plan 依欄位與 group 結構及 schema wire rank 歸一；不同 setter 呼叫順序不要求產生不同 encoder。無字典時，明確的宣告順序本身就是 wire plan 的一部分，不能一律按 tag 數字排序。中間 expression 型別可以不同，共用的目標是最終 layout / plan；populate callable 的內聯或薄型別擦除以成本驗證，不把某一種 callback wrapper 當成唯一實作。
+
 常規快路徑採 `make().named_setter(...)...` 或 `message<MsgType>().set<Tag>()...` 的型別化 expression。需要命令式條件填值時，先宣告小型 `Shape` / `Fields`，再使用 `send<Message, Shape>(populate)`；以少量可選 slot 表達必要的分支。
 
 不把無 shape 限制的 mutable lambda 宣稱為零額外成本的 shape 推導方式。C++ 呼叫介面若沒有攜帶其欄位集合，就不能假設 compiler 能把一份涵蓋全 XML 的大 builder 自動縮到實際使用的幾格。若後續提供全 schema mutable builder，它仍填 slot，必須使用另外驗證過的稀疏儲存策略並揭露成本，不能默默改走文字追加。
@@ -529,7 +543,7 @@ inline 情境允許 compiler 在遵守所有權與錯誤契約下消除中間 sl
 
 大而稀疏的已宣告集合需比較 active-slot list、touched-word list、分層 presence 或分塊儲存等策略。重複 setter 不可重複登記同一 active slot；一輪結束只清除本輪觸碰或建構的狀態，不讀取未初始化值，也不殘留上一筆的 presence 或資料。若使用 generation stamp，需計入 stamp 索引空間、併發隔離和計數回繞的處理，不能把成本藏進全域表。
 
-canonical wire order 不能被 setter 呼叫順序取代。小型 shape 在編譯期生成正確順序；全 schema 的稀疏 fallback 若採 active list，必須計入按 wire rank 排序或有序列舉的成本，不能把 `O(K log K)` 排序隱藏在聲稱 `O(K)` 的編碼中。排序只操作索引，不搬動變長值。
+有 schema 時，canonical wire order 不能被 setter 呼叫順序取代。小型 shape 在編譯期生成正確順序；全 schema 的稀疏 fallback 若採 active list，必須計入按 wire rank 排序或有序列舉的成本，不能把 `O(K log K)` 排序隱藏在聲稱 `O(K)` 的編碼中。排序只操作索引，不搬動變長值。無字典模式仍依明確宣告的 wire 順序輸出。
 
 required / conditional 驗證仍依承諾執行：能由 shape 判定的缺失在編譯期診斷，其餘依已生成的規則與存在欄位檢查。不能為了宣稱成本與 `K` 成正比就略過協議或業務驗證；任意條件規則的成本應另外量測。
 
@@ -624,21 +638,23 @@ flowchart TD
 - codec 不依賴 socket、執行緒、store 或 engine。
 - message 層統一定義 slot layout、欄位值、view offset 與編碼 plan；XML 生成的介面和直接靜態 tag 共用此層。動態欄位入口與靜態 slot 路徑有明確邊界。
 - session core 接收已定義的事件，輸出明確的 action，不直接讀時鐘、開 socket 或同步呼叫業務程式。
-- driver 解譯 action、協調 mmap queue 與 transport，將 append、同步完成或失敗結果送回 core。
+- driver 解譯 action、協調 mmap queue 與 transport，將 append 完成或失敗結果送回 core。
 - runtime 安排 session owner、命令與投遞資源，不複製 initiator / acceptor 的協議邏輯。
 - CLI 把設定轉成公開模型，格式化公開事件；它不能持有另一套 session 行為實作。
 
 ### 8.1 純粹且可重播的 session core
 
-輸入包括已依當前模式驗證的 frame、連線事件、timer 到期、應用發送命令、mmap queue append / 同步完成與傳輸結果。輸出包括發送管理訊息、提交 queue record、請求 replay、投遞業務訊息、調整 timer 及關閉連線。
+輸入包括已依當前模式驗證的 frame、連線事件、timer 到期、應用發送命令、mmap queue append 完成或失敗與傳輸結果。輸出包括發送管理訊息、提交 queue record、請求 replay、投遞業務訊息、調整 timer 及關閉連線。
 
-core 顯式記錄尚待完成的 action；需要落盤之後才能推進的狀態，必須等待相應完成事件。用固定容量的 action buffer 或回呼式 action sink 避免每次 transition 配置動態容器。
+core 顯式記錄尚待完成的 action；需要 journal 提交之後才能推進的狀態，必須等待 append 完成事件。預設流程不等待磁碟同步完成。用固定容量的 action buffer 或回呼式 action sink 避免每次 transition 配置動態容器。
 
 這使登入、斷線、gap、resend、replay、持久化失敗與日切可以在沒有真實網路、沒有真實 sleep 的情況下逐步重播。
 
 ### 8.2 所有 protocol state 由單一 owner 修改
 
 每個 session 有且只有一個 owner。任何應用執行緒透過命令通道提出要求；protocol sequence、timer、重發範圍與 store 順序都由 owner 決定。
+
+owner 是單一執行權，不表示每個 session 各自建立一條執行緒。自有 runtime 由明確數量的 event loop 分別擁有多個 session；啟動時固定 session 到 loop 的配置，首版不在連線存續或重連期間自動遷移。每輪對每個 session 設定收取 bytes、frame、命令、replay 及發送 bytes 的處理預算，並服務到期 timer，避免大量積壓獨佔 loop。需要強隔離時可把指定 session 放在獨立 loop；CPU 綁定與輪詢策略由明確部署選項控制。
 
 initiator / acceptor 共享同一 driver；差異集中在連線建立、Logon 身份匹配與重連。身份匹配以本地視角定義，診斷同時列出 local 與 remote CompID，避免 sender / target 在接收端產生歧義。
 
@@ -652,6 +668,8 @@ initiator / acceptor 共享同一 driver；差異集中在連線建立、Logon �
 
 時鐘跳變、部分 frame、黏包、短寫、半關閉與暫時不可寫都是常規測試輸入。網路層有明確的 frame 大小和緩衝上限。
 
+TCP 使用非阻塞 socket；正常低負載立即嘗試發送，不為湊批主動等待。可寫事件只在存在待發送資料且需要恢復進展時監聽，排空後移除，避免空閒 socket 持續喚醒。若採 edge-triggered poller，處理預算用盡但尚未到 EAGAIN 的 session 保留在 ready list，不能等待一個可能不再出現的邊緣事件。[Linux send(2)](https://man7.org/linux/man-pages/man2/send.2.html) 與 [epoll(7)](https://man7.org/linux/man-pages/man7/epoll.7.html) 是短寫、可寫等待及公平排程的實作依據。
+
 第一版 session 時段使用 UTC；其他時區在有明確時區模型與夏令時間測試後才開放，不能只依賴部署機器的隱含本地時區。
 
 ### 8.4 手動驅動模式保留完整語義
@@ -659,6 +677,50 @@ initiator / acceptor 共享同一 driver；差異集中在連線建立、Logon �
 需要與既有 event loop 整合時，提供 `start()`、`poll_once()`、喚醒與下一個 deadline 的明確契約。手動模式由呼叫者服務 I/O 與 timer，不私下建立另一組自動輪詢執行緒。
 
 業務 callback 的執行策略仍由 engine 型別決定；`poll_once()` 不改變 context 的發送合法性。第一版先支援自有 runtime，手動模式在同一 driver 上擴充，不能複製一份協議實作。
+
+### 8.5 TCP 與應用背壓是核心契約
+
+背壓從第一個真實 TCP initiator / acceptor 流程開始實作及驗收。長期輸入速率大於消費速率時，緩衝只能吸收有限突發；引擎必須把壓力傳回生產者，或在有界期限內結束受影響連線，不能無限增加記憶體或 journal。
+
+#### 8.5.1 資源與進度分開計算
+
+每個 session 分別追蹤有界命令通道、未完成 socket 發送、已接收但未完成業務交付、以及保留供 replay 的歷史記錄。上限同時包含消息數、bytes 及最老待處理消息年齡；不能用單一「queue depth」混淆這些階段。引擎另有總記憶體、journal 空間及執行預算，避免大量 session 合計超額。
+
+每個方向使用有回差的高低水位：高水位限制新准入或投遞，降到低水位才解除，避免邊界抖動。預留完整 frame 的接收緩衝與在途操作所需空間，不能先超量讀取再丟棄；歷史 retention 與仍未完成的消息都計入磁碟預算。mmap journal 不作為無限離線發送佇列。
+
+#### 8.5.2 發送端快、對手方讀取慢
+
+| 情況 | 引擎行為 | 對應用的契約 |
+| --- | --- | --- |
+| 無積壓且容量足夠 | owner 編號、提交記錄後立即嘗試發送 | 成功接受由 receipt 識別，不代表對端已處理 |
+| 短寫或 EAGAIN / EWOULDBLOCK | 保留當前 frame 的 byte offset，等待可寫並繼續剩餘 bytes，期間服務其他 session | 已接受消息不要求應用重新提交 |
+| 積壓達准入上限 | 停止接受新的業務消息，保留管理資源及已接受消息 | 接受前回傳 queue_full，不分配序號、不消耗可重試的原消息 |
+| 積壓降到低水位 | 發出容量恢復提示，更新可查詢狀態 | 普通應用執行緒可重試；多生產者競爭下重試仍可能 queue_full |
+| 持續無進展或消息等待超出期限 | 停止新業務，嘗試有期限的 Logout，必要時關閉 transport | 回報明確的 write_stalled / backlog_timeout 原因及未完成 receipt |
+
+同一連線先完成當前 frame，再依已決定的正常發送順序處理下一筆；不能在半條 FIX 消息中插入其他消息。待寫描述符可引用已提交 journal 記錄及 byte offset，避免完整 payload 再複製；segment 在 transport 不再引用前不可回收。已有多筆積壓時可使用有界 sendmsg / writev 批次，仍需準確處理跨 frame 的短寫與公平預算。
+
+容量恢復通知是提示，應用可查詢最新准入狀態；註冊與重查的順序須避免漏掉恢復事件後永久等待。callback 不可同步等待容量，外部應用也不應以緊密重試迴圈消耗 owner 的 CPU。短暫 EAGAIN 本身不視為 session failure；停滯期限以實際 transport byte 進展計算，新命令入隊或建立 Heartbeat 不能刷新此期限。
+
+#### 8.5.3 本地接收快、業務消費慢
+
+queued 投遞達高水位時停止排入更多 callback；在剩餘 journal 與接收預算內，owner 可繼續 framing、協議處理及提交 inbound，以吸收短暫突發並回應管理消息。這段緩衝有明確 bytes、年齡與磁碟上限，不隱藏持續消費不足。
+
+逼近接收硬上限時減少或暫停該 socket 的讀取，讓 TCP 接收窗口把壓力傳回對端；降到低水位後主動恢復服務，含 edge-triggered 下重新排入 ready list。只暫停相應 session，不阻塞整個 loop。inline 不具備 callback 與 I/O 隔離；慢 callback 返回後限制後續處理與讀取，永久阻塞 callback 依 6.1 的限制處理。
+
+FIX 管理消息與業務消息共用 TCP byte stream。Heartbeat / TestRequest 可能排在業務 bytes 之後，不能承諾「停止讀業務但仍只讀心跳」。讀取暫停期間保留真實的協議 timer 與背壓原因，不偽造活動時間、不私自放寬對端心跳要求；超過資源或停滯期限時嘗試有期限的 Logout，無法完成便斷線。對端也可能因心跳逾時先斷線，必須能按相同恢復流程重新接入。
+
+#### 8.5.4 FIX 順序、管理消息與恢復
+
+- 為 Heartbeat、TestRequest 回覆、Logout、Reject 與恢復動作保留命令、buffer 及必要 journal 空間；owner 可優先處理管理動作，再為尚未編號的業務命令分配下一序號。此安排不承諾管理消息能越過已排入 TCP 的 bytes，也不任意改變已編號的正常發送順序。
+- 心跳與 TestRequest 的判定、回覆、Logout 及 resend 依所支援 FIX session 規則執行。建立一筆管理消息不等於它已送出；transport 進展、協議活動及業務完成時間分別記錄。
+- 重連後丟棄舊 TCP 連線的 byte offset，按 session 序號與 journal 協調缺口。被要求重發的消息使用原 MsgSeqNum、PossDupFlag 與 OrigSendingTime，重建完整 frame；不能把已編號消息當作新訂單再取一次序號，也不能把舊 frame 的剩餘片段送進新連線。
+- 預設可靠訂單與回報不因 queue 滿而丟棄、合併或覆寫。重發時若業務確有過期訂單等跳過需求，須有顯式、符合對手方約定的 replay 政策及 GapFill；不能把 GapFill 或 sequence reset 當成清空積壓的捷徑。
+- inbound journal 記錄與 NextNumIn 的推進一致提交；業務完成 cursor 另行記錄。已提交但未完成 callback 的消息從本地 journal 重投遞，尚未完成協議接收的範圍按 FIX 序號恢復，不能因 callback 慢就把已接收消息重複當成網路缺口。
+- replay 也受發送容量、公平預算及停滯期限限制，避免重連時一次讀出整段歷史造成另一輪無界積壓。已完成 socket 寫入不作為刪除重發歷史的充分條件。
+- TLS 實作把明文、密文及內部待寫緩衝計入相同容量模型，保留 transport 所需的重試狀態；不能用 TLS 隱藏的無界緩衝繞過背壓。
+
+協議依據為 [FIX Session Layer §4.5–4.8](https://www.fixtrading.org/wp-content/uploads/download-manager-files/FIX_Session_Layer_June_2020.pdf)；水位、資源預留、公平預算及本地停滯期限是 NimbleFIX 的實作政策，不宣稱為 FIX 統一定義的參數。
 
 ## 9. 協議正確性、持久化與恢復
 
@@ -687,38 +749,44 @@ queue 在這裡是**可索引、可反覆重播的 journal**，不是讀出後�
 
 第一版以每個 session 獨立的 queue 與分段檔案隔離身份及恢復，不讓所有 session 爭用一個全域 writer。大量 session 的 mapping、檔案描述元及索引有明確資源預算；未來若共用 shard queue，必須保持每個 session 的順序、隔離與恢復契約。
 
-### 9.3 mmap 與同步確認分開定義
+### 9.3 預設 appended，恢復範圍聚焦程序崩潰
 
-使用 mmap 解決儲存介面和重播路徑，不自動等於斷電後每筆資料都存在。正式預設採用 `confirmation = synced`；需要降低同步成本時，使用者明確選擇 `appended`，或在 synced 政策下啟用 group commit。
+正式預設採用 `confirmation = "appended"`。store 使用檔案的共享映射，完整記錄及其序號決策提交後即可繼續協議發送或業務投遞，收發熱路徑不等待逐筆 fsync / msync。這個選擇同時服務低延遲與程序重啟恢復，不能把匿名記憶體或 MAP_PRIVATE 當成相同 store。
 
-| 確認政策 | 可以依賴的邊界 | 代價與限制 |
-| --- | --- | --- |
-| `synced`，預設 | 相應記錄及恢復所需 metadata 的同步完成後，才允許其對應的協議發送或業務投遞 | 磁碟與同步操作會影響延遲；承諾以支援的檔案系統及儲存設備故障模型為前提 |
-| `appended`，明確選擇 | 完整記錄已提交到檔案的共享映射，可由仍正常運行的 OS 下的程序重啟驗證並恢復 | 未同步尾部不保證通過 OS crash、斷電或裝置故障；不能把此模式宣稱為已同步落盤 |
+| 方向 / 狀態 | 預設承諾 |
+| --- | --- |
+| outbound | 訊息與序號決策提交後才首次寫出；程序重啟可找回已提交記錄並按 FIX 規則恢復 |
+| inbound | 已依協議接收的消息與 NextNumIn 決策提交後才交付；未完成交付從 journal 恢復，可能重複但可識別 |
+| transition / checkpoint | 恢復所需事件按提交順序保存；checkpoint 及索引可由已提交 journal 重建，不先於其依賴記錄發布 |
+| 僅 accepted 的命令 | 尚在記憶體命令通道，程序崩潰可能消失；receipt 的 appended 才是可恢復邊界 |
 
-group commit 是同步排程政策，不是第三種 store。一次同步可以確認多筆，但每筆在進度事件中明確區分 appended / synced，且必須等它所屬批次成功才跨過 synced 邊界。批次大小、最大等待時間與 writer backpressure 都有上限。
+保證前提是程序異常退出後 OS、檔案系統與裝置仍正常，store 目錄保留。斷電、OS crash、裝置損壞與跨主機接管不列入首版恢復保證，也不安排斷電測試作為發布前置條件。程序崩潰中斷 append 仍在範圍內，必須辨認未提交尾部，不能把部分記錄當成完整消息。
 
-實作需要依所選檔案系統處理映射頁與檔案 / 目錄 metadata 的同步。Linux 的 [msync(2)](https://man7.org/linux/man-pages/man2/msync.2.html) 說明映射內容的同步，[fsync(2)](https://man7.org/linux/man-pages/man2/fsync.2.html) 另外指出檔案同步不能代替目錄項目的同步。不能只呼叫一次函數或使用 CPU memory barrier，就宣稱整個 crash-consistency 協議成立。
+首版只承諾 appended；`synced`、group commit 及完整磁碟同步確認可依實際需求後續增加，未實作的 confirmation 值在預檢時報錯。日後若提供，須另定明確故障模型與 synced watermark，不把非同步背景回寫命名為「發送前已同步」。正常 OS 回寫可以進行，但不能以每筆等待同步作為預設路徑。
 
-基本 codec 單元測試可使用 test double；它不是可配置、可部署的 memory store。session 整合測試與 hello-fix 使用臨時目錄內的真實 mmap queue；重啟案例保留該目錄直到驗收完成，不以 tmpfs 的結果代表實體磁碟耐久性。
+共享映射及同步的系統語義參閱 [mmap(2)](https://man7.org/linux/man-pages/man2/mmap.2.html) 與 [msync(2)](https://man7.org/linux/man-pages/man2/msync.2.html)。省去逐筆同步不代表 mmap 存取永遠不阻塞；預配置、預觸頁、長時間背景回寫與輪轉的成本仍需量測。
+
+基本 codec 單元測試可使用 test double；它不是可配置、可部署的 memory store。session 整合測試與 hello-fix 使用臨時目錄內的真實 mmap queue；重啟案例保留該目錄直到驗收完成。正式效能量測揭露實際儲存裝置及檔案系統，不能用 tmpfs 取代正式 store 的長時間成本。
 
 ### 9.4 queue 格式與恢復流程
 
 - 記錄包含 queue 格式版本、session 身份、epoch、方向、序號或事件型別、長度、內容完整性資訊與提交狀態；有業務 schema 時可額外記錄 fingerprint，無字典記錄沒有這項前置要求。
 - 以固定格式、offset 與穩定的記錄識別保存資料，不寫入 C++ 指標、物件佈局或程序內地址。
-- append 完成、reader 可見與 synced watermark 各有明確邊界；commit marker、checksum 與 checkpoint 的順序以故障注入驗證，不能只假設一個 marker 寫入是所有故障下的原子提交。
+- append 完成與 reader 可見有明確邊界；先寫完整 header / payload 與完整性資訊，再以定義好的原子發布及記憶體順序提交。commit marker、checksum 與 checkpoint 的順序以程序中止故障注入驗證，不能把尚未完整寫入的記錄發布給 reader 或 transport；release / acquire 不代表磁碟同步。
 - checkpoint 記錄可重建的序號與交付進度，索引映射 `(epoch, direction, FIX sequence)` 到 queue 位置；損壞或過期的索引可由已驗證記錄重建。
 - 恢復時從有效 checkpoint 掃描連續紀錄，辨識未提交或 torn tail；不能越過不明損壞繼續猜測序號。修復與截尾有明確且可稽核的政策。
 - 同一 session queue 有排他 writer lock，避免兩個 engine 或 acceptor 的兩條連線同時推進同一身份。
-- outbound wire frame、序號決策與 checkpoint 使用一致的提交模型，之後才按政策寫入 socket；replay 從保存記錄重建需要的重發 header，不原地覆寫歷史紀錄。
+- outbound wire frame 與序號決策使用一致的提交模型，完成後才寫入 socket；checkpoint 不可先於其引用的記錄。比較直接在預留 journal payload 編碼與先編碼再追加的成本，無論採哪種都不得暴露部分 frame；replay 從保存記錄重建需要的重發 header，不原地覆寫歷史紀錄。
 - inbound 記錄、預期序號、callback 投遞與 delivery cursor 的順序明確；callback 返回後才推進相應完成 cursor。崩潰可能重複投遞，回呼需要 replay 標記和穩定關聯識別碼。
+- callback 的完成事件經 owner 排序，若處理結果依賴該次 callback 提交的回覆，須先確認相關 outbound 已 appended，才提交 inbound 完成 cursor。queued 的 send 命令與完成事件也須保留此依賴；不能在回覆僅 accepted 時先標記接收消息完成，造成崩潰後回覆與重投遞依據同時消失。這不把外部資料庫副作用納入同一交易。
 - 不承諾應用 callback、外部資料庫與對手方之間的 exactly-once；業務層需要自己的去重或交易協調。
 - segment 預先配置並按容量或時間輪替；輪替不等於 FIX 日切，也不自動 reset sequence。所有跨 segment 的 cursor 都能在重啟後重新定位。
+- 預先準備可用 segment 並預觸寫入頁，輪轉所需開檔、空間配置及索引維護盡量移出逐消息路徑；備用容量耗盡時以背壓或明確失敗處理，不隱藏 heap fallback 或無界同步擴展。
 - reader lease 與 segment 回收有界；retention 同時考慮協議可重發範圍、未完成業務交付與有效 reader，不因讀取完畢就刪除資料。達到磁碟預算時明確 backpressure 或停止 session，不覆寫仍需恢復的紀錄。
 - store 損壞、磁碟滿、檔案延伸失敗、映射存取故障、同步失敗與不相容格式都阻止不安全推進；預先配置和監控空間可降低風險，不能假設 mmap 寫入永遠不失敗。
 - reset sequence 透過明確的 session epoch 與可稽核操作表達；一般重新啟動不重置身份、序號或 queue。
 
-純 session core 測試使用 fake clock、fault-injecting store 和可控制的 transport；真正的 queue 另做每個提交邊界、程序中止、斷電模型、segment 輪替與 reader 落後的恢復測試。一般 kill-process 測試不能代表斷電測試。
+純 session core 測試使用 fake clock、fault-injecting store 和可控制的 transport；真正的 queue 另做每個提交邊界、程序中止、segment 輪替與 reader 落後的恢復測試。逐項核對記錄、序號及交付結果，不以「檔案仍存在」代表恢復成功。磁碟滿、損壞及映射錯誤至少要求可診斷地停止不安全推進，不擴展為磁碟故障後自動恢復的承諾。
 
 ## 10. 一個可預期的命令列入口
 
@@ -744,12 +812,12 @@ group commit 是同步排程政策，不是第三種 store。一次同步可以�
 version = 1
 
 [engine]
-dispatch = "queued"
+dispatch = "inline"
 schema = "fix44"
 
 [engine.storage]
 directory = "./state/buy-side"
-confirmation = "synced"
+confirmation = "appended"
 
 [[sessions]]
 name = "venue-a"
@@ -770,12 +838,12 @@ password_env = "FIX_PASSWORD"
 version = 1
 
 [engine]
-dispatch = "queued"
+dispatch = "inline"
 schema = "fix44"
 
 [engine.storage]
 directory = "./state/sell-side"
-confirmation = "synced"
+confirmation = "appended"
 
 [[listeners]]
 name = "main"
@@ -797,7 +865,20 @@ password_env = "FIX_PASSWORD"
 
 加入另一位客戶時，在同一 listener 下新增 session 與自己的認證政策；store 依協議身份分開，不以 listener 的一個序號服務全部客戶。
 
-CLI 的 `dispatch` 在啟動時選擇 queued 或 inline engine 實例；`schema = "fix44"` 選擇預生成的 C++ typed 綁定，`schema = "none"` 或省略 schema 不啟用具名綁定。兩種角色都適用，其他連線與儲存設定不變。第一版同一 engine 使用一個業務模式；多 schema listener 路由屬後續擴充，不能用尚未實作的混合設定暗示支援。設定不能在穩態收發時改變 execution policy。
+CLI 的 `dispatch` 預設為 inline，在啟動時選擇 inline 或 queued engine 實例；`confirmation` 預設為 appended。兩個選項職責獨立，不因選擇 queued 改成同步落盤。`schema = "fix44"` 選擇預生成的 C++ typed 綁定，`schema = "none"` 或省略 schema 不啟用具名綁定。兩種角色都適用，其他連線與儲存設定不變。第一版同一 engine 使用一個業務模式；多 schema listener 路由屬後續擴充，不能用尚未實作的混合設定暗示支援。設定不能在穩態收發時改變 execution policy。
+
+背壓設定由每個 session 的 `flow_control` 模型承載，engine 提供有限預設與總資源預算，session 可覆寫。至少包含以下項目；具體容量及期限在 baseline 後制定，首版不得以無限值作為預設配置：
+
+| 設定項 | 含義與驗證 |
+| --- | --- |
+| 命令消息數 / bytes 上限 | 涵蓋尚未編號的跨執行緒與離線命令，不以 wire 積壓代替這項計數 |
+| 待發送消息數 / bytes 高低水位與硬上限 | 限制未完成 transport 寫入的積壓；低水位小於高水位，高水位不超過硬上限，計入已接受命令的預留額度 |
+| 未完成接收交付的消息數 / bytes 高低水位與硬上限 | 限制 journal 到業務完成 cursor 之間的積壓，包含投遞中消息 |
+| 最老命令 / 待發送 / 待交付消息的期限 | 分別限制各階段等待時間，不能只靠容量維持高延遲積壓 |
+| transport 無進展與接收背壓期限 | 持續停滯時結束連線，與協議心跳及 Logout deadline 分開觀察 |
+| 管理資源預留與每輪處理預算 | 支援必要管理動作及多 session 公平性，不承諾繞過已阻塞的 TCP bytes |
+
+資源預檢列出 session 及 engine 的預配置記憶體、journal 空間與檔案 / mapping 預算；上限互相矛盾、總額超出能力或不足以容納最大 frame 與管理預留時報錯。顯式設定的 socket send / receive buffer 也揭露有效值，不能靠巨大 kernel buffer 隱藏背壓。
 
 若需要直接讀取業務字典，使用 `dictionary = "./venue-FIX44.xml"` 指定 XML，不另提供基底 / 擴充模式。`schema` 指已生成的 C++ 綁定，`dictionary` 指 XML 來源；兩者同時存在時檢查定義一致性，兩者都沒有時才完全不啟用業務 schema。沒有預生成綁定但有 XML 的工具可使用通用 callback 與 XML 驗證資料，不能假造有名稱的 C++ 方法。
 
@@ -832,12 +913,15 @@ venue.toml:12:12: invalid_value [sessions.venue-a.endpoint]
 
 ## 11. 可觀察性是基本能力
 
-每個 session 至少可取得：角色、listener 或遠端 endpoint、狀態與最近原因、local / remote 身份、下一個收發序號、最後收發時間、重連或接入次數、重發範圍、佇列深度、queue offset、reader lag 與 synced watermark。
+每個 session 至少可取得：角色、listener 或遠端 endpoint、狀態與最近原因、local / remote 身份、下一個收發序號、最後實際收發時間、重連或接入次數、重發範圍、queue offset、appended 進度、協議接收與業務完成 cursor。可選同步功能實作後才增加 synced watermark。
+
+背壓觀察分別顯示：命令消息數 / bytes、未完成發送消息數 / bytes、最老待發送年齡、最後寫入進展、當前短寫 offset、接收投遞積壓與年齡、讀取暫停狀態、journal 使用量及 reader lag。累計 queue_full、EAGAIN、短寫、高低水位轉移、暫停時長與 write_stalled / backlog_timeout；不能只提供一個無法定位瓶頸的 queue depth。必要時抽樣觀察 kernel 待送 bytes，避免把全部資料移入 socket buffer 後宣稱無積壓。
 
 事件帶有 session、operation、error code 與可用的關聯識別碼。CLI 預設顯示登入成功、斷線原因、重連、恢復與停止結果；函式庫提供結構化事件、查詢 snapshot 及可選 sink。
 
 - callback 失敗、queue 飽和和 store 錯誤必須保留原始原因。
 - 正常收發不在 owner 執行緒同步格式化或寫入文字日誌；使用有界事件記錄及非熱路徑格式化。
+- 熱路徑 metrics 以 owner / 執行緒本地計數及有界採樣維護，匯總與輸出移出熱路徑；error observer 由非 owner 的有界診斷通道呼叫，不讓範例的錯誤文字輸出阻塞正常 I/O。
 - 日誌通道飽和時增加丟失計數，保留可查詢的最後錯誤，不能造成無界記憶體增長。
 - 未註冊 error observer 時仍保留錯誤 snapshot；engine 級致命錯誤透過 `run()` 結果傳回。
 - 對應用 callback 的例外有明確政策：在啟用例外的建置中捕捉、標記 callback failure 並停止受影響 session；error observer 再次失敗則停止 engine，不能靜默繼續。
@@ -899,6 +983,8 @@ TLS、系統執行緒或可選 backend 的依賴由 target 傳遞，不要求使
 - 不正確的 callback 簽名有可理解的編譯失敗；正確 callback 必須真的被呼叫。
 - queued 與 inline 分別驗證 callback 所在執行緒、session 順序及發送結果。
 - 跨執行緒 sender、producer lane、停止後 handle、慢 callback、queue 飽和與取消都有驗收。
+- accepted 前的驗證、容量預留與被拒絕消息的可重試所有權有明確驗收；最長管理 header、序號位數變化及 buffer 邊界不能導致 owner 接受後才發現輸入編碼錯誤。
+- queue_full 不分配序號；已接受消息遇到 EAGAIN 不要求應用重送。容量恢復提示、註冊與重查、MPSC 競爭、消息及 byte 水位與最老年齡限制分別驗證。
 - 短命字串、臨時值、view 複製、巢狀 group 和保留訊息都以生命週期工具驗證。
 - 啟動失敗的資源回收、callback 內停止、重複停止與析構不會死鎖。
 - flat 與 typed 模式都經過相同的 session 和 mmap queue 路徑；不提供記憶體 store 讓部分測試繞過恢復契約。
@@ -915,9 +1001,22 @@ TLS、系統執行緒或可選 backend 的依賴由 target 傳遞，不要求使
 
 以 subprocess 與 loopback socket 驗證 CLI、TLS、Logon 認證、登入到訂單回報、斷線恢復及 mmap queue 重啟。端口由 OS 配置，不依賴固定端口或特定 cwd。
 
-acceptor 專用案例至少包括：同一 listener 下多客戶端、local / remote 身份反轉、未知身份、錯誤認證、慢 Logon、重複登入、正確 session 回覆、單客戶故障隔離，以及服務重啟後從穩定身份找回 queue。兩個角色都要測 queued / inline、flat / typed、同步政策和雙向 resend。
+acceptor 專用案例至少包括：同一 listener 下多客戶端、local / remote 身份反轉、未知身份、錯誤認證、慢 Logon、重複登入、正確 session 回覆、單客戶故障隔離，以及服務重啟後從穩定身份找回 queue。兩個角色都要測預設 inline / 可選 queued、flat / typed、appended 提交與雙向 resend；尚未實作的同步模式不列入首版門檻。
 
-store 案例包括程序中止時各 append / commit / 同步邊界、損壞或過期索引、torn tail、磁碟滿、segment 輪替、reader 落後及 callback 完成 cursor。恢復後逐項核對實際訊息與序號，不能只檢查檔案仍然存在。
+store 案例包括程序中止時各 append / commit / send 邊界、損壞或過期索引、未提交尾部、磁碟滿、segment 輪替、reader 落後及 callback 完成 cursor。特別在 inbound 已提交、回覆 accepted / appended、socket 已寫出與完成 cursor 提交之間中止，確認回覆依賴與交付進度不會造成靜默遺失。恢復後逐項核對實際訊息與序號；保證已提交記錄可恢復，允許有標記的重複業務投遞，不要求 exactly-once。斷電與 OS crash 不列入首版驗收。
+
+TCP 背壓驗收從首個真實網路切片開始，fake transport 可確定性注入，loopback 對手程式另以限速、暫停讀取及受控 buffer 製造實際壅塞：
+
+| 案例 | 必須核對的結果 |
+| --- | --- |
+| 限速讀取、停止讀取、恢復讀取 | EAGAIN 與短寫可繼續，無高 CPU 忙重試；消息 / byte 預算及等待年齡有界；低水位解除准入限制 |
+| 半條 frame 後斷線或殺進程 | 同連線不插入其他 frame；新連線不沿用舊 offset；依 FIX 規則以完整 frame 與原序號恢復 |
+| 發送飽和時產生 Heartbeat / TestRequest / Logout | 管理資源可用，timer 與真實寫入進展不混淆；無法送出時按期限斷線，不無限等待 Logout |
+| queued callback 消費變慢 | 短暫積壓由有限 journal 吸收；硬上限前暫停讀取；不丟棄、覆寫或越過未完成的同 session 交付 |
+| 接收暫停時收到管理消息 | 不假造只讀心跳能力；期限與斷線原因清楚，雙方可透過正常 session 恢復重新接入 |
+| 積壓或 replay 期間重啟 | 已接收但未交付走本地 journal；未完成協議接收的消息走 FIX 缺口恢復；序號、內容及 replay 標記正確 |
+| 一個 session 持續慢讀或大量 replay | 其他 session 的 I/O、timer 與 callback 仍有公平進展，尾延遲與資源隔離有數據 |
+| 長時間持續負載 | journal 回寫、預配置及 segment 輪轉不造成未觀察的無界積壓，磁碟預算耗盡時有明確結果 |
 
 錯誤案例核對退出碼、診斷內容與 session 結果；不只斷言內部函數有返回值。特別保留跨目錄執行、錯誤端口、schema 不匹配及業務 callback 失敗案例。
 
@@ -943,7 +1042,7 @@ README 的程式碼片段、上手命令和預期輸出由同一批可執行範�
 | 應用交付 | flat / typed dispatch、queue reader、sender 提交 | queued / inline、producer 數量、callback 工作量 |
 | 端到端 | 真實 socket、重連、TLS、儲存與應用交付 | 機器、核心綁定、負載模型、同步政策、網路條件 |
 
-每層提供 throughput、p50 / p99 / p99.9、分配次數、記憶體與飽和點；同步儲存和恢復路徑不能混進「純 codec」數字。
+每層提供 throughput、p50 / p99 / p99.9、最大值、分配次數、記憶體與飽和點；樣本數足夠時另外提供 p99.99。恢復路徑與日後可選的同步儲存不能混進「純 codec」數字；應用排隊時間與從 API 接受到實際寫出的等待時間另外揭露，不能只量 owner 開始處理後的服務時間。
 
 同一 shape-local layout 的具名 setter 與靜態 tag 先驗證共用 slot / plan，再比較完整成本；不能只因某次 compiler 最佳化後數字接近，就認定兩條實作已經統一。API 的型別與後端結構提供這項保證，不承諾所有 compiler 都輸出逐 byte 相同的機器碼。
 
@@ -972,11 +1071,25 @@ slot 是候選的統一中間表示，不是已經量測過的效能結論。基
 
 ### 14.2 端到端與發布基線
 
-正式 session benchmark 一律啟用 mmap queue，分別公布 appended、synced 及 group commit 的結果；不能用 memory store 的成績宣傳可恢復 session 的效能。initiator 與多客戶端 acceptor 分開量測，另外列出 append、同步、page fault、segment 輪替、reader lag 與重啟掃描的成本。
+benchmark harness 與第一個 codec / journal 切片一起建立，每個後續切片都有相應邊界的數據，不等功能完成後才檢查效能架構。基線包括以下三類：
 
-同時測試低負載、接近容量與過載，使用能辨識排隊延遲的負載方法，避免只測串行 request-response 而隱藏壅塞。樣本數、暖機、編譯器、CPU、schema 和原始結果都要可取得。
+| 基線 | 用途與條件 |
+| --- | --- |
+| 絕對數據 | 公布實際延遲、吞吐、資源用量及吞吐與延遲曲線，先有可重現結果再訂數值 SLO |
+| 空基線 | 最小非阻塞 TCP echo 與最小 parse / encode，揭露網路及 codec 基礎成本；不帶 session / store，不能當成正式引擎成績，也不直接相減兩個 p99 宣稱引擎開銷 |
+| QuickFIX 對照 | 同機、相同消息組合、速率、warmup、CPU 配置、TCP 選項與記錄設定；公開版本、編譯參數、store 及實際同步行為，不僅憑 MemoryStore / FileStore 名稱判定耐久性相同 |
+
+QuickFIX 互通是獨立的正確性驗收，快於 QuickFIX 只代表該配置下的相對結果。Chronicle 作為架構參考，跨語言、硬體與測量邊界的公開數字不作直接對比。
+
+正式 session benchmark 一律啟用 appended mmap queue，分別量測預設 inline、queued、普通多生產者 sender 與進階 lane；不能用 memory store 的成績宣傳可恢復 session 的效能。若日後實作 synced 或 group commit，另列其同步邊界與結果。initiator 與多客戶端 acceptor 分開量測，列出 append、page fault、segment 輪替、reader lag、背景回寫及重啟掃描的成本。
+
+端到端使用獨立、可控制速率的 open-loop load generator，避免 coordinated omission，保留到達速率、實際接受率、queue_full 及完整排隊延遲。串行 request-response 可作補充，不代替過載量測。測試低負載、接近容量、突發、持續過載及接收端限速，報告健康 session 在其他 session 壅塞時的尾延遲。
+
+公開硬體、儲存裝置、檔案系統、內核、編譯器與 flags、CPU 綁定、SMT / turbo、dispatch、確認政策、schema、消息組合、warmup、時長、樣本數及多次結果差異。原始數據、腳本、設定與 commit 一同保存。量測邊界區分使用者態、內核及硬體時間戳，未取得 wire 時間戳時不宣稱 wire-to-callback。
 
 設計目標：在明確配置的容量內，inline 的穩態 codec / session 路徑不做 heap allocation、不取共享鎖；queued 路徑的訊息儲存與佇列預配置，維持有界使用量。這些都是需要量測證明的目標，不涵蓋啟動、診斷格式化、業務程式自行配置或外部 I/O 成本。
+
+用 allocator hook、系統呼叫追蹤與 perf 診斷分配、鎖、page fault、cache miss 及預設逐消息零 fsync / msync；正式延遲量測與 strace 等侵入式診斷分開執行。長時間測試涵蓋背景回寫、輪轉及工作集變化，不能只量永遠駐留 cache 的單一消息。
 
 第一份穩定 baseline 建立後才訂定數值回歸預算。一般 CI 做功能與 benchmark smoke；專用機重複量測效能，避免把共享 runner 的單次抖動當作效能結論。
 
@@ -984,7 +1097,7 @@ slot 是候選的統一中間表示，不是已經量測過的效能結論。基
 
 ## 15. 建議的程式碼與文檔結構
 
-下列是未來實作目標；本次重置只保留這份設計文檔。
+下列是未來實作目標；目前分支只有設計與評審文檔，尚無相應實作。
 
 ```text
 include/nimblefix/        少量公開頭與標準 schema 入口
@@ -1017,18 +1130,20 @@ README 聚焦產品定位與第一筆收發，讓使用者分別找到「我要�
 
 | 階段 | 交付內容 | 進入下一階段的條件 |
 | --- | --- | --- |
-| 0：設計基線 | 本提案、公開契約、錯誤與支援範圍 | 對 API 和容量/所有權契約完成審查；尚無可執行產品 |
-| 1：第一條垂直流程 | build / install、shape-local slot / encoder、靜態 tag、XML 預生成 FIX44 getter/setter、基本 core/runtime、真實 mmap queue、雙角色 hello-fix | 靜態 tag / generated API 與 queued / inline 都完成登入、下單、回報、登出；共用編碼 plan，稀疏 shape 不配置完整 schema；重啟基本序號恢復；外部應用能連結 |
-| 2：完整 FIX44 session | 全部宣稱的 session 行為、group、分層驗證、acceptor 多客戶端與 backpressure | 支援矩陣、雙角色協議案例、故障注入及獨立對手方驗收通過 |
-| 3：部署與恢復加固 | queue 完整故障恢復、索引、輪替、reader、認證、TLS、時段與診斷 CLI | 雙角色重啟、損壞與同步邊界、資源回收、錯誤輸出及離開來源目錄部署全部通過 |
-| 4：方言與擴充 | 自訂 XML、運行期 XML 載入、建置 helper、明確動態欄位入口、其他 FIX 版本、手動驅動 | 各版本獨立驗收，XML 增量生成與一致性檢查，動態成本獨立量測，公開 API 維持一致 |
-| 5：效能與發布 | 壓測、benchmark、依證據優化、文件與套件穩定化 | 預設模式與 inline 都有數據，回歸預算達標，正式發布範圍完全通過驗收 |
+| 0：設計基線 | 本提案、低延遲預設、程序故障模型、發送 / 背壓 / 所有權契約及支援範圍 | 重要不變量與驗收邊界完成審查；尚無可執行產品 |
+| 1：codec / slot 驗證 | shape-local slot、靜態 tag、最小 XML 生成介面與共用 encoder、framing / flat parse、benchmark harness | 名稱與 tag 路徑 wire / layout 一致；稀疏成本、所有權、編譯診斷及編譯體積有證據；公布 codec baseline；不依賴網路或正式 session |
+| 2：journal / inline session 驗證 | 真實 appended mmap queue、純 core、fake clock / transport、inline callback、receipt 及交付依賴 | 每個 append / commit / send 邊界的程序中止恢復；序號與未完成交付正確；EAGAIN / 短寫可確定性重播；session baseline，逐消息不等待 fsync / msync |
+| 3：首條真實 TCP 流程 | build / install、FIX44 樣本消息預生成、雙角色 hello-fix、非阻塞 transport、有界背壓及基本多 session 排程 | 登入、下單、回報、登出與重啟；外部應用能連結；對端慢讀、短寫、半 frame 斷線、停滯期限及健康 session 公平性驗收；端到端與空基線 |
+| 4：完整 FIX44 與 queued | 全部宣稱的 session 行為、group、分層驗證、完整內建 FIX44 綁定、queued、多客戶端、MPSC sender | 支援矩陣、雙角色獨立對手方互通；兩種投遞候選有對照；飽和、接收暫停、重投遞與 replay 背壓驗收；並行生命週期工具通過 |
+| 5：部署與恢復加固 | queue 索引 / checkpoint / 輪轉 / reader、認證、TLS、時段、診斷 CLI 及長時間負載 | 程序重啟恢復與 store 故障停止、TLS 背壓、資源上限、結構化診斷及離開來源目錄部署通過；背景回寫和輪轉的尾延遲有數據 |
+| 6：方言與擴充 | 自訂 XML、運行期 XML 載入、建置 helper、明確動態欄位入口、其他 FIX 版本、手動驅動 | 各版本獨立驗收，XML 增量生成與一致性檢查，動態成本獨立量測，公開 API 維持一致 |
+| 7：優化與發布凍結 | 依 profile 優化、完整性能報告、回歸預算、文件與套件穩定化 | 預設 inline + appended、queued 及各發送入口的數據可重現；背壓、恢復與發布範圍全部達標；凍結前不再擴功能 |
 
-階段交付可以只有部分功能，但必須使用最終架構中的真實元件，標明尚未支援的能力；不以固定回應或空實作假裝功能完成。第一階段的連通性示範不等於可投入交易使用。
+階段交付可以只有部分功能，但必須使用最終架構中的真實元件，標明尚未支援的能力；不以固定回應或空實作假裝功能完成。階段 1、2 用於驗證架構，階段 3 是第一個使用者可執行的網路 demo，尚不等於可投入交易使用。
 
-每階段都同時交付程式碼、公開 API 說明、可執行範例及對應測試。不存在「先把功能堆完，最後再補易用性」的階段。
+每個實作切片交付公開 API / 設定變更、不變量、可重現範例、測試與相應邊界的原始性能數據、已知限制及可回退點。協議預期由已核對規範和獨立對手方驗證，不只用同一實作的兩端互測。AI 實施也按此驗收，不能用產生程式碼的速度代替性能或恢復證據。
 
-第一個正式發布的最小門檻為階段 1 至 3，以及階段 5 的品質與量測要求全部滿足；階段 4 的每項擴充獨立列入支援範圍，未通過前不宣稱支援。
+首個正式發布的最小門檻為階段 1 至 5，以及階段 7 的品質與量測要求全部滿足；階段 6 的每項擴充獨立列入支援範圍，未通過前不宣稱支援。synced、斷電恢復及災難恢復不列入本次發布門檻。
 
 ## 17. 對審核與後續討論的設計回應
 
@@ -1048,16 +1163,23 @@ README 聚焦產品定位與第一筆收發，讓使用者分別找到「我要�
 | 字典有多種自訂格式與擴充角色 | 只使用 XML，直接生成 C++，不區分基底和覆寫層，不要求二進位字典部署 |
 | 按 tag 填值退化成文字組裝 | generated setter 與靜態 `set<Tag>()` 編譯期歸一為 slot / EncodingPlan，只有顯式動態 tag 入口允許文字追加 |
 | tag 數字或 optional 欄位很稀疏，slot 仍浪費空間與掃描 | 完整 XML metadata 與 shape-local payload 分離；初始化、presence、排序、reset、group 與交接成本獨立驗收 |
+| 低延遲只存在於非預設配置 | 預設 inline + appended，從 codec / journal 階段建立基準，逐階段驗證完整成本 |
+| 為斷電保證增加逐筆同步等待 | 首版聚焦 OS 仍正常下的程序崩潰恢復，完整記錄提交後繼續收發，同步確認延後獨立驗收 |
+| TCP 慢接收端令積壓無界或忙重試 | 消息 / bytes / 年齡限制、短寫 offset、可寫等待、高低水位與有界停滯期限 |
+| 誤以為管理消息能繞過 TCP 堵塞 | 預留資源但遵守 byte stream 與發送順序，無法前進時有限嘗試 Logout 後斷線恢復 |
+| 收到消息與完成業務處理混為一談 | 協議接收 cursor、業務完成 cursor 及回覆提交依賴分開，已接收未完成消息走本地重投遞 |
 
 ## 18. 仍需用實作與量測回答的問題
 
-本提案已選定 mmap queue 作為唯一正式 store、預設同步確認、initiator / acceptor 對等使用、可選且只用 XML 的業務字典、靜態 tag 與 generated API 共用 shape-local slot / plan、顯式動態入口、預設 queued、可選 inline、可多生產者的普通 sender、純 session core、有版本 TOML 及完整安裝套件等方向。以下細節在建立 baseline 後決定，不能先用無依據的 magic number 固化：
+本提案已選定低延遲優先、mmap queue 作為唯一正式 store、預設 inline + appended、以程序崩潰重啟為恢復範圍、有界 TCP / 應用背壓、initiator / acceptor 對等使用、可選且只用 XML 的業務字典、靜態 tag 與 generated API 共用 shape-local slot / plan、顯式動態入口、可選 queued、可多生產者的普通 sender、純 session core、有版本 TOML 及完整安裝套件等方向。這些方向不再留待 baseline 決定；以下實作細節以證據選擇，不能先用無依據的 magic number 固化：
 
 - 每種負載的預設 queue、frame、group、slab 與擁有化容量，以及對應記憶體預算。
+- 發送及接收各階段的消息 / byte 水位、最大等待年齡、停滯期限、管理預留與每輪公平預算，以及對應的資源估算與過載曲線。
 - 多生產者命令通道的實作、爭用成本與 producer lane 的實際收益。
 - slot 的變長資料儲存、fluent 靜態形狀的中間值搬移、layout / plan 重用，以及最終 frame 編碼之間可安全消除的複製。
 - 大型已宣告集合在低 presence 下應選擇哪種稀疏儲存、列舉與 reset 策略；是否值得提供全 schema mutable builder，以及應公開的成本界線。
-- mmap queue record / segment / index / checkpoint 佈局、讀取 lease、同步與批次政策的成本及故障驗證。
+- mmap queue record / segment / index / checkpoint 佈局、讀取 lease、預配置、直接編碼及輪轉策略的成本與程序中止驗證。
+- queued 的直接 journal reader 與描述符 ring，在相同恢復及 retention 契約下的延遲、複製、工作集及飽和成本。
 - 無字典 wire 規則表的支援範圍、局部 group descriptor 介面，以及 flat / typed 共享的解析資料模型。
 - 每個 execution policy 的效能回歸預算、長時間負載下的尾延遲與飽和行為。
 - 哪些額外 backend 或編碼優化有足夠收益，值得增加建置與維護成本。
