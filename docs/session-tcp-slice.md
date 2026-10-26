@@ -142,8 +142,8 @@ order/report examples and dictionary oracle cover application message validity
 separately. L2 uses fixed-shape messages and a different allocation boundary.
 Journal state defaults to the workspace filesystem, not `/tmp` tmpfs.
 
-The corresponding stage 3 raw measurements are recorded under
-`bench/results/stage3/`, with exact code revision, binary/source hashes,
+The corresponding [stage 3 raw measurements](../bench/results/stage3/README.md)
+identify implementation commit `e5bd312`, with exact code revision, binary/source hashes,
 compiler, CPU affinity, filesystem and workload conditions. They are an
 initial development-host baseline, with no numerical SLO or QuickFIX speedup
 claim. Dedicated-machine repeatability, full saturation curves, hardware
