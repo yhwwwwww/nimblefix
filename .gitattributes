@@ -1,0 +1,2 @@
+# Python's CSV writer emits CRLF; preserve the archived raw sample bytes.
+bench/results/**/*.csv whitespace=cr-at-eol
