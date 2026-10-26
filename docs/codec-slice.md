@@ -122,9 +122,10 @@ The schema-size probe fixes a two-field shape while adding 1,000 unused optional
 fields and widening tag spacing; it records slot/builder size, generated header
 size, compile time and probe binary size.
 
-The measured baseline and raw files are added in the separate benchmark commit
-so they can identify the exact implementation commit they measured. Results
-from this development machine are exploratory; no latency SLO is set here.
+The [measured baseline and raw files](../bench/results/codec-initial/README.md)
+identify implementation commit `059c3f3`, with three runs and a fixed-shape
+schema-size probe. Results from this development machine are exploratory; no
+latency SLO is set here.
 Fluent construction still allocates a bounded backing block and grows it;
 fixed-shape construction/encode and flat parse are the allocation-free paths.
 Pooling/reusable fluent storage remains work before claiming an allocation-free
