@@ -1,0 +1,44 @@
+name: codec
+on: [push, pull_request]
+permissions:
+  contents: read
+
+jobs:
+  contracts:
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        include:
+          - toolchain: gcc
+            cxx: g++
+          - toolchain: clang
+            cxx: clang++
+    env:
+      CXX: ${{ matrix.cxx }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: xmake-io/github-action-setup-xmake@v1
+        with:
+          xmake-version: '2.9.8'
+      - name: Configure
+        run: xmake f -y -m release --toolchain=${{ matrix.toolchain }} --benchmarks=y
+      - name: Build and test
+        run: xmake check
+      - name: Installed consumers
+        run: |
+          python3 tests/install_test.py
+          python3 tests/install_test.py --core-only
+      - name: Benchmark smoke
+        run: python3 bench/run.py --binary build/linux/x86_64/release/codec-bench --compiler "$CXX" --samples 100 --runs 1 --output /tmp/codec-smoke
+
+  sanitizer:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: xmake-io/github-action-setup-xmake@v1
+        with:
+          xmake-version: '2.9.8'
+      - run: xmake f -y -m debug --toolchain=clang --sanitize=y --fuzzers=y
+      - run: xmake check
+      - name: Parser fuzz smoke
+        run: xmake run parser-fuzz -runs=10000 -max_len=1024

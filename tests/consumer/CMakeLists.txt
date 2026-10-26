@@ -1,0 +1,12 @@
+cmake_minimum_required(VERSION 3.23)
+project(NimbleFIXConsumer LANGUAGES CXX)
+find_package(NimbleFIX 0.1 CONFIG REQUIRED COMPONENTS core)
+option(CONSUMER_SCHEMA "Test the installed XML generator" ON)
+add_executable(consumer main.cpp)
+target_link_libraries(consumer PRIVATE NimbleFIX::nimblefix)
+if(CONSUMER_SCHEMA)
+    nimblefix_generate_schema(TARGET venue_schema NAMESPACE venue
+        HEADER venue.hpp XML_FILES "${CMAKE_CURRENT_SOURCE_DIR}/venue.xml")
+    add_executable(schema-consumer typed.cpp)
+    target_link_libraries(schema-consumer PRIVATE venue_schema)
+endif()

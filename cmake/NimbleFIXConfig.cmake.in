@@ -1,0 +1,10 @@
+@PACKAGE_INIT@
+
+include("${CMAKE_CURRENT_LIST_DIR}/NimbleFIXTargets.cmake")
+set_and_check(NIMBLEFIX_SCHEMA_GENERATOR "@PACKAGE_CMAKE_INSTALL_DATADIR@/nimblefix/schema/generate.py")
+include("${CMAKE_CURRENT_LIST_DIR}/NimbleFIXSchema.cmake")
+set(NimbleFIX_core_FOUND TRUE)
+if(TARGET NimbleFIX::fix44_sample)
+    set(NimbleFIX_sample_FOUND TRUE)
+endif()
+check_required_components(NimbleFIX)

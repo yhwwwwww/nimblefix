@@ -1,0 +1,7 @@
+<?xml version="1.0"?>
+<fix type="FIX" major="4" minor="4">
+  <fields><field number="900001" name="ExternalID" type="STRING"/></fields>
+  <messages><message name="CustomOrder" msgtype="Z" msgcat="app">
+    <field name="ExternalID" required="Y"/>
+  </message></messages>
+</fix>
