@@ -411,7 +411,10 @@ struct GroupScan {
             break;
         }
         if (consumed_member) continue;
-        if (member_contains_tag(schema, parent_members, wire_fields[cursor].tag)) break;
+        if (member_contains_tag(schema, parent_members, wire_fields[cursor].tag) ||
+            wire_fields[cursor].tag == 10) break;
+        const auto* trailer = find_component(schema, "Trailer");
+        if (trailer != nullptr && member_contains_tag(schema, trailer->members, wire_fields[cursor].tag)) break;
         // Unknown extension fields stay within this entry until a delimiter or
         // a known field owned by the parent message starts the next level.
         ++cursor;

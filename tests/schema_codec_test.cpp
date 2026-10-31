@@ -1,5 +1,6 @@
 #include <array>
 #include <cstdint>
+#include <iostream>
 #include <string>
 #include <string_view>
 
@@ -12,7 +13,7 @@ using namespace nimblefix;
 
 int failures = 0;
 
-#define CHECK(condition) do { if (!(condition)) ++failures; } while (false)
+#define CHECK(condition) do { if (!(condition)) { ++failures; std::cerr << "line " << __LINE__ << ": " << #condition << "\n"; } } while (false)
 
 constexpr std::array<EnumValueDescriptor, 2> multi_char_values{{
     {106, "0", "zero"}, {106, "1", "one"}}};
@@ -141,6 +142,84 @@ void test_nested_group_projection_and_validation_levels() {
     CHECK(validate_schema_message(schema, flat, ValidationLevel::required).code == ErrorCode::required_field_missing);
 }
 
+void test_wide_group_dictionary_and_error_order() {
+    // A valid custom message may have many independent groups. Its final
+    // group and the ordering of malformed-group errors must remain visible.
+    constexpr std::size_t count = 20;
+    std::array<FieldDescriptor, 2 + count * 2> wide_fields{};
+    std::array<std::array<MessageMemberDescriptor, 1>, count> entry_members{};
+    std::array<GroupDescriptor, count> wide_groups{};
+    std::array<MessageMemberDescriptor, count + 1> wide_members{};
+    wide_fields[0] = {100, "Root", "CHAR", FieldClass::character, WireType::character};
+    wide_members[0] = {MemberKind::field, 0, 0, true};
+    for (std::size_t i = 0; i < count; ++i) {
+        const auto count_tag = static_cast<std::uint32_t>(1000 + i * 2);
+        wide_fields[1 + i * 2] = {count_tag, "Count", "NUMINGROUP",
+            FieldClass::unsigned_integer, WireType::integer};
+        wide_fields[2 + i * 2] = {count_tag + 1, "Entry", "STRING",
+            FieldClass::text, WireType::string};
+        entry_members[i][0] = {MemberKind::field, static_cast<std::uint32_t>(2 + i * 2), 0, true};
+        wide_groups[i] = {"Group", count_tag, count_tag + 1, entry_members[i]};
+        wide_members[i + 1] = {MemberKind::group, 0, static_cast<std::uint32_t>(i), false};
+    }
+    wide_fields.back() = {5000, "Signature", "STRING", FieldClass::text, WireType::string};
+    const std::array<MessageMemberDescriptor, 1> trailer_members{{
+        {MemberKind::field, static_cast<std::uint32_t>(wide_fields.size() - 1), 0, false}}};
+    const std::array<ComponentDescriptor, 1> wide_components{{{"Trailer", trailer_members}}};
+    const std::array<MessageDescriptor, 1> wide_messages{{{"Wide", "W", "app", wide_members}}};
+    const SchemaDescriptor wide_schema{"FIX", "4.4", "wide-test", wide_fields,
+        wide_groups, wide_components, wide_messages};
+    const auto make_body = [&](std::string_view root, bool missing_root, bool malformed_last) {
+        std::string body = "35=W\001";
+        if (!missing_root) body += "100=" + std::string{root} + '\001';
+        for (std::size_t i = 0; i < count; ++i) {
+            const auto tag = 1000 + i * 2;
+            body += std::to_string(tag) + "=" + (malformed_last && i + 1 == count ? "2" : "1") + '\001';
+            body += std::to_string(tag + 1) + "=entry\001";
+        }
+        return body;
+    };
+    std::array<FieldView, 128> scratch{};
+    FlatMessageView flat{};
+    const auto parse = [&](const std::string& wire) {
+        FrameView frame{};
+        CHECK(inspect_frame(wire, frame).ok());
+        CHECK(parse_flat(frame, scratch, flat).ok());
+    };
+    auto wire = make_frame(make_body("R", false, false));
+    parse(wire);
+    CHECK(validate_schema_message(wide_schema, flat).ok());
+    const auto last = GroupView<TestSchema>::find(wide_schema, wide_members, flat.fields(), 1038);
+    CHECK(last.ok() && last.value().size() == 1 && last.value().delimiter_tag() == 1039);
+    if (last.ok()) CHECK(last.value().at(0).status().ok());
+    Status lookup_status{};
+    CHECK(detail::find_top_level_field(wide_schema, wide_messages[0], flat, 1039, lookup_status) == nullptr);
+    CHECK(lookup_status.code == ErrorCode::missing_field);
+
+    wire = make_frame(make_body("R", false, false) + "5000=signature\001");
+    parse(wire);
+    CHECK(validate_schema_message(wide_schema, flat).ok());
+
+    wire = make_frame(make_body("BAD", false, false));
+    parse(wire);
+    auto status = validate_schema_message(wide_schema, flat);
+    CHECK(status.code == ErrorCode::invalid_value && status.tag == 100);
+    wire = make_frame(make_body("R", true, false));
+    parse(wire);
+    status = validate_schema_message(wide_schema, flat);
+    CHECK(status.code == ErrorCode::required_field_missing && status.tag == 100);
+    for (const bool missing_root : {false, true}) {
+        wire = make_frame(make_body("BAD", missing_root, true));
+        parse(wire);
+        status = validate_schema_message(wide_schema, flat);
+        CHECK(status.code == ErrorCode::invalid_value && status.tag == 1039);
+    }
+    wire = make_frame(make_body("R", false, false) + "100=S\001");
+    parse(wire);
+    status = validate_schema_message(wide_schema, flat);
+    CHECK(status.code == ErrorCode::duplicate_field && status.tag == 100);
+}
+
 void test_bounded_owned_group_payload() {
     using namespace nimblefix;
     OwnedGroupBuilder<453, 448, 1> group;
@@ -165,5 +244,6 @@ int main() {
     test_scalar_validation();
     test_nested_group_projection_and_validation_levels();
     test_bounded_owned_group_payload();
+    test_wide_group_dictionary_and_error_order();
     return failures == 0 ? 0 : 1;
 }
