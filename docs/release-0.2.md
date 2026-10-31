@@ -90,7 +90,7 @@ TSAN_OPTIONS=halt_on_error=1 \
 ```
 
 The full FIX44 parser/strict-validator fuzz target, built with Clang and
-ASan/UBSan, completed 1,421,264 executions in a 16-second bounded run without
+ASan/UBSan, completed 1,592,580 executions in a 16-second bounded run without
 a finding. This is a smoke campaign, not an exhaustive protocol proof.
 
 Both installed-consumer modes passed from a read-only source copy after
@@ -107,8 +107,11 @@ cross-epoch FIX369 progress, accepted-command age expiry without consuming
 sequence numbers, and safe bounded cleanup after worker completion. The
 performance review replaced full receipt-ring scans with active indexes,
 removed idle Sender mutex acquisition and kept SPSC wakeup/receipt paths free
-of shared mutexes. Current counters and their exact boundaries are in the
-stage 7 results; no controlled before/after latency speedup is claimed.
+of shared mutexes. Full-schema field lookup now reuses a bounded list of group
+descriptors, with an unrestricted fallback for wider dictionaries. Tests also
+cover 20 independent groups, final-group Trailer boundaries and unchanged error
+precedence. The stage 7 results retain the original and optimized schema runs;
+the reported improvement is scoped to those schema microbenchmarks.
 
 ## Compatibility and operating boundary
 

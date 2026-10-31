@@ -4,6 +4,11 @@
 分段 journal、TLS、认证、TOML/CLI、运行时 XML、自定义字典和手动驱动。
 [支持表](session-support.md)说明具体协议和资源边界，[发布记录](release-0.2.md)保存验收证据。
 
+生成消息的 `make()` 使用可增长的自有存储，添加字段时可能分配内存。
+需要复用预分配存储时，使用声明字段 shape、字节容量和生成消息 `policy_type` 的
+`FixedMessage`；slot 和文本 arena 内嵌于消息实例。两种入口共用编码计划，
+具体分配次数与边界见[性能报告](../bench/results/stage7/README.md)。
+
 ## 第一次成功收发
 
 ```sh

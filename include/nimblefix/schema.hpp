@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <charconv>
 #include <cstddef>
 #include <cstdint>
@@ -428,9 +429,48 @@ struct LevelLookup {
     bool found{};
 };
 
+// Most levels contain only a few groups. Discover those once rather than
+// searching every scalar member for every wire field and requested tag.
+// Larger custom levels retain the original search with no fixed schema limit.
+class LevelGroupLookup {
+public:
+    LevelGroupLookup(const SchemaDescriptor& schema,
+        std::span<const MessageMemberDescriptor> members) noexcept
+        : schema_(schema), members_(members) {
+        for (const auto& member : members) {
+            const auto* group = descriptor_group(schema, member);
+            if (group == nullptr) continue;
+            if (count_ == groups_.size()) {
+                overflow_ = true;
+                break;
+            }
+            groups_[count_++] = group;
+        }
+    }
+
+    [[nodiscard]] bool contains(std::uint32_t tag) const noexcept {
+        if (overflow_) {
+            return std::any_of(members_.begin(), members_.end(), [&](const auto& member) {
+                const auto* group = descriptor_group(schema_, member);
+                return group != nullptr && group->count_tag == tag;
+            });
+        }
+        for (std::size_t i = 0; i < count_; ++i)
+            if (groups_[i]->count_tag == tag) return true;
+        return false;
+    }
+
+private:
+    const SchemaDescriptor& schema_;
+    std::span<const MessageMemberDescriptor> members_;
+    std::array<const GroupDescriptor*, 16> groups_;
+    std::size_t count_{};
+    bool overflow_{};
+};
+
 [[nodiscard]] inline LevelLookup find_level_field(const SchemaDescriptor& schema,
     std::span<const MessageMemberDescriptor> members, std::span<const FieldView> fields,
-    std::uint32_t tag) noexcept {
+    std::uint32_t tag, const LevelGroupLookup& groups) noexcept {
     LevelLookup result{};
     for (std::size_t cursor = 0; cursor < fields.size();) {
         const auto current_tag = fields[cursor].tag;
@@ -442,11 +482,7 @@ struct LevelLookup {
             result.index = cursor;
             result.found = true;
         }
-        const auto group_member = std::find_if(members.begin(), members.end(), [&](const auto& member) {
-            const auto* group = descriptor_group(schema, member);
-            return group != nullptr && group->count_tag == current_tag;
-        });
-        if (group_member != members.end()) {
+        if (groups.contains(current_tag)) {
             const auto scan = skip_group(schema, fields, members, cursor, 0);
             if (!scan.status.ok()) { result.status = scan.status; return result; }
             cursor = scan.end;
@@ -456,6 +492,13 @@ struct LevelLookup {
     }
     if (!result.found) result.status = {ErrorCode::missing_field, static_cast<int>(tag)};
     return result;
+}
+
+[[nodiscard]] inline LevelLookup find_level_field(const SchemaDescriptor& schema,
+    std::span<const MessageMemberDescriptor> members, std::span<const FieldView> fields,
+    std::uint32_t tag) noexcept {
+    const LevelGroupLookup groups{schema, members};
+    return find_level_field(schema, members, fields, tag, groups);
 }
 
 [[nodiscard]] inline Status validate_unknown_fields(const SchemaDescriptor& schema,
@@ -518,13 +561,14 @@ struct LevelLookup {
     std::span<const MessageMemberDescriptor> members, std::span<const FieldView> fields,
     ValidationLevel level, std::size_t depth = 0) noexcept {
     if (depth > max_schema_group_depth) return {ErrorCode::invalid_value};
+    const LevelGroupLookup groups{schema, members};
     for (std::size_t i = 0; i < members.size(); ++i) {
         const auto& member = members[i];
         const auto tag = member_tag(schema, member);
         if (member.kind == MemberKind::field) {
             const auto* descriptor = descriptor_field(schema, member);
             if (descriptor == nullptr) return {ErrorCode::invalid_value, static_cast<int>(tag)};
-            const auto lookup = find_level_field(schema, members, fields, tag);
+            const auto lookup = find_level_field(schema, members, fields, tag, groups);
             if (!lookup.status.ok() && lookup.status.code != ErrorCode::missing_field) return lookup.status;
             const FieldView* found = lookup.found ? &fields[lookup.index] : nullptr;
             if (found == nullptr) {
@@ -538,14 +582,14 @@ struct LevelLookup {
             if (level == ValidationLevel::strict && !enum_values_accept(*descriptor, found->value))
                 return {ErrorCode::invalid_value, static_cast<int>(tag), found->offset};
             if (descriptor->length_tag != 0) {
-                const auto length_lookup = find_level_field(schema, members, fields, descriptor->length_tag);
+                const auto length_lookup = find_level_field(schema, members, fields, descriptor->length_tag, groups);
                 if (!length_lookup.status.ok()) return length_lookup.status;
                 std::uint64_t length{};
                 if (!parse_unsigned(fields[length_lookup.index].value, length) || length != found->value.size())
                     return {ErrorCode::invalid_value, static_cast<int>(descriptor->length_tag),
                         fields[length_lookup.index].offset};
             } else if (descriptor->data_tag != 0 && descriptor->field_class == FieldClass::unsigned_integer) {
-                const auto data_lookup = find_level_field(schema, members, fields, descriptor->data_tag);
+                const auto data_lookup = find_level_field(schema, members, fields, descriptor->data_tag, groups);
                 std::uint64_t length{};
                 if (!parse_unsigned(found->value, length))
                     return {ErrorCode::invalid_value, static_cast<int>(tag), found->offset};
@@ -561,7 +605,7 @@ struct LevelLookup {
         } else {
             const auto* group = descriptor_group(schema, member);
             if (group == nullptr) return {ErrorCode::invalid_value, static_cast<int>(tag)};
-            const auto lookup = find_level_field(schema, members, fields, group->count_tag);
+            const auto lookup = find_level_field(schema, members, fields, group->count_tag, groups);
             if (!lookup.status.ok() && lookup.status.code != ErrorCode::missing_field) return lookup.status;
             if (!lookup.found) {
                 if (level != ValidationLevel::structure && member.required)

@@ -78,7 +78,7 @@ auto created = nimblefix::Engine<Schema>::create({.storage={.directory="./state"
 // engine.on<nimblefix::fix44::ExecutionReport>(
 //     [](nimblefix::SessionContext&, const auto& report) -> nimblefix::Status { ... });
 auto order = nimblefix::fix44::NewOrderSingle::make()
-    .cl_ord_id("DEMO-001").symbol("AAPL").side('1')
+    .cl_ord_id("DEMO-001").handl_inst('1').symbol("AAPL").side('1')
     .transact_time("20261031-12:00:00.000").order_qty(100).ord_type('1');
 // In a callback: context.send(order).
 ```
@@ -88,6 +88,12 @@ have typed named getters and `get<Tag>()`; groups have bounded, owned builders
 and borrowed receive views. Validation levels are structure, required and
 strict (types/enums as well as required fields). `DynamicMessage` is the
 explicit API for runtime tags. Header fields remain engine managed.
+
+Fluent `make()` owns growing storage and can allocate while adding fields.
+For reusable storage, `FixedMessage` holds an explicit field shape and text
+arena inline; use the generated message's `policy_type` for dictionary checks.
+Both paths use the same encoding plan. Allocation counts are reported separately
+in the [performance results](bench/results/stage7/README.md).
 
 Use `Engine<Schema, Queued>` to run business callbacks on a bounded worker
 executor. One session has at most one in-flight callback; its reply append
