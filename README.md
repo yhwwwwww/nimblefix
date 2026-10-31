@@ -9,6 +9,10 @@ also provides a relocatable installed package.
 
 ## Run an order-entry application
 
+Start with [initiator.cpp](examples/initiator.cpp) and
+[acceptor.cpp](examples/acceptor.cpp). They show the typed FIX44 flow directly.
+The flat counterparts are separate files, selected by core-only builds.
+
 ```sh
 xmake f -m release
 xmake build acceptor-example initiator-example
@@ -44,6 +48,9 @@ Each command supplies its ClOrdID, symbol, side, quantity and limit price or
 market instruction. Receipts describe local acceptance/append/write progress;
 ExecutionReport is the separate counterparty response. `quit` or input EOF
 drains accepted requests within the configured deadline before Logout.
+`status` shows connection availability and each request's current receipt.
+These console examples choose Queued so terminal output runs on business workers;
+the library's default remains Inline.
 The example tracks up to 256 accepted request IDs per process, rejects duplicate
 IDs and reports failed or timed-out requests without silently resubmitting them.
 
@@ -54,7 +61,7 @@ acknowledgements; it does not implement an exchange or an order-management syste
 Numeric IPv4/IPv6 endpoints are supported. Standard builds use full typed FIX44;
 core-only builds retain the same command workflow with flat messages.
 
-For the automated paired protocol/restart smoke test:
+The automated paired protocol/restart test lives in `tests/hello_fix.cpp`:
 
 ```sh
 xmake build hello-fix

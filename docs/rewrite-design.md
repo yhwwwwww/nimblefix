@@ -97,7 +97,7 @@ Router、HA、自動接管、熱更新、Orchestra 行為規則、Web 管理介�
 ### 4.1 目標 API：typed initiator
 
 完整可執行入口見 [initiator.cpp](../examples/initiator.cpp) 與其業務處理
-[order_entry.hpp](../examples/order_entry.hpp)。initiator 必須長期運行，讓業務命令、
+[orders.hpp](../examples/orders.hpp)。initiator 必須長期運行，讓業務命令、
 策略或風控完成後的請求明確觸發發送；session active 只表示連線可用。
 登入、重新登入和收到第一筆回報都不能自行產生新訂單或結束整個應用。
 
@@ -137,15 +137,17 @@ nf::Result<nf::SendReceipt> submit_limit_order(
 }
 ```
 
-回報 callback 把所需資料複製到有界、擁有資料的事件佇列，由業務執行緒關聯請求。
+終端範例明確使用 Queued，在 worker 內同步讀取 view、顯示回報並標記請求已收到回應，
+不保留 callback-scoped view。必要的請求關聯只使用有界的標準容器與 mutex，
+不為示例重新實作事件佇列或訂單管理系統。
 本地 receipt 的 accepted、appended、written 與對手方 ExecutionReport 分開跟蹤。
 `quit`、輸入結束或信號才觸發關機；正常退出先限時排空已接受請求，再 Logout。
 沒有對手方回報時，應明確標示結果未知，不根據連線恢復自動新增另一筆訂單。
 協議要求的原序號 replay 與新業務請求是不同操作。
 
-範例預設使用 inline callback 與 appended mmap queue，先提交記錄再發送，不等待磁碟同步。
-業務 callback 不輸出終端文字；顯示工作由非 owner 的有界事件 sink 處理。
-[hello_fix.cpp](../examples/hello_fix.cpp) 是明確執行一次請求的自測協調器，亦透過外部
+引擎預設仍是 Inline 與 appended mmap queue，先提交記錄再發送，不等待磁碟同步。
+範例的 Queued 選擇讓終端輸出不在協議 owner 上執行。
+[hello_fix.cpp](../tests/hello_fix.cpp) 是明確執行一次請求的自測協調器，亦透過外部
 Sender 提交，不把自測下單動作藏在 session active callback 中。
 
 ### 4.2 Callback 必須被可靠地綁定

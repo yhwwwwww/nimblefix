@@ -199,12 +199,14 @@ def order_events(client, identifier, symbol, side, after, expect_running=True):
     accepted = client.wait_regex(re.compile(
         rf"\bACCEPTED\s+ClOrdID={escaped_id}\s+receipt=\d+\b"),
         f"accepted event for {identifier}", after=after)
-    receipt = client.wait_regex(re.compile(
-        rf"\bRECEIPT\s+ClOrdID={escaped_id}\s+state=written\s+sequence=(\d+)\b"),
-        f"written receipt for {identifier}", after=after)
     report = client.wait_regex(re.compile(
         rf"\bEXECUTION_REPORT\s+ClOrdID={escaped_id}\s+Symbol={re.escape(symbol)}\s+Side={side}\b"),
         f"matching ExecutionReport for {identifier}", after=after)
+    if expect_running:
+        client.write("status")
+    receipt = client.wait_regex(re.compile(
+        rf"\bRECEIPT\s+ClOrdID={escaped_id}\s+state=written\s+sequence=(\d+)\b"),
+        f"written receipt for {identifier}", after=after)
     sequence_match = re.search(r"\bsequence=(\d+)\b", receipt)
     if sequence_match is None:
         raise RuntimeError(f"written receipt omitted sequence number: {receipt!r}")
@@ -511,8 +513,6 @@ def exercise_raw_peer(initiator, directory):
                 next_inbound_sequence += 1
                 client.wait_regex(re.compile(rf"EXECUTION_REPORT ClOrdID=RAW-1 .*OrdStatus={status}"),
                     "later execution report", after=after)
-                client.wait_text("ORDER_RESULT ClOrdID=RAW-1 state=response",
-                    "trade update correlation", after=after)
 
             # Force a transport reconnect after a fully reported order. The
             # reconnect itself must not create another application order.
@@ -544,9 +544,10 @@ def exercise_raw_peer(initiator, directory):
             if second_time <= first_report_time:
                 raise RuntimeError("TransactTime did not advance for the later order")
 
-            client.write("quit")
+            client.write("status")
             receipt_pattern = re.compile(r"\bRECEIPT\s+ClOrdID=RAW-2\s+state=written\s+sequence=\d+\b")
             client.wait_regex(receipt_pattern, "second raw order written receipt", after=second_cursor)
+            client.write("quit")
             peer.assert_no_type("5", 0.2)
             if client.process.poll() is not None:
                 raise RuntimeError("quit sent Logout before the outstanding report was received")

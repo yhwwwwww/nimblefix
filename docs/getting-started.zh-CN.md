@@ -11,6 +11,10 @@
 
 ## 第一次成功收发
 
+先读 [initiator.cpp](../examples/initiator.cpp) 和
+[acceptor.cpp](../examples/acceptor.cpp)：主文件直接展示 typed FIX44 接入流程。
+flat 版本单独放在 `flat_initiator.cpp`、`flat_acceptor.cpp`，仅核心库构建选择这些源码。
+
 ```sh
 xmake f -m release
 xmake build acceptor-example initiator-example
@@ -41,14 +45,16 @@ quit
 登录成功和重连都不会生成新订单，收到一笔回报后程序继续运行。
 每笔订单由命令提供 ClOrdID、标的、方向、数量和限价或市价指令；发送时才生成 TransactTime。
 本地 receipt 的 accepted/appended/written 与对手方的 ExecutionReport 分开显示。
+`status` 查询连接是否可发及各请求的 receipt；不为终端演示实现后台轮询状态机。
 `quit` 或标准输入 EOF 停止接收新命令，限时等待已接受请求的发送和回报，再 Logout。
 示例每个进程最多跟踪 256 个已接受的请求 ID；拒绝重复 ID，不自动重试或补单。
 
 默认构建使用完整 FIX44 typed 绑定；仅核心库构建使用相同命令流程的 flat 入口。
+终端示例明确选择 Queued，让回报输出在业务 worker 内执行；库的默认策略仍为 Inline。
 保留两端各自的协议状态目录；新业务请求使用新的 ClOrdID。应用重启后的订单身份与幂等
 由业务系统持久化管理。acceptor 只模拟订单 New 确认，不包含撮合、风控或完整订单管理。
 
-自动化协议／重启自测单独运行：
+自动化协议／重启自测位于 `tests/hello_fix.cpp`，单独运行：
 
 ```sh
 xmake build hello-fix

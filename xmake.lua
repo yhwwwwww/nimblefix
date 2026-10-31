@@ -154,7 +154,7 @@ end
 target("hello-fix")
     set_kind("binary")
     set_rundir("$(projectdir)")
-    add_files("examples/hello_fix.cpp")
+    add_files("tests/hello_fix.cpp")
     add_deps("nimblefix", "fix44-sample")
     add_includedirs(generated_dir)
     add_defines("NIMBLEFIX_SAMPLE_SCHEMA=1")
@@ -180,12 +180,15 @@ for _, role in ipairs({"initiator", "acceptor"}) do
     target(role .. "-example")
         set_kind("binary")
         set_rundir("$(projectdir)")
-        add_files("examples/" .. role .. ".cpp")
+        if has_config("standard_schemas") then
+            add_files("examples/" .. role .. ".cpp")
+        else
+            add_files("examples/flat_" .. role .. ".cpp")
+        end
         add_deps("nimblefix")
         if has_config("standard_schemas") then
             add_deps("fix44-schema")
             add_includedirs(generated_dir)
-            add_defines("NIMBLEFIX_BUILTIN_FIX44=1")
         end
     target_end()
 end

@@ -132,6 +132,12 @@ two flat TSan example checks, and both relocated installation modes with
 examples. The protocol/restart self-test also submits through an external
 Sender and uses distinct business IDs across restarts.
 
+The readable walkthrough now keeps typed and flat entry points in separate
+source files. Console callbacks explicitly use Queued and ordinary standard
+containers for request correlation; custom event queues and the larger
+order-entry support layer were removed. Receipt progress is queried by status
+and during shutdown. The paired protocol self-test belongs to tests/hello_fix.cpp.
+
 Source compatibility is scoped to 0.2.x; rebuild applications when changing the
 library. Generated headers and loaded XML must have equal metadata fingerprints
 when used together. Flat mode and typed mode are explicit. Optional XML/TLS and

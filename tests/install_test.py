@@ -34,6 +34,9 @@ def main():
             shutil.copytree(ROOT / directory, source / directory)
         for filename in ("CMakeLists.txt", "LICENSE"):
             shutil.copyfile(ROOT / filename, source / filename)
+        if args.examples:
+            (source / "tests").mkdir()
+            shutil.copyfile(ROOT / "tests/hello_fix.cpp", source / "tests/hello_fix.cpp")
         for item in source.rglob("*"):
             item.chmod(0o555 if item.is_dir() else 0o444)
         source.chmod(0o555)
