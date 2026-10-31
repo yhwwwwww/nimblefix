@@ -96,75 +96,57 @@ Router、HA、自動接管、熱更新、Orchestra 行為規則、Web 管理介�
 
 ### 4.1 目標 API：typed initiator
 
-以下示意一般 initiator 的形狀；標準 FIX 4.4 頭文件隨套件提供。正式實作時，此類範例必須直接來自可編譯的原始碼。
+完整可執行入口見 [initiator.cpp](../examples/initiator.cpp) 與其業務處理
+[order_entry.hpp](../examples/order_entry.hpp)。initiator 必須長期運行，讓業務命令、
+策略或風控完成後的請求明確觸發發送；session active 只表示連線可用。
+登入、重新登入和收到第一筆回報都不能自行產生新訂單或結束整個應用。
+
+`add_initiator()` 返回的 session handle 在啟動前便可取得並保留 `Sender<Schema>`。
+協議 owner 執行 `engine.run()`；業務執行緒在收到明確請求後才進入下面的發送邊界。
+請求中的時間由業務執行緒在提交時產生，欄位取自該筆請求：
 
 ```cpp
-#include <iostream>
-#include <utility>
-
+#include <string_view>
 #include <nimblefix/engine.hpp>
 #include <nimblefix/fix44.hpp>
 
 namespace nf = nimblefix;
-using namespace nf::literals;
 
-int main()
+struct LimitOrderRequest {
+    std::string_view cl_ord_id;
+    std::string_view symbol;
+    std::string_view transact_time;
+    char side;
+    nf::Decimal quantity;
+    nf::Decimal price;
+};
+
+nf::Result<nf::SendReceipt> submit_limit_order(
+    const nf::Sender<nf::fix44::Schema>& sender, const LimitOrderRequest& request)
 {
-    auto created = nf::Engine<nf::fix44::Schema>::create({
-        .storage = {.directory = "./state/buy-side"},
-    });
-    if (!created.ok()) {
-        std::cerr << created.error().message() << '\n';
-        return 1;
-    }
-    auto engine = std::move(created).value();
-
-    engine.on_error([](const nf::ErrorEvent& error) {
-        std::cerr << error.format() << '\n';
-    });
-
-    engine.on<nf::fix44::ExecutionReport>(
-        [&engine](auto&, nf::fix44::ExecutionReportView) {
-            engine.request_stop();
-            return nf::Status::success();
-        });
-
-    engine.on_session_active([](auto& context) {
-        auto order = nf::fix44::NewOrderSingle::make()
-            .cl_ord_id("DEMO-001")
-            .symbol("AAPL")
-            .side(nf::fix44::Side::buy)
-            .transact_time(nf::UtcTimestamp::now())
-            .order_qty(100)
-            .ord_type(nf::fix44::OrdType::limit)
-            .price("150.25"_dec);
-        auto sent = context.send(std::move(order));
-        return sent.status();
-    });
-
-    auto session = engine.add_initiator({
-        .name = "venue-a",
-        .sender_comp_id = "BUY",
-        .target_comp_id = "SELL",
-        .endpoint = nf::TcpEndpoint{"127.0.0.1", 9876},
-    });
-    if (!session.ok()) {
-        std::cerr << session.error().message() << '\n';
-        return 1;
-    }
-
-    auto result = engine.run();
-    if (!result.ok()) {
-        std::cerr << result.error().message() << '\n';
-        return 1;
-    }
-    return 0;
+    auto order = nf::fix44::NewOrderSingle::make()
+        .cl_ord_id(request.cl_ord_id)
+        .handl_inst('1')
+        .symbol(request.symbol)
+        .side(request.side)
+        .transact_time(request.transact_time)
+        .order_qty(request.quantity)
+        .ord_type('2')
+        .price(request.price);
+    return sender.send(order);
 }
 ```
 
-範例刻意只在 session active 事件中發送第一筆訊息。真實應用需自行決定重新登入後是否再次下單；引擎不替業務層決定訂單唯一性或自動重送策略。
+回報 callback 把所需資料複製到有界、擁有資料的事件佇列，由業務執行緒關聯請求。
+本地 receipt 的 accepted、appended、written 與對手方 ExecutionReport 分開跟蹤。
+`quit`、輸入結束或信號才觸發關機；正常退出先限時排空已接受請求，再 Logout。
+沒有對手方回報時，應明確標示結果未知，不根據連線恢復自動新增另一筆訂單。
+協議要求的原序號 replay 與新業務請求是不同操作。
 
-範例預設使用 inline callback 與 appended mmap queue，先提交記錄再發送，不等待磁碟同步。業務 callback 不輸出終端文字；需要顯示結果時交給非 owner 執行緒的有界事件 sink。上手程式不需要先選擇 store backend，但必須提供明確的儲存目錄；測試範例由 harness 配置臨時目錄。
+範例預設使用 inline callback 與 appended mmap queue，先提交記錄再發送，不等待磁碟同步。
+業務 callback 不輸出終端文字；顯示工作由非 owner 的有界事件 sink 處理。
+[hello_fix.cpp](../examples/hello_fix.cpp) 是明確執行一次請求的自測協調器，亦透過外部
+Sender 提交，不把自測下單動作藏在 session active callback 中。
 
 ### 4.2 Callback 必須被可靠地綁定
 
@@ -393,31 +375,28 @@ queued 穩態投遞比較兩種候選：直接以 mmap journal reader cursor 交
 
 因此，最小接入入口是 `Engine<>`，不必先提供字典。相同的 `add_initiator()` / `add_listener()` / `add_acceptor()` 適用；儲存與恢復也不能因採 flat 模式而被省略。
 
-下面示意 `Engine<>` 啟動前註冊的基本收發邏輯，不 include generated schema 頭文件。MsgType 與 tag 透過 template 參數成為編譯期資訊；欄位值可以來自實際業務資料：
+無字典入口同樣由業務請求觸發；`Engine<>` 的生命週期與業務執行緒分離。
+下面使用與 4.1 相同的業務請求 DTO，改以靜態 tag 表達消息；此入口本身不需要生成字典：
 
 ```cpp
-// engine 的建立、storage.directory、session 註冊與錯誤檢查同第 4 節。
-engine.on_session_active([](auto& context) {
+nf::Result<nf::SendReceipt> submit_flat_limit_order(
+    const nf::Sender<>& sender, const LimitOrderRequest& request)
+{
     auto order = nf::message<"D">()
-        .set<11>("DEMO-001")
+        .set<11>(request.cl_ord_id)
         .set<21>('1')
-        .set<55>("AAPL")
-        .set<54>('1')
-        .set<60>(nf::UtcTimestamp::now())
-        .set<38>(100)
+        .set<55>(request.symbol)
+        .set<54>(request.side)
+        .set<60>(request.transact_time)
+        .set<38>(request.quantity)
         .set<40>('2')
-        .set<44>("150.25"_dec);
-    return context.send(std::move(order)).status();
-});
-
-engine.on_message([](auto&, nf::FlatMessageView message) {
-    for (auto field : message.fields()) {
-        // 在此以 field.tag / field.value 執行有界處理；終端檢視交給非 owner 的 sink。
-        (void)field;
-    }
-    return nf::Status::success();
-});
+        .set<44>(request.price);
+    return sender.send(order);
+}
 ```
+
+完整的無字典命令與回報流程直接使用 `initiator-example` 的 core-only 構建，
+不另外使用登入即下單、收到一筆回報即退出的簡化業務模型。
 
 上述 raw tag 是使用者明確選擇的業務表達方式；generated API 才負責消除這些數字。引擎管理 8、9、35、34、49、56、52、10 等 session / framing 欄位，禁止以業務欄位重複注入，並自動計算長度與校驗碼。
 

@@ -115,6 +115,23 @@ the reported improvement is scoped to those schema microbenchmarks.
 
 ## Compatibility and operating boundary
 
+The order-entry examples were subsequently corrected to use explicit business
+commands through a retained Sender on a thread separate from the protocol owner.
+Logon/reconnect create no orders, and one report does not terminate the process.
+The initiator accepts multiple limit/market requests, tracks local receipts
+separately from counterparty reports, and drains on quit/EOF/signal with a
+deadline. Later partial/full trade reports for the same ClOrdID are supported.
+The old example-only --cl-ord-id flag is replaced by per-command IDs. The core
+library API and the measured runtime implementation are unchanged.
+
+An independent raw FIX peer verifies idle Logon, explicit order parameters and
+fresh TransactTime, continued operation after reports, reconnect without a new
+order, and write/report completion before Logout. The revised examples passed
+xmake check, all 43 CMake Release tests, three typed ASan/UBSan example checks,
+two flat TSan example checks, and both relocated installation modes with
+examples. The protocol/restart self-test also submits through an external
+Sender and uses distinct business IDs across restarts.
+
 Source compatibility is scoped to 0.2.x; rebuild applications when changing the
 library. Generated headers and loaded XML must have equal metadata fingerprints
 when used together. Flat mode and typed mode are explicit. Optional XML/TLS and

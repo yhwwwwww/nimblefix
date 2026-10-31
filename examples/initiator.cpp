@@ -1,111 +1,23 @@
 #include "endpoint.hpp"
+#include "order_entry.hpp"
 
-#include <array>
 #include <atomic>
 #include <chrono>
 #include <csignal>
-#include <cstdint>
 #include <iostream>
-#include <string>
-#include <string_view>
 #include <thread>
 
-#include <nimblefix/decimal.hpp>
-#include <nimblefix/message.hpp>
-
-namespace nf = nimblefix;
-namespace demo = nimblefix_example;
-using namespace nf::literals;
-
 namespace {
-
 static_assert(std::atomic<bool>::is_always_lock_free);
 std::atomic<bool> stop_signal{false};
+}
 
 extern "C" void handle_signal(int) {
     stop_signal.store(true, std::memory_order_relaxed);
 }
 
-std::string_view field_value(const nf::FlatMessageView& message, std::uint32_t tag,
-    nf::Status& status) noexcept {
-    const auto found = message.find_unique(tag);
-    if (!found.ok()) {
-        status = found.status();
-        return {};
-    }
-    return found.value().value;
-}
-
-bool is_expected_report(const nf::FlatMessageView& message,
-    std::string_view cl_ord_id) noexcept {
-    nf::Status status{};
-    const auto response_id = field_value(message, 11, status);
-    if (!status.ok() || response_id != cl_ord_id) return false;
-    const auto side = field_value(message, 54, status);
-    if (!status.ok() || side != "1") return false;
-    const auto leaves = field_value(message, 151, status);
-    if (!status.ok()) return false;
-    const auto cumulative = field_value(message, 14, status);
-    if (!status.ok()) return false;
-    const auto average = field_value(message, 6, status);
-    if (!status.ok()) return false;
-    const auto symbol = field_value(message, 55, status);
-    if (!status.ok() || symbol != "AAPL") return false;
-    const auto exec_type = field_value(message, 150, status);
-    if (!status.ok() || exec_type != "0") return false;
-    const auto order_status = field_value(message, 39, status);
-    if (!status.ok() || order_status != "0") return false;
-    const auto order_id = field_value(message, 37, status);
-    if (!status.ok() || !order_id.starts_with("ORD-")) return false;
-    const auto exec_id = field_value(message, 17, status);
-    if (!status.ok() || !exec_id.starts_with("EXEC-")) return false;
-    const auto transact_time = field_value(message, 60, status);
-    if (!status.ok() || !demo::timestamp_shaped(transact_time)) return false;
-
-    const auto leaves_value = nf::Decimal::parse(leaves);
-    const auto cumulative_value = nf::Decimal::parse(cumulative);
-    const auto average_value = nf::Decimal::parse(average);
-    const auto expected_leaves = nf::Decimal::parse("100");
-    const auto zero = nf::Decimal::parse("0");
-    return leaves_value.ok() && expected_leaves.ok() &&
-        leaves_value.value() == expected_leaves.value() &&
-        cumulative_value.ok() && zero.ok() && cumulative_value.value() == zero.value() &&
-        average_value.ok() && average_value.value() == zero.value();
-}
-
-void publish_sent(demo::ConsoleEvents& events, std::string_view cl_ord_id,
-    const nf::SendReceipt& receipt) noexcept {
-    std::array<char, 192> text{};
-    std::size_t used = 0;
-    const auto append = [&](std::string_view part) {
-        const auto count = std::min(part.size(), text.size() - used);
-        if (count != 0) std::copy_n(part.data(), count, text.data() + used);
-        used += count;
-    };
-    append("accepted ClOrdID ");
-    append(cl_ord_id);
-    append(" at sequence ");
-    const auto sequence = std::to_chars(text.data() + used, text.data() + text.size(), receipt.msg_seq_num);
-    if (sequence.ec == std::errc{}) used = static_cast<std::size_t>(sequence.ptr - text.data());
-    append(" (receipt ");
-    const auto id = std::to_chars(text.data() + used, text.data() + text.size(), receipt.id);
-    if (id.ec == std::errc{}) used = static_cast<std::size_t>(id.ptr - text.data());
-    append(")");
-    events.push(demo::ConsoleEvent::Kind::message, {text.data(), used});
-}
-
-std::string make_default_cl_ord_id(std::string_view timestamp) {
-    std::string id{"DEMO-"};
-    id.reserve(64);
-    id.append(timestamp);
-    id.push_back('-');
-    id.append(std::to_string(static_cast<unsigned long long>(::getpid())));
-    return id;
-}
-
-} // namespace
-
 int main(int argc, char** argv) {
+    using namespace nimblefix_example::order_entry;
     demo::Options options;
     if (!demo::parse_args(argc, argv, true, options)) {
         demo::print_usage("initiator-example", true);
@@ -116,97 +28,60 @@ int main(int argc, char** argv) {
         return 0;
     }
 
-    std::array<char, 22> time_storage{};
-    const auto initial_time = demo::utc_timestamp(time_storage);
-    if (initial_time.empty()) {
-        std::cerr << "could not read UTC clock\n";
-        return 1;
-    }
-    const std::string transact_time{initial_time};
-    if (options.cl_ord_id.empty()) options.cl_ord_id = make_default_cl_ord_id(transact_time);
-
     nf::EngineConfig config;
     config.storage.directory = options.state;
     config.logon_timeout_ms = options.timeout_ms;
-    config.logout_timeout_ms = 10'000;
     config.connect_timeout_ms = options.timeout_ms;
-    auto created = nf::Engine<>::create(std::move(config));
+    config.logout_timeout_ms = options.timeout_ms;
+    auto created = ExampleEngine::create(std::move(config));
     if (!created.ok()) {
         std::cerr << "Engine create failed: " << created.status().message() << '\n';
         return 1;
     }
     auto engine = std::move(created).value();
-    demo::ConsoleEvents events;
-    std::atomic<bool> order_accepted{false};
-    std::atomic<bool> report_received{false};
-    std::atomic<bool> invalid_report{false};
 
-    auto active_callback = engine.on_session_active(
-        [&events, &order_accepted, &options, &transact_time](nf::SessionContext& context) -> nf::Status {
-            if (order_accepted.load(std::memory_order_acquire)) return nf::Status::success();
-            auto new_order = nf::message<"D">()
-                .set<11>(options.cl_ord_id)
-                .set<55>("AAPL")
-                .set<54>('1')
-                .set<60>(transact_time)
-                .set<38>("100"_dec)
-                .set<40>('2')
-                .set<44>("150.25"_dec);
-            const auto sent = context.send(new_order);
-            if (!sent.ok()) {
-                demo::push_status(events, "send NewOrderSingle", sent.status());
-                return sent.status();
-            }
-            order_accepted.store(true, std::memory_order_release);
-            publish_sent(events, options.cl_ord_id, sent.value());
+    ReportQueue report_events;
+    DiagnosticQueue diagnostic_events;
+#if defined(NIMBLEFIX_BUILTIN_FIX44) && NIMBLEFIX_BUILTIN_FIX44
+    const auto callback_status = engine.on<nf::fix44::ExecutionReport>(
+        [&report_events](nf::SessionContext&, const nf::fix44::ExecutionReport::view_type& report) {
+            if (!report_events.push(make_report_event(report.flat())))
+                return nf::Status{nf::ErrorCode::capacity_exceeded};
             return nf::Status::success();
         });
-    if (!active_callback.ok()) {
-        std::cerr << "on_session_active failed: " << active_callback.message() << '\n';
-        return 1;
-    }
-
-    auto message_callback = engine.on_message(
-        [&events, &options, &report_received, &invalid_report](nf::SessionContext&,
-            const nf::FlatMessageView& message) -> nf::Status {
+#else
+    const auto callback_status = engine.on_message(
+        [&report_events](nf::SessionContext&, const nf::FlatMessageView& message) {
             if (!demo::is_message(message, "8")) return nf::Status::success();
-            nf::Status status{};
-            const auto response_id = field_value(message, 11, status);
-            if (!status.ok() || response_id != options.cl_ord_id) return nf::Status::success();
-            if (!is_expected_report(message, options.cl_ord_id)) {
-                invalid_report.store(true, std::memory_order_release);
-                events.push(demo::ConsoleEvent::Kind::error,
-                    "matching ExecutionReport did not contain expected New acknowledgement",
-                    nf::ErrorCode::invalid_value);
-                return nf::Status::success();
-            }
-            if (!report_received.exchange(true, std::memory_order_acq_rel)) {
-                events.push(demo::ConsoleEvent::Kind::message,
-                    "received matching New ExecutionReport");
-            }
+            if (!report_events.push(make_report_event(message)))
+                return nf::Status{nf::ErrorCode::capacity_exceeded};
             return nf::Status::success();
         });
-    if (!message_callback.ok()) {
-        std::cerr << "on_message failed: " << message_callback.message() << '\n';
+#endif
+    if (!callback_status.ok()) {
+        std::cerr << "ExecutionReport callback registration failed: "
+            << callback_status.message() << '\n';
         return 1;
     }
-    auto error_callback = engine.on_error([&events](const nf::ErrorEvent& error) {
-        events.push_error(error);
-    });
-    if (!error_callback.ok()) {
-        std::cerr << "on_error failed: " << error_callback.message() << '\n';
+    const auto error_status = engine.on_error(
+        [&diagnostic_events](const nf::ErrorEvent& error) { push_diagnostic(diagnostic_events, error); });
+    if (!error_status.ok()) {
+        std::cerr << "on_error registration failed: " << error_status.message() << '\n';
         return 1;
     }
-    const auto session = engine.add_initiator({
+
+    const auto session_result = engine.add_initiator({
         .name = "demo-initiator",
         .sender_comp_id = "BUY",
         .target_comp_id = "SELL",
         .endpoint = {options.host, options.port},
     });
-    if (!session.ok()) {
-        std::cerr << "add_initiator failed: " << session.status().message() << '\n';
+    if (!session_result.ok()) {
+        std::cerr << "add_initiator failed: " << session_result.status().message() << '\n';
         return 1;
     }
+    auto session = std::move(session_result).value();
+    auto sender = session.sender<ExampleSchema>();
     const auto validation = engine.validate();
     if (!validation.ok()) {
         std::cerr << "Engine config invalid: " << validation.message() << '\n';
@@ -222,49 +97,147 @@ int main(int argc, char** argv) {
         run_done.store(true, std::memory_order_release);
     });
 
-    const auto deadline = std::chrono::steady_clock::now() +
-        std::chrono::milliseconds(options.timeout_ms);
-    bool stop_requested = false;
+    std::array<TrackedOrder, max_tracked_orders> orders{};
+    std::size_t order_count = 0;
+    bool application_error = false;
     bool timed_out = false;
-    std::uint64_t dropped_events = 0;
+    std::uint64_t dropped_reports = 0;
+    std::uint64_t dropped_diagnostics = 0;
+    bool session_active = false;
+    const auto startup_deadline = std::chrono::steady_clock::now() +
+        std::chrono::milliseconds(options.timeout_ms);
+    const auto connection_active = [&] {
+        const auto snapshot = engine.snapshot("demo-initiator");
+        return snapshot.ok() && snapshot.value().state == nf::SessionState::active;
+    };
+
     while (!run_done.load(std::memory_order_acquire) &&
         !stop_signal.load(std::memory_order_relaxed) &&
-        !report_received.load(std::memory_order_acquire)) {
-        if (std::chrono::steady_clock::now() >= deadline) {
+        !(sender.can_send() && connection_active())) {
+        print_diagnostics(diagnostic_events, dropped_diagnostics);
+        print_report_events(report_events, orders, order_count, application_error, dropped_reports);
+        if (std::chrono::steady_clock::now() >= startup_deadline) {
             timed_out = true;
+            std::cerr << "Timed out waiting for SESSION_ACTIVE after " << options.timeout_ms << " ms\n" << std::flush;
             break;
         }
-        demo::print_events(events, dropped_events);
-        std::this_thread::sleep_for(std::chrono::milliseconds(25));
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
+    if (!run_done.load(std::memory_order_acquire) && sender.can_send() && connection_active() &&
+        !stop_signal.load(std::memory_order_relaxed) && !timed_out) {
+        session_active = true;
+        std::cout << "SESSION_ACTIVE\n" << std::flush;
+    }
+
+    bool stop_input = !session_active;
+    std::array<char, 512> input_line{};
+    std::size_t input_size = 0;
+    bool input_overflow = false;
+    bool input_eof = false;
+    if (session_active) {
+        while (!run_done.load(std::memory_order_acquire)) {
+            const bool active_now = connection_active();
+            if (active_now != session_active) {
+                std::cout << (active_now ? "SESSION_ACTIVE\n" : "SESSION_INACTIVE\n") << std::flush;
+                session_active = active_now;
+            }
+            print_diagnostics(diagnostic_events, dropped_diagnostics);
+            print_report_events(report_events, orders, order_count, application_error, dropped_reports);
+            update_receipts(sender, orders, order_count);
+
+            if (stop_signal.load(std::memory_order_relaxed)) stop_input = true;
+            report_expired_orders(orders, order_count, std::chrono::steady_clock::now(), timed_out);
+            if (timed_out) stop_input = true;
+            if (stop_input && all_orders_settled(orders, order_count, std::chrono::steady_clock::now()))
+                break;
+
+            if (stop_input || input_eof) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                continue;
+            }
+
+            pollfd input_descriptor{STDIN_FILENO, POLLIN, 0};
+            const int ready = ::poll(&input_descriptor, 1, 50);
+            if (ready < 0) {
+                if (errno == EINTR) continue;
+                std::cerr << "ERROR poll(stdin): " << errno << '\n' << std::flush;
+                application_error = true;
+                stop_input = true;
+                continue;
+            }
+            if (ready == 0) continue;
+            if ((input_descriptor.revents & (POLLIN | POLLHUP)) == 0) {
+                if ((input_descriptor.revents & (POLLERR | POLLNVAL)) != 0) {
+                    std::cerr << "ERROR stdin poll reported a terminal error\n" << std::flush;
+                    application_error = true;
+                    stop_input = true;
+                }
+                continue;
+            }
+
+            std::array<char, 1024> bytes{};
+            const auto received = ::read(STDIN_FILENO, bytes.data(), bytes.size());
+            if (received < 0) {
+                if (errno == EINTR || errno == EAGAIN) continue;
+                std::cerr << "ERROR read(stdin): " << errno << '\n' << std::flush;
+                application_error = true;
+                stop_input = true;
+                continue;
+            }
+            if (received == 0) {
+                input_eof = true;
+                if (input_overflow) {
+                    std::cerr << "ERROR command line exceeded " << input_line.size() << " bytes\n" << std::flush;
+                    input_overflow = false;
+                    input_size = 0;
+                } else if (input_size != 0) {
+                    handle_line({input_line.data(), input_size}, sender, engine, orders,
+                        order_count, options.timeout_ms, stop_input);
+                    input_size = 0;
+                }
+                stop_input = true;
+                continue;
+            }
+
+            for (ssize_t i = 0; i < received && !stop_input; ++i) {
+                const char byte = bytes[static_cast<std::size_t>(i)];
+                if (byte == '\n') {
+                    if (input_overflow) {
+                        std::cerr << "ERROR command line exceeded " << input_line.size() << " bytes\n" << std::flush;
+                        input_overflow = false;
+                        input_size = 0;
+                        continue;
+                    }
+                    handle_line({input_line.data(), input_size}, sender, engine, orders,
+                        order_count, options.timeout_ms, stop_input);
+                    input_size = 0;
+                    continue;
+                }
+                if (input_overflow) continue;
+                if (input_size == input_line.size()) {
+                    input_overflow = true;
+                    continue;
+                }
+                input_line[input_size++] = byte;
+            }
+        }
+    }
+
     if (!run_done.load(std::memory_order_acquire)) {
-        engine.request_stop();
-        stop_requested = true;
+        const int stop_result = finish_engine(engine, owner, run_done, run_status, sender,
+            orders, order_count, report_events, diagnostic_events, application_error,
+            dropped_reports, dropped_diagnostics, options.timeout_ms);
+        return stop_result != 0 || timed_out ? 1 : 0;
     }
-    while (!run_done.load(std::memory_order_acquire)) {
-        demo::print_events(events, dropped_events);
-        std::this_thread::sleep_for(std::chrono::milliseconds(25));
-    }
-    owner.join();
-    demo::print_events(events, dropped_events);
+
+    print_diagnostics(diagnostic_events, dropped_diagnostics);
+    print_report_events(report_events, orders, order_count, application_error, dropped_reports);
+    if (owner.joinable()) owner.join();
     if (!run_status.ok()) {
-        std::cerr << "Initiator stopped: " << run_status.message() << '\n';
+        std::cerr << "Initiator stopped: " << run_status.message() << '\n' << std::flush;
         return 1;
     }
-    if (timed_out && !report_received.load(std::memory_order_acquire)) {
-        std::cerr << "Timed out waiting for the matching ExecutionReport after "
-            << options.timeout_ms << " ms\n";
-        return 1;
-    }
-    if (stop_signal.load(std::memory_order_relaxed) &&
-        !report_received.load(std::memory_order_acquire)) {
-        std::cerr << "Stopped by signal before the order was acknowledged\n";
-        return 130;
-    }
-    if (!report_received.load(std::memory_order_acquire)) {
-        std::cerr << "Engine stopped before a matching ExecutionReport arrived\n";
-        return 1;
-    }
-    if (stop_requested) std::cout << "Initiator stopped gracefully.\n";
-    return invalid_report.load(std::memory_order_acquire) ? 1 : 0;
+    if (timed_out || application_error) return 1;
+    std::cerr << "Engine stopped before the user requested quit\n" << std::flush;
+    return 1;
 }

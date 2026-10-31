@@ -182,6 +182,11 @@ for _, role in ipairs({"initiator", "acceptor"}) do
         set_rundir("$(projectdir)")
         add_files("examples/" .. role .. ".cpp")
         add_deps("nimblefix")
+        if has_config("standard_schemas") then
+            add_deps("fix44-schema")
+            add_includedirs(generated_dir)
+            add_defines("NIMBLEFIX_BUILTIN_FIX44=1")
+        end
     target_end()
 end
 

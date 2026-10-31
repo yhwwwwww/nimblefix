@@ -1,5 +1,9 @@
 #include "endpoint.hpp"
 
+#if defined(NIMBLEFIX_BUILTIN_FIX44)
+#include <nimblefix/fix44.hpp>
+#endif
+
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -13,6 +17,11 @@
 namespace nf = nimblefix;
 namespace demo = nimblefix_example;
 using namespace nf::literals;
+#if defined(NIMBLEFIX_BUILTIN_FIX44)
+using Schema = nf::fix44::Schema;
+#else
+using Schema = nf::FlatSchema;
+#endif
 
 namespace {
 
@@ -97,15 +106,16 @@ int main(int argc, char** argv) {
     config.storage.directory = options.state;
     config.logon_timeout_ms = options.timeout_ms;
     config.logout_timeout_ms = options.timeout_ms;
-    auto created = nf::Engine<>::create(std::move(config));
+    auto created = nf::Engine<Schema>::create(std::move(config));
     if (!created.ok()) {
         std::cerr << "Engine create failed: " << created.status().message() << '\n';
         return 1;
     }
     auto engine = std::move(created).value();
     demo::ConsoleEvents events;
-    auto message_callback = engine.on_message(
-        [&events](nf::SessionContext& context, const nf::FlatMessageView& incoming) -> nf::Status {
+    demo::ConsoleEvents errors;
+    auto handle_order = [&events](nf::SessionContext& context,
+        const nf::FlatMessageView& incoming) -> nf::Status {
             if (!demo::is_message(incoming, "D")) return nf::Status::success();
 
             nf::Status status{};
@@ -135,6 +145,13 @@ int main(int argc, char** argv) {
             const auto exec_id = make_id(exec_id_storage, "EXEC-", context.inbound_record_id());
             if (order_id.empty() || exec_id.empty()) return {nf::ErrorCode::too_large};
 
+#if defined(NIMBLEFIX_BUILTIN_FIX44)
+            auto report = nf::fix44::ExecutionReport::make()
+                .order_id(order_id).exec_id(exec_id).cl_ord_id(cl_ord_id)
+                .exec_type('0').ord_status('0').symbol(symbol).side(side_text.front())
+                .leaves_qty(quantity.value()).cum_qty("0"_dec).avg_px("0"_dec)
+                .transact_time(transact_time);
+#else
             auto report = nf::message<"8">()
                 .set<37>(order_id)
                 .set<17>(exec_id)
@@ -147,17 +164,26 @@ int main(int argc, char** argv) {
                 .set<14>("0"_dec)
                 .set<6>("0"_dec)
                 .set<60>(transact_time);
+#endif
             const auto sent = context.send(report);
             if (!sent.ok()) return sent.status();
             publish_accepted(events, cl_ord_id, sent.value());
             return nf::Status::success();
+        };
+#if defined(NIMBLEFIX_BUILTIN_FIX44)
+    auto message_callback = engine.on<nf::fix44::NewOrderSingle>(
+        [handle_order](nf::SessionContext& context, const nf::fix44::NewOrderSingleView& order) {
+            return handle_order(context, order.flat());
         });
+#else
+    auto message_callback = engine.on_message(handle_order);
+#endif
     if (!message_callback.ok()) {
         std::cerr << "on_message failed: " << message_callback.message() << '\n';
         return 1;
     }
-    auto error_callback = engine.on_error([&events](const nf::ErrorEvent& error) {
-        events.push_error(error);
+    auto error_callback = engine.on_error([&errors](const nf::ErrorEvent& error) {
+        errors.push_error(error);
     });
     if (!error_callback.ok()) {
         std::cerr << "on_error failed: " << error_callback.message() << '\n';
@@ -199,6 +225,7 @@ int main(int argc, char** argv) {
     bool endpoint_printed = false;
     bool stop_requested = false;
     std::uint64_t dropped_events = 0;
+    std::uint64_t dropped_errors = 0;
     while (!run_done.load(std::memory_order_acquire) &&
         !stop_signal.load(std::memory_order_relaxed)) {
         if (!endpoint_printed) {
@@ -218,6 +245,8 @@ int main(int argc, char** argv) {
             }
         }
         demo::print_events(events, dropped_events);
+        demo::print_events(errors, dropped_errors);
+        std::cout.flush();
         std::this_thread::sleep_for(std::chrono::milliseconds(25));
     }
     if (!run_done.load(std::memory_order_acquire)) {
@@ -226,6 +255,7 @@ int main(int argc, char** argv) {
     }
     owner.join();
     demo::print_events(events, dropped_events);
+    demo::print_events(errors, dropped_errors);
     if (!run_status.ok()) {
         std::cerr << "Acceptor stopped: " << run_status.message() << '\n';
         return 1;

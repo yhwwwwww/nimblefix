@@ -24,7 +24,6 @@ namespace nimblefix_example {
 struct Options {
     std::filesystem::path state;
     std::string host{"127.0.0.1"};
-    std::string cl_ord_id;
     std::uint16_t port{};
     std::uint32_t timeout_ms{10'000};
     bool port_set{};
@@ -49,7 +48,7 @@ inline bool valid_text(std::string_view text) noexcept {
     for (const unsigned char ch : text) if (ch < 0x20 || ch == 0x7f) return false;
     return true;
 }
-inline bool parse_args(int argc, char** argv, bool accept_cl_ord_id, Options& options) {
+inline bool parse_args(int argc, char** argv, bool initiator, Options& options) {
     for (int index = 1; index < argc; ++index) {
         const std::string_view argument{argv[index]};
         if (argument == "--help" || argument == "-h") { options.help = true; return true; }
@@ -74,23 +73,24 @@ inline bool parse_args(int argc, char** argv, bool accept_cl_ord_id, Options& op
                 std::cerr << "--timeout-ms must be an integer in 1..3600000\n"; return false;
             }
             options.timeout_ms = static_cast<std::uint32_t>(timeout);
-        } else if (argument == "--cl-ord-id" && accept_cl_ord_id) {
-            if (!valid_text(value) || value.size() > 64) {
-                std::cerr << "--cl-ord-id must be 1..64 printable bytes\n"; return false;
-            }
-            options.cl_ord_id.assign(value);
         } else {
             std::cerr << "unknown option: " << argument << '\n'; return false;
         }
     }
-    if (!options.state.empty() && options.port_set) return true;
+    if (!options.state.empty() && options.port_set) {
+        if (initiator && options.port == 0) {
+            std::cerr << "initiator --port must be in 1..65535\n";
+            return false;
+        }
+        return true;
+    }
     std::cerr << "--state and --port are required\n";
     return false;
 }
-inline void print_usage(std::string_view program, bool accept_cl_ord_id) {
+inline void print_usage(std::string_view program, bool initiator) {
     std::cerr << "Usage: " << program << " --state PATH --port PORT [--host NUMERIC] [--timeout-ms 10000]";
-    if (accept_cl_ord_id) std::cerr << " [--cl-ord-id ID]";
     std::cerr << '\n';
+    if (initiator) std::cerr << "Commands: order ID SYMBOL buy|sell QTY PRICE|market; status; quit\n";
 }
 inline std::string_view utc_timestamp(std::array<char, 22>& buffer) noexcept {
     using namespace std::chrono;
@@ -115,6 +115,8 @@ struct ConsoleEvent {
 };
 class ConsoleEvents {
 public:
+    // One producer and one consumer. The owner callback and diagnostic
+    // callback run on different threads and must use separate instances.
     static constexpr std::size_t capacity = 64;
     void push(ConsoleEvent::Kind kind, std::string_view text,
         nimblefix::ErrorCode code = nimblefix::ErrorCode::none) noexcept {

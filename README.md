@@ -7,28 +7,59 @@ also provides a relocatable installed package.
 [中文入门](docs/getting-started.zh-CN.md) · [Supported behavior](docs/session-support.md) ·
 [Design](docs/rewrite-design.md) · [Release evidence](docs/release-0.2.md)
 
-## Build and exchange an order
+## Run an order-entry application
 
 ```sh
 xmake f -m release
+xmake build acceptor-example initiator-example
+```
+
+Run the simulated counterparty and the order-entry application separately:
+
+Terminal 1:
+
+```sh
+xmake run acceptor-example --state ./state/sell --port 9876
+```
+
+Terminal 2:
+
+```sh
+xmake run initiator-example --state ./state/buy --port 9876
+```
+
+After `SESSION_ACTIVE`, enter business commands in Terminal 2:
+
+```text
+order ORDER-001 AAPL buy 100 150.25
+order ORDER-002 MSFT sell 25 market
+status
+quit
+```
+
+The protocol runs on its owner thread. The main business thread accepts explicit
+commands and sends through the session's retained `Sender`. Logon and reconnect
+create no new orders, and receiving a report keeps the application running.
+Each command supplies its ClOrdID, symbol, side, quantity and limit price or
+market instruction. Receipts describe local acceptance/append/write progress;
+ExecutionReport is the separate counterparty response. `quit` or input EOF
+drains accepted requests within the configured deadline before Logout.
+The example tracks up to 256 accepted request IDs per process, rejects duplicate
+IDs and reports failed or timed-out requests without silently resubmitting them.
+
+Keep each side's state directory across restarts and use a new ClOrdID for each
+new business request. Business identity and idempotency across application
+restarts remain application responsibilities. The acceptor simulates New
+acknowledgements; it does not implement an exchange or an order-management system.
+Numeric IPv4/IPv6 endpoints are supported. Standard builds use full typed FIX44;
+core-only builds retain the same command workflow with flat messages.
+
+For the automated paired protocol/restart smoke test:
+
+```sh
 xmake build hello-fix
 xmake run hello-fix --self-test --typed --restart
 ```
-
-The paired harness performs Logon, NewOrderSingle, ExecutionReport and Logout,
-then restarts with the same persistent state. For separate processes:
-
-```sh
-xmake build acceptor-example initiator-example
-# Terminal 1
-xmake run acceptor-example --state ./state/sell --port 9876
-# Terminal 2
-xmake run initiator-example --state ./state/buy --port 9876 --cl-ord-id DEMO-001
-```
-
-Keep each side's state directory across restarts. Use a new ClOrdID for a new
-order. Business idempotency across callback recovery remains application logic.
-Numeric IPv4/IPv6 endpoints are supported.
 
 ## Configure and operate
 
@@ -80,7 +111,7 @@ auto created = nimblefix::Engine<Schema>::create({.storage={.directory="./state"
 auto order = nimblefix::fix44::NewOrderSingle::make()
     .cl_ord_id("DEMO-001").handl_inst('1').symbol("AAPL").side('1')
     .transact_time("20261031-12:00:00.000").order_qty(100).ord_type('1');
-// In a callback: context.send(order).
+// In the business command handler: session.sender<Schema>().send(order).
 ```
 
 Named setters and `set<Tag>()` use the same slots and encoder. Generated views

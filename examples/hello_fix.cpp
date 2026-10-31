@@ -67,7 +67,7 @@ std::string_view format_business_id(std::array<char, 40>& buffer,
     return {buffer.data(), static_cast<std::size_t>(converted.ptr - buffer.data())};
 }
 
-bool is_expected_report(const nf::FlatMessageView& message) noexcept {
+bool is_expected_report(const nf::FlatMessageView& message, std::string_view expected_id) noexcept {
     const auto cl_ord_id = message.find_unique(11);
     const auto side = message.find_unique(54);
     const auto leaves = message.find_unique(151);
@@ -86,7 +86,7 @@ bool is_expected_report(const nf::FlatMessageView& message) noexcept {
     const auto average_price = nf::Decimal::parse(average.value().value);
     const auto expected_qty = nf::Decimal::parse("100");
     const auto zero = nf::Decimal::parse("0");
-    return cl_ord_id.value().value == "DEMO-001" && side.value().value == "1" &&
+    return cl_ord_id.value().value == expected_id && side.value().value == "1" &&
         symbol.value().value == "AAPL" && exec_type.value().value == "0" &&
         order_status.value().value == "0" &&
         leaves_qty.ok() && expected_qty.ok() && leaves_qty.value() == expected_qty.value() &&
@@ -96,7 +96,7 @@ bool is_expected_report(const nf::FlatMessageView& message) noexcept {
 }
 
 PairResult run_pair(const std::filesystem::path& root, bool typed,
-                    std::chrono::milliseconds timeout) {
+                    std::chrono::milliseconds timeout, std::string_view business_id) {
     PairResult result;
     const auto acceptor_dir = root / "acceptor";
     const auto initiator_dir = root / "initiator";
@@ -109,14 +109,8 @@ PairResult run_pair(const std::filesystem::path& root, bool typed,
     }
     auto acceptor = std::move(created_acceptor).value();
 
-    const auto transact_time = current_utc_timestamp();
-    if (transact_time.empty()) {
-        result.status = {nf::ErrorCode::invalid_timestamp};
-        return result;
-    }
     std::atomic<bool> report_seen{false};
     std::atomic<bool> valid_report{false};
-    std::atomic<std::uint64_t> sent_order_sequence{0};
     std::mutex error_mutex;
     std::size_t error_count = 0;
     nf::Status first_error{};
@@ -242,50 +236,10 @@ PairResult run_pair(const std::filesystem::path& root, bool typed,
         result.status = initiator_errors;
         return result;
     }
-    auto active = initiator.on_session_active([&](nf::SessionContext& context) -> nf::Status {
-#if defined(NIMBLEFIX_SAMPLE_SCHEMA)
-        if (typed) {
-            auto order = nf::fix44_sample::NewOrderSingle::make()
-                .cl_ord_id("DEMO-001")
-                .symbol("AAPL")
-                .side('1')
-                .transact_time(transact_time)
-                .order_qty(100)
-                .ord_type('2')
-                .price("150.25"_dec);
-            const auto sent = context.send(order);
-            if (!sent.ok()) return sent.status();
-            sent_order_sequence.store(sent.value().msg_seq_num, std::memory_order_release);
-            return nf::Status::success();
-        }
-#else
-        (void)typed;
-#endif
-        {
-            auto order = nf::message<"D">()
-                .set<11>("DEMO-001")
-                .set<55>("AAPL")
-                .set<54>('1')
-                .set<60>(transact_time)
-                .set<38>(100)
-                .set<40>('2')
-                .set<44>("150.25"_dec);
-            const auto sent = context.send(order);
-            if (!sent.ok()) return sent.status();
-            sent_order_sequence.store(sent.value().msg_seq_num, std::memory_order_release);
-        }
-        return nf::Status::success();
-    });
-    if (!active.ok()) {
-        acceptor.request_stop();
-        acceptor_thread.join();
-        result.status = active;
-        return result;
-    }
     auto received_callback = initiator.on_message(
         [&](nf::SessionContext&, const nf::FlatMessageView& incoming) -> nf::Status {
             if (is_message(incoming, "8")) {
-                valid_report.store(is_expected_report(incoming), std::memory_order_release);
+                valid_report.store(is_expected_report(incoming, business_id), std::memory_order_release);
                 report_seen.store(true, std::memory_order_release);
             }
             return nf::Status::success();
@@ -316,16 +270,63 @@ PairResult run_pair(const std::filesystem::path& root, bool typed,
         return result;
     }
 
-    std::thread initiator_thread([&] { result.status = initiator.run(); });
+    auto sender = initiator_session.value().sender<>();
+    nf::Status initiator_run_status{};
+    std::atomic<bool> initiator_done{false};
+    std::thread initiator_thread([&] {
+        initiator_run_status = initiator.run();
+        initiator_done.store(true, std::memory_order_release);
+    });
     const auto report_deadline = std::chrono::steady_clock::now() + timeout;
-    while (!report_seen.load(std::memory_order_acquire) &&
+    while (!sender.can_send() && !initiator_done.load(std::memory_order_acquire) &&
            std::chrono::steady_clock::now() < report_deadline)
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
+
+    // The self-test coordinator explicitly submits one business request.
+    // Connection lifecycle callbacks never create or resubmit an order.
+    const auto transact_time = current_utc_timestamp();
+    const auto submit_order = [&]() -> nf::Result<nf::SendReceipt> {
+        if (transact_time.empty()) return nf::Status{nf::ErrorCode::invalid_timestamp};
+#if defined(NIMBLEFIX_SAMPLE_SCHEMA)
+        if (typed) {
+            auto order = nf::fix44_sample::NewOrderSingle::make()
+                .cl_ord_id(business_id).symbol("AAPL").side('1')
+                .transact_time(transact_time).order_qty(100).ord_type('2').price("150.25"_dec);
+            return sender.send(order);
+        }
+#else
+        (void)typed;
+#endif
+        auto order = nf::message<"D">()
+            .set<11>(business_id).set<21>('1').set<55>("AAPL").set<54>('1')
+            .set<60>(transact_time).set<38>(100).set<40>('2').set<44>("150.25"_dec);
+        return sender.send(order);
+    };
+    const auto submitted = sender.can_send() ? submit_order()
+        : nf::Result<nf::SendReceipt>{nf::Status{nf::ErrorCode::logon_timeout}};
+    nf::Status submission_status = submitted.status();
+    bool written = false;
+    while (submission_status.ok() && !initiator_done.load(std::memory_order_acquire) &&
+           std::chrono::steady_clock::now() < report_deadline) {
+        const auto receipt = sender.receipt(submitted.value().id);
+        if (!receipt.ok()) { submission_status = receipt.status(); break; }
+        result.order_sequence = receipt.value().msg_seq_num;
+        if (receipt.value().state == nf::ReceiptState::failed ||
+            receipt.value().state == nf::ReceiptState::expired) {
+            submission_status = receipt.value().status;
+            break;
+        }
+        written = receipt.value().state == nf::ReceiptState::written;
+        if (written && report_seen.load(std::memory_order_acquire)) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    if (submission_status.ok() && (!written || !report_seen.load(std::memory_order_acquire)))
+        submission_status = {nf::ErrorCode::backlog_timeout};
     initiator.request_stop();
     acceptor.request_stop();
     initiator_thread.join();
     acceptor_thread.join();
-    result.order_sequence = sent_order_sequence.load(std::memory_order_acquire);
+    result.status = submission_status.ok() ? initiator_run_status : submission_status;
     result.received_report = report_seen.load(std::memory_order_acquire);
     result.valid_report = valid_report.load(std::memory_order_acquire);
     {
@@ -369,11 +370,11 @@ int main(int argc, char** argv) {
         return 1;
     }
     const std::filesystem::path root{temp_path};
-    auto first = run_pair(root, typed, std::chrono::seconds(10));
+    auto first = run_pair(root, typed, std::chrono::seconds(10), "DEMO-001");
     bool restart_ok = true;
     std::uint64_t second_sequence = 0;
     if (first.status.ok() && first.received_report && restart) {
-        const auto second = run_pair(root, typed, std::chrono::seconds(10));
+        const auto second = run_pair(root, typed, std::chrono::seconds(10), "DEMO-002");
         restart_ok = second.status.ok() && second.received_report && second.valid_report &&
             second.order_sequence > first.order_sequence;
         second_sequence = second.order_sequence;

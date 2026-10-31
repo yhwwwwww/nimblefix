@@ -13,21 +13,47 @@
 
 ```sh
 xmake f -m release
+xmake build acceptor-example initiator-example
+```
+
+先启动模拟对手方，再在另一个终端启动订单输入程序：
+
+```sh
+xmake run acceptor-example --state ./state/sell --port 9876
+```
+
+另一个终端：
+
+```sh
+xmake run initiator-example --state ./state/buy --port 9876
+```
+
+看到 `SESSION_ACTIVE` 后，在订单输入程序中输入业务命令：
+
+```text
+order ORDER-001 AAPL buy 100 150.25
+order ORDER-002 MSFT sell 25 market
+status
+quit
+```
+
+协议 owner 在线程内运行，主线程读取业务命令，通过提前取得的 `Sender` 发送。
+登录成功和重连都不会生成新订单，收到一笔回报后程序继续运行。
+每笔订单由命令提供 ClOrdID、标的、方向、数量和限价或市价指令；发送时才生成 TransactTime。
+本地 receipt 的 accepted/appended/written 与对手方的 ExecutionReport 分开显示。
+`quit` 或标准输入 EOF 停止接收新命令，限时等待已接受请求的发送和回报，再 Logout。
+示例每个进程最多跟踪 256 个已接受的请求 ID；拒绝重复 ID，不自动重试或补单。
+
+默认构建使用完整 FIX44 typed 绑定；仅核心库构建使用相同命令流程的 flat 入口。
+保留两端各自的协议状态目录；新业务请求使用新的 ClOrdID。应用重启后的订单身份与幂等
+由业务系统持久化管理。acceptor 只模拟订单 New 确认，不包含撮合、风控或完整订单管理。
+
+自动化协议／重启自测单独运行：
+
+```sh
 xmake build hello-fix
 xmake run hello-fix --self-test --typed --restart
 ```
-
-此命令启动真实 TCP 双方，完成 Logon、订单、成交报告和 Logout，再保留状态重启。
-独立进程示例：
-
-```sh
-xmake build acceptor-example initiator-example
-xmake run acceptor-example --state ./state/sell --port 9876
-# 另一个终端：
-xmake run initiator-example --state ./state/buy --port 9876 --cl-ord-id DEMO-001
-```
-
-保留两端各自的状态目录；新订单使用新的 ClOrdID。回调故障恢复和应用外部副作用的幂等由应用负责。
 
 ## 使用配置文件
 
