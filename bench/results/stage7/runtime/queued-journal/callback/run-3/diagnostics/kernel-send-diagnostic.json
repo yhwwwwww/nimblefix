@@ -1,0 +1,35 @@
+{
+  "samples": 5000,
+  "message_type": "8",
+  "completed_full_frame_writes": 5000,
+  "expected_full_frame_writes": 5000,
+  "kernel_write_before_accept_return_samples": 0,
+  "kernel_minus_accepted_return_signed_ns": {
+    "p50_ns": 32070,
+    "p99_ns": 61675,
+    "p999_ns": 102131,
+    "min_ns": 7314,
+    "max_ns": 1002258,
+    "negative_count": 0
+  },
+  "accepted_to_kernel_lower_bound_ns": {
+    "p50_ns": 32070,
+    "p99_ns": 61675,
+    "p999_ns": 102131,
+    "min_ns": 7314,
+    "max_ns": 1002258,
+    "negative_count": 0
+  },
+  "accepted_to_kernel_upper_bound_signed_ns": {
+    "p50_ns": 34324,
+    "p99_ns": 64691,
+    "p999_ns": 104425,
+    "min_ns": 12564,
+    "max_ns": 1003651,
+    "negative_count": 0
+  },
+  "bounds_note": "accepted_return_ns is sampled immediately after the API call; scheduling can intervene before that sample. API acceptance occurs inside the call, bracketed by api_start_ns and accepted_return_ns. kernel_write_return_ns is sampled after send returned all bytes of the frame to the kernel, not peer receipt. Lower bound is max(0, write_return - accepted_return); upper bound is write_return - api_start. Raw signed deltas are preserved; a negative raw delta counts a write before the post-call observation, and does not prove it preceded the actual API return. Impossible negative upper bounds fail validation.",
+  "samples_csv": "runtime/queued-journal/callback/run-3/diagnostics/kernel-send-samples.csv.gz",
+  "samples_json": "runtime/queued-journal/callback/run-3/diagnostics/kernel-send-samples.json.gz",
+  "scope": "separate diagnostic pass with send wrapper enabled; includes only complete tracked FIX D/8 frames from the measured phase"
+}

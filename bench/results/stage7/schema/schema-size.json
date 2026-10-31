@@ -1,0 +1,35 @@
+{
+  "compiler": "g++",
+  "measurements": [
+    {
+      "unused_optional_fields": 0,
+      "tag_stride": 1,
+      "builder_bytes": 40,
+      "slot_bytes": 32,
+      "generated_header_bytes": 7146,
+      "binary_bytes": 16232,
+      "generation_seconds": 0.045296948999748565,
+      "compile_seconds": 0.47755833600240294
+    },
+    {
+      "unused_optional_fields": 1000,
+      "tag_stride": 1,
+      "builder_bytes": 40,
+      "slot_bytes": 32,
+      "generated_header_bytes": 967519,
+      "binary_bytes": 16232,
+      "generation_seconds": 0.06616936800128315,
+      "compile_seconds": 0.7250634630036075
+    },
+    {
+      "unused_optional_fields": 1000,
+      "tag_stride": 1000,
+      "builder_bytes": 40,
+      "slot_bytes": 32,
+      "generated_header_bytes": 984556,
+      "binary_bytes": 16232,
+      "generation_seconds": 0.07130423000489827,
+      "compile_seconds": 0.7325535650015809
+    }
+  ]
+}

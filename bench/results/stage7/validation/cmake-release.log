@@ -1,0 +1,91 @@
+Test project /tmp/nimblefix-v4-cmake
+      Start 22: producer_lane
+      Start 33: compile-fail
+      Start 43: schema-benchmark-smoke
+      Start 11: network
+ 1/43 Test #11: network ..........................   Passed    2.71 sec
+      Start 29: xmake-schema
+ 2/43 Test #43: schema-benchmark-smoke ...........   Passed    5.23 sec
+      Start 39: quickfix_network
+ 3/43 Test #29: xmake-schema .....................   Passed    4.85 sec
+      Start 42: runtime-benchmark-smoke
+ 4/43 Test #39: quickfix_network .................   Passed    4.03 sec
+      Start 32: xml-codegen
+ 5/43 Test #42: runtime-benchmark-smoke ..........   Passed    2.05 sec
+      Start 27: protocol-versions
+ 6/43 Test #22: producer_lane ....................   Passed    9.93 sec
+      Start 24: sender_expiry
+ 7/43 Test #24: sender_expiry ....................   Passed    0.62 sec
+      Start 37: endpoint-examples
+ 8/43 Test #27: protocol-versions ................   Passed    1.14 sec
+      Start 30: engine-tls
+ 9/43 Test #32: xml-codegen ......................   Passed    1.74 sec
+      Start 14: journal_rotation
+10/43 Test #37: endpoint-examples ................   Passed    0.46 sec
+      Start  8: session
+11/43 Test #30: engine-tls .......................   Passed    0.27 sec
+      Start 26: cli
+12/43 Test  #8: session ..........................   Passed    0.22 sec
+      Start 23: queued_shutdown
+13/43 Test #26: cli ..............................   Passed    0.22 sec
+      Start 28: queued-crash
+14/43 Test #14: journal_rotation .................   Passed    0.25 sec
+      Start 16: protocol_session
+15/43 Test #23: queued_shutdown ..................   Passed    0.13 sec
+      Start 31: tls-transport
+16/43 Test #16: protocol_session .................   Passed    0.12 sec
+      Start 40: quickfix_dual_role
+17/43 Test #28: queued-crash .....................   Passed    0.14 sec
+      Start  9: session_boundary
+18/43 Test #40: quickfix_dual_role ...............   Passed    0.11 sec
+      Start  2: outbound-reconnect
+19/43 Test  #9: session_boundary .................   Passed    0.11 sec
+      Start  1: initiator-reconnect
+20/43 Test #31: tls-transport ....................   Passed    0.13 sec
+      Start 41: journal-benchmark-smoke
+21/43 Test  #2: outbound-reconnect ...............   Passed    0.10 sec
+      Start 10: session_limits
+22/43 Test #41: journal-benchmark-smoke ..........   Passed    0.10 sec
+      Start 21: engine_features
+23/43 Test  #1: initiator-reconnect ..............   Passed    0.10 sec
+      Start 35: hello-fix
+24/43 Test #10: session_limits ...................   Passed    0.07 sec
+      Start 36: hello-fix-typed
+25/43 Test #35: hello-fix ........................   Passed    0.06 sec
+      Start 38: quickfix
+26/43 Test #21: engine_features ..................   Passed    0.06 sec
+      Start 17: queued_runtime
+27/43 Test #17: queued_runtime ...................   Passed    0.02 sec
+      Start 13: journal_reader
+28/43 Test #38: quickfix .........................   Passed    0.02 sec
+      Start  7: journal
+29/43 Test  #7: journal ..........................   Passed    0.01 sec
+      Start 25: runtime-xml
+30/43 Test #25: runtime-xml ......................   Passed    0.01 sec
+      Start 18: sender_schema
+31/43 Test #13: journal_reader ...................   Passed    0.02 sec
+      Start  5: contract
+32/43 Test #18: sender_schema ....................   Passed    0.00 sec
+      Start  3: parser
+33/43 Test  #5: contract .........................   Passed    0.00 sec
+      Start 12: settings
+34/43 Test #36: hello-fix-typed ..................   Passed    0.06 sec
+      Start  4: message
+35/43 Test  #3: parser ...........................   Passed    0.00 sec
+      Start 15: protocol_core
+36/43 Test #12: settings .........................   Passed    0.00 sec
+      Start 19: schema_codec
+37/43 Test  #4: message ..........................   Passed    0.00 sec
+      Start 34: codec-demo
+38/43 Test #15: protocol_core ....................   Passed    0.00 sec
+      Start  6: generated
+39/43 Test #19: schema_codec .....................   Passed    0.00 sec
+      Start 20: dynamic_message
+40/43 Test #34: codec-demo .......................   Passed    0.00 sec
+41/43 Test  #6: generated ........................   Passed    0.00 sec
+42/43 Test #20: dynamic_message ..................   Passed    0.00 sec
+43/43 Test #33: compile-fail .....................   Passed   13.09 sec
+
+100% tests passed out of 43
+
+Total Test time (real) =  13.09 sec

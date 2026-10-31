@@ -1,0 +1,31 @@
+Test project /tmp/nimblefix-v4-asan
+      Start 11: journal_reader
+ 1/13 Test #11: journal_reader ...................   Passed    0.05 sec
+      Start 12: journal_rotation
+ 2/13 Test #12: journal_rotation .................   Passed    0.33 sec
+      Start 14: protocol_session
+ 3/13 Test #14: protocol_session .................   Passed    0.26 sec
+      Start 15: queued_runtime
+ 4/13 Test #15: queued_runtime ...................   Passed    0.05 sec
+      Start 16: schema_codec
+ 5/13 Test #16: schema_codec .....................   Passed    0.01 sec
+      Start 17: dynamic_message
+ 6/13 Test #17: dynamic_message ..................   Passed    0.01 sec
+      Start 18: engine_features
+ 7/13 Test #18: engine_features ..................   Passed    0.10 sec
+      Start 19: producer_lane
+ 8/13 Test #19: producer_lane ....................   Passed   10.07 sec
+      Start 20: queued_shutdown
+ 9/13 Test #20: queued_shutdown ..................   Passed    0.15 sec
+      Start 21: sender_expiry
+10/13 Test #21: sender_expiry ....................   Passed    0.71 sec
+      Start 22: runtime-xml
+11/13 Test #22: runtime-xml ......................   Passed    0.04 sec
+      Start 25: engine-tls
+12/13 Test #25: engine-tls .......................   Passed    0.31 sec
+      Start 26: tls-transport
+13/13 Test #26: tls-transport ....................   Passed    0.13 sec
+
+100% tests passed out of 13
+
+Total Test time (real) =  12.22 sec
