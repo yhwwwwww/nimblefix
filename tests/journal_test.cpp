@@ -83,6 +83,7 @@ void test_append_recovery_lock_and_dependencies() {
         CHECK(inbound.value().payload == "raw-inbound-1");
         CHECK(journal.next_inbound_seq() == 2);
         CHECK(!journal.has_delivery(inbound.value().id));
+        CHECK(journal.completed_inbound_seq() == 0);
 
         auto outbound = journal.append(RecordKind::outbound, 1, 7001,
                                       inbound.value().id, "raw-outbound-1");
@@ -97,6 +98,8 @@ void test_append_recovery_lock_and_dependencies() {
                                        inbound.value().id, {});
         CHECK(delivery.ok());
         CHECK(journal.has_delivery(inbound.value().id));
+        CHECK(journal.completed_inbound_seq() == 1);
+        CHECK(journal.completed_inbound_record_id() == inbound.value().id);
         CHECK(journal.records().size() == 3);
 
         auto locked = Journal::open(config);
@@ -167,12 +170,14 @@ void test_gapfill_sequence_decision_is_inbound_commit() {
         CHECK(reset.value().next_seq == 7);
         CHECK(opened.value().next_inbound_seq() == 7);
         CHECK(opened.value().has_delivery(reset.value().id));
+        CHECK(opened.value().completed_inbound_seq() == 6);
     }
 
     auto recovered = Journal::open(config);
     CHECK(recovered.ok());
     if (!recovered.ok()) return;
     CHECK(recovered.value().next_inbound_seq() == 7);
+    CHECK(recovered.value().completed_inbound_seq() == 6);
     auto next = recovered.value().append(RecordKind::inbound, 7, 0, 0, "next-frame");
     CHECK(next.ok());
     CHECK(next.value().next_seq == 8);

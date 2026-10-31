@@ -1,2 +1,5 @@
 # Python's CSV writer emits CRLF; preserve the archived raw sample bytes.
 bench/results/**/*.csv whitespace=cr-at-eol
+
+# Keep the vendored upstream license text byte-for-byte.
+third_party/quickfix-LICENSE -whitespace

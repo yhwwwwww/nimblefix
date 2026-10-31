@@ -7,6 +7,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstring>
+#include <ctime>
 #include <filesystem>
 #include <functional>
 #include <iostream>
@@ -51,11 +52,20 @@ struct EngineGuard {
     }
 };
 
+std::string current_timestamp() {
+    std::array<char,32> buffer{};
+    const auto now = std::time(nullptr);
+    std::tm utc{};
+    ::gmtime_r(&now, &utc);
+    ::strftime(buffer.data(), buffer.size(), "%Y%m%d-%H:%M:%S", &utc);
+    return buffer.data();
+}
+
 std::string make_frame(std::string_view type, std::uint64_t sequence,
                        std::string_view sender, std::string_view target,
                        std::string_view order_id = "ORDER-1") {
     std::array<char, 1024> output{};
-    const auto sending_time = std::string_view{"20261026-12:00:00.000"};
+    const auto sending_time = current_timestamp();
     if (type == "A") {
         auto logon = nf::message<"A">().set<98>(0).set<108>(30);
         const auto encoded = nf::encode_fix44(logon,
@@ -235,7 +245,7 @@ bool test_shutdown_during_existing_logout(const std::filesystem::path& directory
         std::array<char, 256> reply;
         const auto logout = nf::message<"5">();
         const auto encoded = nf::encode_fix44(logout,
-            {"BUY", "SELL", 2, "20261027-00:00:00.000"}, reply);
+            {"BUY", "SELL", 2, current_timestamp()}, reply);
         if (!encoded.ok() || !send_all(client, {reply.data(), encoded.value()})) return false;
     } else if (close_without_ack) {
         ::close(client);
@@ -307,7 +317,7 @@ bool test_burst_before_eof(const std::filesystem::path& directory, bool half_clo
     bool drained = false;
     const auto drain_deadline = Clock::now() + std::chrono::seconds(3);
     while (Clock::now() < drain_deadline) {
-        auto reopened = nf::Journal::open({.path=journal_path.string(), .session_key="FIX.4.4|4:SELL|3:BUY"});
+        auto reopened = nf::Journal::open({.path=journal_path.string(), .session_key="FIX.4.4|4:SELL|3:BUY", .segment_bytes=1024U*1024U});
         if (reopened.ok()) {
             if (reopened.value().next_inbound_seq() != 1202) return false;
             drained = true;

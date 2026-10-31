@@ -4,12 +4,14 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
 
 #include <nimblefix/codec.hpp>
 #include <nimblefix/journal.hpp>
+#include <nimblefix/settings.hpp>
 #include <nimblefix/status.hpp>
 
 namespace nimblefix {
@@ -33,6 +35,7 @@ enum class ReceiptState : std::uint8_t {
     written,
     failed,
     expired,
+    accepted,
 };
 
 struct SessionConfig {
@@ -61,6 +64,19 @@ struct SessionConfig {
     std::size_t journal_capacity_bytes{16U * 1024U * 1024U};
     std::size_t journal_max_records{65'536};
     JournalTestHook journal_test_hook{};
+
+    // Tail-only runtime/storage settings keep older designated initializers
+    // source-compatible. A null settings value preserves the direct Driver
+    // compatibility behavior used by low-level tests and embedders.
+    std::optional<SessionSettings> settings{};
+    bool tls_verified{};
+    std::size_t journal_segment_bytes{};
+    std::size_t journal_max_segments{};
+    std::size_t retain_outbound_messages{};
+    // Engine acceptor paths may authenticate the first Logon before creating
+    // a Driver so they can safely route the connection by session identity.
+    // Direct Driver users leave this false and let the Driver authenticate.
+    bool logon_preauthenticated{};
 };
 
 struct DeliveryInfo {
@@ -74,6 +90,20 @@ struct SendReceipt {
     std::uint64_t msg_seq_num{};
     ReceiptState state{ReceiptState::appended};
     Status status{};
+};
+
+namespace detail {
+class EngineRuntime;
+class SenderSharedState;
+}
+
+// A bounded asynchronous delivery lease. The frame refers either to the
+// committed journal mapping or to the configured descriptor-ring byte arena;
+// owner keeps that storage alive until the worker releases the lease.
+struct DeliveryLease {
+    DeliveryInfo info{};
+    std::string_view frame{};
+    JournalLease journal_lease{};
 };
 
 struct WriteResult {
@@ -109,26 +139,70 @@ public:
     [[nodiscard]] Status logout(std::string_view reason = {}) noexcept;
     [[nodiscard]] SessionState state() const noexcept;
     [[nodiscard]] bool is_recovery() const noexcept { return delivery_.is_recovery; }
+    [[nodiscard]] std::string_view session_name() const noexcept { return session_name_; }
+    [[nodiscard]] std::string_view local_comp_id() const noexcept { return local_comp_id_; }
+    [[nodiscard]] std::string_view remote_comp_id() const noexcept { return remote_comp_id_; }
     [[nodiscard]] RecordId inbound_record_id() const noexcept { return delivery_.record_id; }
     [[nodiscard]] std::uint64_t inbound_msg_seq_num() const noexcept { return delivery_.msg_seq_num; }
+    [[nodiscard]] std::size_t accepted_sends() const noexcept { return send_ordinal_; }
 
 private:
     friend class SessionDriver;
+    friend class detail::EngineRuntime;
+
+    using SendFunction = Result<SendReceipt>(*)(void*, detail::MessageView,
+        std::uint64_t, std::string_view, DeliveryInfo, std::size_t,
+        std::uint64_t) noexcept;
+
     SessionContext(SessionDriver& driver, std::uint64_t now_ms,
-        std::string_view wall_time, DeliveryInfo delivery) noexcept
-        : driver_(&driver), now_ms_(now_ms), wall_time_(wall_time), delivery_(delivery) {}
+        std::string_view wall_time, DeliveryInfo delivery) noexcept;
+
+    SessionContext(std::shared_ptr<detail::SenderSharedState> sender,
+        SendFunction send_function, SessionState state, std::uint64_t now_ms,
+        std::string_view wall_time, DeliveryInfo delivery,
+        std::string_view session_name, std::string_view local_comp_id,
+        std::string_view remote_comp_id,
+        std::uint64_t generation = 0) noexcept
+        : send_context_(sender.get()), send_function_(send_function),
+          sender_lifetime_(std::move(sender)), now_ms_(now_ms), wall_time_(wall_time),
+          delivery_(delivery), state_snapshot_(state), generation_(generation),
+          session_name_(session_name), local_comp_id_(local_comp_id),
+          remote_comp_id_(remote_comp_id) {}
+
+    static Result<SendReceipt> send_inline(void* context, detail::MessageView message,
+        std::uint64_t now_ms, std::string_view wall_time, DeliveryInfo delivery,
+        std::size_t ordinal, std::uint64_t generation) noexcept;
 
     SessionDriver* driver_{};
+    void* send_context_{};
+    SendFunction send_function_{};
+    std::shared_ptr<detail::SenderSharedState> sender_lifetime_{};
     std::uint64_t now_ms_{};
     std::string_view wall_time_{};
     DeliveryInfo delivery_{};
     std::size_t send_ordinal_{};
+    SessionState state_snapshot_{SessionState::closed};
+    std::uint64_t generation_{};
+    std::string_view session_name_{};
+    std::string_view local_comp_id_{};
+    std::string_view remote_comp_id_{};
 };
 
 struct SessionCallbacks {
     // The message view and SessionContext are valid only for this call. Return
     // success to append the delivery-complete journal record.
     std::function<Status(SessionContext&, const FlatMessageView&, const DeliveryInfo&)> on_message{};
+    // Schema validation is a separate protocol boundary from business callback
+    // failure, so invalid typed input never reaches application code.
+    std::function<Status(const FlatMessageView&)> validate_message{};
+    WireHints wire_hints{};
+    std::function<Status()> on_deferred_active{};
+    bool deferred_active{};
+    // When present, the driver calls this on the owner with a committed inbound
+    // record. A successful callback must call defer_delivery() after enqueueing
+    // that record; queue_full leaves it pending for a later retry.
+    std::function<Status(const DeliveryLease&)> on_deferred_message{};
+    bool deferred_delivery{};
     std::function<Status(SessionContext&)> on_active{};
     std::function<void(Status)> on_error{};
     std::function<void()> on_capacity{};
@@ -153,6 +227,13 @@ public:
     // are monotonic milliseconds and a FIX UTC timestamp string respectively.
     [[nodiscard]] Status connected(std::uint64_t now_ms, std::string_view wall_time) noexcept;
     [[nodiscard]] Status receive(std::string_view complete_frame, std::uint64_t now_ms,
+        std::string_view wall_time) noexcept;
+    [[nodiscard]] Status defer_delivery(DeliveryInfo info) noexcept;
+    [[nodiscard]] Status defer_active() noexcept;
+    [[nodiscard]] Status complete_active(Status callback_status,
+        std::uint64_t now_ms, std::string_view wall_time) noexcept;
+    [[nodiscard]] Status complete_delivery(DeliveryInfo info, Status callback_status,
+        std::size_t accepted_replies, std::uint64_t now_ms,
         std::string_view wall_time) noexcept;
     [[nodiscard]] Status tick(std::uint64_t now_ms, std::string_view wall_time) noexcept;
     [[nodiscard]] Status disconnected(Status reason, std::uint64_t now_ms) noexcept;
@@ -182,14 +263,20 @@ public:
     [[nodiscard]] bool needs_write() const noexcept;
     [[nodiscard]] bool should_close() const noexcept;
     [[nodiscard]] bool can_send() const noexcept;
+    // Safe before reading another transport frame. Each accepted frame may
+    // consume max_frame_bytes from the bounded inbound callback/recovery area.
+    [[nodiscard]] bool can_receive() const noexcept;
     [[nodiscard]] std::uint64_t next_deadline_ms() const noexcept;
     [[nodiscard]] std::uint64_t next_inbound_seq() const noexcept;
     [[nodiscard]] std::uint64_t next_outbound_seq() const noexcept;
     [[nodiscard]] std::size_t pending_messages() const noexcept;
     [[nodiscard]] std::size_t pending_bytes() const noexcept;
+    [[nodiscard]] std::size_t pending_inbound_messages() const noexcept;
+    [[nodiscard]] std::size_t pending_inbound_bytes() const noexcept;
 
 private:
     friend class SessionContext;
+    friend class detail::EngineRuntime;
     struct Impl;
     explicit SessionDriver(std::unique_ptr<Impl> impl) noexcept;
     [[nodiscard]] Result<SendReceipt> send_dependent(detail::MessageView message,

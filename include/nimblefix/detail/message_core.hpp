@@ -50,6 +50,7 @@ enum class WireType : std::uint8_t {
     integer,
     decimal,
     utc_timestamp,
+    binary_data,
 };
 
 inline constexpr std::size_t unranked_field_rank = std::numeric_limits<std::size_t>::max();
@@ -75,6 +76,12 @@ struct WireRank : std::integral_constant<std::size_t, unranked_field_rank> {};
 template <class Policy, std::uint32_t Tag>
 struct FieldWireType : std::integral_constant<WireType, WireType::unspecified> {};
 
+template <class Policy, std::uint32_t Tag>
+struct GroupCountTag : std::false_type {};
+
+template <class Policy, std::uint32_t Tag>
+struct FieldPairTag : std::integral_constant<std::uint32_t, 0> {};
+
 struct MessageLimits {
     std::size_t max_fields{64};
     std::size_t max_value_bytes{4096};
@@ -83,10 +90,12 @@ struct MessageLimits {
 namespace detail {
 
 inline constexpr std::uint32_t maximum_fix_tag = 999999999;
+inline constexpr std::uint32_t last_msg_seq_num_processed_tag = 369;
 
 [[nodiscard]] constexpr bool is_managed_tag(std::uint32_t tag) noexcept {
     return tag == 8 || tag == 9 || tag == 10 || tag == 34 || tag == 35 ||
-        tag == 49 || tag == 52 || tag == 56;
+        tag == 43 || tag == 49 || tag == 52 || tag == 56 || tag == 122 ||
+        tag == last_msg_seq_num_processed_tag;
 }
 
 [[nodiscard]] constexpr bool is_valid_text(std::string_view value) noexcept {
@@ -101,9 +110,9 @@ inline constexpr std::uint32_t maximum_fix_tag = 999999999;
     return static_cast<unsigned>((value[position] - '0') * 10 + (value[position + 1] - '0'));
 }
 
-// FIX 4.4 UTCTimestamp: YYYYMMDD-HH:MM:SS or millisecond precision.
+// FIX timestamps allow seconds, milliseconds, microseconds, or nanoseconds.
 [[nodiscard]] constexpr bool is_valid_utc_timestamp(std::string_view value) noexcept {
-    if (value.size() != 17 && value.size() != 21) return false;
+    if (value.size() != 17 && value.size() != 21 && value.size() != 24 && value.size() != 27) return false;
     if (value.data() == nullptr) return false;
     for (std::size_t i = 0; i < value.size(); ++i) {
         if (i == 8) {
@@ -140,13 +149,26 @@ static_assert(sizeof(SlotValue) == 16);
 struct PlanField {
     std::uint32_t tag{};
     std::uint32_t slot_index{};
+    std::uint32_t pair_tag{};
     FieldKind kind{};
     WireType wire_type{};
+    bool group_counter{};
     std::uint8_t prefix_size{};
+    std::uint8_t pair_prefix_size{};
     std::array<char, 10> tag_prefix{};
+    std::array<char, 10> pair_tag_prefix{};
 };
 
 using EnumValueValidator = bool (*)(std::uint32_t, std::string_view) noexcept;
+
+struct MessageView;
+
+struct RepeatingGroupView {
+    std::uint32_t count_tag{};
+    std::uint32_t delimiter_tag{};
+    const MessageView* entries{};
+    std::size_t entry_count{};
+};
 
 struct MessageView {
     const SlotValue* slots{};
@@ -161,6 +183,8 @@ struct MessageView {
     const std::uint32_t* required_tags{};
     std::size_t required_tag_count{};
     EnumValueValidator enum_value_allowed{};
+    const RepeatingGroupView* groups{};
+    std::size_t group_count{};
 };
 
 [[nodiscard]] constexpr bool is_present(const MessageView& message, std::size_t slot) noexcept {
@@ -324,6 +348,9 @@ template <class T>
 inline constexpr bool is_character_v = std::is_same_v<std::remove_cvref_t<T>, char>;
 
 template <class T>
+inline constexpr bool is_boolean_v = std::is_same_v<std::remove_cvref_t<T>, bool>;
+
+template <class T>
 inline constexpr bool is_decimal_v = std::is_same_v<std::remove_cvref_t<T>, Decimal>;
 
 template <class T>
@@ -338,23 +365,24 @@ inline constexpr bool is_unsigned_integer_v = std::is_integral_v<std::remove_cvr
     std::is_unsigned_v<std::remove_cvref_t<T>>;
 
 template <class T>
-inline constexpr bool supported_value_v = is_character_v<T> || is_decimal_v<T> || is_string_v<T> ||
+inline constexpr bool supported_value_v = is_character_v<T> || is_boolean_v<T> || is_decimal_v<T> || is_string_v<T> ||
     is_signed_integer_v<T> || is_unsigned_integer_v<T>;
 
 template <class T>
-inline constexpr FieldKind value_kind_v = is_character_v<T> ? FieldKind::character :
+inline constexpr FieldKind value_kind_v = (is_character_v<T> || is_boolean_v<T>) ? FieldKind::character :
     is_decimal_v<T> ? FieldKind::decimal : is_string_v<T> ? FieldKind::string :
     is_signed_integer_v<T> ? FieldKind::signed_integer : FieldKind::unsigned_integer;
 
 template <WireType Type>
-inline constexpr FieldKind wire_field_kind_v = Type == WireType::string || Type == WireType::utc_timestamp
+inline constexpr FieldKind wire_field_kind_v = Type == WireType::string || Type == WireType::utc_timestamp ||
+    Type == WireType::binary_data
     ? FieldKind::string : Type == WireType::character ? FieldKind::character :
     Type == WireType::decimal ? FieldKind::decimal : FieldKind::signed_integer;
 
 template <WireType Type, class T>
 inline constexpr bool wire_value_compatible_v = Type == WireType::unspecified ? supported_value_v<T> :
-    Type == WireType::string || Type == WireType::utc_timestamp ? is_string_v<T> :
-    Type == WireType::character ? is_character_v<T> :
+    Type == WireType::string || Type == WireType::utc_timestamp || Type == WireType::binary_data ? is_string_v<T> :
+    Type == WireType::character ? (is_character_v<T> || is_boolean_v<T>) :
     Type == WireType::integer ? (is_signed_integer_v<T> || is_unsigned_integer_v<T>) :
     Type == WireType::decimal ? (is_decimal_v<T> || is_signed_integer_v<T> || is_unsigned_integer_v<T>) : false;
 
@@ -412,7 +440,7 @@ consteval auto make_slot_map(FieldList<FieldTypes...>) {
     return result;
 }
 
-template <class... FieldTypes>
+template <class Policy, class... FieldTypes>
 consteval auto make_plan(FieldList<FieldTypes...>) {
     constexpr std::size_t count = sizeof...(FieldTypes);
     static_assert(count <= std::numeric_limits<std::uint32_t>::max());
@@ -428,6 +456,8 @@ consteval auto make_plan(FieldList<FieldTypes...>) {
             field.slot_index = static_cast<std::uint32_t>(physical_index);
             field.kind = F::kind;
             field.wire_type = F::wire_type;
+            field.group_counter = GroupCountTag<Policy, F::tag>::value;
+            field.pair_tag = FieldPairTag<Policy, F::tag>::value;
             std::array<char, 9> digits{};
             std::size_t digit_count = 0;
             auto tag = F::tag;
@@ -440,6 +470,19 @@ consteval auto make_plan(FieldList<FieldTypes...>) {
                 field.tag_prefix[i] = digits[digit_count - i - 1];
             }
             field.tag_prefix[digit_count] = '=';
+            if (field.pair_tag != 0) {
+                std::array<char, 9> pair_digits{};
+                std::size_t pair_digit_count = 0;
+                auto pair_tag = field.pair_tag;
+                do {
+                    pair_digits[pair_digit_count++] = static_cast<char>('0' + pair_tag % 10);
+                    pair_tag /= 10;
+                } while (pair_tag != 0);
+                field.pair_prefix_size = static_cast<std::uint8_t>(pair_digit_count + 1);
+                for (std::size_t i = 0; i < pair_digit_count; ++i)
+                    field.pair_tag_prefix[i] = pair_digits[pair_digit_count - i - 1];
+                field.pair_tag_prefix[pair_digit_count] = '=';
+            }
             physical_fields[physical_index++] = field;
         };
         (add.template operator()<FieldTypes>(), ...);
@@ -501,7 +544,7 @@ public:
 
 template <class Policy, FixedString MsgType, class CanonicalShape>
 struct EncodingPlan {
-    inline static constexpr auto fields = make_plan(CanonicalShape{});
+    inline static constexpr auto fields = make_plan<Policy>(CanonicalShape{});
 };
 
 template <class Shape>
@@ -579,6 +622,10 @@ template <class T>
         slot.scalar = character;
         slot.offset = 0;
         slot.size = 0;
+    } else if constexpr (is_boolean_v<Value>) {
+        slot.scalar = value ? static_cast<unsigned char>('Y') : static_cast<unsigned char>('N');
+        slot.offset = 0;
+        slot.size = 0;
     } else if constexpr (is_decimal_v<Value>) {
         if (value.scale() > 18) return Status{ErrorCode::invalid_decimal};
         slot.scalar = std::bit_cast<std::uint64_t>(value.coefficient());
@@ -609,7 +656,18 @@ template <WireType Type, class T>
 [[nodiscard]] inline Status store_typed_slot_value(SlotValue& slot, char* bytes, std::size_t& byte_count,
     std::size_t byte_capacity, T&& value) noexcept {
     using Value = std::remove_cvref_t<T>;
-    if constexpr (Type == WireType::decimal && is_signed_integer_v<Value>) {
+    if constexpr (Type == WireType::binary_data && is_string_v<T>) {
+        const auto text = as_string_view(std::forward<T>(value));
+        if (text.size() != 0 && text.data() == nullptr) return Status{ErrorCode::invalid_value};
+        if (text.size() > byte_capacity - byte_count || text.size() > std::numeric_limits<std::uint32_t>::max())
+            return Status{ErrorCode::capacity_exceeded};
+        slot.offset = static_cast<std::uint32_t>(byte_count);
+        slot.size = static_cast<std::uint32_t>(text.size());
+        slot.scalar = text.size();
+        if (!text.empty()) std::memmove(bytes + byte_count, text.data(), text.size());
+        byte_count += text.size();
+        return Status::success();
+    } else if constexpr (Type == WireType::decimal && is_signed_integer_v<Value>) {
         return store_slot_value(slot, bytes, byte_count, byte_capacity,
             Decimal{static_cast<std::int64_t>(value)});
     } else if constexpr (Type == WireType::decimal && is_unsigned_integer_v<Value>) {
@@ -716,7 +774,12 @@ public:
         if (!status_.ok()) return status_;
         if constexpr (detail::is_string_v<V>) {
             const auto text = detail::as_string_view(std::forward<V>(value));
-            if (!detail::is_valid_text(text)) {
+            if constexpr (declared_wire_type != WireType::binary_data) {
+                if (!detail::is_valid_text(text)) {
+                    status_ = Status{ErrorCode::invalid_value, static_cast<int>(Tag)};
+                    return status_;
+                }
+            } else if (text.size() != 0 && text.data() == nullptr) {
                 status_ = Status{ErrorCode::invalid_value, static_cast<int>(Tag)};
                 return status_;
             }
@@ -882,6 +945,7 @@ public:
     using policy_type = Policy;
     using canonical_shape_type = CanonicalShape;
     using plan_type = Plan;
+    static constexpr std::size_t attached_group_count = 0;
     static constexpr std::string_view msg_type = MsgType.view();
     static constexpr std::size_t slot_count = field_count_;
     static constexpr std::size_t slot_storage_bytes = field_count_ * sizeof(detail::SlotValue);
@@ -953,7 +1017,12 @@ private:
         if constexpr (detail::is_string_v<V>) {
             text = detail::as_string_view(std::forward<V>(value));
             value_size = text.size();
-            if (!detail::is_valid_text(text)) {
+            if constexpr (FieldWireType<Policy, Tag>::value != WireType::binary_data) {
+                if (!detail::is_valid_text(text)) {
+                    status_ = Status{ErrorCode::invalid_value, static_cast<int>(Tag)};
+                    return;
+                }
+            } else if (text.size() != 0 && text.data() == nullptr) {
                 status_ = Status{ErrorCode::invalid_value, static_cast<int>(Tag)};
                 return;
             }

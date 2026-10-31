@@ -56,8 +56,8 @@ constexpr std::string_view custom_pair_frame =
     "58=q\001"
     "10=218\001";
 
-std::string make_frame(std::string_view body) {
-    std::string frame = "8=FIX.4.4\0019=" + std::to_string(body.size()) + "\001";
+std::string make_frame(std::string_view body, std::string_view begin = "FIX.4.4") {
+    std::string frame = "8=" + std::string(begin) + "\0019=" + std::to_string(body.size()) + "\001";
     frame.append(body);
     unsigned sum = 0;
     for (const char c : frame)
@@ -155,7 +155,7 @@ void test_frame_rejections_and_limits() {
     CHECK(too_large_status.code == ErrorCode::too_large);
     CHECK(too_large_status.offset == 10);
 
-    const std::string wrong_begin = "8=FIX.4.2\0019=24\001";
+    const std::string wrong_begin = "8=FIX.4.1\0019=24\001";
     CHECK(nimblefix::inspect_frame(wrong_begin, frame).code == ErrorCode::invalid_header);
     const std::string wrong_header_order = "8=FIX.4.4\00135=0\0019=24\001";
     CHECK(nimblefix::inspect_frame(wrong_header_order, frame).code == ErrorCode::invalid_header);
@@ -237,9 +237,66 @@ void test_custom_pair_and_malformed_data() {
 
     invalid = make_frame("35=Z\00195=0\00196=\001");
     CHECK(parse(invalid, message, scratch).code == ErrorCode::invalid_value);
-    std::array<LengthDataPair, 65> too_many{};
+    std::array<LengthDataPair, nimblefix::max_wire_hint_pairs + 1> too_many{};
     CHECK(nimblefix::inspect_frame(ordinary_frame, frame, WireHints{too_many})
               .code == ErrorCode::capacity_exceeded);
+}
+
+void test_supported_versions_measurement_and_369() {
+    using nimblefix::FixVersion;
+    constexpr std::array versions{
+        FixVersion::fix42, FixVersion::fix43, FixVersion::fix44, FixVersion::fixt11};
+    constexpr std::string_view time = "20261031-12:00:00.123456789";
+    auto message = nimblefix::message<"Z">().set<58>("payload");
+    std::array<char, 512> output{};
+    std::array<FieldView, 24> scratch{};
+    for (const auto version : versions) {
+        nimblefix::SessionHeader header{
+            .sender_comp_id = "BUY",
+            .target_comp_id = "SELL",
+            .msg_seq_num = 7,
+            .sending_time = time,
+            .version = version,
+            .last_msg_seq_num_processed = 5,
+        };
+        output.fill('#');
+        const auto measured = nimblefix::measure_fix(message.view(), header);
+        CHECK(measured.ok());
+        CHECK(output[0] == '#');
+        const auto encoded = nimblefix::encode_fix(message.view(), header, output);
+        CHECK(encoded.ok());
+        if (!encoded.ok() || !measured.ok()) continue;
+        CHECK(encoded.value() == measured.value());
+        const std::string_view wire{output.data(), encoded.value()};
+        CHECK(wire.starts_with("8=" + std::string(nimblefix::begin_string(version)) + "\001"));
+        CHECK(wire.find("369=5\001") != std::string_view::npos);
+        FrameView frame{};
+        CHECK(nimblefix::inspect_frame(wire, frame).ok());
+        CHECK(frame.version == version);
+        FlatMessageView parsed{};
+        CHECK(nimblefix::parse_flat(frame, scratch, parsed).ok());
+        CHECK(parsed.find_unique(369).value().value == "5");
+
+        const auto original = make_frame(
+            "35=Z\00149=BUY\00156=SELL\00134=7\00152=20261031-12:00:00.123456789\001"
+            "369=2\00158=payload\001", nimblefix::begin_string(version));
+        FlatMessageView original_view{};
+        CHECK(parse(original, original_view, scratch).ok());
+        header.sending_time = "20261031-12:01:00.123456789";
+        header.last_msg_seq_num_processed = 9;
+        const auto replay_size = nimblefix::encode_fix_replay(original_view, header, output);
+        CHECK(replay_size.ok());
+        if (!replay_size.ok()) continue;
+        FrameView replay_frame{};
+        const std::string_view replay_wire{output.data(), replay_size.value()};
+        CHECK(nimblefix::inspect_frame(replay_wire, replay_frame).ok());
+        CHECK(replay_frame.version == version);
+        FlatMessageView replay_view{};
+        CHECK(nimblefix::parse_flat(replay_frame, scratch, replay_view).ok());
+        CHECK(replay_view.find_unique(369).value().value == "9");
+        CHECK(replay_view.find_unique(43).value().value == "Y");
+        CHECK(replay_view.find_unique(58).value().value == "payload");
+    }
 }
 
 void test_duplicate_order_and_capacity() {
@@ -385,6 +442,7 @@ int main() {
     test_plain_value_rules();
     test_deterministic_malformed_buffer_sweep();
     test_replay_binary_and_header_contract();
+    test_supported_versions_measurement_and_369();
     if (failures != 0) {
         std::cerr << failures << " parser test(s) failed\n";
         return 1;

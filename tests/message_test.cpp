@@ -211,7 +211,7 @@ void test_fluent_limits_and_delimiters() {
     if (scalars.ok()) {
         const auto frame = as_view(output, scalars.value());
         check(frame.find("21=1\x01") != std::string_view::npos, "character field is emitted as one byte");
-        check(frame.find("40=1\x01") != std::string_view::npos, "boolean field uses FIX numeric true");
+        check(frame.find("40=Y\x01") != std::string_view::npos, "boolean field uses FIX Y/N");
     }
 
     const auto bad_header = encode_fix44(message<"D">().set<11>("id"),

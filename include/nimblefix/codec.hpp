@@ -2,17 +2,19 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <string_view>
 
 #include <nimblefix/message.hpp>
+#include <nimblefix/protocol.hpp>
 #include "nimblefix/status.hpp"
 
 namespace nimblefix {
 
 inline constexpr char soh = '\x01';
 inline constexpr std::size_t default_max_frame_bytes = 65'536;
-inline constexpr std::size_t max_wire_hint_pairs = 64;
+inline constexpr std::size_t max_wire_hint_pairs = 128;
 
 struct CodecLimits {
     std::size_t max_frame_bytes{default_max_frame_bytes};
@@ -33,6 +35,7 @@ struct FrameView {
     // Exactly one complete frame; coalesced input after it is not included.
     std::string_view bytes{};
     std::size_t consumed{};
+    FixVersion version{FixVersion::fix44};
 };
 
 // On success, output.bytes is the first validated frame and output.consumed is
@@ -83,11 +86,31 @@ struct SessionHeader {
     std::string_view sending_time{};
     bool poss_dup{};
     std::string_view orig_sending_time{};
+    FixVersion version{FixVersion::fix44};
+    std::optional<std::uint64_t> last_msg_seq_num_processed{};
 };
 
-// Encode one complete FIX 4.4 frame into caller-owned storage. On any error the
-// destination span is left unchanged. The result is the number of bytes written.
-// The destination must not overlap message or header input storage.
+// Measure the complete frame without writing bytes. This runs the same input
+// validation and checked size arithmetic as encode_fix, for accepted-before-encode
+// reservation by callers with bounded output storage.
+[[nodiscard]] Result<std::size_t> measure_fix(detail::MessageView message,
+    SessionHeader header) noexcept;
+
+[[nodiscard]] inline Result<std::size_t> encoded_size(detail::MessageView message,
+    SessionHeader header) noexcept {
+    return measure_fix(message, header);
+}
+
+// Encode one complete FIX frame into caller-owned storage. On any error the
+// destination span is left unchanged. The destination must not overlap input storage.
+[[nodiscard]] Result<std::size_t> encode_fix(detail::MessageView message,
+    SessionHeader header, std::span<char> output) noexcept;
+
+// Re-encode a parsed frame for replay. BeginString remains the original version.
+[[nodiscard]] Result<std::size_t> encode_fix_replay(const FlatMessageView& original,
+    SessionHeader header, std::span<char> output) noexcept;
+
+// FIX 4.4 compatibility spellings. They use the same version-aware encoder.
 [[nodiscard]] Result<std::size_t> encode_fix44(detail::MessageView message,
     SessionHeader header, std::span<char> output) noexcept;
 
@@ -97,6 +120,13 @@ struct SessionHeader {
 // from the original frame, including Length/Data fields.
 [[nodiscard]] Result<std::size_t> encode_fix44_replay(const FlatMessageView& original,
     SessionHeader header, std::span<char> output) noexcept;
+
+template <class Message>
+    requires requires(const Message& message) { message.view(); }
+[[nodiscard]] Result<std::size_t> encode_fix(const Message& message,
+    SessionHeader header, std::span<char> output) noexcept {
+    return encode_fix(message.view(), header, output);
+}
 
 template <class Message>
     requires requires(const Message& message) { message.view(); }

@@ -61,6 +61,7 @@ Status validate_hints(WireHints hints) noexcept {
                 return error(ErrorCode::invalid_value, pair.length_tag, i);
         }
         for (const auto builtin : fix44_pairs) {
+            if (pair.length_tag == builtin.length_tag && pair.data_tag == builtin.data_tag) continue;
             if (same_or_conflicting(pair, builtin))
                 return error(ErrorCode::invalid_value, pair.length_tag, i);
         }
@@ -155,20 +156,27 @@ Status parse_unsigned(std::string_view value,
     return Status::success();
 }
 
-Status fixed_begin_string(std::string_view input,
-                          std::size_t value_start,
-                          std::size_t& delimiter_at) noexcept {
-    constexpr std::string_view expected = "FIX.4.4";
-    std::size_t cursor = value_start;
-    for (std::size_t i = 0; i < expected.size(); ++i, ++cursor) {
-        if (cursor >= input.size()) return {ErrorCode::need_more, 8, input.size()};
-        if (input[cursor] == soh) return {ErrorCode::invalid_header, 8, cursor};
-        if (input[cursor] != expected[i]) return {ErrorCode::invalid_header, 8, cursor};
+Status read_begin_string(std::string_view input,
+                         std::size_t value_start,
+                         std::size_t max_frame_bytes,
+                         std::size_t& delimiter_at,
+                         FixVersion& version) noexcept {
+    const auto scan_end = input.size() < max_frame_bytes ? input.size() : max_frame_bytes;
+    for (std::size_t cursor = value_start; cursor < scan_end; ++cursor) {
+        const char ch = input[cursor];
+        if (ch == soh) {
+            if (cursor == value_start) return {ErrorCode::invalid_header, 8, value_start};
+            const auto parsed = parse_fix_version(input.substr(value_start, cursor - value_start));
+            if (!parsed.ok()) return {ErrorCode::invalid_header, 8, value_start};
+            version = parsed.value();
+            delimiter_at = cursor;
+            return Status::success();
+        }
+        if (static_cast<unsigned char>(ch) < 0x20 || ch == 0x7f)
+            return {ErrorCode::invalid_header, 8, cursor};
     }
-    if (cursor >= input.size()) return {ErrorCode::need_more, 8, input.size()};
-    if (input[cursor] != soh) return {ErrorCode::invalid_header, 8, cursor};
-    delimiter_at = cursor;
-    return Status::success();
+    if (input.size() < max_frame_bytes) return {ErrorCode::need_more, 8, input.size()};
+    return {ErrorCode::too_large, 8, max_frame_bytes};
 }
 
 // A BodyLength is read until SOH. If the buffer ends on digits, the value may
@@ -240,11 +248,12 @@ Status inspect_frame(std::string_view input,
 
     std::uint32_t tag = 0;
     std::size_t equals_at = 0;
+    FixVersion version = FixVersion::fix44;
     Status status = scan_tag(input, 0, std::numeric_limits<std::size_t>::max(), tag, equals_at);
     if (!status.ok()) return status;
     if (tag != 8) return {ErrorCode::invalid_header, static_cast<int>(tag), 0};
     std::size_t begin_delimiter = 0;
-    status = fixed_begin_string(input, equals_at + 1, begin_delimiter);
+    status = read_begin_string(input, equals_at + 1, limits.max_frame_bytes, begin_delimiter, version);
     if (!status.ok()) return status;
 
     const std::size_t body_length_tag_start = begin_delimiter + 1;
@@ -332,6 +341,7 @@ Status inspect_frame(std::string_view input,
 
     output.bytes = input.substr(0, frame_size);
     output.consumed = frame_size;
+    output.version = version;
     return Status::success();
 }
 

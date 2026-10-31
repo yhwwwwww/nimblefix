@@ -316,6 +316,36 @@ CoreOutput SessionCore::process(const CoreEvent& event) noexcept {
         }
         enter_logout(event.text, event.now_ms, output);
         break;
+
+    case CoreEventKind::sequence_reset_committed:
+        // Reset-mode SequenceReset ignores the wire MsgSeqNum. The driver
+        // validates NewSeqNo and journals the previous receive cursor plus
+        // the new cursor in the same committed inbound record first.
+        if (!connected_ || state_ == SessionState::closed || state_ == SessionState::failed ||
+            event.next_sequence <= next_inbound_) {
+            write_error(Status{ErrorCode::protocol_error, 36}, output);
+            break;
+        }
+        next_inbound_ = event.next_sequence;
+        last_rx_ms_ = event.now_ms;
+        if (resend_pending_ && next_inbound_ > resend_end_) {
+            resend_pending_ = false;
+            resend_end_ = 0;
+        }
+        break;
+
+    case CoreEventKind::reset_epoch:
+        if (state_ != SessionState::disconnected && state_ != SessionState::awaiting_logon) {
+            output.status = Status{ErrorCode::sequence_reset_denied, 141};
+            break;
+        }
+        next_inbound_ = next_outbound_ = 1;
+        local_logon_sent_ = remote_logon_seen_ = logon_reply_pending_ = false;
+        test_pending_ = heartbeat_pending_ = resend_pending_ = false;
+        local_logout_written_ = close_after_logout_ = false;
+        test_deadline_ = resend_end_ = 0;
+        failure_ = Status::success();
+        break;
     }
     return output;
 }

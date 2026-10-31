@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Build from a read-only copy; install and consume without the source/build tree."""
 import argparse
+import json
 import os
 from pathlib import Path
 import shutil
@@ -19,14 +20,17 @@ def run(*command, cwd=None):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--cxx", default=os.environ.get("CXX", "g++"))
-    parser.add_argument("--core-only", action="store_true")
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument("--core-only", action="store_true")
+    modes.add_argument("--features", action="store_true",
+        help="enable system TLS, runtime XML, and all standard schema bindings")
     parser.add_argument("--examples", action="store_true")
     args = parser.parse_args()
     with tempfile.TemporaryDirectory(prefix="nimblefix-install-") as temporary:
         base = Path(temporary)
         source, build, prefix = base / "source", base / "build", base / "prefix"
         source.mkdir()
-        for directory in ("include", "src", "cmake", "tools/schema", "schemas", "examples"):
+        for directory in ("include", "src", "cmake", "tools/schema", "tools/nimblefix", "schemas", "examples", "third_party", "xmake"):
             shutil.copytree(ROOT / directory, source / directory)
         for filename in ("CMakeLists.txt", "LICENSE"):
             shutil.copyfile(ROOT / filename, source / filename)
@@ -34,11 +38,22 @@ def main():
             item.chmod(0o555 if item.is_dir() else 0o444)
         source.chmod(0o555)
         try:
-            run("cmake", "-S", str(source), "-B", str(build),
+            configure = ["cmake", "-S", str(source), "-B", str(build),
                 "-DCMAKE_BUILD_TYPE=Release", f"-DCMAKE_CXX_COMPILER={args.cxx}",
                 "-DNIMBLEFIX_BUILD_TESTS=OFF", f"-DNIMBLEFIX_BUILD_EXAMPLES={'ON' if args.examples else 'OFF'}",
-                f"-DNIMBLEFIX_BUILD_SAMPLE_SCHEMA={'OFF' if args.core_only else 'ON'}")
-            run("cmake", "--build", str(build), "-j", "2")
+                "-DNIMBLEFIX_BUILD_CLI=ON",
+                f"-DNIMBLEFIX_BUILD_SAMPLE_SCHEMA={'ON' if not args.core_only and (not args.features or args.examples) else 'OFF'}",
+                f"-DNIMBLEFIX_BUILD_STANDARD_SCHEMAS={'ON' if args.features else 'OFF'}",
+                f"-DNIMBLEFIX_ENABLE_TLS={'ON' if args.features else 'OFF'}",
+                f"-DNIMBLEFIX_ENABLE_XML={'ON' if args.features else 'OFF'}"]
+            if args.core_only:
+                # Make accidental optional package discovery a configure-time
+                # failure, proving the core/CLI install has no such dependency.
+                configure.extend(("-DCMAKE_DISABLE_FIND_PACKAGE_Python3=TRUE",
+                    "-DCMAKE_DISABLE_FIND_PACKAGE_LibXml2=TRUE",
+                    "-DCMAKE_DISABLE_FIND_PACKAGE_OpenSSL=TRUE"))
+            run(*configure)
+            run("cmake", "--build", str(build), "--parallel", "1" if args.features else "2")
             run("cmake", "--install", str(build), "--prefix", str(prefix))
             # Relocate the installed package and make both build paths unavailable.
             relocated = base / "relocated"
@@ -49,9 +64,23 @@ def main():
             shutil.copytree(ROOT / "tests/consumer", consumer)
             run("cmake", "-S", str(consumer), "-B", str(external_build),
                 f"-DCMAKE_PREFIX_PATH={relocated}", f"-DCMAKE_CXX_COMPILER={args.cxx}",
-                f"-DCONSUMER_SCHEMA={'OFF' if args.core_only else 'ON'}")
-            run("cmake", "--build", str(external_build), "-j", "2")
+                f"-DCONSUMER_SCHEMA={'OFF' if args.core_only else 'ON'}",
+                f"-DCONSUMER_FEATURES={'ON' if args.features else 'OFF'}")
+            run("cmake", "--build", str(external_build), "--parallel", "1" if args.features else "2")
             run(str(external_build / "consumer"), cwd=base)
+            cli = relocated / "bin" / "nimblefix"
+            doctor = json.loads(subprocess.run([str(cli), "doctor", "--json"], cwd=base,
+                text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=True).stdout)
+            if doctor["tls"] != bool(args.features):
+                raise RuntimeError(f"installed CLI reports tls={doctor['tls']}, expected {bool(args.features)}")
+            cli_config_dir = base / "installed cli config"
+            initialized = subprocess.run([str(cli), "init", "--directory", str(cli_config_dir), "--json"],
+                cwd=base, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=True)
+            config_path = Path(json.loads(initialized.stdout)["acceptor"])
+            validated = subprocess.run([str(cli), "validate", "--config", str(config_path), "--json"],
+                cwd=base, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=True)
+            if not json.loads(validated.stdout).get("valid"):
+                raise RuntimeError("installed CLI did not validate its generated acceptor config")
             if args.examples:
                 run(str(relocated / "bin/hello-fix"), "--self-test", "--restart", cwd=base)
                 if not args.core_only:
@@ -63,6 +92,10 @@ def main():
                 run(str(external_build / "schema-consumer"), cwd=base)
                 generated = external_build / "generated/venue_schema/venue.hpp"
                 original = generated.read_bytes()
+                original_mtime = generated.stat().st_mtime_ns
+                run("cmake", "--build", str(external_build), "--parallel", "1" if args.features else "2")
+                if generated.stat().st_mtime_ns != original_mtime:
+                    raise RuntimeError("no-op installed helper build rewrote its generated header")
                 # Verify both incrementality and that changing XML actually
                 # changes generated metadata, without a manual codegen step.
                 xml = consumer / "venue.xml"
@@ -74,13 +107,35 @@ def main():
                 if generated.read_bytes() == original:
                     raise RuntimeError("XML edit did not regenerate the installed helper's header")
                 run(str(external_build / "schema-consumer"), cwd=base)
+                if args.features:
+                    run(str(external_build / "features"), cwd=base)
+                    run(str(external_build / "xml-runtime"), str(consumer / "venue.xml"), cwd=base)
+                    schema_summary = subprocess.run([str(cli), "schema", "check", "--xml",
+                        str(consumer / "venue.xml"), "--json"], cwd=base,
+                        text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=True)
+                    if not json.loads(schema_summary.stdout).get("valid"):
+                        raise RuntimeError("installed CLI did not load the runtime XML schema")
+                    cli_header = base / "cli generated" / "venue.hpp"
+                    cli_header.parent.mkdir(parents=True)
+                    run(str(cli), "schema", "generate", "--xml", str(consumer / "venue.xml"),
+                        "--namespace", "installed::venue", "--output", str(cli_header), cwd=base)
+                    if not cli_header.is_file() or b"installed::venue" not in cli_header.read_bytes():
+                        raise RuntimeError("installed CLI schema generator did not produce the requested header")
+                    # The installed xmake helper must find its sibling generator
+                    # after relocation, with both the copied source and build hidden.
+                    run("python3", str(ROOT / "tests/xmake_schema_test.py"),
+                        "--rule", str(relocated / "share/nimblefix/xmake/nimblefix-schema.lua"),
+                        "--generator", str(relocated / "share/nimblefix/schema/generate.py"),
+                        "--include-dir", str(relocated / "include"), cwd=base)
             # Unknown requested components must fail during find_package.
             cmakelists = consumer / "CMakeLists.txt"
             cmakelists.write_text(cmakelists.read_text().replace("COMPONENTS core", "COMPONENTS nonexistent"))
             failed = subprocess.run(["cmake", "-S", str(consumer), "-B", str(base / "unknown-component"),
-                f"-DCMAKE_PREFIX_PATH={relocated}"], text=True, capture_output=True)
-            if failed.returncode == 0:
-                raise RuntimeError("unknown required component was accepted")
+                f"-DCMAKE_PREFIX_PATH={relocated}", f"-DCONSUMER_FEATURES={'ON' if args.features else 'OFF'}"],
+                text=True, capture_output=True)
+            failure_text = failed.stdout + failed.stderr
+            if failed.returncode == 0 or "NimbleFIX" not in failure_text:
+                raise RuntimeError(f"unknown required component was not rejected clearly:\n{failure_text}")
         finally:
             # TemporaryDirectory cleanup also needs write permissions on the copy.
             for candidate in (source, base / "hidden-source"):
@@ -88,7 +143,8 @@ def main():
                     candidate.chmod(0o755)
                     for item in candidate.rglob("*"):
                         if item.is_dir(): item.chmod(0o755)
-    print("read-only build, relocated install, and external consumer passed" + (" (core only)" if args.core_only else " (with XML regeneration)"))
+    mode = "core only" if args.core_only else "TLS/XML/standard features" if args.features else "sample XML"
+    print(f"read-only build, relocated install, external consumer, and installed CLI passed ({mode})")
 
 
 if __name__ == "__main__":

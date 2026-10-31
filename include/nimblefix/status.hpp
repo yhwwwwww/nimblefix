@@ -46,6 +46,19 @@ enum class ErrorCode {
     receipt_expired,
     wrong_thread,
     logout_timeout,
+    authentication_failed,
+    tls_error,
+    certificate_error,
+    tls_handshake_timeout,
+    unsupported_protocol,
+    schema_mismatch,
+    backlog_timeout,
+    message_unhandled,
+    history_unavailable,
+    reader_expired,
+    schedule_closed,
+    sequence_reset_denied,
+    peer_rejected,
 };
 
 struct [[nodiscard]] Status {
@@ -95,6 +108,19 @@ struct [[nodiscard]] Status {
         case ErrorCode::receipt_expired: return "send receipt retention expired";
         case ErrorCode::wrong_thread: return "operation requires the session owner thread";
         case ErrorCode::logout_timeout: return "FIX Logout acknowledgement timed out";
+        case ErrorCode::authentication_failed: return "FIX Logon authentication failed";
+        case ErrorCode::tls_error: return "TLS protocol operation failed";
+        case ErrorCode::certificate_error: return "TLS certificate verification failed";
+        case ErrorCode::tls_handshake_timeout: return "TLS handshake timed out";
+        case ErrorCode::unsupported_protocol: return "unsupported FIX transport or application version";
+        case ErrorCode::schema_mismatch: return "XML and generated schema definitions differ";
+        case ErrorCode::backlog_timeout: return "bounded application backlog timed out";
+        case ErrorCode::message_unhandled: return "no registered handler for this message type";
+        case ErrorCode::history_unavailable: return "requested FIX replay history is no longer retained";
+        case ErrorCode::reader_expired: return "journal reader exceeded its permitted lag";
+        case ErrorCode::schedule_closed: return "FIX session is outside its configured schedule";
+        case ErrorCode::peer_rejected: return "peer rejected a FIX message";
+        case ErrorCode::sequence_reset_denied: return "FIX sequence reset is not permitted by policy";
         }
         return "unknown error";
     }

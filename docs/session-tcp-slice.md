@@ -1,5 +1,8 @@
 # Journal, inline session and TCP acceptance record
 
+Historical record for the named stage commits. Current release behavior is in
+[the 0.2 support matrix](session-support.md) and [release record](release-0.2.md).
+
 This closes stages 2–3 of design §16 alongside the
 [stage 1 codec record](codec-slice.md). The current deliverable runs a real
 FIX44 order/report flow through both roles with appended mmap storage,

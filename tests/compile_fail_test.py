@@ -11,6 +11,9 @@ ROOT = Path(__file__).resolve().parents[1]
 
 CASES = {
     "managed_tag": ('auto x = nf::message<"D">().set<34>(1);', "engine managed"),
+    "managed_possdup": ('auto x = nf::message<"D">().set<43>(true);', "engine managed"),
+    "managed_origtime": ('auto x = nf::message<"D">().set<122>("20261031-00:00:00");', "engine managed"),
+    "managed_processed": ('auto x = nf::message<"D">().set<369>(1);', "engine managed"),
     "invalid_tag": ('auto x = nf::message<"D">().set<0>(1);', "FIX tags must"),
     "duplicate_flat_tag": ('auto x = nf::message<"D">().set<11>("a").set<11>("b");', "same tag twice"),
     "runtime_tag": ('int tag = 11; auto x = nf::message<"D">().set(tag, "a");', "set"),
@@ -24,12 +27,16 @@ GENERATED_CASES = {
     "quantity_string": ('auto x = nf::fix44_sample::NewOrderSingle::make().order_qty("bad");', "generated FIX field type"),
     "tagged_price_string": ('auto x = nf::fix44_sample::NewOrderSingle::make().set<44>("bad");', "generated FIX field type"),
     "side_integer": ('auto x = nf::fix44_sample::NewOrderSingle::make().side(1);', "generated FIX field type"),
+    "typed_generic_callback": ('nf::Engine<nf::fix44_sample::Schema>& e=*static_cast<nf::Engine<nf::fix44_sample::Schema>*>(nullptr); (void)e.on_message([](nf::SessionContext&, const nf::FlatMessageView&) { return nf::Status::success(); });', "on_message"),
+    "typed_wrong_view": ('nf::Engine<nf::fix44_sample::Schema>& e=*static_cast<nf::Engine<nf::fix44_sample::Schema>*>(nullptr); (void)e.on<nf::fix44_sample::NewOrderSingle>([](nf::SessionContext&, int) { return nf::Status::success(); });', "on"),
     "unknown_generated_field": ('auto x = nf::fix44_sample::NewOrderSingle::make().set<900001>("x");', "not allowed"),
 }
 
 ENGINE_CASES = {
-    "unsupported_engine_schema": ('(void)sizeof(nf::Engine<int>);', "typed Engine<Schema> dispatch is not implemented"),
+    "unsupported_engine_schema": ('(void)sizeof(nf::Engine<int>);', "typed Engine Schema must expose descriptor()"),
     "wrong_message_callback": ('nf::Engine<>& engine = *static_cast<nf::Engine<>*>(nullptr); (void)engine.on_message([](int) {});', "on_message"),
+    "invalid_execution_policy": ('(void)sizeof(nf::Engine<nf::FlatSchema, int>);', "Engine Policy must"),
+    "retained_session_context": ('void save(nf::SessionContext&); auto f=[](nf::SessionContext& context) { auto retained = context; };', "deleted"),
     "wrong_active_callback": ('nf::Engine<>& engine = *static_cast<nf::Engine<>*>(nullptr); (void)engine.on_session_active([]() {});', "on_session_active"),
 }
 
@@ -54,7 +61,7 @@ def main():
             str(ROOT / "schemas/fix44-sample.xml")], check=True)
         command.extend(["-I", temp])
         for name, (body, diagnostic) in (CASES | GENERATED_CASES | ENGINE_CASES).items():
-            includes = '#include <nimblefix/fix44_sample.hpp>\n' if name in GENERATED_CASES else ""
+            includes = '#include <nimblefix/fix44_sample.hpp>\n#include <nimblefix/engine.hpp>\n' if name in GENERATED_CASES else ""
             if name in ENGINE_CASES:
                 includes = '#include <nimblefix/engine.hpp>\n'
             source.write_text(prefix + includes + "int main() { " + body + " }\n")

@@ -1,5 +1,8 @@
 # Codec / slot implementation slice
 
+Historical record for the named stage commits. Current release behavior is in
+[the 0.2 support matrix](session-support.md) and [release record](release-0.2.md).
+
 This records the first implementation slice in §16 of the rewrite design.
 The public surface is experimental C++20: message slots, exact decimal values,
 bounded FIX 4.4 encoding, frame inspection, flat parsing, and a minimal XML

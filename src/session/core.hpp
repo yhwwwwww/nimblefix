@@ -21,6 +21,8 @@ enum class CoreEventKind : std::uint8_t {
     logon_reply_appended,
     tick,
     local_logout,
+    sequence_reset_committed,
+    reset_epoch,
 };
 
 enum class CoreActionKind : std::uint8_t {

@@ -26,7 +26,7 @@ struct Peer final : FIX::Application {
     void onLogout(const FIX::SessionID&) override { logged_out = true; }
     void onLogon(const FIX::SessionID& id) override {
         FIX44::NewOrderSingle order(FIX::ClOrdID(identifier), FIX::Side('1'),
-            FIX::TransactTime(FIX::UtcTimeStamp()), FIX::OrdType('2'));
+            FIX::TransactTime(FIX::UtcTimeStamp::now()), FIX::OrdType('2'));
         order.set(FIX::Symbol("AAPL")); order.set(FIX::HandlInst('1'));
         order.set(FIX::OrderQty(100)); order.set(FIX::Price(150.25));
         FIX::Session::sendToTarget(order, id);

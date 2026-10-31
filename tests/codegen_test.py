@@ -52,10 +52,11 @@ class SchemaCodegenTests(unittest.TestCase):
         self.assertIn("FieldWireType<nimblefix::fix44_sample::NewOrderSinglePolicy, 60>", first)
         self.assertIn("WireType::utc_timestamp", first)
         self.assertIn("NewOrderSingle_required_tags", first)
-        self.assertIn("contains only the supplied XML subset", first)
-        self.assertIn("typed receive projection is not generated", first)
+        self.assertIn("TypedMessageView<Schema>", first)
+        self.assertIn("explicit NewOrderSingleView(const ::nimblefix::FlatMessageView& flat)", first)
         self.assertIn("enum_value_allowed", first)
-        self.assertIn('value == "1" || value == "2"', first)
+        self.assertIn('"1"', first)
+        self.assertIn('"2"', first)
         self.assertIn("EnumValueDescriptor", first)
         self.assertNotIn(str(path.resolve()), first)
 
@@ -190,35 +191,93 @@ class SchemaCodegenTests(unittest.TestCase):
             codegen.load_schema([path])
         self.assertIn("XML namespaces are not supported", str(caught.exception))
 
-    def test_group_structures_are_rejected_explicitly(self):
+    def test_groups_generate_bounded_shape_local_group_api(self):
         path = self.write(
             "group.xml",
             self.schema_xml(
-                '<fields><field number="11" name="ClOrdID" type="STRING"/></fields>',
+                '<fields><field number="11" name="ClOrdID" type="STRING"/>'
+                '<field number="453" name="NoPartyIDs" type="NUMINGROUP"/>'
+                '<field number="448" name="PartyID" type="STRING"/>'
+                '<field number="802" name="NoPartySubIDs" type="NUMINGROUP"/>'
+                '<field number="523" name="PartySubID" type="STRING"/></fields>',
                 '<messages><message name="NewOrderSingle" msgtype="D">'
-                '<field name="ClOrdID" required="Y"/><group name="NoPartyIDs" required="N"/>'
+                '<field name="ClOrdID" required="Y"/><group name="NoPartyIDs" required="N">'
+                '<field name="PartyID" required="Y"/><group name="NoPartySubIDs" required="N">'
+                '<field name="PartySubID" required="Y"/></group></group>'
                 '</message></messages>',
             ),
         )
-        with self.assertRaises(codegen.SchemaError) as caught:
-            codegen.load_schema([path])
-        self.assertIn("repeating groups are not supported", str(caught.exception))
+        output = codegen.render_header(codegen.load_schema([path]), "nimblefix::fixture")
+        self.assertIn("GroupDescriptor", output)
+        self.assertIn("OwnedGroupBuilder<453u, 448u", output)
+        self.assertIn("OwnedGroupBuilder<802u, 523u", output)
+        self.assertIn("static_assert(std::remove_cvref_t<G>::count_tag == 453u", output)
+        self.assertIn("GroupCountTag<nimblefix::fixture::NewOrderSinglePolicy, 453>", output)
 
-    def test_unsupported_fix_field_type_is_rejected_with_supported_list(self):
+    def test_data_field_type_generates_binary_data_metadata(self):
         path = self.write(
             "unsupported-type.xml",
             self.schema_xml(
-                '<fields><field number="90" name="RawData" type="DATA"/></fields>',
+                '<fields><field number="89" name="RawDataLength" type="LENGTH"/>'
+                '<field number="90" name="RawData" type="DATA"/></fields>',
                 '<messages><message name="RawMessage" msgtype="Z">'
                 '<field name="RawData" required="N"/></message></messages>',
             ),
         )
-        with self.assertRaises(codegen.SchemaError) as caught:
-            codegen.load_schema([path])
-        error = str(caught.exception)
-        self.assertIn("unsupported FIX field type 'DATA'", error)
-        for field_type in ("STRING", "CHAR", "INT", "PRICE", "QTY", "UTCTIMESTAMP"):
-            self.assertIn(field_type, error)
+        output = codegen.render_header(codegen.load_schema([path]), "nimblefix::fixture")
+        self.assertIn("FieldClass::binary_data", output)
+        self.assertIn('"RawData", "DATA"', output)
+
+    def test_legacy_and_extended_scalar_types_and_nested_delimiter(self):
+        path = self.write(
+            "legacy-types.xml",
+            self.schema_xml(
+                '<fields>'
+                '<field number="90" name="RawData" type="DATA"/>'
+                '<field number="91" name="RawDataLength" type="LENGTH"/>'
+                '<field number="212" name="XmlDataLen" type="LENGTH"/>'
+                '<field number="213" name="XmlData" type="XMLDATA"/>'
+                '<field number="100" name="OuterCount" type="INT"/>'
+                '<field number="101" name="InnerCount" type="NUMINGROUP"/>'
+                '<field number="102" name="InnerDelim" type="STRING"/>'
+                '<field number="103" name="OuterValue" type="STRING"/>'
+                '<field number="104" name="OldDate" type="UTCDATE"/>'
+                '<field number="105" name="TagNumber" type="TAGNUM"/>'
+                '<field number="106" name="Directions" type="MULTIPLECHARVALUE">'
+                '<value enum="0"/><value enum="1"/></field>'
+                '</fields>',
+                '<messages><message name="LegacyMessage" msgtype="Z">'
+                '<field name="RawData" required="N"/><field name="XmlData" required="N"/>'
+                '<group name="OuterCount" required="N">'
+                '<group name="InnerCount" required="N"><field name="InnerDelim" required="Y"/></group>'
+                '<field name="OuterValue" required="N"/></group>'
+                '<field name="OldDate" required="N"/><field name="TagNumber" required="N"/>'
+                '<field name="Directions" required="N"/></message></messages>',
+                root_attrs='type="FIX" major="4" minor="2"',
+            ),
+        )
+        output = codegen.render_header(codegen.load_schema([path]), "nimblefix::legacy")
+        self.assertIn("FieldClass::tag_number", output)
+        self.assertIn("FieldClass::multiple_char_value", output)
+        self.assertIn("FieldClass::utc_date", output)
+        self.assertIn("WireType::binary_data", output)
+        self.assertIn('{"OuterCount", 100u, 101u,', output)
+        self.assertIn("LengthDataPair, 2", output)
+
+    def test_all_vendored_standard_dictionaries_are_parseable(self):
+        standard = ROOT / "schemas" / "standard"
+        expected = {"FIX42.xml", "FIX43.xml", "FIX44.xml", "FIXT11.xml", "FIX50SP2.xml"}
+        self.assertEqual(expected, {path.name for path in standard.glob("*.xml")})
+        for name in sorted(expected):
+            with self.subTest(name=name):
+                schema = codegen.load_schema([standard / name])
+                self.assertGreater(len(schema.fields_by_name), 0)
+                self.assertGreater(len(schema.messages_by_name), 0)
+
+    def test_fix43_duplicate_identical_field_reference_normalizes_once(self):
+        schema = codegen.load_schema([ROOT / "schemas" / "standard" / "FIX43.xml"])
+        members = schema._expanded_messages["RegistrationInstructions"]
+        self.assertEqual(1, sum(member.field_name == "OwnershipType" for member in members))
 
     def test_supported_int_type_emits_integer_wire_metadata(self):
         path = self.write(
@@ -350,7 +409,7 @@ class SchemaCodegenTests(unittest.TestCase):
         )
         with self.assertRaises(codegen.SchemaError) as caught:
             codegen.load_schema([path])
-        self.assertIn("unsupported <extension>", str(caught.exception))
+        self.assertIn("unexpected <extension>", str(caught.exception))
 
     def test_write_if_changed_preserves_existing_file(self):
         path = self.directory / "generated.hpp"

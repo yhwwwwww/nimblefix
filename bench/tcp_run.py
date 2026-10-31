@@ -48,6 +48,8 @@ def main():
     parser.add_argument("--rate", type=int, default=2000)
     parser.add_argument("--echo", action="store_true", help="measure the raw byte-echo baseline")
     parser.add_argument("--state-parent", type=Path, default=Path("build/bench-state"))
+    parser.add_argument("--peer-label", default="NimbleFIX Engine")
+    parser.add_argument("--peer-metadata", default="inline; appended mmap journal")
     args = parser.parse_args()
     if not 1 <= args.samples <= 20000 or not 1 <= args.rate <= 100000:
         parser.error("samples 1..20000, rate 1..100000 required")
@@ -119,11 +121,14 @@ def main():
             with (args.output / "samples.csv").open("w") as destination:
                 writer = csv.writer(destination); writer.writerow(("id", "scheduled_to_reply_ns")); writer.writerows(samples)
             latencies = sorted(row[1] for row in samples)
-            report = {"boundary":("L0 minimal nonblocking raw TCP byte echo; no codec/session/store" if args.echo else "L3 loopback, independent Python open-loop schedule to parsed reply, appended mmap journal, inline"),
+            report = {"boundary":("L0 minimal nonblocking raw TCP byte echo; no codec/session/store" if args.echo else f"L3 loopback, independent Python open-loop schedule to parsed reply, {args.peer_label}; {args.peer_metadata}"),
                 "samples":args.samples,"offered_rate":args.rate,"received":received,
                 "observed_rate":received*1e9/elapsed_ns,"warmup_business_messages":0,
                 "p50_ns":latencies[math.ceil(len(latencies)*.5)-1],"p99_ns":latencies[math.ceil(len(latencies)*.99)-1],
-                "max_ns":max(latencies),"limitations":"development host; Python framing and scheduling included; no wire timestamps"}
+                "p999_ns":latencies[math.ceil(len(latencies)*.999)-1],
+                "max_ns":max(latencies),"peer_label":args.peer_label,
+                "peer_metadata":args.peer_metadata,
+                "limitations":"development host; Python framing and scheduling included; no wire timestamps"}
             report.update({"state_filesystem":filesystem,"kernel":platform.platform(),
                 "cpu_affinity":sorted(os.sched_getaffinity(0)),"cpu_pinned":len(os.sched_getaffinity(0))==1,
                 "code_revision":subprocess.check_output(["git","rev-parse","HEAD"],text=True).strip(),
