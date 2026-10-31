@@ -22,15 +22,21 @@ def archive(directory):
         replacements[str(path.resolve())]=relative
         replacements[path.relative_to(directory).as_posix()]=relative
         path.unlink()
-    def normalize(value):
-        if isinstance(value,dict):return {key:normalize(item) for key,item in value.items()}
-        if isinstance(value,list):return [normalize(item) for item in value]
+    def normalize(value, parent):
+        if isinstance(value,dict):return {key:normalize(item, parent) for key,item in value.items()}
+        if isinstance(value,list):return [normalize(item, parent) for item in value]
         if isinstance(value,str):
             if value in replacements:return replacements[value]
             if value.startswith(str(directory)+'/'):return Path(value).relative_to(directory).as_posix()
+            if value.endswith(('.csv', '-samples.json')):
+                candidate=(parent / value).resolve()
+                if str(candidate) in replacements:return replacements[str(candidate)]
+                compressed=candidate.with_suffix(candidate.suffix+'.gz')
+                if compressed.is_relative_to(directory) and compressed.is_file():
+                    return compressed.relative_to(directory).as_posix()
         return value
     for path in sorted(directory.rglob('*.json')):
-        path.write_text(json.dumps(normalize(json.loads(path.read_text())),indent=2)+'\n')
+        path.write_text(json.dumps(normalize(json.loads(path.read_text()), path.parent),indent=2)+'\n')
     checksums={}
     archives = set(directory.rglob('*.csv.gz')) | set(directory.rglob('*-samples.json.gz'))
     for path in sorted(archives):
