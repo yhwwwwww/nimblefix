@@ -47,6 +47,12 @@ public:
     // when this is not called; optional nested groups otherwise stay absent.
     void set_empty() noexcept { touched_ = true; }
 
+    void reset() noexcept {
+        entry_count_ = 0;
+        status_ = Status::success();
+        touched_ = false;
+    }
+
     [[nodiscard]] Status add(Entry&& entry) noexcept {
         if (!status_.ok()) return status_;
         if constexpr (requires(Entry& item) { item.prepare(); }) {

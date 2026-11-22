@@ -362,12 +362,15 @@ if has_config("benchmarks") then
         add_includedirs(generated_dir)
         add_ldflags("-Wl,--wrap=malloc", {force = true})
     target_end()
-    target("direct-initiator-bench")
-        set_kind("binary")
-        add_files("bench/direct_initiator_bench.cpp")
-        add_deps("nimblefix-core", "fix44-sample")
-        add_includedirs(generated_dir)
-    target_end()
+    if has_config("standard_schemas") then
+        target("direct-initiator-bench")
+            set_kind("binary")
+            add_files("bench/direct_initiator_bench.cpp")
+            add_deps("nimblefix-core", "fix44-schema")
+            add_includedirs(generated_dir)
+            add_ldflags("-Wl,--wrap=malloc", {force = true})
+        target_end()
+    end
 end
 
 if has_config("fuzzers") then
