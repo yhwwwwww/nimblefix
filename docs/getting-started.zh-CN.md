@@ -1,13 +1,34 @@
-# NimbleFIX 0.2 入门
+# NimbleFIX 0.3 入门
 
-当前实现包含完整 FIX44 生成绑定、group、typed 接收、Inline/Queued、MPSC Sender、
-分段 journal、TLS、认证、TOML/CLI、运行时 XML、自定义字典和手动驱动。
-[支持表](session-support.md)说明具体协议和资源边界，[发布记录](release-0.2.md)保存验收证据。
+NimbleFIX 0.3 采用“按需付费（Pay Only For What You Need）”的三层 C++20 架构：
+- **Layer 0 (`nimblefix_core`)**：面向极速单连接交易客户端的零开销 **`DirectInitiator<Schema, Handler, Transport>`**（稳态热路径 0 malloc / 0 mutex / 0 fsync，具备完整重启恢复、序列号持久化、ResendRequest / GapFill / 业务 Replay 及 `SIGKILL` 崩溃重传），搭配单遍回填编码器、纯 v2 分段 mmap Journal（硬件 SSE4.2 CRC32C）与支持 `--messages` 子集裁剪的代码生成器。
+- **Layer 0 + TLS (`nimblefix_core_tls`)**：可选非阻塞 OpenSSL 3 **`DirectTlsTransport`**（支持 TLS 1.2/1.3、CA/主机名/IP 校验、mTLS 双向认证与断线重连复用 `TlsContext`），无需引入 Acceptor/Engine。
+- **Layer 1 / 2 (`nimblefix`)**：完整多会话服务端/客户端运行时（Linux `epoll` Reactor、Acceptor、`Inline`/`Queued` 分发、MPSC `Sender`、SPSC `ProducerLane`、可选运行时 libxml2 XML 与 TOML CLI）。
+
+[支持表](session-support.md)说明具体协议和资源边界。
+
+## 极速 Initiator 快速上手 (`DirectInitiator`)
+
+直接查看 [examples/direct_initiator.cpp](../examples/direct_initiator.cpp)，只需链接 `nimblefix-core`（如需 TLS 则链接 `nimblefix-core-tls` 并传入 `DirectTlsTransport`）：
+
+```sh
+xmake f -m release --tls=y
+xmake build direct-initiator-example direct-initiator-bench
+# 运行同口径 Pre-TCP + 真实 TCP 环回延迟基准（完整 912 字段 FIX 4.4 + v2 mmap Journal）
+./build/linux/x86_64/release/direct-initiator-bench 5000 30000
+```
+
+如需精简生成的 Schema 头文件，可通过 `--messages` 只生成需要的业务消息（管理消息与依赖组自动保留）：
+
+```sh
+python3 tools/schema/generate.py --output generated/venue.hpp --namespace venue \
+  --messages NewOrderSingle,OrderCancelRequest,ExecutionReport schemas/standard/FIX44.xml
+```
 
 生成消息的 `make()` 使用可增长的自有存储，添加字段时可能分配内存。
-需要复用预分配存储时，使用声明字段 shape、字节容量和生成消息 `policy_type` 的
-`FixedMessage`；slot 和文本 arena 内嵌于消息实例。两种入口共用编码计划，
-具体分配次数与边界见[性能报告](../bench/results/stage7/README.md)。
+需要零分配复用存储时，使用声明字段 shape、字节容量和生成消息 `policy_type` 的
+`FixedMessage`（及支持 `reset()` 复用的 `GroupBuilder`）；slot 和文本 arena 内嵌于消息实例，
+且全链路原生支持 `1..999,999,999` 任意超大自定义 tag 编号，无 1024-bit 上限或内存膨胀。
 
 ## 第一次成功收发
 

@@ -36,16 +36,30 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(nimblefix_core PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
+# Layer 0 + optional TLS: DirectTlsTransport + OpenSSL 3 wrapper (no Engine/Acceptor/Queued).
+add_library(nimblefix_core_tls STATIC
+    src/transport/tls.cpp
+    src/transport/direct_tls.cpp)
+target_link_libraries(nimblefix_core_tls PUBLIC nimblefix_core)
+if(NIMBLEFIX_ENABLE_TLS)
+    find_package(OpenSSL 3.0 REQUIRED)
+    target_link_libraries(nimblefix_core_tls PUBLIC OpenSSL::SSL OpenSSL::Crypto)
+    target_compile_definitions(nimblefix_core_tls PRIVATE NIMBLEFIX_ENABLE_TLS=1)
+endif()
+add_library(NimbleFIX::nimblefix_core_tls ALIAS nimblefix_core_tls)
+target_compile_features(nimblefix_core_tls PUBLIC cxx_std_20)
+set_target_properties(nimblefix_core_tls PROPERTIES CXX_EXTENSIONS OFF)
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(nimblefix_core_tls PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
 # Layer 1/2: Full runtime library (SessionDriver + Engine + Acceptor + Queued + optional TLS).
 file(GLOB runtime_sources CONFIGURE_DEPENDS src/runtime/*.cpp)
 add_library(nimblefix STATIC
     src/session/driver.cpp
-    src/transport/tls.cpp
     ${runtime_sources})
-target_link_libraries(nimblefix PUBLIC nimblefix_core)
+target_link_libraries(nimblefix PUBLIC nimblefix_core_tls)
 if(NIMBLEFIX_ENABLE_TLS)
-    find_package(OpenSSL 3.0 REQUIRED)
-    target_link_libraries(nimblefix PUBLIC OpenSSL::SSL OpenSSL::Crypto)
     target_compile_definitions(nimblefix PRIVATE NIMBLEFIX_ENABLE_TLS=1)
 endif()
 add_library(NimbleFIX::nimblefix ALIAS nimblefix)
@@ -225,6 +239,17 @@ if(NIMBLEFIX_BUILD_TESTS)
     else()
         add_test(NAME tls-unavailable COMMAND tls-transport-test)
     endif()
+    if(NIMBLEFIX_BUILD_SAMPLE_SCHEMA)
+        add_executable(direct-tls-initiator-test tests/direct_tls_initiator_test.cpp)
+        target_link_libraries(direct-tls-initiator-test PRIVATE nimblefix_core_tls fix44_sample)
+        if(NIMBLEFIX_ENABLE_TLS)
+            add_test(NAME direct-tls-initiator COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/direct_tls_initiator_test.py"
+                --binary $<TARGET_FILE:direct-tls-initiator-test>)
+            set_tests_properties(direct-tls-initiator PROPERTIES TIMEOUT 30)
+        else()
+            add_test(NAME direct-tls-unavailable COMMAND direct-tls-initiator-test)
+        endif()
+    endif()
     add_test(NAME xml-codegen COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/codegen_test.py")
     add_test(NAME compile-fail COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/compile_fail_test.py"
         --cxx "${CMAKE_CXX_COMPILER}")
@@ -343,7 +368,7 @@ if(NIMBLEFIX_BUILD_FUZZERS)
     endforeach()
 endif()
 
-install(TARGETS nimblefix_core nimblefix EXPORT NimbleFIXTargets ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}")
+install(TARGETS nimblefix_core nimblefix_core_tls nimblefix EXPORT NimbleFIXTargets ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}")
 install(DIRECTORY include/nimblefix DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}")
 install(FILES tools/schema/generate.py DESTINATION "${CMAKE_INSTALL_DATADIR}/nimblefix/schema")
 install(FILES xmake/nimblefix-schema.lua DESTINATION "${CMAKE_INSTALL_DATADIR}/nimblefix/xmake")

@@ -87,14 +87,24 @@ target("nimblefix-core")
     add_syslinks("pthread", {public = true})
 target_end()
 
-target("nimblefix")
+target("nimblefix-core-tls")
     set_kind("static")
     add_deps("nimblefix-core")
     add_includedirs("include", {public = true})
-    add_files("src/session/driver.cpp", "src/runtime/*.cpp", "src/transport/tls.cpp")
+    add_files("src/transport/tls.cpp", "src/transport/direct_tls.cpp")
     if has_config("tls") then
         add_defines("NIMBLEFIX_ENABLE_TLS=1")
         add_syslinks("ssl", "crypto", {public = true})
+    end
+target_end()
+
+target("nimblefix")
+    set_kind("static")
+    add_deps("nimblefix-core-tls")
+    add_includedirs("include", {public = true})
+    add_files("src/session/driver.cpp", "src/runtime/*.cpp")
+    if has_config("tls") then
+        add_defines("NIMBLEFIX_ENABLE_TLS=1")
     end
 target_end()
 
@@ -281,6 +291,13 @@ if has_config("tests") then
         add_deps("nimblefix")
         if not has_config("tls") then add_tests("unavailable") end
     target_end()
+    target("direct-tls-initiator-test")
+        set_kind("binary")
+        add_files("tests/direct_tls_initiator_test.cpp")
+        add_deps("nimblefix-core-tls", "fix44-sample")
+        add_includedirs(generated_dir)
+        if not has_config("tls") then add_tests("unavailable") end
+    target_end()
 end
 
 if has_config("quickfix_dir") then
@@ -421,6 +438,7 @@ task("check")
         if config.get("tls") then
             os.vrunv("python3", {"tests/engine_tls_test.py", "--binary", project.target("engine-tls-probe"):targetfile()})
             os.vrunv("python3", {"tests/tls_transport_test.py", "--binary", project.target("tls-transport-test"):targetfile()})
+            os.vrunv("python3", {"tests/direct_tls_initiator_test.py", "--binary", project.target("direct-tls-initiator-test"):targetfile()})
         end
         if config.get("benchmarks") then
             os.vrunv("python3", {"bench/journal_run.py", "--binary", project.target("journal-bench"):targetfile(),

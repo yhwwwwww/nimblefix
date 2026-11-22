@@ -1,217 +1,174 @@
-# NimbleFIX 0.2
+# NimbleFIX 0.3
 
-A C++20 FIX engine with bounded messages, generated schemas, recoverable mmap
-journals and nonblocking TCP/TLS. Development and tests use **xmake**; CMake
-also provides a relocatable installed package.
+A C++20 FIX engine designed around **pay only for what you need**: start with a zero-overhead Layer 0 **DirectInitiator** (`NimbleFIX::nimblefix_core`, 0 malloc / 0 mutex / 0 fsync steady state, full restart recovery & GapFill/Replay), opt into Layer 0 OpenSSL 3 TLS (`NimbleFIX::nimblefix_core_tls`), or scale up to the full Layer 1/2 multi-session **Engine** (`NimbleFIX::nimblefix`) with Linux `epoll`, Acceptor, `Inline`/`Queued` dispatch, MPSC/SPSC senders, runtime XML, and TOML CLI.
 
 [中文入门](docs/getting-started.zh-CN.md) · [Supported behavior](docs/session-support.md) ·
-[Design](docs/rewrite-design.md) · [Release evidence](docs/release-0.2.md)
+[Design](docs/rewrite-design.md)
 
-## Run an order-entry application
+---
 
-Start with [initiator.cpp](examples/initiator.cpp) and
-[acceptor.cpp](examples/acceptor.cpp). They show the typed FIX44 flow directly.
-The flat counterparts are separate files, selected by core-only builds.
+## Architecture: 3-Layer Pay-Only-For-What-You-Need
+
+| Layer | CMake Target / xmake Target | Included Capabilities | Extra Dependencies |
+| :--- | :--- | :--- | :--- |
+| **Layer 0 (Core)** | `NimbleFIX::nimblefix_core` / `nimblefix-core` | Single-pass backpatch Codec, `FixedMessage`, generated Schemas (`--messages` subset codegen), pure v2 segmented mmap Journal (hardware SSE4.2 CRC32C, `reserve()`/`commit()`), `SessionCore`, nonblocking `TcpTransport`, **`DirectInitiator<Schema, Handler, Transport>`** | C++20 + `pthread` only |
+| **Layer 0 + TLS** | `NimbleFIX::nimblefix_core_tls` / `nimblefix-core-tls` | Everything in Layer 0 + nonblocking OpenSSL 3 **`DirectTlsTransport`** (TLS 1.2/1.3, CA/hostname/IP verification, mTLS, `TlsContext` reuse on reconnect) | OpenSSL 3+ (optional) |
+| **Layer 1 / 2 (Full)** | `NimbleFIX::nimblefix` / `nimblefix` | Everything above + `SessionDriver`, Linux `epoll` multi-session `Engine<Schema, Inline\|Queued>`, Acceptor, MPSC `Sender`, SPSC `ProducerLane`, optional runtime libxml2 XML & TOML CLI | Optional libxml2 |
+
+---
+
+## Quickstart: Layer 0 `DirectInitiator` (Zero-Overhead Initiator)
+
+See [examples/direct_initiator.cpp](examples/direct_initiator.cpp) for a complete runnable initiator with zero-allocation `FixedMessage`, v2 mmap Journal persistence, automatic restart recovery, and GapFill/Replay:
+
+```cpp
+#include <nimblefix/direct_initiator.hpp>
+#include <nimblefix/fix44_sample.hpp>
+
+namespace nf = nimblefix;
+namespace fix = nimblefix::fix44_sample;
+
+struct MyHandler {
+    [[nodiscard]] nf::Status on_message(const nf::FlatMessageView& msg,
+                                        const nf::DeliveryInfo& info) noexcept {
+        // Zero-copy view; info.is_recovery == true for crash-recovered deliveries.
+        return nf::Status::success();
+    }
+};
+
+nf::DirectInitiatorConfig cfg{};
+cfg.host = "127.0.0.1";
+cfg.port = 9876;
+cfg.storage_directory = "./state/buy";
+cfg.session_key = "FIX.4.4/BUY/SELL";
+cfg.local_comp_id = "BUY";
+cfg.remote_comp_id = "SELL";
+
+auto init = nf::DirectInitiator<fix::Schema, MyHandler>::open(std::move(cfg)).value();
+(void)init.connect();
+while (!init.is_active()) (void)init.poll_once();
+
+// Zero-allocation outbound send (encodes directly into mmap Journal via reserve/commit):
+using OrderShape = nf::Fields<
+    nf::Field<11, nf::FieldKind::string>, nf::Field<55, nf::FieldKind::string>,
+    nf::Field<54, nf::FieldKind::character>, nf::Field<60, nf::FieldKind::string>,
+    nf::Field<38, nf::FieldKind::decimal>, nf::Field<40, nf::FieldKind::character>>;
+fix::NewOrderSingleFixed<OrderShape, 128> order;
+(void)order.cl_ord_id("ORD-001");
+(void)order.symbol("AAPL");
+(void)order.side('1');
+(void)order.transact_time("20261123-00:00:00.000");
+(void)order.order_qty(nf::Decimal{100, 0});
+(void)order.ord_type('1');
+
+(void)init.send(order);
+```
+
+### Enabling FIX over TLS (`DirectTlsTransport`)
+
+Link `NimbleFIX::nimblefix_core_tls` (`nimblefix-core-tls` in xmake) and swap the `Transport` template argument — zero Engine/Acceptor overhead:
+
+```cpp
+#include <nimblefix/direct_initiator.hpp>
+#include <nimblefix/direct_tls_transport.hpp>
+
+nf::TlsConfig tls{};
+tls.enabled = true;
+tls.ca_file = "/path/to/ca.pem";
+tls.server_name = "fix.venue.example";
+tls.minimum_version = 13; // TLS 1.3 (or 12 for TLS 1.2+)
+// Optional mTLS:
+// tls.certificate_file = "/path/to/client.pem";
+// tls.private_key_file = "/path/to/client.key";
+
+auto transport = nf::DirectTlsTransport::create(std::move(tls)).value();
+auto init = nf::DirectInitiator<fix::Schema, MyHandler, nf::DirectTlsTransport>::open(
+    std::move(cfg), MyHandler{}, std::move(transport)).value();
+```
+
+### Subset Schema Codegen (`--messages`)
+
+Trim generated headers and compile times to only the business messages you trade (admin messages and referenced groups/components are kept automatically):
 
 ```sh
-xmake f -m release
-xmake build acceptor-example initiator-example
+python3 tools/schema/generate.py --output generated/venue.hpp --namespace venue \
+  --messages NewOrderSingle,OrderCancelRequest,ExecutionReport schemas/standard/FIX44.xml
 ```
 
-Run the simulated counterparty and the order-entry application separately:
+Arbitrary custom/venue tags across the full FIX range (`1..999,999,999`, e.g. `8899` or `900001`) are supported natively with zero bitset bloat — all slot tables and deduplication bitsets are indexed by compact per-message member index, never by raw tag number.
 
-Terminal 1:
+---
 
-```sh
-xmake run acceptor-example --state ./state/sell --port 9876
-```
+## Performance (Release, AMD Ryzen 7 7840HS, GCC 16.2.1, Linux 7.2)
 
-Terminal 2:
+Measured with `direct-initiator-bench` (30,000 samples, 5,000 warmups, `-Wl,--wrap=malloc` verifying **0 allocations**) on the **full 912-field FIX 4.4 standard schema** (`NewOrderSingle` populated inside the timed loop with 7 scalars including `Price` + 3-field `NoPartyIDs` repeating group; 11-field `ExecutionReport`; real **v2 segmented mmap Journal + SSE4.2 hardware CRC32C** persistence):
 
-```sh
-xmake run initiator-example --state ./state/buy --port 9876
-```
+| Workload Boundary | p50 | p95 | p99 | Throughput | Heap Allocs |
+| :--- | ---: | ---: | ---: | ---: | :---: |
+| **User Encode** (in-loop fill + single-pass `encode_fix44`) | **291.0 ns** | 311.0 ns | 390.0 ns | 3,345,749 msgs/s | **0** |
+| **Pre-TCP Session Outbound** (in-loop fill + `DirectInitiator::send` + v2 mmap Journal) | **521.0 ns** | 621.0 ns | 832.0 ns | 1,849,466 msgs/s | **0** |
+| **Pre-TCP Session Inbound** (frame + parse + 912-field FIX 4.4 Schema + dual v2 Journal records + callback) | **1,002.0 ns** | 1,102.0 ns | 1,393.0 ns | 973,061 msgs/s | **0** |
+| **Pre-TCP Combined** (total pure FIX engine round-trip budget) | **1,523.0 ns (1.52 µs)** | 1,693.0 ns | 2,374.0 ns | 637,600 rt/s | **0** |
+| **Real TCP Loopback RTT** (kernel TCP + full FIX 4.4 + v2 mmap Journal) | **9.248 µs** | 11.261 µs | 16.931 µs | 103,134 rt/s | **0** |
 
-After `SESSION_ACTIVE`, enter business commands in Terminal 2:
+Binary footprint (Release): `direct-initiator-example` is **336 KB** (`libnimblefix-core.a`: 409 KB) vs full multi-session `initiator-example` at **1.2 MB**.
 
-```text
-order ORDER-001 AAPL buy 100 150.25
-order ORDER-002 MSFT sell 25 market
-status
-quit
-```
+---
 
-The protocol runs on its owner thread. The main business thread accepts explicit
-commands and sends through the session's retained `Sender`. Logon and reconnect
-create no new orders, and receiving a report keeps the application running.
-Each command supplies its ClOrdID, symbol, side, quantity and limit price or
-market instruction. Receipts describe local acceptance/append/write progress;
-ExecutionReport is the separate counterparty response. `quit` or input EOF
-drains accepted requests within the configured deadline before Logout.
-`status` shows connection availability and each request's current receipt.
-These console examples choose Queued so terminal output runs on business workers;
-the library's default remains Inline.
-The example tracks up to 256 accepted request IDs per process, rejects duplicate
-IDs and reports failed or timed-out requests without silently resubmitting them.
+## Layer 1 / 2: Multi-Session Engine, Acceptor & CLI
 
-Keep each side's state directory across restarts and use a new ClOrdID for each
-new business request. Business identity and idempotency across application
-restarts remain application responsibilities. The acceptor simulates New
-acknowledgements; it does not implement an exchange or an order-management system.
-Numeric IPv4/IPv6 endpoints are supported. Standard builds use full typed FIX44;
-core-only builds retain the same command workflow with flat messages.
-
-The automated paired protocol/restart test lives in `tests/hello_fix.cpp`:
-
-```sh
-xmake build hello-fix
-xmake run hello-fix --self-test --typed --restart
-```
-
-## Configure and operate
-
-```sh
-xmake build nimblefix-cli
-xmake run nimblefix-cli init --directory ./demo
-xmake run nimblefix-cli validate --config ./demo/acceptor.toml --json
-xmake run nimblefix-cli run --config ./demo/acceptor.toml
-# Another terminal:
-xmake run nimblefix-cli run --config ./demo/initiator.toml
-```
-
-The CLI observes business messages; the order/report applications are the
-examples above. Configuration version is `1`. Paths resolve against the
-configuration file directory; unknown keys are errors. `validate` reads
-configuration, dictionaries and certificates offline, without binding sockets
-or opening journals. Secrets use explicit `password_env`/`value_env` references.
-`run` prints structured session/error events with `--json`; SIGINT/SIGTERM use
-bounded Logout shutdown and preserve exit status `128 + signal`.
-
-TLS and runtime XML are optional system dependencies:
+For multi-session server/client gateways, Acceptor listeners, `Queued` worker dispatch, MPSC `Sender`, SPSC `ProducerLane`, or TOML-driven operations, start with [examples/acceptor.cpp](examples/acceptor.cpp) and [examples/initiator.cpp](examples/initiator.cpp):
 
 ```sh
 xmake f -m release --tls=y --xml=y
-xmake build nimblefix-cli
-xmake run nimblefix-cli doctor --json
-xmake run nimblefix-cli schema summary --xml schemas/standard/FIX44.xml --json
+xmake build acceptor-example initiator-example direct-initiator-example nimblefix-cli
 ```
 
-TLS needs OpenSSL 3 or newer; XML needs libxml2 development files. Neither is
-downloaded during a build. TOML parsing is fixed to vendored toml++ 3.4.0.
-TLS verifies the server's DNS/IP identity and supports mutual authentication.
-See [deployment settings](docs/getting-started.zh-CN.md) for configuration.
-
-## Embed
-
-`Engine<>` selects flat messages and Inline business callbacks. A complete
-FIX44 binding is generated from the vendored dictionary:
-
-```cpp
-#include <nimblefix/engine.hpp>
-#include <nimblefix/fix44.hpp>
-
-using Schema = nimblefix::fix44::Schema;
-auto created = nimblefix::Engine<Schema>::create({.storage={.directory="./state"}});
-// Check created.ok(), then move out the engine.
-// engine.on<nimblefix::fix44::ExecutionReport>(
-//     [](nimblefix::SessionContext&, const auto& report) -> nimblefix::Status { ... });
-auto order = nimblefix::fix44::NewOrderSingle::make()
-    .cl_ord_id("DEMO-001").handl_inst('1').symbol("AAPL").side('1')
-    .transact_time("20261031-12:00:00.000").order_qty(100).ord_type('1');
-// In the business command handler: session.sender<Schema>().send(order).
-```
-
-Named setters and `set<Tag>()` use the same slots and encoder. Generated views
-have typed named getters and `get<Tag>()`; groups have bounded, owned builders
-and borrowed receive views. Validation levels are structure, required and
-strict (types/enums as well as required fields). `DynamicMessage` is the
-explicit API for runtime tags. Header fields remain engine managed.
-
-Fluent `make()` owns growing storage and can allocate while adding fields.
-For reusable storage, `FixedMessage` holds an explicit field shape and text
-arena inline; use the generated message's `policy_type` for dictionary checks.
-Both paths use the same encoding plan. Allocation counts are reported separately
-in the [performance results](bench/results/stage7/README.md).
-
-Use `Engine<Schema, Queued>` to run business callbacks on a bounded worker
-executor. One session has at most one in-flight callback; its reply append
-commands finish before its delivery-complete marker. Ordinary
-`handle.sender<Schema>()` is safe for multiple producer threads and copies
-accepted content into bounded storage. Rejected sends retain the message and
-do not consume a FIX sequence. Advanced producer lanes explicitly select a
-single producer and an independent bounded SPSC channel.
-
-`run()` owns the protocol loop on its calling thread. Embedders can instead
-call `start()`, then `poll_once(max_wait_ms)` on that same thread until
-`running()` is false. `request_stop()` is thread safe. Session snapshots are
-safe to query from other threads; error observers run through a separate
-bounded diagnostic channel. Received views and `SessionContext` are valid
-only for the callback; save owned data or use a Sender for later work.
-
-## Storage and recovery
-
-Successful Inline `context.send` means **appended**. Cross-thread or Queued
-send initially returns **accepted**; query its bounded receipt for appended,
-written, failed or expired. Written means the transport accepted bytes.
-
-Input is journaled before delivery. Delivery is at least once; after process
-death an unfinished callback runs with `is_recovery()`. Its dependent replies
-must repeat the same order and content, allowing recovery to reuse committed
-outputs. External side effects require application idempotency.
-
-The default session uses segmented mmap storage. Index/checkpoint files can
-be rebuilt from committed records. Retention requires peer replay progress,
-completed local delivery and released reader/mapping leases. It fails with
-`storage_full` instead of overwriting required history. Readers have explicit
-lag limits. Reset is an explicit authenticated policy and creates an audited
-epoch. No memory store or automatic sequence reset is used.
-
-`appended` covers same-host process death while the OS/filesystem keeps
-operating. There is no per-message fsync/msync or power-loss durability claim.
-Storage failure disables the affected session; a failed journal is never
-silently recreated with sequence one.
-
-## Test, install and measure
+Run the paired order-entry examples:
 
 ```sh
-xmake check
-# Optional independent QuickFIX installation:
-xmake f --quickfix_dir=/path/to/quickfix
-xmake check
-python3 tests/install_test.py --features --examples
-python3 tests/install_test.py --core-only --examples
-python3 tests/xmake_schema_test.py
+# Terminal 1:
+xmake run acceptor-example --state ./state/sell --port 9876
+# Terminal 2:
+xmake run initiator-example --state ./state/buy --port 9876
 ```
 
-CMake exports core, optional XML/configuration components and generated standard
-schemas, plus schema generation helpers for both CMake and xmake:
+Or use the TOML CLI:
 
 ```sh
+xmake run nimblefix-cli init --directory ./demo
+xmake run nimblefix-cli validate --config ./demo/acceptor.toml --json
+xmake run nimblefix-cli run --config ./demo/acceptor.toml
+```
+
+---
+
+## Storage & Crash Recovery
+
+- **Unified v2 segmented mmap Journal**: Legacy v1 single-file storage has been removed in 0.3.0. All sessions (both `DirectInitiator` and `Engine`) use segmented pre-allocated mmap journals with hardware SSE4.2 CRC32C, atomic `.tmp` + `rename` segment creation, and off-hot-path `poll_maintenance()`.
+- **Exact recovery guarantees**: Inbound frames are journaled before business delivery; outbound frames are journaled before socket write. After process restart or `SIGKILL`, both `DirectInitiator` and `Engine` rebuild sequence state, re-deliver unfinished inbound records (`is_recovery == true`), and serve `ResendRequest`, `GapFill`, and business `Replay` accurately.
+- **Durability scope**: Confirmation level `appended` covers same-host process crashes while the OS/filesystem remains healthy; no per-message `fsync`/`msync` is executed on the hot path.
+
+---
+
+## Build, Test & Install
+
+```sh
+# Full xmake build & verification suite (Debug or Release)
+xmake f -m release --tls=y --xml=y --benchmarks=y -y
+xmake check
+
+# Run the DirectInitiator benchmark (Pre-TCP + Real TCP Loopback)
+xmake build direct-initiator-bench
+./build/linux/x86_64/release/direct-initiator-bench 5000 30000
+
+# CMake build, sanitizers, and relocatable install verification
 cmake -S . -B build-cmake -DCMAKE_BUILD_TYPE=Release \
   -DNIMBLEFIX_ENABLE_TLS=ON -DNIMBLEFIX_ENABLE_XML=ON
-cmake --build build-cmake -j2
+cmake --build build-cmake -j
 ctest --test-dir build-cmake --output-on-failure
-cmake --install build-cmake --prefix "$PWD/install"
+python3 tests/install_test.py --features --examples
+python3 tests/install_test.py --core-only --examples
 ```
 
-A core build can disable tests, examples, sample/standard generation, CLI,
-TLS and XML. It then needs only a C++20 compiler, threading support and the
-platform's file/socket APIs; Python and the optional libraries are unnecessary.
-
-```sh
-xmake f -m release --benchmarks=y
-xmake build runtime-bench
-python3 bench/runtime_run.py --binary build/linux/x86_64/release/runtime-bench \
-  --output build/runtime-report --samples 2000 --runs 3
-```
-
-The runtime suite measures real appended sessions, Inline/Queued delivery,
-MPSC/lane submissions, wire round trips and rotation. Timing and instrumented
-passes are separate; raw CSVs, settings, source hashes and limitations accompany
-reports. Historical results remain in `bench/results/codec-initial` and
-`bench/results/stage3`; the 0.2 results are under `bench/results/stage7`.
-
-The public source API is frozen for **0.2.x**. Rebuild dependent binaries when
-upgrading; no C++ ABI promise is made. Persistent format v1 remains supported
-explicitly, while normal Engines create v2 segmented stores. Dependencies and
-required acknowledgements are in [third_party/README.md](third_party/README.md).
+Dependencies and acknowledgements are documented in [third_party/README.md](third_party/README.md).

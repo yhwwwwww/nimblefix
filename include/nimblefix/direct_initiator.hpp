@@ -548,6 +548,22 @@ public:
     [[nodiscard]] bool wants_write() const noexcept {
         return tx_count_ != 0 || replay_active_ || replay_count_ != 0;
     }
+    [[nodiscard]] bool wants_transport_write() const noexcept {
+        if (wants_write() || transport_.is_connecting()) {
+            if constexpr (requires { transport_.wants_write(); }) {
+                return wants_write() || transport_.wants_write();
+            }
+            return true;
+        }
+        return false;
+    }
+    [[nodiscard]] bool has_pending_read() const noexcept {
+        if (rx_head_ < rx_tail_) return true;
+        if constexpr (requires { transport_.pending_plaintext(); }) {
+            return transport_.pending_plaintext() != 0;
+        }
+        return false;
+    }
     [[nodiscard]] bool is_active() const noexcept {
         return core_.state() == SessionState::active && !fatal_;
     }
