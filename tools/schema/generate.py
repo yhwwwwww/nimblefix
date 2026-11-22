@@ -1089,13 +1089,26 @@ def render_header(schema: Schema, namespace: str) -> str:
             f"std::span<const MessageMemberDescriptor>{{message_{index}_members}}, "
             f"std::span<const ::nimblefix::MemberTagEntry>{{message_{index}_members_by_tag}}, "
             f"std::span<const std::uint32_t>{{message_{index}_members_required}}}},")
+    header_comp_idx = next((i for i, c in enumerate(components) if c.name == "Header"), -1)
+    trailer_comp_idx = next((i for i, c in enumerate(components) if c.name == "Trailer"), -1)
+    single_char_msg = [-1] * 128
+    for index, message in enumerate(messages):
+        if len(message.msg_type) == 1:
+            code = ord(message.msg_type)
+            if code < 128 and single_char_msg[code] == -1:
+                single_char_msg[code] = index
     lines += [
+        "}};",
+        "",
+        "inline constexpr std::array<std::int16_t, 128> single_char_message_index{{",
+        "    " + ", ".join(str(v) for v in single_char_msg),
         "}};",
         "",
         "inline constexpr ::nimblefix::SchemaDescriptor schema_descriptor{",
         f"    {_cpp_string(dict(schema.identity).get('type', 'FIX'))}, {_cpp_string(version)}, {_cpp_string(fingerprint)},",
         "    std::span<const FieldDescriptor>{fields}, std::span<const GroupDescriptor>{groups},",
-        "    std::span<const ComponentDescriptor>{components}, std::span<const MessageDescriptor>{messages}",
+        "    std::span<const ComponentDescriptor>{components}, std::span<const MessageDescriptor>{messages},",
+        f"    {header_comp_idx}, {trailer_comp_idx}, std::span<const std::int16_t>{{single_char_message_index}}",
         "};",
         "",
         f"inline constexpr std::array<::nimblefix::LengthDataPair, {sum(1 for field in fields if field.field_type in {'DATA', 'XMLDATA'})}> schema_length_data_pairs{{{{",
@@ -1173,6 +1186,7 @@ def render_header(schema: Schema, namespace: str) -> str:
             "    template<class Derived>",
             f"    using named_setters = {setters_mixin}<Derived>;",
             "    static constexpr bool is_group_entry = true;",
+            "    static constexpr bool has_field_policy_check_traits = true;",
             "    static constexpr std::string_view msg_type = \"__entry__\";",
             f"    inline static constexpr std::array<std::uint32_t, {len(allowed)}> allowed_tags{{{{",
         ]
@@ -1204,6 +1218,7 @@ def render_header(schema: Schema, namespace: str) -> str:
             f"template<class Derived> struct {setters_mixin};",
             f"struct {policy} {{",
             "    using schema_type = Schema;",
+            "    static constexpr bool has_field_policy_check_traits = true;",
             "    template<class... Slots>",
             f"    using rebind = {builder}<Slots...>;",
             "    template<class Derived>",
@@ -1241,6 +1256,11 @@ def render_header(schema: Schema, namespace: str) -> str:
                 lines += [
                     "template<>",
                     f"struct GroupCountTag<{policy}, {tag}> : std::true_type {{}};",
+                ]
+            elif field_needs_policy_check(field):
+                lines += [
+                    "template<>",
+                    f"struct FieldNeedsPolicyCheck<{policy}, {tag}> : std::true_type {{}};",
                 ]
             if tag in field_pair_tags:
                 lines += [
@@ -1438,6 +1458,11 @@ def render_header(schema: Schema, namespace: str) -> str:
                 lines += [
                     "template<>",
                     f"struct GroupCountTag<{policy}, {field.number}> : std::true_type {{}};",
+                ]
+            elif field_needs_policy_check(field):
+                lines += [
+                    "template<>",
+                    f"struct FieldNeedsPolicyCheck<{policy}, {field.number}> : std::true_type {{}};",
                 ]
             if field.number in field_pair_tags:
                 lines += [

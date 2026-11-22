@@ -82,6 +82,12 @@ struct GroupCountTag : std::false_type {};
 template <class Policy, std::uint32_t Tag>
 struct FieldPairTag : std::integral_constant<std::uint32_t, 0> {};
 
+template <class Policy, std::uint32_t Tag, bool HasTraits = requires { Policy::has_field_policy_check_traits; }>
+struct FieldNeedsPolicyCheck : std::true_type {};
+
+template <class Policy, std::uint32_t Tag>
+struct FieldNeedsPolicyCheck<Policy, Tag, true> : std::false_type {};
+
 struct MessageLimits {
     std::size_t max_fields{64};
     std::size_t max_value_bytes{4096};
@@ -178,6 +184,7 @@ struct PlanField {
     FieldKind kind{};
     WireType wire_type{};
     bool group_counter{};
+    bool needs_policy_check{true};
     std::uint8_t prefix_size{};
     std::uint8_t pair_prefix_size{};
     std::array<char, 10> tag_prefix{};
@@ -210,6 +217,8 @@ struct MessageView {
     EnumValueValidator enum_value_allowed{};
     const RepeatingGroupView* groups{};
     std::size_t group_count{};
+    bool prevalidated_scalars{};
+    bool presence_validated{};
 };
 
 [[nodiscard]] constexpr bool is_present(const MessageView& message, std::size_t slot) noexcept {
@@ -482,6 +491,7 @@ consteval auto make_plan(FieldList<FieldTypes...>) {
             field.kind = F::kind;
             field.wire_type = F::wire_type;
             field.group_counter = GroupCountTag<Policy, F::tag>::value;
+            field.needs_policy_check = FieldNeedsPolicyCheck<Policy, F::tag>::value;
             field.pair_tag = FieldPairTag<Policy, F::tag>::value;
             std::array<char, 9> digits{};
             std::size_t digit_count = 0;
@@ -940,8 +950,27 @@ public:
     [[nodiscard]] detail::MessageView view() const noexcept {
         detail::MessageView result{slots_.data(), bytes_.data(), byte_count_, plan_.data(), slot_map_.data(),
             plan_.size(), presence_.data(), msg_type, status_};
+        result.prevalidated_scalars = true;
         detail::attach_policy_validation<Policy>(result);
-        if (result.status.ok()) result.status = detail::validate_schema_presence(result);
+        if (result.status.ok()) {
+            if (result.required_tag_count != 0) {
+                std::size_t required_index = 0;
+                for (std::size_t i = 0; i < plan_.size() && required_index < result.required_tag_count; ++i) {
+                    if (plan_[i].tag != result.required_tags[required_index]) continue;
+                    const auto physical = slot_map_[i];
+                    if ((presence_[physical / 8] & static_cast<std::uint8_t>(1U << (physical % 8))) == 0) {
+                        result.status = Status{ErrorCode::required_field_missing, static_cast<int>(plan_[i].tag)};
+                        break;
+                    }
+                    ++required_index;
+                }
+                if (result.status.ok() && required_index < result.required_tag_count) {
+                    result.status = Status{ErrorCode::required_field_missing,
+                        static_cast<int>(result.required_tags[required_index])};
+                }
+            }
+            result.presence_validated = result.status.ok();
+        }
         return result;
     }
 

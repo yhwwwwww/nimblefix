@@ -178,9 +178,15 @@ template <class Schema>
 }
 
 template <class Schema>
-[[nodiscard]] inline Status direct_schema_validate(const FlatMessageView& message) noexcept {
+[[nodiscard]] inline Status direct_schema_validate(const FlatMessageView& message,
+                                                   std::string_view known_msg_type = {},
+                                                   std::size_t msg_type_offset = 0) noexcept {
     if constexpr (requires { Schema::validate(message); }) return Schema::validate(message);
     else if constexpr (requires { Schema::descriptor(); }) {
+        if (!known_msg_type.empty()) {
+            return validate_schema_message_for_type(Schema::descriptor(), known_msg_type,
+                msg_type_offset, message.fields(), ValidationLevel::strict);
+        }
         return validate_schema_message(Schema::descriptor(), message, ValidationLevel::strict);
     } else return Status::success();
 }
@@ -1126,8 +1132,10 @@ private:
     }
 
     [[nodiscard]] Status deliver_to_handler(const FlatMessageView& msg, DeliveryInfo info,
-                                            std::uint64_t now_ms) noexcept {
-        const auto valid = detail::direct_schema_validate<Schema>(msg);
+                                            std::uint64_t now_ms,
+                                            std::string_view known_msg_type = {},
+                                            std::size_t msg_type_offset = 0) noexcept {
+        const auto valid = detail::direct_schema_validate<Schema>(msg, known_msg_type, msg_type_offset);
         if (!valid.ok()) {
             const auto tags = detail::direct_extract_tags(msg);
             const auto ref_type = tags.msg_type ? tags.msg_type->value : std::string_view{};
@@ -1201,7 +1209,9 @@ private:
     [[nodiscard]] Status apply_actions(const detail::CoreOutput& out,
                                        const FlatMessageView* delivery_msg,
                                        RecordId inbound_id, std::uint64_t inbound_seq,
-                                       std::uint64_t now_ms) noexcept {
+                                       std::uint64_t now_ms,
+                                       std::string_view known_msg_type = {},
+                                       std::size_t msg_type_offset = 0) noexcept {
         if (!out.status.ok()) return fail(out.status);
         for (std::size_t i = 0; i < out.action_count; ++i) {
             const auto& a = out.actions[i];
@@ -1252,7 +1262,8 @@ private:
             case detail::CoreActionKind::deliver_message:
                 if (delivery_msg == nullptr || inbound_id == 0) return fail(Status{ErrorCode::protocol_error});
                 if (const auto st = deliver_to_handler(*delivery_msg,
-                        DeliveryInfo{inbound_id, inbound_seq, false}, now_ms); !st.ok()) return st;
+                        DeliveryInfo{inbound_id, inbound_seq, false}, now_ms,
+                        known_msg_type, msg_type_offset); !st.ok()) return st;
                 break;
             case detail::CoreActionKind::close_transport:
                 should_close_ = true;
@@ -1492,7 +1503,8 @@ private:
         if (!actions.status.ok()) return fail(actions.status);
 
         if (const auto st = apply_actions(actions, detail::direct_is_admin(msg_type) ? nullptr : &message,
-                                          inbound_id, effective_seq, now_ms); !st.ok()) return st;
+                                          inbound_id, effective_seq, now_ms,
+                                          msg_type, tags.msg_type->offset); !st.ok()) return st;
 
         if (detail::direct_is_admin(msg_type) && msg_type != "2") {
             if (const auto st = append_delivery(inbound_id, effective_seq); !st.ok()) return fail(st);

@@ -29,12 +29,6 @@ constexpr std::array<LengthDataPair, 16> fix44_pairs{{
 
 constexpr bool is_decimal_digit(char c) noexcept { return c >= '0' && c <= '9'; }
 
-bool is_valid_plain_value(std::string_view value) noexcept {
-    // TagValue has no representation for an empty ordinary field. Binary bytes
-    // bypass this check only after a known Length/Data pair supplies a boundary.
-    return !value.empty() && detail::is_valid_text(value);
-}
-
 Status error(ErrorCode code, std::uint32_t tag, std::size_t offset) noexcept {
     return {code, tag <= detail::maximum_fix_tag ? static_cast<int>(tag) : 0, offset};
 }
@@ -70,30 +64,78 @@ Status validate_hints(WireHints hints) noexcept {
     return Status::success();
 }
 
-bool find_length_pair(std::uint32_t length_tag,
-                      WireHints hints,
-                      LengthDataPair& found) noexcept {
+constexpr std::size_t builtin_mask_words = 10; // covers tags 0..639
+
+constexpr std::array<std::uint64_t, builtin_mask_words> make_builtin_len_mask() noexcept {
+    std::array<std::uint64_t, builtin_mask_words> m{};
     for (const auto pair : fix44_pairs) {
-        if (pair.length_tag == length_tag) {
-            found = pair;
-            return true;
+        m[pair.length_tag >> 6U] |= (std::uint64_t{1} << (pair.length_tag & 63U));
+    }
+    return m;
+}
+
+constexpr std::array<std::uint64_t, builtin_mask_words> make_builtin_data_mask() noexcept {
+    std::array<std::uint64_t, builtin_mask_words> m{};
+    for (const auto pair : fix44_pairs) {
+        m[pair.data_tag >> 6U] |= (std::uint64_t{1} << (pair.data_tag & 63U));
+    }
+    return m;
+}
+
+constexpr auto builtin_len_mask = make_builtin_len_mask();
+constexpr auto builtin_data_mask = make_builtin_data_mask();
+
+[[nodiscard]] constexpr bool is_builtin_len_tag(std::uint32_t tag) noexcept {
+    return tag < builtin_mask_words * 64U &&
+           (builtin_len_mask[tag >> 6U] & (std::uint64_t{1} << (tag & 63U))) != 0;
+}
+
+[[nodiscard]] constexpr bool is_builtin_data_tag(std::uint32_t tag) noexcept {
+    return tag < builtin_mask_words * 64U &&
+           (builtin_data_mask[tag >> 6U] & (std::uint64_t{1} << (tag & 63U))) != 0;
+}
+
+[[nodiscard]] constexpr bool is_builtin_pair(LengthDataPair p) noexcept {
+    if (!is_builtin_len_tag(p.length_tag)) return false;
+    for (const auto b : fix44_pairs) {
+        if (b.length_tag == p.length_tag && b.data_tag == p.data_tag) return true;
+    }
+    return false;
+}
+
+bool find_length_pair_fast(std::uint32_t length_tag,
+                           WireHints hints,
+                           bool has_extra_hints,
+                           std::uint64_t extra_len_bloom,
+                           LengthDataPair& found) noexcept {
+    if (is_builtin_len_tag(length_tag)) {
+        for (const auto pair : fix44_pairs) {
+            if (pair.length_tag == length_tag) {
+                found = pair;
+                return true;
+            }
         }
     }
-    for (const auto pair : hints.length_data_pairs) {
-        if (pair.length_tag == length_tag) {
-            found = pair;
-            return true;
+    if (has_extra_hints && (extra_len_bloom & (std::uint64_t{1} << (length_tag & 63U))) != 0) {
+        for (const auto pair : hints.length_data_pairs) {
+            if (pair.length_tag == length_tag) {
+                found = pair;
+                return true;
+            }
         }
     }
     return false;
 }
 
-bool is_data_tag(std::uint32_t tag, WireHints hints) noexcept {
-    for (const auto pair : fix44_pairs) {
-        if (pair.data_tag == tag) return true;
-    }
-    for (const auto pair : hints.length_data_pairs) {
-        if (pair.data_tag == tag) return true;
+bool is_data_tag_fast(std::uint32_t tag,
+                      WireHints hints,
+                      bool has_extra_hints,
+                      std::uint64_t extra_data_bloom) noexcept {
+    if (is_builtin_data_tag(tag)) return true;
+    if (has_extra_hints && (extra_data_bloom & (std::uint64_t{1} << (tag & 63U))) != 0) {
+        for (const auto pair : hints.length_data_pairs) {
+            if (pair.data_tag == tag) return true;
+        }
     }
     return false;
 }
@@ -391,18 +433,31 @@ Status parse_flat_verified(FrameView frame,
         return Status::success();
     };
 
+    const char* const raw_bytes = frame.bytes.data();
+    const std::size_t frame_len = frame.bytes.size();
+    bool has_extra_hints = false;
+    std::uint64_t extra_len_bloom = 0;
+    std::uint64_t extra_data_bloom = 0;
+    for (const auto p : hints.length_data_pairs) {
+        if (!is_builtin_pair(p)) {
+            has_extra_hints = true;
+            extra_len_bloom |= (std::uint64_t{1} << (p.length_tag & 63U));
+            extra_data_bloom |= (std::uint64_t{1} << (p.data_tag & 63U));
+        }
+    }
+
     Status status{};
-    while (cursor < frame.bytes.size()) {
+    while (cursor < frame_len) {
         std::uint32_t current_tag = 0;
         std::size_t equals = 0;
-        status = scan_tag(frame.bytes, cursor, frame.bytes.size(), current_tag, equals);
+        status = scan_tag(frame.bytes, cursor, frame_len, current_tag, equals);
         if (!status.ok()) return status;
         const std::size_t value_start = equals + 1;
         if (cursor == checksum_offset) {
             if (current_tag != 10) return {ErrorCode::invalid_checksum, 10, cursor};
             status = add_field(current_tag, value_start, 3, cursor);
             if (!status.ok()) return status;
-            cursor = frame.bytes.size();
+            cursor = frame_len;
             continue;
         }
         if (cursor > checksum_offset || current_tag == 10)
@@ -413,7 +468,7 @@ Status parse_flat_verified(FrameView frame,
             return {ErrorCode::invalid_header, static_cast<int>(current_tag), cursor};
 
         LengthDataPair pair{};
-        if (find_length_pair(current_tag, hints, pair)) {
+        if (find_length_pair_fast(current_tag, hints, has_extra_hints, extra_len_bloom, pair)) {
             std::size_t length_delimiter = 0;
             status = scan_value_delimiter(frame.bytes,
                                           value_start,
@@ -448,26 +503,28 @@ Status parse_flat_verified(FrameView frame,
             if (data_length == 0 || data_length >= available)
                 return error(ErrorCode::invalid_value, data_tag, data_start);
             const std::size_t data_delimiter = data_start + data_length;
-            if (frame.bytes[data_delimiter] != soh)
+            if (raw_bytes[data_delimiter] != soh)
                 return error(ErrorCode::invalid_value, data_tag, data_delimiter);
             status = add_field(data_tag, data_start, data_length, data_field_start);
             if (!status.ok()) return status;
             cursor = data_delimiter + 1;
             continue;
         }
-        if (is_data_tag(current_tag, hints))
+        if (is_data_tag_fast(current_tag, hints, has_extra_hints, extra_data_bloom))
             return error(ErrorCode::invalid_value, current_tag, cursor);
 
-        std::size_t delimiter = 0;
-        status = scan_value_delimiter(frame.bytes,
-                                      value_start,
-                                      checksum_offset,
-                                      current_tag,
-                                      ErrorCode::invalid_frame,
-                                      delimiter);
-        if (!status.ok()) return status;
-        const std::string_view plain_value = frame.bytes.substr(value_start, delimiter - value_start);
-        if (!is_valid_plain_value(plain_value))
+        // Single-pass scan for SOH delimiter + ASCII printable text validation.
+        std::size_t delimiter = value_start;
+        while (delimiter < checksum_offset) {
+            const unsigned char ch = static_cast<unsigned char>(raw_bytes[delimiter]);
+            if (ch == static_cast<unsigned char>(soh)) break;
+            if (ch < 0x20U || ch == 0x7fU)
+                return error(ErrorCode::invalid_value, current_tag, value_start);
+            ++delimiter;
+        }
+        if (delimiter == checksum_offset)
+            return error(ErrorCode::invalid_frame, current_tag, checksum_offset);
+        if (delimiter == value_start)
             return error(ErrorCode::invalid_value, current_tag, value_start);
         status = add_field(current_tag, value_start, delimiter - value_start, cursor);
         if (!status.ok()) return status;

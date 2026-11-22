@@ -122,8 +122,12 @@ template <class Unsigned>
 [[nodiscard]] Status validate_message_impl(const detail::MessageView& message, std::size_t depth) noexcept {
     if (depth > 64) return Status{ErrorCode::invalid_value};
     if (!message.status.ok()) return message.status;
-    if (const auto schema_status = detail::validate_schema_presence(message); !schema_status.ok()) return schema_status;
-    if (message.msg_type.empty() || !valid_text(message.msg_type)) return Status{ErrorCode::invalid_value, 35};
+    if (!message.presence_validated) {
+        if (const auto schema_status = detail::validate_schema_presence(message); !schema_status.ok())
+            return schema_status;
+    }
+    if (message.msg_type.empty() || (!message.prevalidated_scalars && !valid_text(message.msg_type)))
+        return Status{ErrorCode::invalid_value, 35};
     if (message.field_count != 0 && (message.plan == nullptr || message.slots == nullptr)) {
         return Status{ErrorCode::invalid_value};
     }
@@ -132,33 +136,36 @@ template <class Unsigned>
 
     for (std::size_t i = 0; i < message.field_count; ++i) {
         const auto& field = message.plan[i];
-        if (field.slot_index >= message.field_count) return Status{ErrorCode::invalid_value, static_cast<int>(field.tag)};
+        if (!message.presence_validated && field.slot_index >= message.field_count)
+            return Status{ErrorCode::invalid_value, static_cast<int>(field.tag)};
         if (!detail::is_present(message, field.slot_index)) continue;
         const auto& slot = message.slots[detail::physical_slot_index(message, field.slot_index)];
-        switch (field.kind) {
-        case FieldKind::character: {
-            if (slot.scalar > 0xff || slot.scalar < 0x20 || slot.scalar == 0x7f) {
-                return Status{ErrorCode::invalid_value, static_cast<int>(field.tag)};
+        if (!message.prevalidated_scalars) {
+            switch (field.kind) {
+            case FieldKind::character: {
+                if (slot.scalar > 0xff || slot.scalar < 0x20 || slot.scalar == 0x7f) {
+                    return Status{ErrorCode::invalid_value, static_cast<int>(field.tag)};
+                }
+                break;
             }
-            break;
-        }
-        case FieldKind::signed_integer:
-        case FieldKind::unsigned_integer:
-            break;
-        case FieldKind::decimal:
-            if (slot.size > 18) return Status{ErrorCode::invalid_decimal, static_cast<int>(field.tag)};
-            break;
-        case FieldKind::string:
-            if (slot.offset > message.value_byte_count ||
-                slot.size > message.value_byte_count - slot.offset ||
-                (slot.size != 0 && message.value_bytes == nullptr)) {
-                return Status{ErrorCode::invalid_value, static_cast<int>(field.tag)};
+            case FieldKind::signed_integer:
+            case FieldKind::unsigned_integer:
+                break;
+            case FieldKind::decimal:
+                if (slot.size > 18) return Status{ErrorCode::invalid_decimal, static_cast<int>(field.tag)};
+                break;
+            case FieldKind::string:
+                if (slot.offset > message.value_byte_count ||
+                    slot.size > message.value_byte_count - slot.offset ||
+                    (slot.size != 0 && message.value_bytes == nullptr)) {
+                    return Status{ErrorCode::invalid_value, static_cast<int>(field.tag)};
+                }
+                if (field.wire_type != WireType::binary_data &&
+                    !valid_text({message.value_bytes == nullptr ? "" : message.value_bytes + slot.offset, slot.size})) {
+                    return Status{ErrorCode::invalid_value, static_cast<int>(field.tag)};
+                }
+                break;
             }
-            if (field.wire_type != WireType::binary_data &&
-                !valid_text({message.value_bytes == nullptr ? "" : message.value_bytes + slot.offset, slot.size})) {
-                return Status{ErrorCode::invalid_value, static_cast<int>(field.tag)};
-            }
-            break;
         }
         if (field.wire_type == WireType::binary_data) {
             // FIX TagValue requires Length > 0 for binary DATA fields.
@@ -184,7 +191,7 @@ template <class Unsigned>
                 return Status{ErrorCode::invalid_value, static_cast<int>(field.tag)};
             }
         }
-        if (field.wire_type == WireType::utc_timestamp) {
+        if (!message.prevalidated_scalars && field.wire_type == WireType::utc_timestamp) {
             std::array<char, 32> scratch{};
             std::string_view value;
             if (const auto text_status = field_value_text(message, field, scratch, value); !text_status.ok()) {
@@ -194,7 +201,7 @@ template <class Unsigned>
                 return Status{ErrorCode::invalid_timestamp, static_cast<int>(field.tag)};
             }
         }
-        if (message.enum_value_allowed != nullptr) {
+        if (field.needs_policy_check && message.enum_value_allowed != nullptr) {
             std::array<char, 32> scratch{};
             std::string_view value;
             if (const auto text_status = field_value_text(message, field, scratch, value); !text_status.ok()) {
@@ -482,6 +489,249 @@ void append_body_fields(const detail::MessageView& message, Writer& writer) noex
     return Status::success();
 }
 
+class FastSinglePassWriter {
+public:
+    FastSinglePassWriter(char* data, std::size_t start, std::size_t limit) noexcept
+        : data_(data), pos_(start), limit_(limit) {}
+
+    [[nodiscard]] bool overflow() const noexcept { return overflow_; }
+    [[nodiscard]] std::size_t pos() const noexcept { return pos_; }
+    [[nodiscard]] std::uint64_t checksum() const noexcept { return checksum_; }
+    [[nodiscard]] const char* data() const noexcept { return data_; }
+
+    void append(std::string_view value) noexcept {
+        const std::size_t n = value.size();
+        if (n == 0) return;
+        if (n > limit_ - pos_) { overflow_ = true; return; }
+        std::memcpy(data_ + pos_, value.data(), n);
+        add_checksum(data_ + pos_, n);
+        pos_ += n;
+    }
+
+    void append(char value) noexcept {
+        if (pos_ >= limit_) { overflow_ = true; return; }
+        data_[pos_++] = value;
+        checksum_ += static_cast<unsigned char>(value);
+    }
+
+    void append_unsigned(std::uint64_t value) noexcept {
+        if (pos_ >= limit_) { overflow_ = true; return; }
+        const auto res = std::to_chars(data_ + pos_, data_ + limit_, value);
+        if (res.ec != std::errc{}) { overflow_ = true; return; }
+        const auto n = static_cast<std::size_t>(res.ptr - (data_ + pos_));
+        add_checksum(data_ + pos_, n);
+        pos_ += n;
+    }
+
+    void append_signed(std::int64_t value) noexcept {
+        if (pos_ >= limit_) { overflow_ = true; return; }
+        const auto res = std::to_chars(data_ + pos_, data_ + limit_, value);
+        if (res.ec != std::errc{}) { overflow_ = true; return; }
+        const auto n = static_cast<std::size_t>(res.ptr - (data_ + pos_));
+        add_checksum(data_ + pos_, n);
+        pos_ += n;
+    }
+
+    void append_decimal(const detail::SlotValue& slot) noexcept {
+        if (pos_ >= limit_) { overflow_ = true; return; }
+        std::size_t sz = 0;
+        const Decimal value{std::bit_cast<std::int64_t>(slot.scalar), static_cast<std::uint8_t>(slot.size)};
+        if (!value.format(std::span<char>{data_ + pos_, limit_ - pos_}, sz).ok()) {
+            overflow_ = true;
+            return;
+        }
+        add_checksum(data_ + pos_, sz);
+        pos_ += sz;
+    }
+
+private:
+    void add_checksum(const char* ptr, std::size_t n) noexcept {
+        const auto* raw = reinterpret_cast<const unsigned char*>(ptr);
+        std::uint64_t sum = checksum_;
+        for (std::size_t i = 0; i < n; ++i) sum += raw[i];
+        checksum_ = sum;
+    }
+
+    char* data_;
+    std::size_t pos_;
+    std::size_t limit_;
+    std::uint64_t checksum_{};
+    bool overflow_{false};
+};
+
+[[nodiscard]] Status encode_body_single_pass(const detail::MessageView& message,
+    FastSinglePassWriter& writer, std::size_t depth) noexcept {
+    if (depth > 64) return Status{ErrorCode::invalid_value};
+    if (!message.status.ok()) return message.status;
+    if (!message.presence_validated) {
+        if (const auto schema_status = detail::validate_schema_presence(message); !schema_status.ok())
+            return schema_status;
+    }
+    if (message.msg_type.empty() || (!message.prevalidated_scalars && !valid_text(message.msg_type)))
+        return Status{ErrorCode::invalid_value, 35};
+    if (message.field_count != 0 && (message.plan == nullptr || message.slots == nullptr))
+        return Status{ErrorCode::invalid_value};
+    if (message.value_byte_count != 0 && message.value_bytes == nullptr) return Status{ErrorCode::invalid_value};
+    if (message.group_count != 0 && message.groups == nullptr) return Status{ErrorCode::invalid_value};
+
+    std::size_t matched_groups = 0;
+    for (std::size_t i = 0; i < message.field_count; ++i) {
+        const auto& field = message.plan[i];
+        if (!message.presence_validated && field.slot_index >= message.field_count)
+            return Status{ErrorCode::invalid_value, static_cast<int>(field.tag)};
+        if (!detail::is_present(message, field.slot_index)) continue;
+        const auto& slot = message.slots[detail::physical_slot_index(message, field.slot_index)];
+
+        if (!message.prevalidated_scalars) {
+            switch (field.kind) {
+            case FieldKind::character:
+                if (slot.scalar > 0xff || slot.scalar < 0x20 || slot.scalar == 0x7f)
+                    return Status{ErrorCode::invalid_value, static_cast<int>(field.tag)};
+                break;
+            case FieldKind::signed_integer:
+            case FieldKind::unsigned_integer:
+                break;
+            case FieldKind::decimal:
+                if (slot.size > 18) return Status{ErrorCode::invalid_decimal, static_cast<int>(field.tag)};
+                break;
+            case FieldKind::string:
+                if (slot.offset > message.value_byte_count ||
+                    slot.size > message.value_byte_count - slot.offset ||
+                    (slot.size != 0 && message.value_bytes == nullptr))
+                    return Status{ErrorCode::invalid_value, static_cast<int>(field.tag)};
+                if (field.wire_type != WireType::binary_data &&
+                    !valid_text({message.value_bytes == nullptr ? "" : message.value_bytes + slot.offset, slot.size}))
+                    return Status{ErrorCode::invalid_value, static_cast<int>(field.tag)};
+                break;
+            }
+        }
+
+        if (field.wire_type == WireType::binary_data) {
+            if (slot.size == 0 || field.pair_tag == 0 || field.pair_prefix_size == 0)
+                return Status{ErrorCode::invalid_value, static_cast<int>(field.tag)};
+            const auto* length_field = find_plan_field(message, field.pair_tag);
+            if (length_field != nullptr && detail::is_present(message, length_field->slot_index)) {
+                std::uint64_t length{};
+                if (const auto st = group_count_value(message, *length_field, length); !st.ok())
+                    return Status{ErrorCode::invalid_value, static_cast<int>(field.pair_tag)};
+                if (length == 0 || length != slot.size)
+                    return Status{ErrorCode::invalid_value, static_cast<int>(field.pair_tag)};
+            } else {
+                writer.append(std::string_view{field.pair_tag_prefix.data(), field.pair_prefix_size});
+                writer.append_unsigned(slot.size);
+                writer.append(soh);
+                if (writer.overflow()) return Status::success();
+            }
+        } else if (field.pair_tag != 0) {
+            const auto* data_field = find_plan_field(message, field.pair_tag);
+            std::uint64_t length{};
+            if (const auto st = group_count_value(message, field, length); !st.ok()) return st;
+            if (data_field != nullptr && detail::is_present(message, data_field->slot_index)) {
+                if (data_field->wire_type != WireType::binary_data || length == 0 ||
+                    length != binary_data_size(message, *data_field))
+                    return Status{ErrorCode::invalid_value, static_cast<int>(field.tag)};
+            } else {
+                return Status{ErrorCode::invalid_value, static_cast<int>(field.tag)};
+            }
+        }
+
+        const detail::RepeatingGroupView* group = nullptr;
+        if (field.group_counter) {
+            group = find_group(message, field.tag);
+            std::uint64_t stored_count{};
+            if (const auto st = group_count_value(message, field, stored_count); !st.ok()) return st;
+            if (group != nullptr) {
+                if (group->count_tag == 0 || group->delimiter_tag == 0 ||
+                    (group->entry_count != 0 && group->entries == nullptr) ||
+                    group_tag_count(message, group->count_tag) != 1 ||
+                    stored_count != group->entry_count) {
+                    return Status{ErrorCode::invalid_value, static_cast<int>(field.tag)};
+                }
+                ++matched_groups;
+            } else if (stored_count != 0) {
+                return Status{ErrorCode::invalid_value, static_cast<int>(field.tag)};
+            }
+        }
+
+        writer.append(std::string_view{field.tag_prefix.data(), field.prefix_size});
+        const std::size_t val_start = writer.pos();
+        if (group != nullptr) {
+            writer.append_unsigned(group->entry_count);
+        } else {
+            switch (field.kind) {
+            case FieldKind::character:
+                writer.append(static_cast<char>(slot.scalar));
+                break;
+            case FieldKind::signed_integer:
+                writer.append_signed(std::bit_cast<std::int64_t>(slot.scalar));
+                break;
+            case FieldKind::unsigned_integer:
+                writer.append_unsigned(slot.scalar);
+                break;
+            case FieldKind::decimal:
+                writer.append_decimal(slot);
+                break;
+            case FieldKind::string:
+                writer.append(std::string_view{message.value_bytes == nullptr ? "" : message.value_bytes + slot.offset, slot.size});
+                break;
+            }
+        }
+        if (writer.overflow()) return Status::success();
+
+        const std::string_view written_val{writer.data() + val_start, writer.pos() - val_start};
+        if (!message.prevalidated_scalars && field.wire_type == WireType::utc_timestamp) {
+            if (!detail::is_valid_utc_timestamp(written_val))
+                return Status{ErrorCode::invalid_timestamp, static_cast<int>(field.tag)};
+        }
+        if (field.needs_policy_check && message.enum_value_allowed != nullptr) {
+            if (!message.enum_value_allowed(field.tag, written_val))
+                return Status{ErrorCode::invalid_value, static_cast<int>(field.tag)};
+        }
+        writer.append(soh);
+        if (writer.overflow()) return Status::success();
+
+        if (group != nullptr) {
+            for (std::size_t entry_index = 0; entry_index < group->entry_count; ++entry_index) {
+                const auto& entry = group->entries[entry_index];
+                if (entry.field_count == 0 || entry.plan == nullptr || entry.plan[0].tag != group->delimiter_tag ||
+                    !detail::is_present(entry, entry.plan[0].slot_index)) {
+                    return Status{ErrorCode::invalid_value, static_cast<int>(group->delimiter_tag)};
+                }
+                if (const auto st = encode_body_single_pass(entry, writer, depth + 1); !st.ok()) return st;
+                if (writer.overflow()) return Status::success();
+            }
+        }
+    }
+
+    if (matched_groups != message.group_count) {
+        return validate_message_impl(message, depth);
+    }
+    return Status::success();
+}
+
+[[nodiscard]] bool estimate_max_body_bytes(const detail::MessageView& message,
+    std::size_t& total, std::size_t depth) noexcept {
+    if (depth > 64) return false;
+    constexpr std::size_t max_bytes_per_field = 40;
+    if (message.field_count > std::numeric_limits<std::size_t>::max() / max_bytes_per_field) return false;
+    const std::size_t field_bound = message.field_count * max_bytes_per_field;
+    if (field_bound > std::numeric_limits<std::size_t>::max() - total) return false;
+    total += field_bound;
+    if (message.value_byte_count > std::numeric_limits<std::size_t>::max() - total) return false;
+    total += message.value_byte_count;
+    if (message.group_count != 0) {
+        if (message.groups == nullptr) return false;
+        for (std::size_t g = 0; g < message.group_count; ++g) {
+            const auto& group = message.groups[g];
+            if (group.entry_count != 0 && group.entries == nullptr) return false;
+            for (std::size_t e = 0; e < group.entry_count; ++e) {
+                if (!estimate_max_body_bytes(group.entries[e], total, depth + 1)) return false;
+            }
+        }
+    }
+    return true;
+}
+
 } // namespace
 
 Result<std::size_t> measure_fix(detail::MessageView message, SessionHeader header) noexcept {
@@ -493,6 +743,112 @@ Result<std::size_t> measure_fix(detail::MessageView message, SessionHeader heade
 
 Result<std::size_t> encode_fix(detail::MessageView message, SessionHeader header,
     std::span<char> output) noexcept {
+    const auto begin = begin_string(header.version);
+    if (begin.empty()) return Status{ErrorCode::invalid_header, 8};
+
+    // Never touch output before verifying basic message & header status.
+    if (!message.status.ok()) return message.status;
+    if (!message.presence_validated) {
+        if (const auto schema_status = detail::validate_schema_presence(message); !schema_status.ok())
+            return schema_status;
+        message.presence_validated = true;
+    }
+    if (message.msg_type.empty() || (!message.prevalidated_scalars && !valid_text(message.msg_type)))
+        return Status{ErrorCode::invalid_value, 35};
+
+    // Validate header first on the happy path; if invalid, run full message validation
+    // to preserve message-before-header error precedence without touching output.
+    if (const auto hs = validate_header(message, header); !hs.ok()) {
+        if (const auto ms = validate_message(message); !ms.ok()) return ms;
+        return hs;
+    }
+
+    // Compute O(1) safe upper bound so single-pass direct-write NEVER writes to output
+    // if capacity_exceeded is even theoretically possible.
+    std::size_t max_frame_bound = 128 + begin.size() + message.msg_type.size() +
+        header.sender_comp_id.size() + header.target_comp_id.size() +
+        header.sending_time.size() + header.orig_sending_time.size();
+    const bool bound_ok = estimate_max_body_bytes(message, max_frame_bound, 0);
+
+    // Single-pass direct-write + BodyLength backpatch fast path.
+    // Guesses 3-digit BodyLength (100..999 bytes, zero memmove for normal FIX orders/reports).
+    const std::size_t guessed_body_start = 3 + begin.size() + 6; // "8=" + begin + SOH + "9=000" + SOH
+    if (bound_ok && output.size() >= max_frame_bound && output.size() > guessed_body_start + checksum_suffix_size) {
+        FastSinglePassWriter writer{output.data(), guessed_body_start, output.size() - checksum_suffix_size};
+        writer.append("35=");
+        writer.append(message.msg_type);
+        writer.append(soh);
+        writer.append("49=");
+        writer.append(header.sender_comp_id);
+        writer.append(soh);
+        writer.append("56=");
+        writer.append(header.target_comp_id);
+        writer.append(soh);
+        writer.append("34=");
+        writer.append_unsigned(header.msg_seq_num);
+        writer.append(soh);
+        if (header.poss_dup) {
+            writer.append("43=Y");
+            writer.append(soh);
+        }
+        writer.append("52=");
+        writer.append(header.sending_time);
+        writer.append(soh);
+        if (header.last_msg_seq_num_processed) {
+            writer.append("369=");
+            writer.append_unsigned(*header.last_msg_seq_num_processed);
+            writer.append(soh);
+        }
+        if (header.poss_dup) {
+            writer.append("122=");
+            writer.append(header.orig_sending_time);
+            writer.append(soh);
+        }
+
+        if (!writer.overflow()) {
+            if (const auto st = encode_body_single_pass(message, writer, 0); !st.ok()) return st;
+        }
+
+        if (!writer.overflow()) {
+            const std::size_t body_length = writer.pos() - guessed_body_start;
+            const std::size_t body_digits = decimal_digits(body_length);
+            const std::size_t actual_body_start = 3 + begin.size() + 3 + body_digits;
+            const std::size_t total_size = actual_body_start + body_length + checksum_suffix_size;
+            if (total_size <= output.size()) {
+                if (actual_body_start != guessed_body_start) {
+                    std::memmove(output.data() + actual_body_start,
+                                 output.data() + guessed_body_start, body_length);
+                }
+                char* p = output.data();
+                p[0] = '8';
+                p[1] = '=';
+                std::memcpy(p + 2, begin.data(), begin.size());
+                std::size_t off = 2 + begin.size();
+                p[off++] = soh;
+                p[off++] = '9';
+                p[off++] = '=';
+                const auto len_res = std::to_chars(p + off, p + actual_body_start, body_length);
+                off = static_cast<std::size_t>(len_res.ptr - p);
+                p[off++] = soh;
+
+                std::uint64_t total_sum = writer.checksum();
+                const auto* prefix_raw = reinterpret_cast<const unsigned char*>(p);
+                for (std::size_t i = 0; i < actual_body_start; ++i) total_sum += prefix_raw[i];
+                const auto checksum = static_cast<unsigned>(total_sum & 0xffU);
+                char* tail = p + actual_body_start + body_length;
+                tail[0] = '1';
+                tail[1] = '0';
+                tail[2] = '=';
+                tail[3] = static_cast<char>('0' + (checksum / 100U) % 10U);
+                tail[4] = static_cast<char>('0' + (checksum / 10U) % 10U);
+                tail[5] = static_cast<char>('0' + checksum % 10U);
+                tail[6] = soh;
+                return total_size;
+            }
+        }
+    }
+
+    // Tight-buffer fallback: preserves exact validation-vs-capacity error precedence.
     std::size_t body_length{};
     std::size_t total_size{};
     if (const auto status = measure_encoded_frame(message, header, body_length, total_size); !status.ok()) return status;
@@ -500,7 +856,7 @@ Result<std::size_t> encode_fix(detail::MessageView message, SessionHeader header
 
     Writer writer{output};
     writer.append("8=");
-    writer.append(begin_string(header.version));
+    writer.append(begin);
     writer.append(soh);
     writer.append("9=");
     writer.append_unsigned(body_length);
