@@ -549,14 +549,14 @@ void test_two_driver_high_logon_replays_real_admin_gapfill() {
 
     auto business = nf::message<"D">().set<11>("LOST-BEFORE-WRITE").set<55>("NVDA");
     CHECK(initiator.send(business, 3, t3).ok()); // Sequence 2 is committed but not written.
-    CHECK(acceptor.tick(1002, t3).ok());
-    CHECK(flush_all(acceptor, from_acceptor, 1002));
+    CHECK(acceptor.tick(1202, t3).ok());
+    CHECK(flush_all(acceptor, from_acceptor, 1202));
     CHECK(take_frame(from_acceptor.bytes, frame));
     CHECK(field(frame, 35) == "1" && field(frame, 34) == "2");
-    CHECK(initiator.receive(frame, 1003, t4).ok()); // Its response is Heartbeat sequence 3.
+    CHECK(initiator.receive(frame, 1203, t4).ok()); // Its response is Heartbeat sequence 3.
     CHECK(initiator.next_outbound_seq() == 4);
-    CHECK(initiator.disconnected(nf::Status{nf::ErrorCode::connection_closed}, 1004).ok());
-    CHECK(acceptor.disconnected(nf::Status{nf::ErrorCode::connection_closed}, 1004).ok());
+    CHECK(initiator.disconnected(nf::Status{nf::ErrorCode::connection_closed}, 1204).ok());
+    CHECK(acceptor.disconnected(nf::Status{nf::ErrorCode::connection_closed}, 1204).ok());
     from_initiator.bytes.clear();
     from_acceptor.bytes.clear();
 
@@ -637,14 +637,14 @@ void test_two_driver_high_logon_recovers_business_and_admin_gapfill() {
 
     auto business = nf::message<"D">().set<11>("LOST-BEFORE-WRITE").set<55>("NVDA");
     CHECK(initiator.send(business, 3, t3).ok()); // Outbound seq 2 remains untransmitted.
-    CHECK(acceptor.tick(1002, t3).ok());
-    CHECK(flush_all(acceptor, from_acceptor, 1002));
+    CHECK(acceptor.tick(1202, t3).ok());
+    CHECK(flush_all(acceptor, from_acceptor, 1202));
     CHECK(take_frame(from_acceptor.bytes, frame));
     CHECK(field(frame, 35) == "1");
-    CHECK(initiator.receive(frame, 1003, t4).ok()); // Persists an admin Heartbeat at outbound seq 3.
+    CHECK(initiator.receive(frame, 1203, t4).ok()); // Persists an admin Heartbeat at outbound seq 3.
     CHECK(initiator.next_outbound_seq() == 4);
-    CHECK(initiator.disconnected(nf::Status{nf::ErrorCode::connection_closed}, 1004).ok());
-    CHECK(acceptor.disconnected(nf::Status{nf::ErrorCode::connection_closed}, 1004).ok());
+    CHECK(initiator.disconnected(nf::Status{nf::ErrorCode::connection_closed}, 1204).ok());
+    CHECK(acceptor.disconnected(nf::Status{nf::ErrorCode::connection_closed}, 1204).ok());
     from_initiator.bytes.clear();
     from_acceptor.bytes.clear();
 
@@ -741,21 +741,21 @@ void test_testrequest_timeout_starts_after_write_without_past_deadline_spin() {
     CHECK(driver.receive(logon("SELL", "BUY", 1, t1, 1), 1, t1).ok());
     CHECK(driver.state() == nf::SessionState::active);
 
-    CHECK(driver.tick(1001, t2).ok());
+    CHECK(driver.tick(1201, t2).ok());
     CHECK(driver.needs_write());
-    CHECK(driver.next_deadline_ms() > 1001);
+    CHECK(driver.next_deadline_ms() > 1201);
     output.max_write = 0;
     output.block_once = true;
-    CHECK(driver.flush(&capture_write, &output, 1001, 1024).ok());
-    CHECK(driver.tick(2001, t3).ok()); // No timeout while TestRequest is blocked before its first byte.
+    CHECK(driver.flush(&capture_write, &output, 1201, 1024).ok());
+    CHECK(driver.tick(2201, t3).ok()); // No timeout while TestRequest is blocked before its first byte.
     CHECK(driver.state() == nf::SessionState::active);
-    CHECK(driver.next_deadline_ms() > 2001);
+    CHECK(driver.next_deadline_ms() > 2201);
 
     output.max_write = std::numeric_limits<std::size_t>::max();
-    CHECK(flush_all(driver, output, 2002));
+    CHECK(flush_all(driver, output, 2202));
     CHECK(take_frame(output.bytes, frame));
     CHECK(field(frame, 35) == "1");
-    CHECK(driver.tick(3003, t4).ok()); // Response deadline starts after TestRequest was written.
+    CHECK(driver.tick(3203, t4).ok()); // Response deadline starts after TestRequest was written.
     CHECK(driver.state() == nf::SessionState::logout_pending);
 }
 

@@ -1,6 +1,7 @@
 #include "nimblefix/codec.hpp"
 
 #include <array>
+#include <cstring>
 #include <cstdint>
 #include <limits>
 
@@ -215,9 +216,9 @@ Status scan_value_delimiter(std::string_view input,
                             ErrorCode boundary_error,
                             std::size_t& delimiter_at) noexcept {
     const std::size_t scan_end = input.size() < hard_end ? input.size() : hard_end;
-    for (std::size_t cursor = value_start; cursor < scan_end; ++cursor) {
-        if (input[cursor] == soh) {
-            delimiter_at = cursor;
+    if (value_start < scan_end) {
+        if (const void* found = std::memchr(input.data() + value_start, soh, scan_end - value_start)) {
+            delimiter_at = static_cast<std::size_t>(static_cast<const char*>(found) - input.data());
             return Status::success();
         }
     }
@@ -249,21 +250,24 @@ Status inspect_frame(std::string_view input,
     std::uint32_t tag = 0;
     std::size_t equals_at = 0;
     FixVersion version = FixVersion::fix44;
-    Status status = scan_tag(input, 0, std::numeric_limits<std::size_t>::max(), tag, equals_at);
-    if (!status.ok()) return status;
-    if (tag != 8) return {ErrorCode::invalid_header, static_cast<int>(tag), 0};
+    if (input.empty()) return {ErrorCode::need_more, 8, 0};
+    if (input[0] != '8') return {ErrorCode::invalid_header, 0, 0};
+    if (input.size() == 1) return {ErrorCode::need_more, 8, 1};
+    if (input[1] != '=') return {ErrorCode::invalid_header, 0, 0};
+    tag = 8;
+    equals_at = 1;
+    Status status{};
     std::size_t begin_delimiter = 0;
     status = read_begin_string(input, equals_at + 1, limits.max_frame_bytes, begin_delimiter, version);
     if (!status.ok()) return status;
 
     const std::size_t body_length_tag_start = begin_delimiter + 1;
-    status = scan_tag(input,
-                      body_length_tag_start,
-                      std::numeric_limits<std::size_t>::max(),
-                      tag,
-                      equals_at);
-    if (!status.ok()) return status;
-    if (tag != 9) return {ErrorCode::invalid_header, static_cast<int>(tag), body_length_tag_start};
+    if (body_length_tag_start >= input.size()) return {ErrorCode::need_more, 9, input.size()};
+    if (input[body_length_tag_start] != '9') return {ErrorCode::invalid_header, 0, body_length_tag_start};
+    if (body_length_tag_start + 1 >= input.size()) return {ErrorCode::need_more, 9, input.size()};
+    if (input[body_length_tag_start + 1] != '=') return {ErrorCode::invalid_header, 0, body_length_tag_start};
+    tag = 9;
+    equals_at = body_length_tag_start + 1;
 
     std::size_t body_length_delimiter = 0;
     std::size_t body_length = 0;
@@ -334,10 +338,10 @@ Status inspect_frame(std::string_view input,
                                  static_cast<unsigned>(input[checksum_offset + 4] - '0') * 10U +
                                  static_cast<unsigned>(input[checksum_offset + 5] - '0');
     if (check_value > 255U) return {ErrorCode::invalid_checksum, 10, checksum_offset + 3};
-    unsigned sum = 0;
-    for (std::size_t i = 0; i < checksum_offset; ++i)
-        sum = (sum + static_cast<unsigned char>(input[i])) & 0xffU;
-    if (sum != check_value) return {ErrorCode::invalid_checksum, 10, checksum_offset + 3};
+    std::uint64_t sum = 0;
+    const auto* raw = reinterpret_cast<const unsigned char*>(input.data());
+    for (std::size_t i = 0; i < checksum_offset; ++i) sum += raw[i];
+    if ((sum & 0xffU) != check_value) return {ErrorCode::invalid_checksum, 10, checksum_offset + 3};
 
     output.bytes = input.substr(0, frame_size);
     output.consumed = frame_size;
@@ -358,25 +362,22 @@ Result<FieldView> FlatMessageView::find_unique(std::uint32_t tag) const noexcept
     return value;
 }
 
-Status parse_flat(FrameView frame,
-                  std::span<FieldView> scratch,
-                  FlatMessageView& output,
-                  WireHints hints,
-                  CodecLimits limits) noexcept {
+Status parse_flat_verified(FrameView frame,
+                           std::span<FieldView> scratch,
+                           FlatMessageView& output,
+                           WireHints hints) noexcept {
     output.frame_ = {};
     output.fields_ = {};
-    if (frame.bytes.empty() || frame.consumed != frame.bytes.size())
+    if (frame.bytes.size() < 26 || frame.consumed != frame.bytes.size())
         return {ErrorCode::invalid_frame, 0, 0};
-
-    FrameView verified{};
-    Status status = inspect_frame(frame.bytes, verified, hints, limits);
-    if (!status.ok()) return status;
-    if (verified.consumed != frame.bytes.size())
-        return {ErrorCode::invalid_frame, 0, verified.consumed};
 
     const std::size_t checksum_offset = frame.bytes.size() - 7;
     const std::size_t first_header_delimiter = frame.bytes.find(soh);
+    if (first_header_delimiter == std::string_view::npos || first_header_delimiter + 1 >= checksum_offset)
+        return {ErrorCode::invalid_header, 8, 0};
     const std::size_t second_header_delimiter = frame.bytes.find(soh, first_header_delimiter + 1);
+    if (second_header_delimiter == std::string_view::npos || second_header_delimiter >= checksum_offset)
+        return {ErrorCode::invalid_header, 9, first_header_delimiter + 1};
     const std::size_t body_start = second_header_delimiter + 1;
     std::size_t cursor = 0;
     std::size_t count = 0;
@@ -390,6 +391,7 @@ Status parse_flat(FrameView frame,
         return Status::success();
     };
 
+    Status status{};
     while (cursor < frame.bytes.size()) {
         std::uint32_t current_tag = 0;
         std::size_t equals = 0;
@@ -456,9 +458,6 @@ Status parse_flat(FrameView frame,
         if (is_data_tag(current_tag, hints))
             return error(ErrorCode::invalid_value, current_tag, cursor);
 
-        // Unknown fields use the plain-text boundary. A custom binary field
-        // cannot be inferred from SOH bytes; without a WireHint, callers can
-        // retain FrameView::bytes as an opaque frame instead of flat parsing.
         std::size_t delimiter = 0;
         status = scan_value_delimiter(frame.bytes,
                                       value_start,
@@ -478,6 +477,24 @@ Status parse_flat(FrameView frame,
     output.frame_ = frame.bytes;
     output.fields_ = std::span<const FieldView>(scratch.data(), count);
     return Status::success();
+}
+
+Status parse_flat(FrameView frame,
+                  std::span<FieldView> scratch,
+                  FlatMessageView& output,
+                  WireHints hints,
+                  CodecLimits limits) noexcept {
+    output.frame_ = {};
+    output.fields_ = {};
+    if (frame.bytes.empty() || frame.consumed != frame.bytes.size())
+        return {ErrorCode::invalid_frame, 0, 0};
+
+    FrameView verified{};
+    const Status status = inspect_frame(frame.bytes, verified, hints, limits);
+    if (!status.ok()) return status;
+    if (verified.consumed != frame.bytes.size())
+        return {ErrorCode::invalid_frame, 0, verified.consumed};
+    return parse_flat_verified(verified, scratch, output, hints);
 }
 
 } // namespace nimblefix

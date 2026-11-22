@@ -14,6 +14,7 @@
 #include <limits>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <set>
 #include <string>
 #include <string_view>
@@ -28,8 +29,13 @@ struct XmlSchema::Storage {
     std::vector<EnumValueDescriptor> enum_values{};
     std::vector<FieldDescriptor> fields{};
     std::vector<std::vector<MessageMemberDescriptor>> group_members{};
+    std::vector<std::vector<MemberTagEntry>> group_members_by_tag{};
+    std::vector<std::vector<std::uint32_t>> group_required_members{};
     std::vector<std::vector<MessageMemberDescriptor>> component_members{};
+    std::vector<std::vector<MemberTagEntry>> component_members_by_tag{};
     std::vector<std::vector<MessageMemberDescriptor>> message_members{};
+    std::vector<std::vector<MemberTagEntry>> message_members_by_tag{};
+    std::vector<std::vector<std::uint32_t>> message_required_members{};
     std::vector<GroupDescriptor> groups{};
     std::vector<ComponentDescriptor> components{};
     std::vector<MessageDescriptor> messages{};
@@ -45,7 +51,8 @@ struct XmlSchema::Storage {
 namespace {
 
 constexpr std::string_view codegen_version = "codegen-3";
-constexpr std::array<std::uint32_t, 9> managed_tags{{8, 9, 10, 34, 35, 49, 52, 56, 369}};
+constexpr std::array<std::uint32_t, 11> managed_tags{{8, 9, 10, 34, 35, 43, 49, 52, 56, 122, 369}};
+constexpr std::size_t max_expanded_members_per_scope = 100'000;
 
 struct Location {
     std::string source{};
@@ -127,16 +134,26 @@ struct FieldTypeInfo {
 }
 
 [[nodiscard]] bool valid_identifier(std::string_view value) noexcept {
-    if (value.empty() || !(value[0] == '_' || (value[0] >= 'A' && value[0] <= 'Z') ||
+    if (value.empty() || !((value[0] >= 'A' && value[0] <= 'Z') ||
         (value[0] >= 'a' && value[0] <= 'z'))) return false;
     for (const unsigned char ch : value) {
         if (!(ch == '_' || (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') ||
             (ch >= '0' && ch <= '9'))) return false;
     }
     if (value.find("__") != std::string_view::npos) return false;
-    constexpr std::array<std::string_view, 20> keywords{{
-        "alignas", "alignof", "and", "asm", "auto", "bool", "break", "case", "catch", "char",
-        "class", "const", "constexpr", "continue", "default", "delete", "do", "double", "else", "enum"
+    constexpr std::array<std::string_view, 97> keywords{{
+        "alignas", "alignof", "and", "and_eq", "asm", "atomic_cancel", "atomic_commit",
+        "atomic_noexcept", "auto", "bitand", "bitor", "bool", "break", "case", "catch", "char",
+        "char8_t", "char16_t", "char32_t", "class", "compl", "concept", "const", "consteval",
+        "constexpr", "constinit", "const_cast", "continue", "co_await", "co_return", "co_yield",
+        "decltype", "default", "delete", "do", "double", "dynamic_cast", "else", "enum", "explicit",
+        "export", "extern", "false", "float", "for", "friend", "goto", "if", "inline", "int",
+        "long", "mutable", "namespace", "new", "noexcept", "not", "not_eq", "nullptr", "operator",
+        "or", "or_eq", "private", "protected", "public", "reflexpr", "register", "reinterpret_cast",
+        "requires", "return", "short", "signed", "sizeof", "static", "static_assert", "static_cast",
+        "struct", "switch", "synchronized", "template", "this", "thread_local", "throw", "true",
+        "try", "typedef", "typeid", "typename", "union", "unsigned", "using", "virtual", "void",
+        "volatile", "wchar_t", "while", "xor", "xor_eq"
     }};
     return std::find(keywords.begin(), keywords.end(), value) == keywords.end();
 }
@@ -188,11 +205,11 @@ struct FieldTypeInfo {
 }
 
 [[nodiscard]] std::string property(xmlNodePtr node, const char* name) {
-    xmlChar* raw = xmlGetProp(node, reinterpret_cast<const xmlChar*>(name));
-    if (raw == nullptr) return {};
-    std::string value(reinterpret_cast<const char*>(raw));
-    xmlFree(raw);
-    return value;
+    struct XmlFreeDeleter { void operator()(xmlChar* ptr) const noexcept { xmlFree(ptr); } };
+    std::unique_ptr<xmlChar, XmlFreeDeleter> raw(
+        xmlGetProp(node, reinterpret_cast<const xmlChar*>(name)));
+    if (!raw) return {};
+    return std::string(reinterpret_cast<const char*>(raw.get()));
 }
 
 [[nodiscard]] std::map<std::string, std::string> read_attributes(xmlNodePtr node,
@@ -298,8 +315,10 @@ void validate_tree_bounds(xmlNodePtr node, const std::string& source, const XmlS
 
 [[nodiscard]] Document parse_document(const std::string& source, const std::string& input,
     const XmlSchemaLimits& limits) {
+    static std::once_flag init_flag;
+    std::call_once(init_flag, [] { xmlInitParser(); });
     xmlDocPtr raw_doc = xmlReadMemory(input.data(), static_cast<int>(input.size()), source.c_str(), nullptr,
-        XML_PARSE_NONET | XML_PARSE_NOBLANKS | XML_PARSE_COMPACT);
+        XML_PARSE_NONET | XML_PARSE_NOBLANKS | XML_PARSE_COMPACT | XML_PARSE_NOERROR | XML_PARSE_NOWARNING);
     if (raw_doc == nullptr) {
         throw XmlFailure{{ErrorCode::invalid_value}, {source, 1, 1}, "malformed XML document"};
     }
@@ -469,9 +488,12 @@ struct NormalizedSchema {
 
 [[nodiscard]] std::vector<MemberDef> expand_members(const std::vector<MemberDef>& members,
     const std::map<std::string, ComponentDef>& components, bool inherited_required,
-    std::vector<std::string>& stack) {
+    std::vector<std::string>& stack, std::size_t& budget) {
     std::vector<MemberDef> output;
     for (const auto& member : members) {
+        if (budget == 0)
+            throw XmlFailure{{ErrorCode::capacity_exceeded}, member.location, "expanded component member limit exceeded"};
+        --budget;
         const bool required = inherited_required && member.required;
         if (member.kind == MemberDef::Kind::component) {
             const auto found = components.find(member.name);
@@ -480,13 +502,13 @@ struct NormalizedSchema {
             if (std::find(stack.begin(), stack.end(), member.name) != stack.end())
                 throw XmlFailure{{ErrorCode::invalid_value}, member.location, "recursive component reference '" + member.name + "'"};
             stack.push_back(member.name);
-            auto expanded = expand_members(found->second.members, components, required, stack);
+            auto expanded = expand_members(found->second.members, components, required, stack, budget);
             stack.pop_back();
             output.insert(output.end(), std::make_move_iterator(expanded.begin()), std::make_move_iterator(expanded.end()));
         } else if (member.kind == MemberDef::Kind::group) {
             MemberDef expanded = member;
             expanded.required = required;
-            expanded.members = expand_members(member.members, components, true, stack);
+            expanded.members = expand_members(member.members, components, true, stack, budget);
             output.push_back(std::move(expanded));
         } else {
             MemberDef expanded = member;
@@ -500,7 +522,8 @@ struct NormalizedSchema {
 void check_references(const std::vector<MemberDef>& members,
     const std::map<std::string, FieldDef>& fields,
     const std::map<std::string, ComponentDef>& components,
-    std::vector<std::string>& component_stack, const std::string& context) {
+    std::vector<std::string>& component_stack, std::set<std::string>& verified_components,
+    const std::string& context) {
     for (const auto& member : members) {
         if (member.kind == MemberDef::Kind::field) {
             if (!fields.contains(member.name))
@@ -511,16 +534,18 @@ void check_references(const std::vector<MemberDef>& members,
                 throw XmlFailure{{ErrorCode::invalid_value}, member.location, "unknown component reference '" + member.name + "' in " + context};
             if (std::find(component_stack.begin(), component_stack.end(), member.name) != component_stack.end())
                 throw XmlFailure{{ErrorCode::invalid_value}, member.location, "recursive component reference '" + member.name + "'"};
+            if (verified_components.contains(member.name)) continue;
             component_stack.push_back(member.name);
-            check_references(found->second.members, fields, components, component_stack, context);
+            check_references(found->second.members, fields, components, component_stack, verified_components, context);
             component_stack.pop_back();
+            verified_components.insert(member.name);
         } else {
             const auto count = fields.find(member.name);
             if (count == fields.end())
                 throw XmlFailure{{ErrorCode::invalid_value}, member.location, "unknown repeating group counter field '" + member.name + "'"};
             if (count->second.type != "NUMINGROUP" && count->second.type != "INT")
                 throw XmlFailure{{ErrorCode::invalid_value}, member.location, "repeating group counter must have NUMINGROUP or legacy INT type"};
-            check_references(member.members, fields, components, component_stack, context);
+            check_references(member.members, fields, components, component_stack, verified_components, context);
         }
     }
 }
@@ -602,17 +627,20 @@ void validate_scope(const std::vector<MemberDef>& members, const std::map<std::s
         throw XmlFailure{{ErrorCode::capacity_exceeded}, {}, "schema definition count exceeds configured limit"};
     if (result.messages.empty()) throw XmlFailure{{ErrorCode::invalid_value}, {}, "merged XML inputs contain no <message> definitions"};
 
+    std::set<std::string> verified_components;
     for (const auto& [name, component] : result.components) {
         std::vector<std::string> stack{name};
-        check_references(component.members, result.fields, result.components, stack, "component '" + name + "'");
-        const auto expanded = expand_members(component.members, result.components, true, stack);
+        check_references(component.members, result.fields, result.components, stack, verified_components, "component '" + name + "'");
+        std::size_t budget = max_expanded_members_per_scope;
+        const auto expanded = expand_members(component.members, result.components, true, stack, budget);
         validate_scope(expanded, result.fields, "component '" + name + "'", name == "Header" || name == "Trailer");
         result.expanded_components.emplace(name, expanded);
     }
     for (const auto& [name, message] : result.messages) {
         std::vector<std::string> stack;
-        check_references(message.members, result.fields, result.components, stack, "message '" + name + "'");
-        const auto expanded = expand_members(message.members, result.components, true, stack);
+        check_references(message.members, result.fields, result.components, stack, verified_components, "message '" + name + "'");
+        std::size_t budget = max_expanded_members_per_scope;
+        const auto expanded = expand_members(message.members, result.components, true, stack, budget);
         validate_scope(expanded, result.fields, "message '" + name + "'", false);
         result.expanded_messages.emplace(name, expanded);
     }
@@ -634,7 +662,7 @@ struct GroupUse {
 };
 
 [[nodiscard]] std::string group_key(const MemberDef& member) {
-    std::string result = member.name + "{";
+    std::string result = member.name + (member.required ? "Y{" : "N{");
     for (const auto& child : member.members) { result += member_key(child); result += ';'; }
     result += '}';
     return result;
@@ -806,7 +834,14 @@ std::string FingerprintBuilder::finish() { return sha256(bytes_); }
              position += 3) {
             compact_base.replace(position, 8, "Sec");
         }
-        for (const auto& candidate : {name, compact_base}) {
+        std::string expanded_base = name;
+        for (std::size_t position = 0;
+             (position = expanded_base.find("Sec", position)) != std::string::npos;
+             position += 8) {
+            if (expanded_base.compare(position, 8, "Security") == 0) continue;
+            expanded_base.replace(position, 3, "Security");
+        }
+        for (const auto& candidate : {name, compact_base, expanded_base}) {
             const auto data = fields.find(candidate);
             if (data != fields.end() && (data->second.type == "DATA" || data->second.type == "XMLDATA"))
                 return data->second.tag;
@@ -875,9 +910,37 @@ std::string FingerprintBuilder::finish() { return sha256(bytes_); }
         return output;
     };
 
+    const auto make_tag_index = [&](const std::vector<MessageMemberDescriptor>& members) {
+        std::vector<MemberTagEntry> by_tag;
+        by_tag.reserve(members.size());
+        for (std::size_t idx = 0; idx < members.size(); ++idx) {
+            const auto& m = members[idx];
+            const auto tag = m.kind == MemberKind::field
+                ? storage->fields[m.field_index].tag
+                : schema.fields.at(group_definitions.at(group_keys[m.group_index]).name).tag;
+            by_tag.push_back({tag, static_cast<std::uint32_t>(idx)});
+        }
+        std::sort(by_tag.begin(), by_tag.end(),
+            [](const MemberTagEntry& a, const MemberTagEntry& b) { return a.tag < b.tag; });
+        return by_tag;
+    };
+    const auto make_required = [](const std::vector<MessageMemberDescriptor>& members) {
+        std::vector<std::uint32_t> required;
+        for (std::size_t idx = 0; idx < members.size(); ++idx) {
+            if (members[idx].required) required.push_back(static_cast<std::uint32_t>(idx));
+        }
+        return required;
+    };
+
     storage->group_members.reserve(group_keys.size());
-    for (const auto& key : group_keys)
-        storage->group_members.push_back(make_members(group_definitions.at(key).members, make_members));
+    storage->group_members_by_tag.reserve(group_keys.size());
+    storage->group_required_members.reserve(group_keys.size());
+    for (const auto& key : group_keys) {
+        auto members = make_members(group_definitions.at(key).members, make_members);
+        storage->group_members_by_tag.push_back(make_tag_index(members));
+        storage->group_required_members.push_back(make_required(members));
+        storage->group_members.push_back(std::move(members));
+    }
     storage->groups.reserve(group_keys.size());
     for (std::size_t i = 0; i < group_keys.size(); ++i) {
         const auto& group = group_definitions.at(group_keys[i]);
@@ -887,25 +950,40 @@ std::string FingerprintBuilder::finish() { return sha256(bytes_); }
         const auto counter = schema.fields.at(group.name).tag;
         const auto delimiter = schema.fields.at(group.members.front().name).tag;
         storage->groups.push_back({storage->keep(group.name), counter, delimiter,
-            std::span<const MessageMemberDescriptor>{storage->group_members[i]}});
+            std::span<const MessageMemberDescriptor>{storage->group_members[i]},
+            std::span<const MemberTagEntry>{storage->group_members_by_tag[i]},
+            std::span<const std::uint32_t>{storage->group_required_members[i]}});
     }
 
     storage->component_members.reserve(schema.sorted_components.size());
-    for (const auto& component : schema.sorted_components)
-        storage->component_members.push_back(make_members(schema.expanded_components.at(component.name), make_members));
+    storage->component_members_by_tag.reserve(schema.sorted_components.size());
+    for (const auto& component : schema.sorted_components) {
+        auto members = make_members(schema.expanded_components.at(component.name), make_members);
+        storage->component_members_by_tag.push_back(make_tag_index(members));
+        storage->component_members.push_back(std::move(members));
+    }
     storage->components.reserve(schema.sorted_components.size());
     for (std::size_t i = 0; i < schema.sorted_components.size(); ++i)
         storage->components.push_back({storage->keep(schema.sorted_components[i].name),
-            std::span<const MessageMemberDescriptor>{storage->component_members[i]}});
+            std::span<const MessageMemberDescriptor>{storage->component_members[i]},
+            std::span<const MemberTagEntry>{storage->component_members_by_tag[i]}});
 
     storage->message_members.reserve(schema.sorted_messages.size());
-    for (const auto& message : schema.sorted_messages)
-        storage->message_members.push_back(make_members(schema.expanded_messages.at(message.name), make_members));
+    storage->message_members_by_tag.reserve(schema.sorted_messages.size());
+    storage->message_required_members.reserve(schema.sorted_messages.size());
+    for (const auto& message : schema.sorted_messages) {
+        auto members = make_members(schema.expanded_messages.at(message.name), make_members);
+        storage->message_members_by_tag.push_back(make_tag_index(members));
+        storage->message_required_members.push_back(make_required(members));
+        storage->message_members.push_back(std::move(members));
+    }
     storage->messages.reserve(schema.sorted_messages.size());
     for (std::size_t i = 0; i < schema.sorted_messages.size(); ++i) {
         const auto& message = schema.sorted_messages[i];
         storage->messages.push_back({storage->keep(message.name), storage->keep(message.msg_type),
-            storage->keep(message.category), std::span<const MessageMemberDescriptor>{storage->message_members[i]}});
+            storage->keep(message.category), std::span<const MessageMemberDescriptor>{storage->message_members[i]},
+            std::span<const MemberTagEntry>{storage->message_members_by_tag[i]},
+            std::span<const std::uint32_t>{storage->message_required_members[i]}});
     }
 
     for (const auto& field : schema.sorted_fields) {
@@ -984,9 +1062,16 @@ Status load_xml_schema(std::span<const std::string_view> paths, XmlSchema& outpu
                 set_diagnostic(diagnostic, failure);
                 return failure.status;
             }
+            const auto max_read = limits.max_input_file_bytes == std::numeric_limits<std::size_t>::max()
+                ? limits.max_input_file_bytes : limits.max_input_file_bytes + 1;
             std::string input;
-            input.resize(limits.max_input_file_bytes + 1);
+            input.resize(max_read);
             stream.read(input.data(), static_cast<std::streamsize>(input.size()));
+            if (stream.bad()) {
+                const XmlFailure failure{{ErrorCode::io_error}, {path, 0, 0}, "I/O error reading XML input"};
+                set_diagnostic(diagnostic, failure);
+                return failure.status;
+            }
             const auto read_count = static_cast<std::size_t>(stream.gcount());
             if (read_count > limits.max_input_file_bytes) {
                 const XmlFailure failure{{ErrorCode::capacity_exceeded}, {path, 0, 0}, "XML file exceeds byte limit"};

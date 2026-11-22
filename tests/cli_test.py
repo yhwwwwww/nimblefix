@@ -68,7 +68,7 @@ def execute(binary, root, *arguments, expected=0, env=None):
 
 def test(binary, root):
     execute(binary, root, "--help")
-    assert "0.2.0" in execute(binary, root, "--version").stdout
+    assert "0.3.0" in execute(binary, root, "--version").stdout
     doctor = json.loads(execute(binary, root, "doctor", "--json").stdout)
     assert doctor["confirmation"] == "appended" and "queued" in doctor["dispatch"]
     config_dir = root / "配置 with spaces"

@@ -84,9 +84,6 @@ private:
 
 namespace detail {
 
-template <std::uint32_t CountTag, class... Groups>
-struct group_tuple_index;
-
 template <class T, class = void>
 struct schema_type_alias {};
 
@@ -95,14 +92,32 @@ struct schema_type_alias<T, std::void_t<typename T::schema_type>> {
     using schema_type = typename T::schema_type;
 };
 
-template <std::uint32_t CountTag, class First, class... Rest>
-struct group_tuple_index<CountTag, First, Rest...> : std::conditional_t<
-    First::count_tag == CountTag,
-    std::integral_constant<std::size_t, 0>,
-    std::integral_constant<std::size_t, 1 + group_tuple_index<CountTag, Rest...>::value>> {};
+template <class Derived>
+struct empty_named_setters {};
 
-template <std::uint32_t CountTag>
-struct group_tuple_index<CountTag> : std::integral_constant<std::size_t, 0> {};
+template <class Builder, class Derived, class = void>
+struct group_attachment_setters {
+    using type = empty_named_setters<Derived>;
+};
+
+template <class Builder, class Derived>
+struct group_attachment_setters<Builder, Derived,
+    std::void_t<typename Builder::policy_type::template named_setters<Derived>>> {
+    using type = typename Builder::policy_type::template named_setters<Derived>;
+};
+
+template <class Builder, class Derived>
+using group_attachment_setters_t = typename group_attachment_setters<Builder, Derived>::type;
+
+template <class T, class = void>
+struct is_group_entry_helper : std::false_type {};
+
+template <class T>
+struct is_group_entry_helper<T, std::void_t<decltype(std::remove_cvref_t<T>::is_group_entry)>>
+    : std::bool_constant<std::remove_cvref_t<T>::is_group_entry> {};
+
+template <class T>
+inline constexpr bool is_group_entry_v = is_group_entry_helper<std::remove_cvref_t<T>>::value;
 
 } // namespace detail
 
@@ -337,81 +352,12 @@ private:
     bool touched_{};
 };
 
-// Owns one fixed-shape entry and its nested group builders. The schema
-// generator supplies the group tuple, so entry storage is bounded by the
-// declared group shape and never by the whole dictionary.
-template <class Base, class... Groups>
-class GroupEntryOwner {
-public:
-    GroupEntryOwner() = default;
-    GroupEntryOwner(const GroupEntryOwner&) = delete;
-    GroupEntryOwner& operator=(const GroupEntryOwner&) = delete;
-    GroupEntryOwner(GroupEntryOwner&&) noexcept = default;
-    GroupEntryOwner& operator=(GroupEntryOwner&&) noexcept = default;
-
-    template <std::uint32_t Tag, class V>
-    [[nodiscard]] Status set(V&& value) noexcept {
-        return base_.template set<Tag>(std::forward<V>(value));
-    }
-
-    template <std::uint32_t CountTag>
-    [[nodiscard]] auto& group() noexcept {
-        constexpr auto index = detail::group_tuple_index<CountTag, Groups...>::value;
-        static_assert(index < sizeof...(Groups), "CountTag is not a nested group in this entry");
-        using Selected = std::tuple_element_t<index, std::tuple<Groups...>>;
-        static_assert(Selected::count_tag == CountTag, "CountTag is not a nested group in this entry");
-        return std::get<index>(groups_);
-    }
-
-    template <std::uint32_t CountTag>
-    [[nodiscard]] const auto& group() const noexcept {
-        constexpr auto index = detail::group_tuple_index<CountTag, Groups...>::value;
-        static_assert(index < sizeof...(Groups), "CountTag is not a nested group in this entry");
-        using Selected = std::tuple_element_t<index, std::tuple<Groups...>>;
-        static_assert(Selected::count_tag == CountTag, "CountTag is not a nested group in this entry");
-        return std::get<index>(groups_);
-    }
-
-    [[nodiscard]] Status prepare() noexcept {
-        Status status{};
-        std::apply([&](auto&... group) {
-            ((status.ok() && (group.touched() || decltype(group)::required)
-                ? status = base_.template set<decltype(group)::count_tag>(group.size())
-                : status), ...);
-        }, groups_);
-        if (!status.ok()) return status;
-        return base_.view().status;
-    }
-
-    [[nodiscard]] Status status() const noexcept {
-        return const_cast<GroupEntryOwner*>(this)->prepare();
-    }
-
-    [[nodiscard]] detail::MessageView view() const noexcept {
-        auto* self = const_cast<GroupEntryOwner*>(this);
-        const auto prepared = self->prepare();
-        auto message = self->base_.view();
-        if (!prepared.ok()) message.status = prepared;
-        if (!message.status.ok()) return message;
-        std::size_t active = 0;
-        std::apply([&](auto&... group) {
-            ((group.touched() || decltype(group)::required
-                ? (group_views_[active++] = group.view(), void()) : void()), ...);
-        }, self->groups_);
-        message.groups = active == 0 ? nullptr : group_views_.data();
-        message.group_count = active;
-        return message;
-    }
-
-private:
-    Base base_{};
-    std::tuple<Groups...> groups_{};
-    mutable std::array<detail::RepeatingGroupView, sizeof...(Groups)> group_views_{};
-};
-
 template <class Builder, class Group>
-class GroupAttachment : public detail::schema_type_alias<Builder> {
+class GroupAttachment
+    : public detail::schema_type_alias<Builder>,
+      public detail::group_attachment_setters_t<Builder, GroupAttachment<Builder, Group>> {
 public:
+    using policy_type = typename Builder::policy_type;
     static constexpr std::size_t attached_group_count = Builder::attached_group_count + 1;
 
     GroupAttachment(Builder&& builder, Group&& group) noexcept

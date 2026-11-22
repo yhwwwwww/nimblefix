@@ -182,6 +182,56 @@ void test_reader_and_legacy_pin_keep_payload_views_alive() {
     CHECK(lease.payload() == payload);
 }
 
+void test_reader_calls_race_safely_with_retention_and_teardown() {
+    TempStore store;
+    auto config = store.config();
+    config.capacity_bytes = 8U * 8192U;
+    config.max_records = 256;
+    config.segment_bytes = 8192;
+    config.max_segments = 8;
+    auto opened = Journal::open(config);
+    CHECK(opened.ok());
+    if (!opened.ok()) return;
+    auto journal = std::move(opened).value();
+    auto reader_result = journal.create_reader();
+    CHECK(reader_result.ok());
+    if (!reader_result.ok()) return;
+    auto reader = std::move(reader_result).value();
+
+    std::atomic<bool> done{};
+    std::atomic<int> reader_errors{};
+    std::atomic<std::size_t> seen{};
+    const std::string payload(1500, 'R');
+    std::thread consumer([reader = std::move(reader), &done, &reader_errors, &seen, &payload]() mutable {
+        JournalRecord rec;
+        for (;;) {
+            const auto st = reader.next(rec);
+            if (st.code == ErrorCode::need_more) {
+                if (done.load(std::memory_order_acquire)) break;
+                std::this_thread::yield();
+                continue;
+            }
+            if (!st.ok()) {
+                reader_errors.fetch_add(1, std::memory_order_relaxed);
+                break;
+            }
+            if (rec.payload != payload) reader_errors.fetch_add(1, std::memory_order_relaxed);
+            seen.fetch_add(1, std::memory_order_relaxed);
+        }
+    });
+
+    for (std::uint64_t seq = 1; seq <= 12; ++seq) {
+        CHECK(journal.append(RecordKind::outbound, seq, seq, 0, payload).ok());
+        if ((seq % 2) == 0) CHECK(journal.set_retention_floor(seq, 0).ok());
+    }
+    done.store(true, std::memory_order_release);
+    consumer.join();
+    // Once the reader is destroyed, its segment leases drop and retention reclaims old segments.
+    CHECK(journal.set_retention_floor(13, 0).ok());
+    CHECK(reader_errors.load() == 0);
+    CHECK(seen.load() == 12);
+}
+
 void test_reader_calls_race_safely_with_journal_teardown() {
     TempStore store;
     for (int iteration = 0; iteration < 32; ++iteration) {
@@ -230,6 +280,7 @@ int main() {
     test_reader_runs_concurrently_with_append_and_delivery_updates();
     test_record_lease_pins_mapping_for_async_consumers();
     test_reader_and_legacy_pin_keep_payload_views_alive();
+    test_reader_calls_race_safely_with_retention_and_teardown();
     test_reader_calls_race_safely_with_journal_teardown();
     if (failures != 0) {
         std::cerr << failures << " journal reader test(s) failed\n";

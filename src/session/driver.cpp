@@ -14,6 +14,7 @@
 #include <new>
 #include <system_error>
 #include <thread>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -259,7 +260,65 @@ struct ReceiptSlot {
 struct RecoverySlot {
     RecordId id{};
     std::size_t bytes{};
+    bool is_recovery{};
+    bool validated{};
 };
+
+struct InboundTags {
+    const FieldView* begin{};          // 8
+    const FieldView* msg_type{};       // 35
+    const FieldView* seq{};            // 34
+    const FieldView* sender{};         // 49
+    const FieldView* target{};         // 56
+    const FieldView* sending_time{};   // 52
+    const FieldView* poss_dup{};       // 43
+    const FieldView* orig_time{};      // 122
+    const FieldView* test_id{};        // 112
+    const FieldView* peer_ack{};       // 369
+    const FieldView* begin_seq{};      // 7
+    const FieldView* end_seq{};        // 16
+    const FieldView* new_seq{};        // 36
+    const FieldView* gap_fill{};       // 123
+    const FieldView* encrypt{};        // 98
+    const FieldView* hb_int{};         // 108
+    const FieldView* reset_flag{};     // 141
+    const FieldView* appl_ver{};       // 1137
+    const FieldView* text{};           // 58
+    std::uint32_t duplicate_tag{};
+};
+
+[[nodiscard]] InboundTags extract_inbound_tags(const FlatMessageView& message) noexcept {
+    InboundTags out{};
+    auto assign = [&](const FieldView*& slot, const FieldView& field) noexcept {
+        if (slot != nullptr && out.duplicate_tag == 0) out.duplicate_tag = field.tag;
+        else if (slot == nullptr) slot = &field;
+    };
+    for (const auto& field : message.fields()) {
+        switch (field.tag) {
+        case 8: assign(out.begin, field); break;
+        case 35: assign(out.msg_type, field); break;
+        case 34: assign(out.seq, field); break;
+        case 49: assign(out.sender, field); break;
+        case 56: assign(out.target, field); break;
+        case 52: assign(out.sending_time, field); break;
+        case 43: assign(out.poss_dup, field); break;
+        case 122: assign(out.orig_time, field); break;
+        case 112: assign(out.test_id, field); break;
+        case 369: assign(out.peer_ack, field); break;
+        case 7: assign(out.begin_seq, field); break;
+        case 16: assign(out.end_seq, field); break;
+        case 36: assign(out.new_seq, field); break;
+        case 123: assign(out.gap_fill, field); break;
+        case 98: assign(out.encrypt, field); break;
+        case 108: assign(out.hb_int, field); break;
+        case 141: assign(out.reset_flag, field); break;
+        case 1137: assign(out.appl_ver, field); break;
+        case 58: assign(out.text, field); break;
+        default: break;
+        }
+    }
+    return out;
+}
 
 } // namespace
 
@@ -270,7 +329,7 @@ struct SessionDriver::Impl {
           core(config.role, config.heartbeat_ms, config.logon_timeout_ms, config.logout_timeout_ms,
               journal.next_inbound_seq(), journal.next_outbound_seq()),
           tx_slots(config.max_pending_messages), encode_buffer(config.max_frame_bytes),
-          replay_buffer(config.max_frame_bytes), deferred_logon_buffer(config.max_frame_bytes),
+          replay_buffer(config.max_frame_bytes + 128), deferred_logon_buffer(config.max_frame_bytes),
           logon_tx_buffer(config.max_frame_bytes), admin_arena(config.max_frame_bytes),
           parse_fields(config.max_frame_bytes / 4 + 2),
           receipt_slots(config.receipt_capacity), replay_slots(config.max_pending_messages),
@@ -299,6 +358,7 @@ struct SessionDriver::Impl {
             }
             if (record.kind == RecordKind::outbound && record.receipt != 0) {
                 put_receipt(record.receipt, record.seq, ReceiptState::appended);
+                if (record.dependency != 0) ++dependent_reply_counts[record.dependency];
             }
             if (record.kind == RecordKind::inbound) {
                 FlatMessageView message{};
@@ -329,7 +389,7 @@ struct SessionDriver::Impl {
                 recovery_overflow = true;
                 break;
             }
-            recovery_slots[recovery_count++] = RecoverySlot{record.id, record.payload.size()};
+            recovery_slots[recovery_count++] = RecoverySlot{record.id, record.payload.size(), true, false};
             recovery_bytes += record.payload.size();
         }
         peer_ack_seq = std::max(current_epoch_ack,
@@ -370,6 +430,7 @@ struct SessionDriver::Impl {
     std::vector<ReceiptSlot> receipt_slots;
     std::vector<ReplayRange> replay_slots;
     std::vector<RecoverySlot> recovery_slots;
+    std::unordered_map<RecordId, std::size_t> dependent_reply_counts;
     SessionDriver* public_owner{};
     std::thread::id owner_thread{};
     Status last_status{};
@@ -404,8 +465,10 @@ struct SessionDriver::Impl {
     std::size_t logon_tx_size{};
     std::array<char, max_msg_type_bytes> replay_msg_type{};
     std::uint8_t replay_msg_type_size{};
-    std::array<char, 22> wall_time_storage{};
+    std::array<char, 32> wall_time_storage{};
     std::size_t wall_time_size{};
+    std::int64_t cached_wall_time_ms{};
+    bool cached_wall_time_ms_valid{};
     bool owner_set{};
     bool replay_active{};
     bool replay_prepared{};
@@ -429,12 +492,17 @@ struct SessionDriver::Impl {
     Status recovery_status{};
 
     [[nodiscard]] Status set_wall_time(std::string_view value) noexcept {
+        if (wall_time_size != 0 && value == std::string_view{wall_time_storage.data(), wall_time_size}) {
+            callback_wall_time = {wall_time_storage.data(), wall_time_size};
+            return Status::success();
+        }
         if (!detail::is_valid_utc_timestamp(value) || value.size() > wall_time_storage.size()) {
             return Status{ErrorCode::invalid_timestamp, 52};
         }
         std::memcpy(wall_time_storage.data(), value.data(), value.size());
         wall_time_size = value.size();
         callback_wall_time = {wall_time_storage.data(), wall_time_size};
+        cached_wall_time_ms_valid = false;
         return Status::success();
     }
 
@@ -470,7 +538,9 @@ struct SessionDriver::Impl {
 
     [[nodiscard]] std::optional<std::uint64_t> last_processed_seq() const noexcept {
         if (!config.settings || !config.settings->emit_last_processed_seq) return std::nullopt;
-        return journal.completed_inbound_seq();
+        const auto completed = journal.completed_inbound_seq();
+        if (completed == 0) return std::nullopt;
+        return completed;
     }
 
     [[nodiscard]] SessionHeader make_header(std::uint64_t sequence,
@@ -776,8 +846,12 @@ struct SessionDriver::Impl {
             ++safe_count;
         };
         add_safe(AdminField{98, FieldKind::unsigned_integer, 0, {}});
+        const std::uint32_t effective_hb_ms =
+            (config.role == SessionRole::acceptor && core.peer_heartbeat_ms() != 0)
+                ? core.peer_heartbeat_ms()
+                : config.heartbeat_ms;
         const auto seconds = std::max<std::uint64_t>(1,
-            (static_cast<std::uint64_t>(config.heartbeat_ms) + 999) / 1000);
+            (static_cast<std::uint64_t>(effective_hb_ms) + 999) / 1000);
         add_safe(AdminField{108, FieldKind::unsigned_integer, seconds, {}});
 
         const bool request_reset = config.role == SessionRole::initiator && config.settings &&
@@ -977,66 +1051,67 @@ struct SessionDriver::Impl {
             return status;
         }
         if (frame.consumed != bytes.size()) return Status{ErrorCode::invalid_frame};
-        return parse_flat(frame, parse_fields, message, callbacks.wire_hints,
-            CodecLimits{config.max_frame_bytes});
+        return parse_flat_verified(frame, parse_fields, message, callbacks.wire_hints);
     }
 
-    [[nodiscard]] Status parse_inbound_header(const FlatMessageView& message,
+    [[nodiscard]] Status parse_inbound_header(const InboundTags& tags,
         std::string_view& msg_type, std::uint64_t& sequence, bool& poss_dup,
         bool& original_time_valid, std::string_view& test_id) const noexcept {
-        bool duplicate = false;
-        const auto* begin = unique_field(message, 8, duplicate);
-        if (duplicate || begin == nullptr)
+        if (tags.duplicate_tag != 0) {
+            const auto d = tags.duplicate_tag;
+            if (d == 8) return Status{ErrorCode::unsupported_protocol, 8};
+            if (d == 35 || d == 34) return Status{ErrorCode::invalid_header, static_cast<int>(d)};
+            if (d == 49 || d == 56) return Status{ErrorCode::identity_mismatch, static_cast<int>(d)};
+            if (d == 52) return Status{ErrorCode::invalid_timestamp, 52};
+            return Status{ErrorCode::duplicate_field, static_cast<int>(d)};
+        }
+        if (tags.begin == nullptr)
             return Status{ErrorCode::unsupported_protocol, 8};
-        if (config.settings && begin->value != begin_string(fix_version()))
+        if (config.settings && tags.begin->value != begin_string(fix_version()))
             return Status{ErrorCode::unsupported_protocol, 8};
-        const auto* type = unique_field(message, 35, duplicate);
-        if (duplicate || type == nullptr || type->value.empty()) return Status{ErrorCode::invalid_header, 35};
-        const auto* seq = unique_field(message, 34, duplicate);
-        if (duplicate || seq == nullptr || !parse_unsigned(seq->value, sequence) || sequence == 0) {
+        if (tags.msg_type == nullptr || tags.msg_type->value.empty())
+            return Status{ErrorCode::invalid_header, 35};
+        if (tags.seq == nullptr || !parse_unsigned(tags.seq->value, sequence) || sequence == 0)
             return Status{ErrorCode::invalid_header, 34};
-        }
-        const auto* sender = unique_field(message, 49, duplicate);
-        if (duplicate || sender == nullptr || sender->value != config.remote_comp_id) {
+        if (tags.sender == nullptr || tags.sender->value != config.remote_comp_id)
             return Status{ErrorCode::identity_mismatch, 49};
-        }
-        const auto* target = unique_field(message, 56, duplicate);
-        if (duplicate || target == nullptr || target->value != config.local_comp_id) {
+        if (tags.target == nullptr || tags.target->value != config.local_comp_id)
             return Status{ErrorCode::identity_mismatch, 56};
-        }
-        const auto* sending_time = unique_field(message, 52, duplicate);
-        if (duplicate || sending_time == nullptr || !detail::is_valid_utc_timestamp(sending_time->value)) {
+        if (tags.sending_time == nullptr || !detail::is_valid_utc_timestamp(tags.sending_time->value))
             return Status{ErrorCode::invalid_timestamp, 52};
-        }
-        const auto* poss = unique_field(message, 43, duplicate);
-        if (duplicate) return Status{ErrorCode::duplicate_field, 43};
-        poss_dup = poss != nullptr && poss->value == "Y";
-        if (poss != nullptr && poss->value != "Y" && poss->value != "N") {
+        poss_dup = tags.poss_dup != nullptr && tags.poss_dup->value == "Y";
+        if (tags.poss_dup != nullptr && tags.poss_dup->value != "Y" && tags.poss_dup->value != "N")
             return Status{ErrorCode::invalid_value, 43};
-        }
-        const auto* original = unique_field(message, 122, duplicate);
-        if (duplicate) return Status{ErrorCode::duplicate_field, 122};
-        original_time_valid = original != nullptr && detail::is_valid_utc_timestamp(original->value);
-        if (poss_dup && (!original_time_valid || original->value > sending_time->value)) {
+        original_time_valid = tags.orig_time != nullptr && detail::is_valid_utc_timestamp(tags.orig_time->value);
+        if (poss_dup && (!original_time_valid ||
+                detail::compare_utc_timestamps(tags.orig_time->value, tags.sending_time->value) > 0)) {
             return Status{ErrorCode::invalid_timestamp, 122};
         }
-        if (!poss_dup && original != nullptr) return Status{ErrorCode::invalid_header, 122};
-        msg_type = type->value;
+        if (!poss_dup && tags.orig_time != nullptr) return Status{ErrorCode::invalid_header, 122};
+        msg_type = tags.msg_type->value;
         test_id = {};
         if (msg_type == "1" || msg_type == "0") {
-            const auto* test = unique_field(message, 112, duplicate);
-            if (duplicate) return Status{ErrorCode::duplicate_field, 112};
-            if (test != nullptr) test_id = test->value;
-            if (msg_type == "1" && test == nullptr) return Status{ErrorCode::missing_field, 112};
+            if (tags.test_id != nullptr) test_id = tags.test_id->value;
+            if (msg_type == "1" && tags.test_id == nullptr) return Status{ErrorCode::missing_field, 112};
         }
         return Status::success();
     }
 
     [[nodiscard]] bool sending_time_within_skew(std::string_view sent,
-        std::string_view now) const noexcept {
+        std::string_view now) noexcept {
         if (!config.settings || !config.settings->check_sending_time) return true;
-        std::int64_t sent_ms{}, now_ms{};
-        if (!parse_utc_millis(sent, sent_ms) || !parse_utc_millis(now, now_ms)) return false;
+        std::int64_t sent_ms{};
+        if (!parse_utc_millis(sent, sent_ms)) return false;
+        std::int64_t now_ms{};
+        if (cached_wall_time_ms_valid && now == callback_wall_time) {
+            now_ms = cached_wall_time_ms;
+        } else {
+            if (!parse_utc_millis(now, now_ms)) return false;
+            if (now == callback_wall_time) {
+                cached_wall_time_ms = now_ms;
+                cached_wall_time_ms_valid = true;
+            }
+        }
         const auto difference = sent_ms >= now_ms
             ? static_cast<std::uint64_t>(sent_ms - now_ms)
             : static_cast<std::uint64_t>(now_ms - sent_ms);
@@ -1044,21 +1119,16 @@ struct SessionDriver::Impl {
     }
 
     [[nodiscard]] Status validate_logon_policy(const FlatMessageView& message,
-        std::uint64_t sequence, bool& reset_requested) noexcept {
+        const InboundTags& tags, std::uint64_t sequence, bool& reset_requested) noexcept {
         reset_requested = false;
         if (config.settings && config.settings->version == FixVersion::fixt11) {
-            bool duplicate = false;
-            const auto* appl_ver = unique_field(message, 1137, duplicate);
-            if (duplicate || appl_ver == nullptr ||
-                appl_ver->value != config.settings->default_appl_ver_id)
+            if (tags.appl_ver == nullptr ||
+                tags.appl_ver->value != config.settings->default_appl_ver_id)
                 return Status{ErrorCode::unsupported_protocol, 1137};
         }
-        bool duplicate = false;
-        const auto* reset = unique_field(message, 141, duplicate);
-        if (duplicate) return Status{ErrorCode::duplicate_field, 141};
-        if (reset != nullptr && reset->value != "Y" && reset->value != "N")
+        if (tags.reset_flag != nullptr && tags.reset_flag->value != "Y" && tags.reset_flag->value != "N")
             return Status{ErrorCode::invalid_value, 141};
-        reset_requested = reset != nullptr && reset->value == "Y";
+        reset_requested = tags.reset_flag != nullptr && tags.reset_flag->value == "Y";
 
         if (config.role == SessionRole::acceptor && config.settings &&
             !config.logon_preauthenticated) {
@@ -1069,30 +1139,17 @@ struct SessionDriver::Impl {
         if (reset_requested) {
             if (!config.settings || !config.settings->allow_sequence_reset || sequence != 1)
                 return Status{ErrorCode::sequence_reset_denied, 141};
-            const auto* ack = unique_field(message, 369, duplicate);
-            if (duplicate) return Status{ErrorCode::duplicate_field, 369};
-            if (ack != nullptr) {
+            if (tags.peer_ack != nullptr) {
                 std::uint64_t ack_value{};
-                if (!parse_unsigned(ack->value, ack_value) || ack_value != 0)
+                if (!parse_unsigned(tags.peer_ack->value, ack_value) ||
+                    (ack_value != 0 && !(config.role == SessionRole::initiator && ack_value == 1)))
                     return Status{ErrorCode::sequence_reset_denied, 369};
             }
             if (config.role == SessionRole::initiator &&
                 (!config.settings->logon.request_sequence_reset || !local_epoch_reset_started))
                 return Status{ErrorCode::sequence_reset_denied, 141};
-            if (config.role == SessionRole::acceptor) {
-                if (core.state() != SessionState::awaiting_logon)
-                    return Status{ErrorCode::sequence_reset_denied, 141};
-                const auto reset_status = journal.begin_epoch("peer Logon ResetSeqNumFlag=Y");
-                if (!reset_status.ok()) return reset_status;
-                detail::CoreEvent reset_core{};
-                reset_core.kind = detail::CoreEventKind::reset_epoch;
-                const auto reset_output = core.process(reset_core);
-                if (!reset_output.status.ok()) return fail(reset_output.status);
-                peer_ack_seq = 0;
-                peer_reset_requested = true;
-                last_retention_outbound_segment = 0;
-                if (const auto status = update_retention_floor(true); !status.ok()) return fail(status);
-            }
+            if (config.role == SessionRole::acceptor && core.state() != SessionState::awaiting_logon)
+                return Status{ErrorCode::sequence_reset_denied, 141};
         } else if (config.role == SessionRole::initiator && config.settings &&
             config.settings->logon.request_sequence_reset && core.state() == SessionState::awaiting_logon) {
             return Status{ErrorCode::sequence_reset_denied, 141};
@@ -1138,6 +1195,9 @@ struct SessionDriver::Impl {
             return status;
         auto header = make_header(wire_sequence, sending_time, poss_dup,
             original_time_valid ? original_time : std::string_view{});
+        // Preserve actual inbound wire direction (remote -> local) in the redacted journal record.
+        header.sender_comp_id = config.remote_comp_id;
+        header.target_comp_id = config.local_comp_id;
         if (!config.settings) {
             const auto* begin = unique_field(message, 8, duplicate);
             if (duplicate || begin == nullptr) return Status{ErrorCode::corrupt_store, 8};
@@ -1276,11 +1336,13 @@ struct SessionDriver::Impl {
     [[nodiscard]] Status append_delivery(RecordId inbound_id, std::uint64_t sequence) noexcept {
         if (journal.has_delivery(inbound_id)) {
             forget_recovery(inbound_id);
+            dependent_reply_counts.erase(inbound_id);
             return update_retention_floor();
         }
         const auto appended = journal.append(RecordKind::delivery, sequence, 0, inbound_id, {});
         if (!appended.ok()) return appended.status();
         forget_recovery(inbound_id);
+        dependent_reply_counts.erase(inbound_id);
         return update_retention_floor();
     }
 
@@ -1365,18 +1427,28 @@ struct SessionDriver::Impl {
         }
     }
 
-    [[nodiscard]] Status remember_inbound(RecordId id, std::size_t bytes) noexcept {
+    [[nodiscard]] RecoverySlot* find_recovery_slot(RecordId id) noexcept {
+        for (std::size_t i = 0; i < recovery_count; ++i) {
+            if (recovery_slots[i].id == id) return &recovery_slots[i];
+        }
+        return nullptr;
+    }
+
+    [[nodiscard]] Status remember_inbound(RecordId id, std::size_t bytes,
+        bool is_recovery = false, bool validated = false) noexcept {
         if (recovery_count == recovery_slots.size() || bytes > config.max_pending_inbound_bytes - recovery_bytes) {
             return Status{ErrorCode::queue_full};
         }
-        recovery_slots[recovery_count++] = RecoverySlot{id, bytes};
+        recovery_slots[recovery_count++] = RecoverySlot{id, bytes, is_recovery, validated};
         recovery_bytes += bytes;
         return Status::success();
     }
 
     [[nodiscard]] Status deliver_message(const FlatMessageView& message, DeliveryInfo info,
         std::uint64_t now_ms, std::string_view wall_time) noexcept {
-        if (callbacks.validate_message) {
+        auto* slot = find_recovery_slot(info.record_id);
+        const bool already_validated = slot != nullptr && slot->validated;
+        if (callbacks.validate_message && !already_validated) {
             Status validation{};
             try { validation = callbacks.validate_message(message); }
             catch (...) { validation = Status{ErrorCode::callback_failed}; }
@@ -1392,6 +1464,7 @@ struct SessionDriver::Impl {
                 const auto completed = append_delivery(info.record_id, info.msg_seq_num);
                 return completed.ok() ? completed : fail(completed);
             }
+            if (slot != nullptr) slot->validated = true;
         }
         if (deferred_active_callback) return Status::success();
         if (callbacks.deferred_delivery) {
@@ -1531,9 +1604,15 @@ struct SessionDriver::Impl {
             const auto* text = unique_field(message, 58, duplicate);
             if (duplicate) return Status{ErrorCode::corrupt_store, 58};
             if (!has_dependent_outbound(id)) {
-                detail::CoreAction action{detail::CoreActionKind::send_logout, 0, 0,
-                    text == nullptr ? std::string_view{} : text->value};
-                if (const auto status = send_admin_action(action, now_ms, wall_time, id); !status.ok()) return status;
+                detail::CoreEvent logout_event{};
+                logout_event.kind = detail::CoreEventKind::local_logout;
+                logout_event.now_ms = now_ms;
+                logout_event.text = text == nullptr ? std::string_view{} : text->value;
+                logout_event.poss_dup = true; // Mark close_after_logout_ = true on peer-initiated Logout.
+                const auto logout_output = core.process(logout_event);
+                if (!logout_output.status.ok()) return logout_output.status;
+                if (const auto status = apply_actions(logout_output, nullptr, id, seq, now_ms, wall_time, 1);
+                    !status.ok()) return status;
             }
         } else if (type->value == "3") {
             report_peer_reject(message);
@@ -1549,13 +1628,8 @@ struct SessionDriver::Impl {
     }
 
     [[nodiscard]] std::size_t dependent_application_replies(RecordId inbound_id) const noexcept {
-        std::size_t count = 0;
-        for (const auto& record : journal.records()) {
-            if (record.kind == RecordKind::outbound && record.dependency == inbound_id && record.receipt != 0) {
-                ++count;
-            }
-        }
-        return count;
+        const auto found = dependent_reply_counts.find(inbound_id);
+        return found == dependent_reply_counts.end() ? 0U : found->second;
     }
 
     [[nodiscard]] Status deliver_recovery(std::uint64_t now_ms, std::string_view wall_time) noexcept {
@@ -1587,7 +1661,7 @@ struct SessionDriver::Impl {
                 }
             } else {
                 if (const auto status = deliver_message(message,
-                        DeliveryInfo{record_id, sequence, true}, now_ms, wall_time); !status.ok()) return status;
+                        DeliveryInfo{record_id, sequence, entry.is_recovery}, now_ms, wall_time); !status.ok()) return status;
             }
             // ResendRequest completion is deferred until its replay range is
             // fully written. Preserve journal ordering and stop until flush.
@@ -1664,6 +1738,7 @@ struct SessionDriver::Impl {
         const auto appended = journal.append(RecordKind::outbound, sequence, receipt_id, dependency,
             std::string_view{encode_buffer.data(), encoded.value()});
         if (!appended.ok()) return fail(appended.status());
+        if (dependency != 0 && receipt_id != 0) ++dependent_reply_counts[dependency];
         if (const auto status = update_retention_floor(); !status.ok()) return fail(status);
         if (const auto status = enqueue(appended.value().id, encoded.value(), sequence,
                 receipt_id, message.msg_type, now_ms, true); !status.ok()) {
@@ -1712,6 +1787,7 @@ struct SessionDriver::Impl {
         deferred_logon_sequence = 0;
         deferred_logon_pending = false;
         peer_reset_requested = false;
+        local_epoch_reset_started = false;
     }
 
     [[nodiscard]] Status execute_core_output(const detail::CoreOutput& output,
@@ -1804,10 +1880,13 @@ struct SessionDriver::Impl {
                 return fail(Status{ErrorCode::receipt_expired});
             }
         }
+        if (journal.needs_maintenance()) {
+            if (const auto maint = journal.poll_maintenance(); !maint.ok()) return fail(maint);
+        }
         detail::CoreEvent event{};
         event.kind = detail::CoreEventKind::tick;
         event.now_ms = now_ms;
-        event.flag = tx_count != 0 || replay_active || replay_count != 0;
+        event.has_pending_tx = tx_count != 0 || replay_active || replay_count != 0;
         const auto output = core.process(event);
         if (const auto status = execute_core_output(output, nullptr, 0, 0,
                 now_ms, callback_wall_time); !status.ok()) return status;
@@ -1872,12 +1951,13 @@ struct SessionDriver::Impl {
         std::string_view wall_time, bool recovery = false) noexcept {
         FlatMessageView message{};
         if (const auto status = parse_frame(frame_bytes, message); !status.ok()) return fail(status);
+        const auto tags = extract_inbound_tags(message);
         std::string_view msg_type;
         std::string_view test_id;
         std::uint64_t sequence{};
         bool poss_dup = false;
         bool orig_valid = false;
-        if (const auto status = parse_inbound_header(message, msg_type, sequence,
+        if (const auto status = parse_inbound_header(tags, msg_type, sequence,
                 poss_dup, orig_valid, test_id); !status.ok()) return fail(status);
 
         std::uint64_t peer_heartbeat_ms = 0;
@@ -1887,13 +1967,13 @@ struct SessionDriver::Impl {
         std::uint64_t effective_sequence = sequence;
         bool sequence_reset_event = false;
         bool gapfill_event = false;
+        bool duplicate_gapfill = false;
         bool logon_reset_requested = false;
-        bool duplicate = false;
         std::optional<std::uint64_t> inbound_peer_ack{};
         std::string_view logout_text{};
 
-        const auto* sent_time_field = unique_field(message, 52, duplicate);
-        if (sent_time_field == nullptr || duplicate) return fail(Status{ErrorCode::invalid_timestamp, 52});
+        const auto* sent_time_field = tags.sending_time;
+        if (sent_time_field == nullptr) return fail(Status{ErrorCode::invalid_timestamp, 52});
         if (!sending_time_within_skew(sent_time_field->value, wall_time)) {
             const Status stale{ErrorCode::invalid_timestamp, 52};
             if (const auto status = send_protocol_reject(sequence, msg_type, stale, 10,
@@ -1905,74 +1985,83 @@ struct SessionDriver::Impl {
         }
 
         if (msg_type == "A") {
-            bool duplicate = false;
-            const auto* encryption = unique_field(message, 98, duplicate);
-            if (duplicate || encryption == nullptr || encryption->value != "0") {
+            if (tags.encrypt == nullptr || tags.encrypt->value != "0") {
                 return fail(Status{ErrorCode::protocol_error, 98});
             }
-            const auto* heartbeat = unique_field(message, 108, duplicate);
             std::uint64_t seconds{};
-            if (duplicate || heartbeat == nullptr || !parse_unsigned(heartbeat->value, seconds) || seconds == 0 ||
+            if (tags.hb_int == nullptr || !parse_unsigned(tags.hb_int->value, seconds) || seconds == 0 ||
                 seconds > std::numeric_limits<std::uint32_t>::max() / 1000U) {
                 return fail(Status{ErrorCode::protocol_error, 108});
             }
             peer_heartbeat_ms = seconds * 1000;
             if (!recovery) {
-                if (const auto status = validate_logon_policy(message, sequence,
+                if (const auto status = validate_logon_policy(message, tags, sequence,
                         logon_reset_requested); !status.ok()) return fail(status);
             } else if (config.settings && config.settings->version == FixVersion::fixt11) {
-                const auto* appl_ver = unique_field(message, 1137, duplicate);
-                if (duplicate || appl_ver == nullptr ||
-                    appl_ver->value != config.settings->default_appl_ver_id)
+                if (tags.appl_ver == nullptr ||
+                    tags.appl_ver->value != config.settings->default_appl_ver_id)
                     return fail(Status{ErrorCode::unsupported_protocol, 1137});
             }
         } else if (msg_type == "2") {
-            bool duplicate = false;
-            const auto* begin_field = unique_field(message, 7, duplicate);
-            if (duplicate || begin_field == nullptr || !parse_unsigned(begin_field->value, resend_begin)) {
+            if (tags.begin_seq == nullptr || !parse_unsigned(tags.begin_seq->value, resend_begin)) {
                 return fail(Status{ErrorCode::protocol_error, 7});
             }
-            const auto* end_field = unique_field(message, 16, duplicate);
-            if (duplicate || end_field == nullptr || !parse_unsigned(end_field->value, resend_end)) {
+            if (tags.end_seq == nullptr || !parse_unsigned(tags.end_seq->value, resend_end)) {
                 return fail(Status{ErrorCode::protocol_error, 16});
             }
             if (resend_begin == 0 || (resend_end != 0 && resend_end < resend_begin)) {
                 return fail(Status{ErrorCode::protocol_error, 7});
             }
         } else if (msg_type == "4") {
-            bool duplicate = false;
-            const auto* flag = unique_field(message, 123, duplicate);
-            if (duplicate || flag == nullptr) return fail(Status{ErrorCode::missing_field, 123});
-            const auto* new_seq = unique_field(message, 36, duplicate);
-            if (duplicate || new_seq == nullptr || !parse_unsigned(new_seq->value, next_inbound)) {
+            // Tag 123 (GapFillFlag) is optional in FIX and defaults to 'N' (Reset mode).
+            if (tags.gap_fill != nullptr && tags.gap_fill->value != "N" && tags.gap_fill->value != "Y") {
+                return fail(Status{ErrorCode::invalid_value, 123});
+            }
+            const bool is_gap_fill = tags.gap_fill != nullptr && tags.gap_fill->value == "Y";
+            if (tags.new_seq == nullptr || !parse_unsigned(tags.new_seq->value, next_inbound)) {
                 return fail(Status{ErrorCode::protocol_error, 36});
             }
-            if (flag->value == "N") {
+            if (!is_gap_fill) {
                 if (next_inbound <= core.next_inbound()) return fail(Status{ErrorCode::protocol_error, 36});
                 sequence_reset_event = true;
                 effective_sequence = core.next_inbound();
-            } else if (flag->value == "Y") {
-                if (!poss_dup || !orig_valid || next_inbound <= sequence ||
-                    next_inbound <= core.next_inbound())
-                    return fail(Status{ErrorCode::protocol_error, 123});
-                gapfill_event = true;
-                if (sequence < core.next_inbound()) effective_sequence = core.next_inbound();
             } else {
-                return fail(Status{ErrorCode::invalid_value, 123});
+                if (!poss_dup || !orig_valid || next_inbound <= sequence)
+                    return fail(Status{ErrorCode::protocol_error, 123});
+                if (next_inbound <= core.next_inbound()) {
+                    // Duplicate replayed GapFill whose NewSeqNo is already satisfied: ignore cleanly.
+                    duplicate_gapfill = true;
+                } else {
+                    gapfill_event = true;
+                    if (sequence < core.next_inbound()) effective_sequence = core.next_inbound();
+                }
             }
         } else if (msg_type == "5") {
-            bool duplicate = false;
-            const auto* text = unique_field(message, 58, duplicate);
-            if (duplicate) return fail(Status{ErrorCode::duplicate_field, 58});
-            if (text != nullptr) logout_text = text->value;
+            if (tags.text != nullptr) logout_text = tags.text->value;
         }
 
-        std::uint64_t parsed_peer_ack{};
-        if (const auto ack_status = apply_peer_ack(message, &parsed_peer_ack); !ack_status.ok())
-            return fail(ack_status);
-        const auto* ack_field = unique_field(message, 369, duplicate);
-        if (duplicate) return fail(Status{ErrorCode::duplicate_field, 369});
-        if (ack_field != nullptr) inbound_peer_ack = parsed_peer_ack;
+        // Validate peer 369 syntax early; monotonicity check is applied after duplicate check
+        // so replayed PossDup duplicates with older 369 do not falsely fail the session.
+        std::optional<std::uint64_t> parsed_ack_candidate{};
+        if (tags.peer_ack != nullptr) {
+            std::uint64_t ack_val{};
+            if (!parse_unsigned(tags.peer_ack->value, ack_val))
+                return fail(Status{ErrorCode::invalid_value, 369});
+            parsed_ack_candidate = ack_val;
+        }
+
+        if (duplicate_gapfill) {
+            detail::CoreEvent dup_check{};
+            dup_check.kind = detail::CoreEventKind::inbound_candidate;
+            dup_check.now_ms = now_ms;
+            dup_check.sequence = sequence;
+            dup_check.msg_type = msg_type;
+            dup_check.poss_dup = poss_dup;
+            dup_check.orig_sending_time_valid = orig_valid;
+            const auto dup_disp = core.process(dup_check);
+            if (!dup_disp.status.ok()) return fail(dup_disp.status);
+            return Status::success();
+        }
 
         bool deferred_logon = recovery;
         if (msg_type == "A" && !deferred_logon && core.state() == SessionState::awaiting_logon &&
@@ -1983,6 +2072,12 @@ struct SessionDriver::Impl {
                     return Status::success();
                 }
                 return fail(Status{ErrorCode::protocol_error, 35});
+            }
+            if (parsed_ack_candidate) {
+                const auto last_outbound = journal.next_outbound_seq() == 0
+                    ? 0 : journal.next_outbound_seq() - 1;
+                if (*parsed_ack_candidate < peer_ack_seq || *parsed_ack_candidate > last_outbound)
+                    return fail(Status{ErrorCode::protocol_error, 369});
             }
             if (frame_bytes.size() > deferred_logon_buffer.size()) return fail(Status{ErrorCode::too_large});
             std::memcpy(deferred_logon_buffer.data(), frame_bytes.data(), frame_bytes.size());
@@ -1996,8 +2091,8 @@ struct SessionDriver::Impl {
             candidate.sequence = effective_sequence;
             candidate.last = sequence - 1; // The high Logon is already in hand; request only its gap.
             candidate.msg_type = msg_type;
-            candidate.flag = poss_dup;
-            candidate.flag2 = orig_valid;
+            candidate.poss_dup = poss_dup;
+            candidate.orig_sending_time_valid = orig_valid;
             const auto gap_output = core.process(candidate);
             if (!gap_output.status.ok() || gap_output.inbound != detail::InboundDisposition::gap) {
                 deferred_logon_pending = false;
@@ -2039,17 +2134,42 @@ struct SessionDriver::Impl {
             deferred_logon = true;
         }
 
+        // For acceptor 141=Y Logon, commit epoch reset only after all Logon validations have passed.
+        if (msg_type == "A" && logon_reset_requested && config.role == SessionRole::acceptor) {
+            const auto reset_status = journal.begin_epoch("peer Logon ResetSeqNumFlag=Y");
+            if (!reset_status.ok()) return fail(reset_status);
+            detail::CoreEvent reset_core{};
+            reset_core.kind = detail::CoreEventKind::reset_epoch;
+            const auto reset_output = core.process(reset_core);
+            if (!reset_output.status.ok()) return fail(reset_output.status);
+            peer_ack_seq = 0;
+            peer_reset_requested = true;
+            last_retention_outbound_segment = 0;
+            if (const auto status = update_retention_floor(true); !status.ok()) return fail(status);
+        }
+
         detail::CoreEvent candidate{};
         candidate.kind = detail::CoreEventKind::inbound_candidate;
         candidate.now_ms = now_ms;
         candidate.sequence = effective_sequence;
         candidate.msg_type = msg_type;
-        candidate.flag = poss_dup;
-        candidate.flag2 = orig_valid;
-        candidate.flag3 = deferred_logon;
+        candidate.poss_dup = poss_dup;
+        candidate.orig_sending_time_valid = orig_valid;
+        candidate.is_deferred_logon = deferred_logon;
+        if (msg_type == "2") {
+            candidate.first = resend_begin;
+            candidate.last = resend_end;
+        }
         const auto disposition = core.process(candidate);
         if (!disposition.status.ok()) return fail(disposition.status);
         if (disposition.inbound == detail::InboundDisposition::duplicate) return Status::success();
+        if (parsed_ack_candidate) {
+            const auto last_outbound = journal.next_outbound_seq() == 0
+                ? 0 : journal.next_outbound_seq() - 1;
+            if (*parsed_ack_candidate < peer_ack_seq || *parsed_ack_candidate > last_outbound)
+                return fail(Status{ErrorCode::protocol_error, 369});
+            inbound_peer_ack = parsed_ack_candidate;
+        }
         if (disposition.inbound == detail::InboundDisposition::gap) {
             callback_now_ms = now_ms;
             callback_wall_time = wall_time;
@@ -2067,10 +2187,8 @@ struct SessionDriver::Impl {
         std::uint64_t persisted_next = 0;
         if (sequence_reset_event || gapfill_event) persisted_next = next_inbound;
         if (msg_type == "A") {
-            const auto* original_field = unique_field(message, 122, duplicate);
-            if (duplicate) return fail(Status{ErrorCode::duplicate_field, 122});
             const auto safe = encode_safe_logon(message, sequence, poss_dup,
-                orig_valid, original_field == nullptr ? std::string_view{} : original_field->value,
+                orig_valid, tags.orig_time == nullptr ? std::string_view{} : tags.orig_time->value,
                 sent_time_field->value, inbound_peer_ack);
             if (!safe.ok()) return fail(safe.status());
             stored_payload = {encode_buffer.data(), safe.value()};
@@ -2080,10 +2198,23 @@ struct SessionDriver::Impl {
         if (!appended.ok()) return fail(appended.status());
         const auto inbound_id = appended.value().id;
         if (!is_session_admin(msg_type)) {
-            if (const auto status = remember_inbound(inbound_id, stored_payload.size()); !status.ok())
+            const bool is_gap_or_replay_recovery = core.state() == SessionState::awaiting_logon || poss_dup;
+            if (const auto status = remember_inbound(inbound_id, stored_payload.size(),
+                    is_gap_or_replay_recovery, false); !status.ok())
                 return fail(status);
+        } else if (msg_type == "2") {
+            // Track pending ResendRequest in recovery_slots so disconnect mid-replay
+            // replays and completes it upon reconnect without freezing 369/retention.
+            if (recovery_count < recovery_slots.size() &&
+                stored_payload.size() <= config.max_pending_inbound_bytes - recovery_bytes) {
+                (void)remember_inbound(inbound_id, stored_payload.size(), true, true);
+            }
         }
         if (inbound_peer_ack) peer_ack_seq = *inbound_peer_ack;
+
+        const bool merged_gapfill_covered_deferred_logon =
+            (sequence_reset_event || gapfill_event) && deferred_logon_pending &&
+            appended.value().next_seq > deferred_logon_sequence;
 
         detail::CoreEvent committed{};
         committed.kind = sequence_reset_event || gapfill_event
@@ -2096,9 +2227,9 @@ struct SessionDriver::Impl {
         committed.first = peer_heartbeat_ms;
         committed.last = resend_end;
         committed.text = msg_type == "1" || msg_type == "0" ? test_id : logout_text;
-        committed.flag = poss_dup;
-        committed.flag2 = deferred_logon;
-        committed.flag3 = orig_valid;
+        committed.poss_dup = poss_dup;
+        committed.orig_sending_time_valid = orig_valid;
+        committed.is_deferred_logon = deferred_logon || merged_gapfill_covered_deferred_logon;
         if (msg_type == "2") committed.first = resend_begin;
         const auto actions = core.process(committed);
         if (!actions.status.ok()) return fail(actions.status);
@@ -2112,7 +2243,8 @@ struct SessionDriver::Impl {
         }
         if (msg_type == "3") report_peer_reject(message);
         if (const auto status = update_retention_floor(); !status.ok()) return fail(status);
-        if (deferred_logon) {
+        if (deferred_logon || merged_gapfill_covered_deferred_logon) {
+            secure_clear(deferred_logon_buffer);
             deferred_logon_pending = false;
             deferred_logon_size = 0;
             deferred_logon_sequence = 0;
@@ -2158,10 +2290,15 @@ struct SessionDriver::Impl {
                     front->business) break;
                 detail::CoreEvent skipped{};
                 skipped.kind = detail::CoreEventKind::outbound_skipped;
+                skipped.now_ms = now_ms;
                 skipped.sequence = front->sequence;
                 skipped.msg_type = {front->msg_type.data(), front->msg_type_size};
-                (void)core.process(skipped);
+                const auto skip_output = core.process(skipped);
                 if (const auto status = pop_tx(false, now_ms); !status.ok()) return status;
+                if (skip_output.action_count != 0 || !skip_output.status.ok()) {
+                    if (const auto status = apply_actions(skip_output, nullptr, 0, 0,
+                            now_ms, callback_wall_time); !status.ok()) return status;
+                }
             }
         } else if (tx_count != 0) {
             const auto* front = front_tx();
@@ -2294,6 +2431,10 @@ Status SessionDriver::receive(std::string_view complete_frame, std::uint64_t now
     std::string_view wall_time) noexcept {
     if (!impl_) return Status{ErrorCode::engine_stopped};
     if (const auto status = impl_->claim_owner(); !status.ok()) return status;
+    if (impl_->fatal) return impl_->last_status.ok() ? Status{ErrorCode::engine_stopped} : impl_->last_status;
+    if (impl_->core.state() == SessionState::disconnected || impl_->core.state() == SessionState::closed ||
+        impl_->core.state() == SessionState::failed)
+        return Status{ErrorCode::not_ready};
     if (const auto status = impl_->set_wall_time(wall_time); !status.ok()) return status;
     impl_->callback_now_ms = now_ms;
     return impl_->process_inbound(complete_frame, now_ms, impl_->callback_wall_time);

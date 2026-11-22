@@ -5,6 +5,7 @@
 #include <charconv>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <string_view>
 #include <system_error>
@@ -160,14 +161,15 @@ template <class Unsigned>
             break;
         }
         if (field.wire_type == WireType::binary_data) {
-            if (field.pair_tag == 0 || field.pair_prefix_size == 0)
+            // FIX TagValue requires Length > 0 for binary DATA fields.
+            if (slot.size == 0 || field.pair_tag == 0 || field.pair_prefix_size == 0)
                 return Status{ErrorCode::invalid_value, static_cast<int>(field.tag)};
             const auto* length_field = find_plan_field(message, field.pair_tag);
             if (length_field != nullptr && detail::is_present(message, length_field->slot_index)) {
                 std::uint64_t length{};
                 if (const auto status = group_count_value(message, *length_field, length); !status.ok())
                     return Status{ErrorCode::invalid_value, static_cast<int>(field.pair_tag)};
-                if (length != slot.size)
+                if (length == 0 || length != slot.size)
                     return Status{ErrorCode::invalid_value, static_cast<int>(field.pair_tag)};
             }
         } else if (field.pair_tag != 0) {
@@ -175,10 +177,10 @@ template <class Unsigned>
             std::uint64_t length{};
             if (const auto status = group_count_value(message, field, length); !status.ok()) return status;
             if (data_field != nullptr && detail::is_present(message, data_field->slot_index)) {
-                if (data_field->wire_type != WireType::binary_data ||
+                if (data_field->wire_type != WireType::binary_data || length == 0 ||
                     length != binary_data_size(message, *data_field))
                     return Status{ErrorCode::invalid_value, static_cast<int>(field.tag)};
-            } else if (length != 0) {
+            } else {
                 return Status{ErrorCode::invalid_value, static_cast<int>(field.tag)};
             }
         }
@@ -277,12 +279,14 @@ public:
     explicit Writer(std::span<char> output) noexcept : output_(output) {}
 
     void append(std::string_view value) noexcept {
-        for (const char ch : value) append(ch);
+        if (value.empty()) return;
+        std::memcpy(output_.data() + position_, value.data(), value.size());
+        update_checksum(value.size());
     }
 
     void append(char value) noexcept {
         output_[position_++] = value;
-        checksum_ = (checksum_ + static_cast<unsigned char>(value)) & 0xffU;
+        checksum_ += static_cast<unsigned char>(value);
     }
 
     void append_unsigned(std::uint64_t value) noexcept {
@@ -330,7 +334,7 @@ public:
     }
 
     void append_checksum_suffix() noexcept {
-        const auto checksum = static_cast<unsigned>(checksum_);
+        const auto checksum = static_cast<unsigned>(checksum_ & 0xffU);
         output_[position_++] = '1';
         output_[position_++] = '0';
         output_[position_++] = '=';
@@ -342,13 +346,16 @@ public:
 
 private:
     void update_checksum(std::size_t size) noexcept {
-        for (std::size_t i = 0; i < size; ++i) checksum_ = (checksum_ + static_cast<unsigned char>(output_[position_ + i])) & 0xffU;
+        const auto* raw = reinterpret_cast<const unsigned char*>(output_.data() + position_);
+        std::uint64_t sum = checksum_;
+        for (std::size_t i = 0; i < size; ++i) sum += raw[i];
+        checksum_ = sum;
         position_ += size;
     }
 
     std::span<char> output_;
     std::size_t position_{};
-    unsigned checksum_{};
+    std::uint64_t checksum_{};
 };
 
 [[nodiscard]] Status measure_body_fields(const detail::MessageView& message,
@@ -415,7 +422,7 @@ void append_body_fields(const detail::MessageView& message, Writer& writer) noex
     }
     if (header.poss_dup && (!valid_text(header.orig_sending_time) ||
         !detail::is_valid_utc_timestamp(header.orig_sending_time) ||
-        header.orig_sending_time > header.sending_time)) {
+        detail::compare_utc_timestamps(header.orig_sending_time, header.sending_time) > 0)) {
         return Status{ErrorCode::invalid_timestamp, 122};
     }
     if (!header.poss_dup && !header.orig_sending_time.empty()) return Status{ErrorCode::invalid_header, 122};
@@ -567,6 +574,8 @@ Result<std::size_t> encode_fix_replay(const FlatMessageView& original,
     const auto* sending_time_field = find_optional(52);
     const auto* original_time_field = find_optional(122);
     const auto* poss_dup_field = find_optional(43);
+    (void)find_optional(49);
+    (void)find_optional(56);
     (void)find_optional(369); // Reject a duplicate even though the old value is replaced.
     if (duplicate_header_tag != 0)
         return Status{ErrorCode::duplicate_field, static_cast<int>(duplicate_header_tag)};
@@ -600,7 +609,8 @@ Result<std::size_t> encode_fix_replay(const FlatMessageView& original,
             original_time_field == nullptr ? sending_time_field->offset : original_time_field->offset};
     }
     if (!valid_text(msg_type_field->value)) return Status{ErrorCode::invalid_value, 35};
-    if (original_sending_time > header.sending_time) return Status{ErrorCode::invalid_timestamp, 122};
+    if (detail::compare_utc_timestamps(original_sending_time, header.sending_time) > 0)
+        return Status{ErrorCode::invalid_timestamp, 122};
     if (header.msg_seq_num != 0 && header.msg_seq_num != sequence) {
         return Status{ErrorCode::invalid_value, 34, seq_field->offset};
     }

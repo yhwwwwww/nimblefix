@@ -103,6 +103,9 @@ void test_rotation_recovery_and_inspection() {
         const auto full = journal.append(RecordKind::outbound, 4, 104, 0, large_payload());
         CHECK(!full.ok() && full.status().code == ErrorCode::storage_full);
         CHECK(journal.records().size() == 3);
+        CHECK(journal.needs_maintenance());
+        CHECK(journal.poll_maintenance().ok());
+        CHECK(!journal.needs_maintenance());
 
         const auto before = std::filesystem::last_write_time(store.path);
         const auto checkpoint_before = std::filesystem::last_write_time(store.path + ".ckp");
@@ -272,6 +275,44 @@ void test_checkpoint_corruption_rebuild_and_payload_corruption_fails_closed() {
     }
     CHECK(Journal::open(corrupt_config).status().code == ErrorCode::corrupt_store);
     CHECK(Journal::inspect_snapshot(corrupt_config).diagnostic.code == ErrorCode::corrupt_store);
+
+    // Non-final segment dirty tail must fail closed with corrupt_store instead of silently zeroing.
+    TempStore dirty_tail;
+    const auto dirty_config = dirty_tail.config();
+    {
+        auto opened = Journal::open(dirty_config);
+        CHECK(opened.ok());
+        if (!opened.ok()) return;
+        CHECK(opened.value().append(RecordKind::outbound, 1, 1, 0, large_payload()).ok());
+        CHECK(opened.value().append(RecordKind::outbound, 2, 2, 0, large_payload()).ok());
+    }
+    {
+        const auto seg0 = dirty_tail.path + ".seg0";
+        const int fd = ::open(seg0.c_str(), O_RDWR | O_CLOEXEC);
+        CHECK(fd >= 0);
+        if (fd >= 0) {
+            const unsigned char garbage = 0xAB;
+            // Write non-zero byte past the first record in non-final seg0.
+            CHECK(::pwrite(fd, &garbage, 1, 4096 + 64 + 3000 + 8) == 1);
+            ::close(fd);
+        }
+    }
+    CHECK(Journal::open(dirty_config).status().code == ErrorCode::corrupt_store);
+    CHECK(Journal::inspect_snapshot(dirty_config).diagnostic.code == ErrorCode::corrupt_store);
+
+    // Stale .tmp files from crashed atomic creation are cleaned up on open.
+    TempStore stale_tmp;
+    const auto stale_config = stale_tmp.config();
+    {
+        const auto orphan = stale_tmp.path + ".seg99.tmp.12345";
+        const int fd = ::open(orphan.c_str(), O_CREAT | O_RDWR | O_CLOEXEC, 0600);
+        CHECK(fd >= 0);
+        if (fd >= 0) ::close(fd);
+        CHECK(std::filesystem::exists(orphan));
+        auto opened = Journal::open(stale_config);
+        CHECK(opened.ok());
+        CHECK(!std::filesystem::exists(orphan));
+    }
 }
 
 void test_checkpoint_rebuild_after_retention() {
@@ -486,27 +527,38 @@ void test_committed_delivery_completion_survives_process_kill() {
 }
 
 void test_format_compatibility_and_path_safety() {
-    TempStore legacy;
-    auto v1_config = legacy.config();
-    v1_config.segment_bytes = 0;
-    v1_config.max_segments = 0;
+    TempStore auto_seg;
+    auto default_seg_config = auto_seg.config();
+    default_seg_config.segment_bytes = 0;
+    default_seg_config.max_segments = 0;
     {
-        auto created = Journal::open(v1_config);
+        auto created = Journal::open(default_seg_config);
         CHECK(created.ok());
         if (!created.ok()) return;
-        CHECK(created.value().append(RecordKind::outbound, 1, 1, 0, "v1-frame").ok());
+        CHECK(created.value().append(RecordKind::outbound, 1, 1, 0, "v2-auto-frame").ok());
     }
-    auto segmented_config = legacy.config();
     {
-        auto compatible = Journal::open(segmented_config);
-        if (!compatible.ok()) std::cerr << "v1 compatibility: " << compatible.status().message()
-            << " code=" << static_cast<int>(compatible.status().code)
-            << " offset=" << compatible.status().offset << '\n';
-        CHECK(compatible.ok());
-        if (!compatible.ok()) return;
-        CHECK(compatible.value().records().size() == 1);
-        CHECK(compatible.value().append(RecordKind::outbound, 2, 2, 0, "v1-next").ok());
+        auto reopened = Journal::open(default_seg_config);
+        CHECK(reopened.ok());
+        if (!reopened.ok()) return;
+        CHECK(reopened.value().records().size() == 1);
+        CHECK(reopened.value().append(RecordKind::outbound, 2, 2, 0, "v2-auto-next").ok());
     }
+
+    // Legacy v1 files are retired in 0.3.0 and must be rejected as unsupported_version.
+    TempStore v1_rejected;
+    const auto v1_config = v1_rejected.config();
+    { auto opened = Journal::open(v1_config); CHECK(opened.ok()); }
+    {
+        const int fd = ::open(v1_rejected.path.c_str(), O_RDWR | O_CLOEXEC);
+        CHECK(fd >= 0);
+        if (fd >= 0) {
+            const std::array<unsigned char, 4> v1{1, 0, 0, 0};
+            CHECK(::pwrite(fd, v1.data(), v1.size(), 8) == static_cast<ssize_t>(v1.size()));
+            ::close(fd);
+        }
+    }
+    CHECK(Journal::open(v1_config).status().code == ErrorCode::unsupported_version);
 
     TempStore unsupported;
     const auto config = unsupported.config();
@@ -618,13 +670,28 @@ void test_epoch_reset_is_audited_and_crash_recoverable() {
     CHECK(Journal::open(config).status().code == ErrorCode::corrupt_store);
     CHECK(Journal::inspect_snapshot(config).diagnostic.code == ErrorCode::corrupt_store);
 
-    TempStore legacy;
-    auto legacy_config = legacy.config();
-    legacy_config.segment_bytes = 0;
-    legacy_config.max_segments = 0;
-    auto old = Journal::open(legacy_config);
-    CHECK(old.ok());
-    if (old.ok()) CHECK(old.value().begin_epoch("no v1 reset").code == ErrorCode::unsupported);
+    // Post-reset retention monotonicity across reopen.
+    TempStore epoch_retain;
+    auto er_config = epoch_retain.config();
+    er_config.capacity_bytes = 1024U * 1024U + 3U * er_config.segment_bytes;
+    {
+        auto opened = Journal::open(er_config);
+        CHECK(opened.ok());
+        if (!opened.ok()) return;
+        CHECK(opened.value().begin_epoch("epoch 2 monotonic floor").ok());
+        CHECK(opened.value().append(RecordKind::outbound, 1, 1, 0, large_payload()).ok());
+        CHECK(opened.value().append(RecordKind::outbound, 2, 2, 0, large_payload()).ok());
+        CHECK(opened.value().set_retention_floor(3, 0).ok());
+        CHECK(opened.value().lowest_retained_outbound_seq() == 3);
+    }
+    {
+        auto reopened = Journal::open(er_config);
+        CHECK(reopened.ok());
+        if (reopened.ok()) {
+            CHECK(reopened.value().checkpoint().epoch == 2);
+            CHECK(reopened.value().lowest_retained_outbound_seq() == 3);
+        }
+    }
 
     TempStore crash_store;
     auto base = crash_store.config();
@@ -824,6 +891,7 @@ void test_kill_boundaries_for_v2_metadata_and_rotation() {
             auto opened = Journal::open(store.config({kill_at, &context}));
             if (!opened.ok()) ::_exit(13);
             (void)opened.value().append(RecordKind::outbound, 2, 2, 0, large_payload());
+            (void)opened.value().poll_maintenance();
             ::_exit(14);
         }
         if (child >= 0) CHECK(child_was_killed(child));

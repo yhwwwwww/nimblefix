@@ -139,6 +139,31 @@ inline constexpr std::uint32_t last_msg_seq_num_processed_tag = 369;
     return day >= 1 && day <= max_day;
 }
 
+// Compare two already-validated FIX UTC timestamps numerically across
+// second / millisecond / microsecond / nanosecond precisions.
+// Returns < 0 if lhs < rhs, 0 if equal instants, > 0 if lhs > rhs.
+[[nodiscard]] constexpr int compare_utc_timestamps(std::string_view lhs,
+                                                   std::string_view rhs) noexcept {
+    // First 17 characters are fixed-width YYYYMMDD-HH:MM:SS.
+    const std::size_t base_len = 17;
+    for (std::size_t i = 0; i < base_len; ++i) {
+        if (lhs[i] != rhs[i]) return lhs[i] < rhs[i] ? -1 : 1;
+    }
+    const auto fractional_ns = [](std::string_view value) constexpr noexcept -> std::uint32_t {
+        if (value.size() <= 17) return 0;
+        std::uint32_t ns = 0;
+        std::uint32_t mult = 100'000'000U;
+        for (std::size_t i = 18; i < value.size(); ++i) {
+            ns += static_cast<std::uint32_t>(value[i] - '0') * mult;
+            mult /= 10U;
+        }
+        return ns;
+    };
+    const auto lhs_ns = fractional_ns(lhs);
+    const auto rhs_ns = fractional_ns(rhs);
+    return lhs_ns < rhs_ns ? -1 : (lhs_ns > rhs_ns ? 1 : 0);
+}
+
 struct SlotValue {
     std::uint64_t scalar{};
     std::uint32_t offset{};
@@ -358,11 +383,11 @@ inline constexpr bool is_string_v = std::is_convertible_v<T, std::string_view> &
 
 template <class T>
 inline constexpr bool is_signed_integer_v = std::is_integral_v<std::remove_cvref_t<T>> &&
-    std::is_signed_v<std::remove_cvref_t<T>> && !is_character_v<T>;
+    std::is_signed_v<std::remove_cvref_t<T>> && !is_character_v<T> && !is_boolean_v<T>;
 
 template <class T>
 inline constexpr bool is_unsigned_integer_v = std::is_integral_v<std::remove_cvref_t<T>> &&
-    std::is_unsigned_v<std::remove_cvref_t<T>>;
+    std::is_unsigned_v<std::remove_cvref_t<T>> && !is_character_v<T> && !is_boolean_v<T>;
 
 template <class T>
 inline constexpr bool supported_value_v = is_character_v<T> || is_boolean_v<T> || is_decimal_v<T> || is_string_v<T> ||
@@ -708,9 +733,19 @@ template <FixedString MsgType>
     return StaticMessage<MsgType>{limits};
 }
 
+namespace detail {
+template <class Policy, class = void>
+struct policy_schema_alias {};
+
+template <class Policy>
+struct policy_schema_alias<Policy, std::void_t<typename Policy::schema_type>> {
+    using schema_type = typename Policy::schema_type;
+};
+} // namespace detail
+
 template <FixedString MsgType, class Shape, std::size_t ByteCapacity = 4096,
     class Policy = FlatMessagePolicy<MsgType>>
-class FixedShapeMessage {
+class FixedShapeMessage : public detail::policy_schema_alias<Policy> {
     static_assert(detail::ShapeTraits<Shape>::size <= std::numeric_limits<std::uint32_t>::max());
     static_assert(ByteCapacity <= std::numeric_limits<std::uint32_t>::max());
     static_assert(detail::shape_unique<Shape>::value, "Fields cannot declare a tag more than once");
@@ -728,6 +763,7 @@ public:
     using shape_type = Shape;
     using policy_type = Policy;
     using plan_type = Plan;
+    static constexpr std::size_t attached_group_count = 0;
     static constexpr std::string_view msg_type = MsgType.view();
     static constexpr std::size_t slot_count = field_count_;
     static constexpr std::size_t slot_storage_bytes = field_count_ * sizeof(detail::SlotValue);
@@ -749,7 +785,6 @@ public:
 
     void reset() noexcept {
         for (auto& bits : presence_) bits = 0;
-        if (byte_count_ != 0) std::memset(bytes_.data(), 0, byte_count_);
         byte_count_ = 0;
         status_ = Status::success();
     }
@@ -772,14 +807,16 @@ public:
                 detail::wire_field_kind_v<declared_wire_type> == Declared::kind),
             "value type does not match the declared Fields kind or XML wire type");
         if (!status_.ok()) return status_;
+        std::string_view text{};
         if constexpr (detail::is_string_v<V>) {
-            const auto text = detail::as_string_view(std::forward<V>(value));
+            text = detail::as_string_view(std::forward<V>(value));
             if constexpr (declared_wire_type != WireType::binary_data) {
                 if (!detail::is_valid_text(text)) {
                     status_ = Status{ErrorCode::invalid_value, static_cast<int>(Tag)};
                     return status_;
                 }
-            } else if (text.size() != 0 && text.data() == nullptr) {
+            } else if (text.empty() || text.data() == nullptr) {
+                // FIX TagValue binary DATA fields require Length > 0.
                 status_ = Status{ErrorCode::invalid_value, static_cast<int>(Tag)};
                 return status_;
             }
@@ -795,10 +832,8 @@ public:
         std::size_t byte_count = byte_count_;
         Status result{};
         if constexpr (detail::is_string_v<V>) {
-            const auto text = detail::as_string_view(std::forward<V>(value));
             const bool was_present = (presence_[index / 8] & static_cast<std::uint8_t>(1U << (index % 8))) != 0;
             if (was_present) {
-                std::array<char, ByteCapacity> aliased_input;
                 const char* external_source = text.data();
                 const auto old_offset = static_cast<std::size_t>(slot.offset);
                 const auto old_reserved = static_cast<std::size_t>(slot.scalar);
@@ -832,47 +867,49 @@ public:
                         const bool aliases_shifted_tail = input_in_arena && input_offset >= old_end;
                         const bool crosses_shift_boundary = input_in_arena && input_offset < old_end &&
                             text.size() > old_end - input_offset;
+                        const auto apply_shift = [&](const char* source_ptr, bool source_in_arena) noexcept {
+                            if (result.ok() && size_delta != 0) {
+                                const auto tail_size = byte_count_ - old_end;
+                                if (growing) {
+                                    std::memmove(bytes_.data() + old_end + size_delta,
+                                        bytes_.data() + old_end, tail_size);
+                                } else {
+                                    std::memmove(bytes_.data() + old_offset + text.size(),
+                                        bytes_.data() + old_end, tail_size);
+                                }
+                                for (std::size_t plan_index = 0; plan_index < plan_.size(); ++plan_index) {
+                                    if (plan_[plan_index].kind != FieldKind::string) continue;
+                                    const auto physical = slot_map_[plan_index];
+                                    if (physical == index ||
+                                        (presence_[physical / 8] & static_cast<std::uint8_t>(1U << (physical % 8))) == 0) {
+                                        continue;
+                                    }
+                                    auto& other = slots_[physical];
+                                    if (other.offset >= old_end) {
+                                        other.offset = static_cast<std::uint32_t>(growing
+                                            ? static_cast<std::size_t>(other.offset) + size_delta
+                                            : static_cast<std::size_t>(other.offset) - size_delta);
+                                    }
+                                }
+                                if (aliases_shifted_tail) {
+                                    input_offset = growing ? input_offset + size_delta : input_offset - size_delta;
+                                }
+                                byte_count = new_count;
+                            }
+                            if (result.ok()) {
+                                const auto* source = source_in_arena ? bytes_.data() + input_offset : source_ptr;
+                                if (!text.empty()) std::memmove(bytes_.data() + old_offset, source, text.size());
+                                slot.size = static_cast<std::uint32_t>(text.size());
+                                slot.scalar = text.size();
+                            }
+                        };
                         if (result.ok() && crosses_shift_boundary) {
-                            // A borrowed substring may span both the replaced
-                            // value and the tail being moved. Preserve just its
-                            // used bytes before either region changes.
+                            // Only touch stack scratch if the substring genuinely crosses the shift boundary.
+                            std::array<char, ByteCapacity> aliased_input;
                             std::memcpy(aliased_input.data(), text.data(), text.size());
-                            external_source = aliased_input.data();
-                            input_in_arena = false;
-                        }
-                        if (result.ok() && size_delta != 0) {
-                            const auto tail_size = byte_count_ - old_end;
-                            if (growing) {
-                                std::memmove(bytes_.data() + old_end + size_delta,
-                                    bytes_.data() + old_end, tail_size);
-                            } else {
-                                std::memmove(bytes_.data() + old_offset + text.size(),
-                                    bytes_.data() + old_end, tail_size);
-                            }
-                            for (std::size_t plan_index = 0; plan_index < plan_.size(); ++plan_index) {
-                                if (plan_[plan_index].kind != FieldKind::string) continue;
-                                const auto physical = slot_map_[plan_index];
-                                if (physical == index ||
-                                    (presence_[physical / 8] & static_cast<std::uint8_t>(1U << (physical % 8))) == 0) {
-                                    continue;
-                                }
-                                auto& other = slots_[physical];
-                                if (other.offset >= old_end) {
-                                    other.offset = static_cast<std::uint32_t>(growing
-                                        ? static_cast<std::size_t>(other.offset) + size_delta
-                                        : static_cast<std::size_t>(other.offset) - size_delta);
-                                }
-                            }
-                            if (aliases_shifted_tail) {
-                                input_offset = growing ? input_offset + size_delta : input_offset - size_delta;
-                            }
-                            byte_count = new_count;
-                        }
-                        if (result.ok()) {
-                            const auto* source = input_in_arena ? bytes_.data() + input_offset : external_source;
-                            if (!text.empty()) std::memmove(bytes_.data() + old_offset, source, text.size());
-                            slot.size = static_cast<std::uint32_t>(text.size());
-                            slot.scalar = text.size();
+                            apply_shift(aliased_input.data(), false);
+                        } else {
+                            apply_shift(external_source, input_in_arena);
                         }
                     }
                 }
@@ -1022,7 +1059,7 @@ private:
                     status_ = Status{ErrorCode::invalid_value, static_cast<int>(Tag)};
                     return;
                 }
-            } else if (text.size() != 0 && text.data() == nullptr) {
+            } else if (text.empty() || text.data() == nullptr) {
                 status_ = Status{ErrorCode::invalid_value, static_cast<int>(Tag)};
                 return;
             }

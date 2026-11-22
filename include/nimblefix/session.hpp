@@ -130,6 +130,8 @@ public:
     template <class Message>
         requires requires(const Message& message) { message.view(); }
     [[nodiscard]] Result<SendReceipt> send(const Message& message) noexcept {
+        static_assert(!requires { requires std::remove_cvref_t<Message>::is_group_entry; },
+            "repeating group entries cannot be sent as standalone FIX messages");
         return send(message.view());
     }
 
@@ -249,6 +251,8 @@ public:
         requires requires(const Message& message) { message.view(); }
     [[nodiscard]] Result<SendReceipt> send(const Message& message,
         std::uint64_t now_ms, std::string_view wall_time) noexcept {
+        static_assert(!requires { requires std::remove_cvref_t<Message>::is_group_entry; },
+            "repeating group entries cannot be sent as standalone FIX messages");
         return send(message.view(), now_ms, wall_time);
     }
 

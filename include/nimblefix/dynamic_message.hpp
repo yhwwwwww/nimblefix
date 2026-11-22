@@ -83,7 +83,17 @@ public:
             slot.size = static_cast<std::uint32_t>(text.size());
             slot.scalar = text.size();
             try {
-                value_bytes_.insert(value_bytes_.end(), text.begin(), text.end());
+                // Handle self-aliasing safely if text points inside value_bytes_.
+                const auto src = reinterpret_cast<std::uintptr_t>(text.data());
+                const auto base = reinterpret_cast<std::uintptr_t>(value_bytes_.data());
+                if (!value_bytes_.empty() && src >= base && src - base <= value_bytes_.size()) {
+                    const auto off = static_cast<std::size_t>(src - base);
+                    value_bytes_.reserve(old_bytes + text.size());
+                    value_bytes_.insert(value_bytes_.end(),
+                        value_bytes_.data() + off, value_bytes_.data() + off + text.size());
+                } else {
+                    value_bytes_.insert(value_bytes_.end(), text.begin(), text.end());
+                }
             } catch (...) {
                 return {ErrorCode::capacity_exceeded, static_cast<int>(tag)};
             }
@@ -114,7 +124,7 @@ public:
         if (const auto status = validate_tag(data_tag); !status.ok()) return status;
         if (length_tag == data_tag || contains_tag(length_tag) || contains_tag(data_tag))
             return {ErrorCode::duplicate_field, static_cast<int>(data_tag)};
-        if (bytes.size() != 0 && bytes.data() == nullptr)
+        if (bytes.empty() || bytes.data() == nullptr)
             return {ErrorCode::invalid_value, static_cast<int>(data_tag)};
         if (length_data_pairs_.size() == max_wire_hint_pairs)
             return {ErrorCode::capacity_exceeded, static_cast<int>(data_tag), length_data_pairs_.size()};

@@ -1,4 +1,5 @@
 #include "tcp.hpp"
+#include <nimblefix/tcp_transport.hpp>
 
 #include <arpa/inet.h>
 #include <cerrno>
@@ -248,3 +249,85 @@ void TcpListener::close() noexcept {
 }
 
 } // namespace nimblefix::detail
+
+namespace nimblefix {
+
+TcpTransport::TcpTransport(TcpTransport&& other) noexcept
+    : fd_(std::exchange(other.fd_, -1)),
+      connecting_(std::exchange(other.connecting_, false)) {}
+
+TcpTransport& TcpTransport::operator=(TcpTransport&& other) noexcept {
+    if (this == &other) return *this;
+    close();
+    fd_ = std::exchange(other.fd_, -1);
+    connecting_ = std::exchange(other.connecting_, false);
+    return *this;
+}
+
+TcpTransport::~TcpTransport() {
+    close();
+}
+
+Status TcpTransport::connect(std::string_view host, std::uint16_t port) noexcept {
+    close();
+    bool in_progress = false;
+    auto stream = detail::TcpStream::connect(host, port, in_progress);
+    if (!stream.ok()) return stream.status();
+    fd_ = stream.value().release_handle();
+    connecting_ = in_progress;
+    return Status::success();
+}
+
+Status TcpTransport::finish_connect() noexcept {
+    if (fd_ < 0) return Status{ErrorCode::invalid_value};
+    if (!connecting_) return Status::success();
+    int err = 0;
+    socklen_t len = sizeof(err);
+    if (::getsockopt(fd_, SOL_SOCKET, SO_ERROR, &err, &len) != 0)
+        return Status{ErrorCode::io_error, 0, static_cast<std::size_t>(errno)};
+    if (err != 0) return Status{ErrorCode::io_error, 0, static_cast<std::size_t>(err)};
+    sockaddr_storage peer{};
+    socklen_t peer_len = sizeof(peer);
+    if (::getpeername(fd_, reinterpret_cast<sockaddr*>(&peer), &peer_len) != 0) {
+        if (errno == ENOTCONN) return Status{ErrorCode::need_more};
+        return Status{ErrorCode::io_error, 0, static_cast<std::size_t>(errno)};
+    }
+    connecting_ = false;
+    return Status::success();
+}
+
+TransportIoResult TcpTransport::read(std::span<char> output) noexcept {
+    if (fd_ < 0) return {0, false, true, Status{ErrorCode::invalid_value}};
+    if (output.empty()) return {};
+    ssize_t count;
+    do {
+        count = ::recv(fd_, output.data(), output.size(), 0);
+    } while (count < 0 && errno == EINTR);
+    if (count > 0) return {static_cast<std::size_t>(count), false, false, Status::success()};
+    if (count == 0) return {0, false, true, Status::success()};
+    if (errno == EAGAIN || errno == EWOULDBLOCK) return {0, true, false, Status::success()};
+    return {0, false, false, Status{ErrorCode::io_error, 0, static_cast<std::size_t>(errno)}};
+}
+
+TransportIoResult TcpTransport::write(std::span<const char> input) noexcept {
+    if (fd_ < 0) return {0, false, true, Status{ErrorCode::invalid_value}};
+    if (input.empty()) return {};
+    ssize_t count;
+    do {
+        count = ::send(fd_, input.data(), input.size(), MSG_NOSIGNAL);
+    } while (count < 0 && errno == EINTR);
+    if (count > 0) return {static_cast<std::size_t>(count), false, false, Status::success()};
+    if (count == 0) return {0, false, true, Status::success()};
+    if (errno == EAGAIN || errno == EWOULDBLOCK) return {0, true, false, Status::success()};
+    return {0, false, false, Status{ErrorCode::io_error, 0, static_cast<std::size_t>(errno)}};
+}
+
+void TcpTransport::close() noexcept {
+    if (fd_ >= 0) {
+        (void)::close(fd_);
+        fd_ = -1;
+    }
+    connecting_ = false;
+}
+
+} // namespace nimblefix

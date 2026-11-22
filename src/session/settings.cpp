@@ -11,12 +11,14 @@ bool plain(std::string_view value) noexcept {
     return true;
 }
 bool secret_equal(std::string_view first, std::string_view second) noexcept {
-    std::size_t difference = first.size() ^ second.size();
-    const auto size = std::max(first.size(), second.size());
+    // Fixed-length constant-time comparison preventing compiler short-circuiting
+    // and avoiding length-oracle timing differences across credential inputs.
+    volatile std::size_t difference = first.size() ^ second.size();
+    const std::size_t size = std::max(first.size(), second.size());
     for (std::size_t i = 0; i < size; ++i) {
-        const auto a = i < first.size() ? static_cast<unsigned char>(first[i]) : 0U;
-        const auto b = i < second.size() ? static_cast<unsigned char>(second[i]) : 0U;
-        difference |= a ^ b;
+        const unsigned char a = i < first.size() ? static_cast<unsigned char>(first[i]) : 0U;
+        const unsigned char b = i < second.size() ? static_cast<unsigned char>(second[i]) : 0U;
+        difference = difference | static_cast<std::size_t>(a ^ b);
     }
     return difference == 0;
 }

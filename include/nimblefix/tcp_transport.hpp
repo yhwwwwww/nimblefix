@@ -1,0 +1,63 @@
+#pragma once
+
+#include <concepts>
+#include <cstddef>
+#include <cstdint>
+#include <span>
+#include <string_view>
+
+#include <nimblefix/status.hpp>
+
+namespace nimblefix {
+
+struct TransportIoResult {
+    std::size_t bytes{};
+    bool would_block{};
+    bool peer_closed{};
+    Status status{};
+};
+
+template <class T>
+concept DirectTransport = requires(T& t, const T& ct, std::string_view host, std::uint16_t port,
+                                   std::span<char> rx, std::span<const char> tx) {
+    { t.connect(host, port) } noexcept -> std::same_as<Status>;
+    { t.finish_connect() } noexcept -> std::same_as<Status>;
+    { t.read(rx) } noexcept -> std::same_as<TransportIoResult>;
+    { t.write(tx) } noexcept -> std::same_as<TransportIoResult>;
+    { t.close() } noexcept -> std::same_as<void>;
+    { ct.native_fd() } noexcept -> std::same_as<int>;
+    { ct.valid() } noexcept -> std::same_as<bool>;
+    { ct.is_connecting() } noexcept -> std::same_as<bool>;
+};
+
+// Lightweight nonblocking TCP transport for Layer 0 DirectInitiator.
+// Supports numeric IPv4/IPv6 hosts with TCP_NODELAY and MSG_NOSIGNAL.
+class TcpTransport {
+public:
+    TcpTransport() noexcept = default;
+    explicit TcpTransport(int fd, bool connecting = false) noexcept
+        : fd_(fd), connecting_(connecting) {}
+    TcpTransport(const TcpTransport&) = delete;
+    TcpTransport& operator=(const TcpTransport&) = delete;
+    TcpTransport(TcpTransport&& other) noexcept;
+    TcpTransport& operator=(TcpTransport&& other) noexcept;
+    ~TcpTransport();
+
+    [[nodiscard]] Status connect(std::string_view host, std::uint16_t port) noexcept;
+    [[nodiscard]] Status finish_connect() noexcept;
+    [[nodiscard]] TransportIoResult read(std::span<char> output) noexcept;
+    [[nodiscard]] TransportIoResult write(std::span<const char> input) noexcept;
+    void close() noexcept;
+
+    [[nodiscard]] int native_fd() const noexcept { return fd_; }
+    [[nodiscard]] bool valid() const noexcept { return fd_ >= 0; }
+    [[nodiscard]] bool is_connecting() const noexcept { return connecting_; }
+
+private:
+    int fd_{-1};
+    bool connecting_{};
+};
+
+static_assert(DirectTransport<TcpTransport>);
+
+} // namespace nimblefix

@@ -19,13 +19,13 @@
 #include <mutex>
 #include <new>
 #include <optional>
-#include <poll.h>
 #include <string>
 #include <system_error>
 #include <thread>
 #include <utility>
 #include <vector>
 
+#include <sys/epoll.h>
 #include <sys/eventfd.h>
 #include <unistd.h>
 
@@ -284,6 +284,27 @@ struct SenderCommandView {
     OwnedMessageHeader header{};
     std::memcpy(&header, bytes.data(), sizeof(header));
     auto* base = bytes.data();
+    RepeatingGroupView* groups = header.group_count == 0
+        ? nullptr : reinterpret_cast<RepeatingGroupView*>(base + header.groups_offset);
+    if (groups != nullptr) {
+        // Relocate repeating group entry pointers relative to `bytes.data()` so
+        // messages copied from ring arena to scratch remain 100% position-independent.
+        std::size_t cursor = header.groups_offset + header.group_count * sizeof(RepeatingGroupView);
+        for (std::size_t g = 0; g < header.group_count; ++g) {
+            cursor = align_up(cursor, alignof(MessageView));
+            auto* entries = reinterpret_cast<MessageView*>(base + cursor);
+            groups[g].entries = entries;
+            cursor += groups[g].entry_count * sizeof(MessageView);
+            for (std::size_t e = 0; e < groups[g].entry_count; ++e) {
+                cursor = align_up(cursor, alignof(std::max_align_t));
+                OwnedMessageHeader child_header{};
+                std::memcpy(&child_header, base + cursor, sizeof(child_header));
+                auto child = std::span<char>{base + cursor, child_header.total_size};
+                entries[e] = view_owned_message(child);
+                cursor += child_header.total_size;
+            }
+        }
+    }
     return MessageView{
         header.field_count == 0 ? nullptr : reinterpret_cast<const SlotValue*>(base + header.slots_offset),
         header.value_byte_count == 0 ? nullptr : base + header.values_offset,
@@ -298,8 +319,7 @@ struct SenderCommandView {
         header.required_count == 0
             ? nullptr : reinterpret_cast<const std::uint32_t*>(base + header.required_offset),
         header.required_count, header.enum_value_allowed,
-        header.group_count == 0
-            ? nullptr : reinterpret_cast<const RepeatingGroupView*>(base + header.groups_offset),
+        groups,
         header.group_count};
 }
 
@@ -723,13 +743,14 @@ private:
             slot.version.store(version + 2, std::memory_order_release);
             return false;
         }
-        slot.id.store(value.id, std::memory_order_release);
-        slot.driver_receipt_id.store(driver_receipt_id, std::memory_order_release);
-        slot.msg_seq_num.store(value.msg_seq_num, std::memory_order_release);
-        slot.code.store(static_cast<int>(value.status.code), std::memory_order_release);
-        slot.tag.store(value.status.tag, std::memory_order_release);
-        slot.offset.store(value.status.offset, std::memory_order_release);
-        slot.state.store(static_cast<int>(value.state), std::memory_order_release);
+        slot.id.store(value.id, std::memory_order_relaxed);
+        slot.driver_receipt_id.store(driver_receipt_id, std::memory_order_relaxed);
+        slot.msg_seq_num.store(value.msg_seq_num, std::memory_order_relaxed);
+        slot.code.store(static_cast<int>(value.status.code), std::memory_order_relaxed);
+        slot.tag.store(value.status.tag, std::memory_order_relaxed);
+        slot.offset.store(value.status.offset, std::memory_order_relaxed);
+        slot.state.store(static_cast<int>(value.state), std::memory_order_relaxed);
+        std::atomic_thread_fence(std::memory_order_release);
         slot.version.store(version + 2, std::memory_order_release);
         return true;
     }
@@ -740,16 +761,17 @@ private:
             const auto before = slot.version.load(std::memory_order_acquire);
             if ((before & 1U) != 0) continue;
             ReceiptSnapshot result;
-            result.id = slot.id.load(std::memory_order_acquire);
-            result.driver_receipt_id = slot.driver_receipt_id.load(std::memory_order_acquire);
+            result.id = slot.id.load(std::memory_order_relaxed);
+            result.driver_receipt_id = slot.driver_receipt_id.load(std::memory_order_relaxed);
             result.value.id = result.id;
-            result.value.msg_seq_num = slot.msg_seq_num.load(std::memory_order_acquire);
-            result.value.state = static_cast<ReceiptState>(slot.state.load(std::memory_order_acquire));
+            result.value.msg_seq_num = slot.msg_seq_num.load(std::memory_order_relaxed);
+            result.value.state = static_cast<ReceiptState>(slot.state.load(std::memory_order_relaxed));
             result.value.status = Status{
-                static_cast<ErrorCode>(slot.code.load(std::memory_order_acquire)),
-                slot.tag.load(std::memory_order_acquire),
-                slot.offset.load(std::memory_order_acquire)};
-            const auto after = slot.version.load(std::memory_order_acquire);
+                static_cast<ErrorCode>(slot.code.load(std::memory_order_relaxed)),
+                slot.tag.load(std::memory_order_relaxed),
+                slot.offset.load(std::memory_order_relaxed)};
+            std::atomic_thread_fence(std::memory_order_acquire);
+            const auto after = slot.version.load(std::memory_order_relaxed);
             if (before == after) return result;
         }
     }
@@ -1281,25 +1303,45 @@ std::uint64_t monotonic_ms() noexcept {
 }
 
 std::array<char, 32> wall_timestamp() noexcept {
-    using namespace std::chrono;
-    const auto now = system_clock::now();
-    const auto seconds = time_point_cast<std::chrono::seconds>(now);
-    const auto millis = duration_cast<milliseconds>(now - seconds).count();
-    const std::time_t value = system_clock::to_time_t(now);
-    std::tm utc{};
-    std::array<char, 32> result{};
-    if (::gmtime_r(&value, &utc) == nullptr) {
-        std::memcpy(result.data(), "19700101-00:00:00.000", 22);
-        return result;
+    // Per-thread cached second prefix avoids strftime/snprintf/gmtime_r per frame.
+    thread_local std::time_t cached_sec = -1;
+    thread_local std::array<char, 32> cached_buf{};
+    timespec ts{};
+    ::clock_gettime(CLOCK_REALTIME, &ts);
+    if (ts.tv_sec != cached_sec) {
+        cached_sec = ts.tv_sec;
+        std::tm utc{};
+        if (::gmtime_r(&ts.tv_sec, &utc) == nullptr) {
+            std::memcpy(cached_buf.data(), "19700101-00:00:00.000", 22);
+        } else {
+            auto w2 = [](char* o, unsigned v) noexcept {
+                o[0] = static_cast<char>('0' + (v / 10U) % 10U);
+                o[1] = static_cast<char>('0' + v % 10U);
+            };
+            auto w4 = [](char* o, unsigned v) noexcept {
+                o[0] = static_cast<char>('0' + (v / 1000U) % 10U);
+                o[1] = static_cast<char>('0' + (v / 100U) % 10U);
+                o[2] = static_cast<char>('0' + (v / 10U) % 10U);
+                o[3] = static_cast<char>('0' + v % 10U);
+            };
+            w4(cached_buf.data() + 0, static_cast<unsigned>(utc.tm_year + 1900));
+            w2(cached_buf.data() + 4, static_cast<unsigned>(utc.tm_mon + 1));
+            w2(cached_buf.data() + 6, static_cast<unsigned>(utc.tm_mday));
+            cached_buf[8] = '-';
+            w2(cached_buf.data() + 9, static_cast<unsigned>(utc.tm_hour));
+            cached_buf[11] = ':';
+            w2(cached_buf.data() + 12, static_cast<unsigned>(utc.tm_min));
+            cached_buf[14] = ':';
+            w2(cached_buf.data() + 15, static_cast<unsigned>(utc.tm_sec));
+            cached_buf[17] = '.';
+            cached_buf[21] = '\0';
+        }
     }
-    const auto date_size = ::strftime(result.data(), result.size(), "%Y%m%d-%H:%M:%S", &utc);
-    if (date_size != 17) {
-        std::memcpy(result.data(), "19700101-00:00:00.000", 22);
-        return result;
-    }
-    (void)std::snprintf(result.data() + date_size, result.size() - date_size,
-        ".%03u", static_cast<unsigned>(millis));
-    return result;
+    const auto ms = static_cast<unsigned>(ts.tv_nsec / 1'000'000L);
+    cached_buf[18] = static_cast<char>('0' + (ms / 100U) % 10U);
+    cached_buf[19] = static_cast<char>('0' + (ms / 10U) % 10U);
+    cached_buf[20] = static_cast<char>('0' + ms % 10U);
+    return cached_buf;
 }
 
 constexpr std::string_view timestamp_view(const std::array<char, 32>& value) noexcept {
@@ -1411,11 +1453,21 @@ Result<SendReceipt> queued_context_send(void* raw_state, MessageView message,
 } // namespace
 
 struct EngineRuntime::Impl {
+    enum class TargetKind : std::uint8_t { wake, listener, pending, peer };
+    struct EpollTag {
+        TargetKind kind{};
+        void* pointer{};
+        int fd{-1};
+        std::uint32_t events{};
+    };
+
     struct Listener {
         ListenerConfig config;
         std::optional<TcpListener> socket;
         TcpEndpoint published;
         TlsContext tls_context;
+        std::uint64_t accept_backoff_until{};
+        EpollTag epoll_tag{TargetKind::listener, nullptr, -1, 0};
     };
 
     struct Peer;
@@ -1451,6 +1503,7 @@ struct EngineRuntime::Impl {
         TcpStream stream;
         std::optional<SessionDriver> driver;
         std::string receive_buffer;
+        std::size_t receive_head{};
         std::uint64_t reconnect_at{};
         std::uint64_t connect_deadline{};
         bool driver_connected{};
@@ -1460,6 +1513,32 @@ struct EngineRuntime::Impl {
         std::size_t dependent_commands_processed{};
         Status dependent_send_failure{};
         std::optional<DeliveryCompletion> pending_completion;
+        EpollTag epoll_tag{TargetKind::peer, nullptr, -1, 0};
+
+        [[nodiscard]] std::string_view unread_view() const noexcept {
+            return {receive_buffer.data() + receive_head, receive_buffer.size() - receive_head};
+        }
+        [[nodiscard]] std::size_t unread_size() const noexcept {
+            return receive_buffer.size() - receive_head;
+        }
+        void consume_receive(std::size_t n) noexcept {
+            receive_head += n;
+            if (receive_head >= receive_buffer.size()) {
+                receive_buffer.clear();
+                receive_head = 0;
+            }
+        }
+        void compact_receive() noexcept {
+            if (receive_head == 0) return;
+            const std::size_t rem = receive_buffer.size() - receive_head;
+            if (rem != 0) std::memmove(receive_buffer.data(), receive_buffer.data() + receive_head, rem);
+            receive_buffer.resize(rem);
+            receive_head = 0;
+        }
+        void clear_receive() noexcept {
+            receive_buffer.clear();
+            receive_head = 0;
+        }
     };
 
     struct Pending {
@@ -1470,6 +1549,7 @@ struct EngineRuntime::Impl {
         bool handshaking{};
         std::string receive_buffer;
         std::uint64_t deadline{};
+        EpollTag epoll_tag{TargetKind::pending, nullptr, -1, 0};
     };
 
     struct DeliveryTask {
@@ -1481,9 +1561,6 @@ struct EngineRuntime::Impl {
         std::size_t frame_size{};
         bool active_callback{};
     };
-
-    enum class TargetKind : std::uint8_t { wake, listener, pending, peer };
-    struct PollTarget { TargetKind kind{}; void* pointer{}; };
 
     explicit Impl(EngineConfig value, bool use_queued,
         const SchemaDescriptor* message_schema, WireHints schema_hints)
@@ -1497,14 +1574,22 @@ struct EngineRuntime::Impl {
             schema_hints.length_data_pairs.end());
         wire_hints = WireHints{wire_hint_pairs};
         wake_fd = ::eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
-        if (wake_fd >= 0) {
+        epoll_fd = ::epoll_create1(EPOLL_CLOEXEC);
+        if (wake_fd >= 0 && epoll_fd >= 0) {
             try {
                 wake_control = std::make_shared<WakeControl>(wake_fd);
             } catch (...) {
                 ::close(wake_fd);
+                ::close(epoll_fd);
                 wake_fd = -1;
+                epoll_fd = -1;
                 throw;
             }
+            wake_tag = EpollTag{TargetKind::wake, nullptr, -1, 0};
+            epoll_sync(wake_tag, wake_fd, EPOLLIN);
+        } else {
+            if (wake_fd >= 0) { ::close(wake_fd); wake_fd = -1; }
+            if (epoll_fd >= 0) { ::close(epoll_fd); epoll_fd = -1; }
         }
     }
 
@@ -1516,6 +1601,51 @@ struct EngineRuntime::Impl {
         for (auto& session : sessions) if (session && session->sender) session->sender->mark_stopped();
         if (wake_control) wake_control->close();
         wake_fd = -1;
+        if (epoll_fd >= 0) { ::close(epoll_fd); epoll_fd = -1; }
+    }
+
+    void epoll_remove(EpollTag& tag) noexcept {
+        if (epoll_fd >= 0 && tag.fd >= 0) {
+            (void)::epoll_ctl(epoll_fd, EPOLL_CTL_DEL, tag.fd, nullptr);
+        }
+        tag.fd = -1;
+        tag.events = 0;
+    }
+
+    void epoll_sync(EpollTag& tag, int fd, std::uint32_t desired) noexcept {
+        if (epoll_fd < 0) return;
+        if (fd < 0 || desired == 0) {
+            epoll_remove(tag);
+            return;
+        }
+        if (tag.fd == fd && tag.events == desired) return;
+        epoll_event ev{};
+        ev.events = desired;
+        ev.data.ptr = &tag;
+        if (tag.fd == fd) {
+            if (::epoll_ctl(epoll_fd, EPOLL_CTL_MOD, fd, &ev) == 0) {
+                tag.events = desired;
+                return;
+            }
+        } else if (tag.fd >= 0) {
+            (void)::epoll_ctl(epoll_fd, EPOLL_CTL_DEL, tag.fd, nullptr);
+            tag.fd = -1;
+            tag.events = 0;
+        }
+        if (::epoll_ctl(epoll_fd, EPOLL_CTL_ADD, fd, &ev) == 0) {
+            tag.fd = fd;
+            tag.events = desired;
+        }
+    }
+
+    void close_pending(Pending& item) noexcept {
+        epoll_remove(item.epoll_tag);
+        item.closed = true;
+        if (item.tls) {
+            item.tls->close();
+            item.tls.reset();
+        }
+        item.stream.close();
     }
 
     void close_all() noexcept {
@@ -1527,15 +1657,19 @@ struct EngineRuntime::Impl {
                     for (const auto& lane : peer->session->sender->producer_lanes)
                         if (lane) lane->sync_receipts(*peer->driver);
             }
-            peer->tls.reset();
+            epoll_remove(peer->epoll_tag);
+            if (peer->tls) {
+                peer->tls->close();
+                peer->tls.reset();
+            }
             peer->stream.close();
             peer->driver.reset();
         }
         for (auto& pending_peer : pending) {
-            pending_peer->tls.reset();
-            pending_peer->stream.close();
+            close_pending(*pending_peer);
         }
         for (auto& listener : listeners) {
+            epoll_remove(listener.epoll_tag);
             if (listener.socket) listener.socket->close();
         }
     }
@@ -2037,7 +2171,8 @@ struct EngineRuntime::Impl {
         if (scratch.empty()) return;
         const auto wall = wall_timestamp();
         auto& sender = *peer.session->sender;
-        if (!sender.is_active()) return;
+        const bool drain_in_flight = peer.session->callback_in_flight.load(std::memory_order_acquire);
+        if (!sender.is_active() && !drain_in_flight) return;
         for (std::size_t processed = 0; processed < command_budget; ++processed) {
             auto admission_now = monotonic_ms();
             const auto expired = sender.expire_head(admission_now);
@@ -2062,7 +2197,9 @@ struct EngineRuntime::Impl {
             }
             Result<SendReceipt> accepted{Status{ErrorCode::engine_stopped}};
             const bool active_callback_command = command.dependency == 0 && command.generation != 0;
-            if (active_callback_command && command.generation != peer.generation) {
+            if (!sender.is_active() && command.dependency == 0 && !active_callback_command) {
+                accepted = Status{ErrorCode::not_ready};
+            } else if (active_callback_command && command.generation != peer.generation) {
                 accepted = Status{ErrorCode::connection_closed};
             } else if (command.dependency == 0) {
                 accepted = peer.driver->send(message, admission_now, timestamp_view(wall));
@@ -2342,6 +2479,7 @@ struct EngineRuntime::Impl {
         session.admin_reserve_bytes = config.max_frame_bytes * 2;
         session.max_pending_inbound_messages = config.max_pending_inbound_messages;
         session.max_pending_inbound_bytes = config.max_pending_inbound_bytes;
+        session.receipt_capacity = config.sender_receipt_capacity;
         session.journal_capacity_bytes = config.storage.journal_capacity_bytes;
         session.journal_max_records = config.storage.journal_max_records;
         session.journal_segment_bytes = config.storage.segment_bytes;
@@ -2567,7 +2705,7 @@ struct EngineRuntime::Impl {
             peer.reconnect_at = now + config.reconnect_delay_ms;
             return connected.status();
         }
-        peer.receive_buffer.clear();
+        peer.clear_receive();
         peer.stream = std::move(connected).value();
         peer.connection = in_progress ? Connection::connecting : Connection::connected;
         peer.connect_deadline = now + config.connect_timeout_ms;
@@ -2628,12 +2766,19 @@ struct EngineRuntime::Impl {
             if (reason.code == ErrorCode::connection_closed && peer.driver &&
                 peer.driver->status().ok()) report = true;
         }
-        peer.tls.reset();
+        epoll_remove(peer.epoll_tag);
+        if (peer.tls) {
+            if (graceful_eof || shutdown_started ||
+                (peer.driver && peer.driver->state() == SessionState::closed)) {
+                peer.tls->close();
+            }
+            peer.tls.reset();
+        }
         peer.stream.close();
         if (peer.session) peer.session->sender->set_active(false);
         const bool was_connected = peer.connection == Connection::connected;
         peer.connection = Connection::disconnected;
-        peer.receive_buffer.clear();
+        peer.clear_receive();
         if (was_connected && peer.driver && peer.driver_connected) {
             const auto disconnected = peer.driver->disconnected(
                 Status{ErrorCode::connection_closed}, now);
@@ -2642,6 +2787,10 @@ struct EngineRuntime::Impl {
         if (peer.session) peer.session->state.store(peer.driver
             ? peer.driver->state() : SessionState::disconnected, std::memory_order_release);
         peer.driver_connected = false;
+        peer.deferred_delivery_id = 0;
+        peer.dependent_reply_count = 0;
+        peer.dependent_commands_processed = 0;
+        peer.dependent_send_failure = Status::success();
         if (peer.session && peer.driver) {
             peer.session->sender->sync_receipts(*peer.driver);
             if (!peer.session->sender->producer_lanes.empty())
@@ -2672,10 +2821,18 @@ struct EngineRuntime::Impl {
 
     [[nodiscard]] Status start_accepts(Listener& listener, std::size_t listener_index,
                                       std::uint64_t now) noexcept {
+        if (listener.accept_backoff_until != 0 && now < listener.accept_backoff_until)
+            return Status::success();
+        listener.accept_backoff_until = 0;
         for (std::size_t count = 0; count < 16; ++count) {
             auto accepted = listener.socket->accept();
             if (!accepted.ok()) {
                 if (accepted.status().code == ErrorCode::need_more) return Status::success();
+                if (accepted.status().code == ErrorCode::io_error &&
+                    (accepted.status().offset == EMFILE || accepted.status().offset == ENFILE)) {
+                    // Back off briefly under fd exhaustion instead of spinning 100% CPU.
+                    listener.accept_backoff_until = now + 50;
+                }
                 report_error(listener.config.name, accepted.status());
                 return accepted.status();
             }
@@ -2761,9 +2918,14 @@ struct EngineRuntime::Impl {
             peer->acceptor_index = acceptor_index;
             peer->settings = acceptor.config.settings;
             peer->tls = std::move(source.tls);
+            epoll_remove(source.epoll_tag);
             peer->stream = std::move(source.stream);
             peer->receive_buffer = std::move(source.receive_buffer);
-            peer->receive_buffer.erase(0, first_frame.consumed);
+            peer->receive_head = first_frame.consumed;
+            if (peer->receive_head >= peer->receive_buffer.size()) {
+                peer->receive_buffer.clear();
+                peer->receive_head = 0;
+            }
             peer->receive_buffer.reserve(config.max_frame_bytes + read_chunk_size);
             auto opened = open_driver(*peer, SessionRole::acceptor);
             if (!opened.ok()) return opened;
@@ -2784,8 +2946,7 @@ struct EngineRuntime::Impl {
         } catch (...) {
             frame_status = {ErrorCode::capacity_exceeded};
         }
-        source.closed = true;
-        source.stream.close();
+        close_pending(source);
         if (!frame_status.ok()) {
             // A rejected connection is isolated. Unknown identities do not
             // acquire a driver, journal, or sequence state.
@@ -2798,9 +2959,9 @@ struct EngineRuntime::Impl {
     [[nodiscard]] Status process_peer_buffer(Peer& peer, std::uint64_t now) noexcept {
         std::size_t processed = 0;
         while (!peer.closed && peer.connection == Connection::connected &&
-               !peer.receive_buffer.empty() && processed < frame_budget && peer.driver->can_receive()) {
+               peer.unread_size() != 0 && processed < frame_budget && peer.driver->can_receive()) {
             FrameView frame{};
-            const auto status = inspect_frame(peer.receive_buffer, frame, wire_hints,
+            const auto status = inspect_frame(peer.unread_view(), frame, wire_hints,
                 CodecLimits{config.max_frame_bytes});
             if (status.code == ErrorCode::need_more) return Status::success();
             if (!status.ok()) {
@@ -2814,7 +2975,7 @@ struct EngineRuntime::Impl {
                 peer.session->received_frames.fetch_add(1, std::memory_order_relaxed);
                 peer.session->received_bytes.fetch_add(frame.consumed, std::memory_order_relaxed);
             }
-            peer.receive_buffer.erase(0, frame.consumed);
+            peer.consume_receive(frame.consumed);
             ++processed;
             if (!received.ok()) {
                 drop_peer(peer, received, now, false);
@@ -2831,9 +2992,9 @@ struct EngineRuntime::Impl {
 
     [[nodiscard]] bool has_complete_buffered_frame(Peer& peer) noexcept {
         if (peer.closed || peer.connection != Connection::connected ||
-            peer.receive_buffer.empty() || !peer.driver || !peer.driver->can_receive()) return false;
+            peer.unread_size() == 0 || !peer.driver || !peer.driver->can_receive()) return false;
         FrameView frame{};
-        return inspect_frame(peer.receive_buffer, frame, wire_hints,
+        return inspect_frame(peer.unread_view(), frame, wire_hints,
             CodecLimits{config.max_frame_bytes}).ok();
     }
 
@@ -2844,8 +3005,7 @@ struct EngineRuntime::Impl {
             CodecLimits{config.max_frame_bytes});
         if (status.code == ErrorCode::need_more) return Status::success();
         if (!status.ok()) {
-            connection.closed = true;
-            connection.stream.close();
+            close_pending(connection);
             report_error({}, status);
             return status;
         }
@@ -2858,13 +3018,15 @@ struct EngineRuntime::Impl {
         while (!peer.closed && peer.driver && peer.driver->can_receive() && total < io_byte_budget) {
             const auto already_buffered = process_peer_buffer(peer, now);
             if (!already_buffered.ok() || peer.closed) return already_buffered;
+            if (!peer.driver->can_receive()) break;
             if (has_complete_buffered_frame(peer)) break;
-            if (peer.receive_buffer.size() >= config.max_frame_bytes) {
+            if (peer.unread_size() >= config.max_frame_bytes) {
                 drop_peer(peer, Status{ErrorCode::too_large}, now, true);
                 return {ErrorCode::too_large};
             }
             const auto high_water = config.max_frame_bytes + read_chunk_size;
-            const auto available = high_water - peer.receive_buffer.size();
+            if (peer.receive_buffer.size() >= high_water) peer.compact_receive();
+            const auto available = high_water - peer.unread_size();
             const auto budget = io_byte_budget - total;
             const auto read_size = std::min({scratch.size(), available, budget});
             if (read_size == 0) break;
@@ -2889,8 +3051,12 @@ struct EngineRuntime::Impl {
             }
             const auto processed = process_peer_buffer(peer, now);
             if (!processed.ok() || peer.closed) return processed;
+            // Must check can_receive() before too_large: backpressure read-pause can leave
+            // multiple complete frames buffered past max_frame_bytes without any single frame
+            // exceeding max_frame_bytes.
+            if (!peer.driver->can_receive()) break;
             if (has_complete_buffered_frame(peer)) break;
-            if (peer.receive_buffer.size() >= config.max_frame_bytes) {
+            if (peer.unread_size() >= config.max_frame_bytes) {
                 drop_peer(peer, Status{ErrorCode::too_large}, now, true);
                 return {ErrorCode::too_large};
             }
@@ -2903,9 +3069,7 @@ struct EngineRuntime::Impl {
         if (connection.handshaking) {
             const auto io = connection.tls->handshake();
             if (!io.status.ok() || io.peer_closed) {
-                connection.closed = true;
-                connection.tls.reset();
-                connection.stream.close();
+                close_pending(connection);
                 const auto status = io.status.ok() ? Status{ErrorCode::tls_error} : io.status;
                 report_error({}, status);
                 return status;
@@ -2919,8 +3083,7 @@ struct EngineRuntime::Impl {
         while (!connection.closed && total < io_byte_budget) {
             const auto high_water = config.max_frame_bytes + read_chunk_size;
             if (connection.receive_buffer.size() >= high_water) {
-                connection.closed = true;
-                connection.stream.close();
+                close_pending(connection);
                 report_error({}, Status{ErrorCode::too_large});
                 return {ErrorCode::too_large};
             }
@@ -2931,14 +3094,12 @@ struct EngineRuntime::Impl {
             const auto io = connection.tls ? connection.tls->read(std::span<char>{scratch.data(), read_size})
                 : connection.stream.read(std::span<char>{scratch.data(), read_size});
             if (!io.status.ok()) {
-                connection.closed = true;
-                connection.stream.close();
+                close_pending(connection);
                 report_error({}, io.status);
                 return io.status;
             }
             if (io.peer_closed) {
-                connection.closed = true;
-                connection.stream.close();
+                close_pending(connection);
                 return Status::success();
             }
             if (io.would_block || io.bytes == 0) break;
@@ -2946,16 +3107,14 @@ struct EngineRuntime::Impl {
             try {
                 connection.receive_buffer.append(scratch.data(), io.bytes);
             } catch (...) {
-                connection.closed = true;
-                connection.stream.close();
+                close_pending(connection);
                 report_error({}, Status{ErrorCode::capacity_exceeded});
                 return {ErrorCode::capacity_exceeded};
             }
             const auto processed = process_pending_buffer(connection, now);
             if (!processed.ok() || connection.closed) return processed;
             if (connection.receive_buffer.size() >= config.max_frame_bytes) {
-                connection.closed = true;
-                connection.stream.close();
+                close_pending(connection);
                 report_error({}, Status{ErrorCode::too_large});
                 return {ErrorCode::too_large};
             }
@@ -3067,6 +3226,10 @@ struct EngineRuntime::Impl {
                 if (lane_deadline != 0) deadline = std::min(deadline, lane_deadline);
             }
         }
+        for (const auto& listener : listeners) {
+            if (listener.accept_backoff_until != 0)
+                deadline = std::min(deadline, listener.accept_backoff_until);
+        }
         for (const auto& item : pending)
             if (!item->closed) deadline = std::min(deadline, item->deadline);
         if (shutdown_started) deadline = std::min(deadline, shutdown_deadline);
@@ -3078,11 +3241,11 @@ struct EngineRuntime::Impl {
             shutdown_started = true;
             shutdown_deadline = now + config.logout_timeout_ms;
             for (auto& listener : listeners) {
+                epoll_remove(listener.epoll_tag);
                 if (listener.socket) listener.socket->close();
             }
             for (auto& item : pending) {
-                item->closed = true;
-                item->stream.close();
+                close_pending(*item);
             }
         }
         const auto wall = wall_timestamp();
@@ -3171,8 +3334,8 @@ struct EngineRuntime::Impl {
         status = start_initiators();
         if (!status.ok()) return status;
 
-        poll_fds.reserve(1 + listeners.size() + config.max_pending_connections + config.max_sessions);
-        targets.reserve(poll_fds.capacity());
+        epoll_events.resize(std::max<std::size_t>(
+            64, 1 + listeners.size() + config.max_pending_connections + config.max_sessions));
         return Status::success();
     }
 
@@ -3218,12 +3381,20 @@ struct EngineRuntime::Impl {
             bool buffered_work = false;
             for (auto& peer : peers) {
                 if (!peer->closed && peer->connection == Connection::connected &&
-                    peer->tls && peer->tls->pending_plaintext() != 0)
+                    peer->tls && peer->tls->pending_plaintext() != 0 &&
+                    peer->driver && peer->driver->can_receive()) {
                     (void)read_peer(*peer, now);
+                    if (!peer->closed && peer->tls && peer->tls->pending_plaintext() != 0 &&
+                        peer->driver && peer->driver->can_receive())
+                        buffered_work = true;
+                }
             }
             for (auto& item : pending) {
-                if (!item->closed && item->tls && item->tls->pending_plaintext() != 0)
+                if (!item->closed && item->tls && item->tls->pending_plaintext() != 0) {
                     (void)read_pending(*item, now);
+                    if (!item->closed && item->tls && item->tls->pending_plaintext() != 0)
+                        buffered_work = true;
+                }
             }
             for (const auto& peer : peers) {
                 if (!peer->closed && peer->connection == Connection::connected &&
@@ -3235,15 +3406,14 @@ struct EngineRuntime::Impl {
             for (auto& peer_ptr : peers) {
                 auto& peer = *peer_ptr;
                 if (peer.closed || peer.connection != Connection::connected ||
-                    peer.receive_buffer.empty()) continue;
+                    peer.unread_size() == 0) continue;
                 const auto buffered_status = process_peer_buffer(peer, now);
                 if (!buffered_status.ok() || peer.closed) continue;
                 if (has_complete_buffered_frame(peer)) buffered_work = true;
             }
             for (auto& item : pending) {
                 if (!item->closed && now >= item->deadline) {
-                    item->closed = true;
-                    item->stream.close();
+                    close_pending(*item);
                     report_error({}, Status{item->handshaking ? ErrorCode::tls_handshake_timeout : ErrorCode::logon_timeout});
                 }
             }
@@ -3252,46 +3422,49 @@ struct EngineRuntime::Impl {
             if (observer_failed) { iteration_finished = true; return fatal_status; }
             if (shutdown_complete(now)) { iteration_finished = true; return shutdown_status; }
 
-            poll_fds.clear();
-            targets.clear();
-            poll_fds.push_back(pollfd{wake_fd, POLLIN, 0});
-            targets.push_back({TargetKind::wake, nullptr});
+            // Synchronize epoll registrations (zero syscalls when interest masks are unchanged).
             for (auto& listener : listeners) {
-                if (listener.socket && listener.socket->valid()) {
-                    poll_fds.push_back(pollfd{listener.socket->native_handle(), POLLIN, 0});
-                    targets.push_back({TargetKind::listener, &listener});
-                }
+                listener.epoll_tag.pointer = &listener;
+                const bool can_accept = listener.socket && listener.socket->valid() &&
+                    (listener.accept_backoff_until == 0 || now >= listener.accept_backoff_until);
+                epoll_sync(listener.epoll_tag,
+                    can_accept ? listener.socket->native_handle() : -1,
+                    can_accept ? static_cast<std::uint32_t>(EPOLLIN) : 0U);
             }
             for (auto& item : pending) {
+                item->epoll_tag.pointer = item.get();
                 if (!item->closed && item->stream.valid()) {
-                    const short interest = item->tls && item->tls->wants_write() ? POLLOUT : POLLIN;
-                    poll_fds.push_back(pollfd{item->stream.native_handle(), interest, 0});
-                    targets.push_back({TargetKind::pending, item.get()});
+                    const std::uint32_t interest = item->tls && item->tls->wants_write() ? EPOLLOUT : EPOLLIN;
+                    epoll_sync(item->epoll_tag, item->stream.native_handle(), interest);
+                } else {
+                    epoll_remove(item->epoll_tag);
                 }
             }
             for (auto& peer : peers) {
-                if (peer->closed || !peer->stream.valid()) continue;
-                short events = 0;
-                if (peer->connection == Connection::connecting) events = POLLOUT;
+                peer->epoll_tag.pointer = peer.get();
+                if (peer->closed || !peer->stream.valid()) {
+                    epoll_remove(peer->epoll_tag);
+                    continue;
+                }
+                std::uint32_t events = 0;
+                if (peer->connection == Connection::connecting) events = EPOLLOUT;
                 else if (peer->connection == Connection::handshaking) {
-                    events = peer->tls->wants_write() ? POLLOUT : POLLIN;
+                    events = peer->tls->wants_write() ? EPOLLOUT : EPOLLIN;
                 } else if (peer->connection == Connection::connected) {
                     if (peer->driver && peer->driver->can_receive())
-                        events = peer->tls && peer->tls->read_wants_write() ? POLLOUT : POLLIN;
+                        events = peer->tls && peer->tls->read_wants_write() ? EPOLLOUT : EPOLLIN;
                     if (peer->driver && peer->driver->needs_write())
-                        events |= peer->tls && peer->tls->write_wants_read() ? POLLIN : POLLOUT;
+                        events |= peer->tls && peer->tls->write_wants_read() ? EPOLLIN : EPOLLOUT;
                 }
-                if (events != 0) {
-                    poll_fds.push_back(pollfd{peer->stream.native_handle(), events, 0});
-                    targets.push_back({TargetKind::peer, peer.get()});
-                }
+                epoll_sync(peer->epoll_tag, peer->stream.native_handle(), events);
             }
+
             now = monotonic_ms();
             const auto deadline = compute_deadline(now);
             const auto wait_ms = buffered_work || deadline <= now ? 0U : static_cast<unsigned>(
                 std::min<std::uint64_t>(deadline - now, maximum_wait_ms));
-            const int ready = ::poll(poll_fds.data(), static_cast<nfds_t>(poll_fds.size()),
-                static_cast<int>(wait_ms));
+            const int ready = ::epoll_wait(epoll_fd, epoll_events.data(),
+                static_cast<int>(epoll_events.size()), static_cast<int>(wait_ms));
             if (ready < 0) {
                 if (errno == EINTR) return Status::success();
                 iteration_finished = true;
@@ -3299,13 +3472,13 @@ struct EngineRuntime::Impl {
             }
             if (ready == 0) return Status::success();
 
-            const auto count = poll_fds.size();
-            const auto start = count == 0 ? 0 : rotation % count;
+            const auto count = static_cast<std::size_t>(ready);
+            const auto start = rotation % count;
             for (std::size_t offset = 0; offset < count; ++offset) {
                 const auto index = (start + offset) % count;
-                const auto events = poll_fds[index].revents;
-                if (events == 0) continue;
-                auto* target = &targets[index];
+                const auto events = epoll_events[index].events;
+                auto* target = static_cast<EpollTag*>(epoll_events[index].data.ptr);
+                if (target == nullptr || events == 0) continue;
                 now = monotonic_ms();
                 if (target->kind == TargetKind::wake) {
                     while (::read(wake_fd, wake_bytes.data(), wake_bytes.size()) > 0) {}
@@ -3313,7 +3486,8 @@ struct EngineRuntime::Impl {
                 }
                 if (target->kind == TargetKind::listener) {
                     auto* listener = static_cast<Listener*>(target->pointer);
-                    if (events & (POLLERR | POLLNVAL)) {
+                    if (events & EPOLLERR) {
+                        epoll_remove(listener->epoll_tag);
                         if (listener->socket) listener->socket->close();
                         report_error(listener->config.name, Status{ErrorCode::io_error});
                         continue;
@@ -3325,17 +3499,14 @@ struct EngineRuntime::Impl {
                 }
                 if (target->kind == TargetKind::pending) {
                     auto* item = static_cast<Pending*>(target->pointer);
-                    if (events & (POLLERR | POLLNVAL)) {
-                        item->closed = true;
-                        item->stream.close();
+                    if (item->closed) continue;
+                    if (events & EPOLLERR) {
+                        close_pending(*item);
                         report_error({}, Status{ErrorCode::io_error});
                         if (observer_failed) { iteration_finished = true; return fatal_status; }
                         continue;
                     }
-                    // POLLHUP can accompany unread Logon bytes. Drain them
-                    // through the same bounded read path before treating EOF
-                    // as an incomplete pending connection.
-                    if (events & (POLLIN | POLLOUT | POLLHUP)) {
+                    if (events & (EPOLLIN | EPOLLOUT | EPOLLHUP)) {
                         (void)read_pending(*item, now);
                         if (observer_failed) { iteration_finished = true; return fatal_status; }
                     }
@@ -3344,7 +3515,7 @@ struct EngineRuntime::Impl {
                 auto* peer = static_cast<Peer*>(target->pointer);
                 if (peer->closed) continue;
                 if (peer->connection == Connection::connecting &&
-                    (events & (POLLOUT | POLLERR | POLLHUP | POLLNVAL))) {
+                    (events & (EPOLLOUT | EPOLLERR | EPOLLHUP))) {
                     const auto completed = peer->stream.finish_connect();
                     if (!completed.ok()) {
                         drop_peer(*peer, completed, now, true);
@@ -3358,29 +3529,25 @@ struct EngineRuntime::Impl {
                     if (!progress.ok()) continue;
                 }
                 if (peer->connection != Connection::connected) continue;
-                if (events & (POLLERR | POLLNVAL)) {
+                if (events & EPOLLERR) {
                     drop_peer(*peer, Status{ErrorCode::io_error}, now, true);
                     continue;
                 }
-                // TCP may report POLLHUP together with data that has not yet
-                // been read. Let read_peer apply its byte/frame budgets and
-                // observe recv()==0 only after the kernel receive queue has
-                // been drained; its buffered complete frames are then
-                // delivered by the normal ready-work path before disconnect.
-                if ((events & (POLLIN | POLLHUP)) ||
-                    (peer->tls && peer->tls->read_wants_write() && (events & POLLOUT)))
+                if ((events & (EPOLLIN | EPOLLHUP)) ||
+                    (peer->tls && peer->tls->read_wants_write() && (events & EPOLLOUT)))
                     (void)read_peer(*peer, now);
-                if (!peer->closed && ((events & POLLOUT) ||
-                    (peer->tls && peer->tls->write_wants_read() && (events & POLLIN))))
+                if (!peer->closed && ((events & EPOLLOUT) ||
+                    (peer->tls && peer->tls->write_wants_read() && (events & EPOLLIN))))
                     (void)write_peer(*peer, now);
                 if (observer_failed) { iteration_finished = true; return fatal_status; }
             }
-            if (count != 0) rotation = (rotation + 1) % count;
+            rotation = (rotation + 1) % count;
         return Status::success();
     }
 
-    std::vector<pollfd> poll_fds;
-    std::vector<PollTarget> targets;
+    std::vector<epoll_event> epoll_events;
+    EpollTag wake_tag{TargetKind::wake, nullptr, -1, 0};
+    int epoll_fd{-1};
     std::size_t rotation{};
     bool iteration_finished{};
     Status final_status{};
@@ -3454,7 +3621,7 @@ Result<std::unique_ptr<EngineRuntime>> EngineRuntime::create(EngineConfig config
     bool queued, const SchemaDescriptor* schema, WireHints wire_hints) noexcept {
     try {
         auto impl = std::make_unique<Impl>(std::move(config), queued, schema, wire_hints);
-        if (impl->wake_fd < 0) return Status{ErrorCode::io_error, 0, static_cast<std::size_t>(errno)};
+        if (impl->wake_fd < 0 || impl->epoll_fd < 0) return Status{ErrorCode::io_error, 0, static_cast<std::size_t>(errno)};
         auto runtime = std::unique_ptr<EngineRuntime>(new EngineRuntime(std::move(impl)));
         return runtime;
     } catch (...) {

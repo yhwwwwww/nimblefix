@@ -67,6 +67,8 @@ public:
             { message.view() } -> std::same_as<detail::MessageView>;
         }
     [[nodiscard]] Result<SendReceipt> send(const Message& message) const noexcept {
+        static_assert(!requires { requires std::remove_cvref_t<Message>::is_group_entry; },
+            "repeating group entries cannot be sent as standalone FIX messages");
         if constexpr (!std::is_same_v<Schema, FlatSchema>) {
             if constexpr (requires { typename Message::schema_type; }) {
                 static_assert(std::is_same_v<Schema, typename Message::schema_type>,
@@ -126,6 +128,8 @@ public:
             { message.view() } -> std::same_as<detail::MessageView>;
         }
     [[nodiscard]] Result<SendReceipt> send(const Message& message) const noexcept {
+        static_assert(!requires { requires std::remove_cvref_t<Message>::is_group_entry; },
+            "repeating group entries cannot be sent as standalone FIX messages");
         if constexpr (!std::is_same_v<Schema, FlatSchema>) {
             if constexpr (requires { typename Message::schema_type; }) {
                 static_assert(std::is_same_v<Schema, typename Message::schema_type>,

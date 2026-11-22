@@ -64,6 +64,10 @@ private:
                              FlatMessageView&,
                              WireHints,
                              CodecLimits) noexcept;
+    friend Status parse_flat_verified(FrameView,
+                                      std::span<FieldView>,
+                                      FlatMessageView&,
+                                      WireHints) noexcept;
 
     std::string_view frame_{};
     std::span<const FieldView> fields_{};
@@ -76,6 +80,13 @@ private:
                                 FlatMessageView& output,
                                 WireHints hints = {},
                                 CodecLimits limits = {}) noexcept;
+
+// Fast-path flat parser for frames already validated by inspect_frame() with
+// matching hints/limits. Skips the redundant framing & checksum pass.
+[[nodiscard]] Status parse_flat_verified(FrameView frame,
+                                         std::span<FieldView> scratch,
+                                         FlatMessageView& output,
+                                         WireHints hints = {}) noexcept;
 
 // Runtime FIX session fields are deliberately separate from the message builder.
 // The codec has no dependency on a Session or transport implementation.

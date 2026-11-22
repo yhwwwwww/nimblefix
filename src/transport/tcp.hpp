@@ -5,6 +5,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 
 #include <nimblefix/status.hpp>
 
@@ -45,6 +46,7 @@ public:
     [[nodiscard]] SocketIoResult write(std::span<const char> input) noexcept;
     [[nodiscard]] Status finish_connect() noexcept;
     [[nodiscard]] int native_handle() const noexcept { return fd_; }
+    [[nodiscard]] int release_handle() noexcept { return std::exchange(fd_, -1); }
     [[nodiscard]] bool valid() const noexcept { return fd_ >= 0; }
     void close() noexcept;
 
@@ -67,6 +69,7 @@ public:
     [[nodiscard]] Result<TcpStream> accept() noexcept;
     [[nodiscard]] Result<BoundEndpoint> local_endpoint() const noexcept;
     [[nodiscard]] int native_handle() const noexcept { return fd_; }
+    [[nodiscard]] int release_handle() noexcept { return std::exchange(fd_, -1); }
     [[nodiscard]] bool valid() const noexcept { return fd_ >= 0; }
     void close() noexcept;
 

@@ -366,14 +366,14 @@ class Loader {
             config.max_pending_inbound_bytes =
                 integer(*flow, "max_pending_inbound_bytes", p, document.engine.max_pending_inbound_bytes, 128,
                         1024U * 1024U * 1024U);
-            config.max_pending_age_ms =
-                static_cast<std::uint32_t>(integer(*flow, "max_pending_age_ms", p, 30'000, 0, 86'400'000));
+            config.max_pending_age_ms = static_cast<std::uint32_t>(
+                integer(*flow, "max_pending_age_ms", p, document.engine.max_pending_age_ms, 0, 86'400'000));
             config.max_delivery_age_ms =
                 static_cast<std::uint32_t>(integer(*flow, "max_delivery_age_ms", p, 30'000, 1, 86'400'000));
             config.receive_pause_timeout_ms = static_cast<std::uint32_t>(
                 integer(*flow, "receive_pause_timeout_ms", p, 30'000, 1, 86'400'000));
-            config.write_stall_ms =
-                static_cast<std::uint32_t>(integer(*flow, "write_stall_ms", p, 30'000, 1, 86'400'000));
+            config.write_stall_ms = static_cast<std::uint32_t>(
+                integer(*flow, "write_stall_ms", p, document.engine.write_stall_ms, 1, 86'400'000));
             result.flow_control = config;
         }
         return result;
@@ -456,7 +456,7 @@ class Loader {
             c.max_pending_sender_messages = integer(*engine, "max_pending_sender_messages", "engine", c.max_pending_sender_messages, 1, 65'536);
             c.max_pending_sender_bytes = integer(*engine, "max_pending_sender_bytes", "engine", c.max_pending_sender_bytes, 128, 1024U*1024U*1024U);
             c.sender_receipt_capacity = integer(*engine, "sender_receipt_capacity", "engine", c.sender_receipt_capacity, 1, 1U*1024U*1024U);
-            c.max_producer_lanes_per_session = integer(*engine, "max_producer_lanes_per_session", "engine", c.max_producer_lanes_per_session, 0, 256);
+            c.max_producer_lanes_per_session = integer(*engine, "max_producer_lanes_per_session", "engine", c.max_producer_lanes_per_session, 0, 64);
             c.diagnostic_capacity = integer(*engine, "diagnostic_capacity", "engine", c.diagnostic_capacity, 1, 65'536);
             if (const auto* queued = table(*engine, "queued", "engine")) {
                 keys(*queued, "engine.queued", {"worker_threads", "max_pending_callbacks", "max_pending_callback_bytes", "delivery_strategy"});
@@ -645,31 +645,38 @@ std::vector<ConfigDiagnostic> validate_config(const ConfigDocument &document) no
         if (document.engine.storage.directory.empty())
             add({ErrorCode::invalid_config}, "engine.storage.directory",
                 "an explicit writable state directory");
-        auto created = Engine<>::create(document.engine);
-        if (!created.ok()) {
-            add(created.status(), "engine", std::string(created.status().message()));
-            return errors;
+        const auto validate_with = [&]<class DispatchPolicy>() {
+            auto created = Engine<FlatSchema, DispatchPolicy>::create(document.engine);
+            if (!created.ok()) {
+                add(created.status(), "engine", std::string(created.status().message()));
+                return;
+            }
+            auto engine = std::move(created).value();
+            (void)engine.on_message([](auto &, const auto &) { return Status::success(); });
+            for (const auto &listener : document.listeners) {
+                const auto added = engine.add_listener(listener);
+                if (!added.ok())
+                    add(added.status(), "listeners." + listener.name, std::string(added.status().message()));
+            }
+            for (const auto &session : document.initiators) {
+                const auto added = engine.add_initiator(session);
+                if (!added.ok())
+                    add(added.status(), "sessions." + session.name, std::string(added.status().message()));
+            }
+            for (const auto &session : document.acceptors) {
+                const auto added = engine.add_acceptor(session);
+                if (!added.ok())
+                    add(added.status(), "sessions." + session.name, std::string(added.status().message()));
+            }
+            const auto valid = engine.validate();
+            if (!valid.ok())
+                add(valid, "engine", std::string(valid.message()));
+        };
+        if (document.dispatch == ConfigDispatch::queued_callbacks) {
+            validate_with.template operator()<Queued>();
+        } else {
+            validate_with.template operator()<Inline>();
         }
-        auto engine = std::move(created).value();
-        (void)engine.on_message([](auto &, const auto &) { return Status::success(); });
-        for (const auto &listener : document.listeners) {
-            const auto added = engine.add_listener(listener);
-            if (!added.ok())
-                add(added.status(), "listeners." + listener.name, std::string(added.status().message()));
-        }
-        for (const auto &session : document.initiators) {
-            const auto added = engine.add_initiator(session);
-            if (!added.ok())
-                add(added.status(), "sessions." + session.name, std::string(added.status().message()));
-        }
-        for (const auto &session : document.acceptors) {
-            const auto added = engine.add_acceptor(session);
-            if (!added.ok())
-                add(added.status(), "sessions." + session.name, std::string(added.status().message()));
-        }
-        const auto valid = engine.validate();
-        if (!valid.ok())
-            add(valid, "engine", std::string(valid.message()));
     } catch (...) {
         ConfigDiagnostic item;
         item.status = {ErrorCode::capacity_exceeded};

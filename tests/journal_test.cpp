@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <filesystem>
 #include <iostream>
 #include <string>
 #include <string_view>
@@ -51,8 +52,7 @@ struct TempJournal {
     }
 
     ~TempJournal() {
-        if (!path.empty()) ::unlink(path.c_str());
-        if (!directory.empty()) ::rmdir(directory.c_str());
+        if (!directory.empty()) std::filesystem::remove_all(directory);
     }
 
     [[nodiscard]] JournalConfig config(std::size_t capacity = 64U * 1024U,
@@ -73,7 +73,10 @@ void test_append_recovery_lock_and_dependencies() {
         auto& journal = opened.value();
         struct stat info {};
         CHECK(::stat(temp.path.c_str(), &info) == 0);
-        CHECK(static_cast<std::size_t>(info.st_size) == config.capacity_bytes);
+        CHECK(static_cast<std::size_t>(info.st_size) == 4096U);
+        struct stat seg_info {};
+        CHECK(::stat((temp.path + ".seg0").c_str(), &seg_info) == 0);
+        CHECK(static_cast<std::size_t>(seg_info.st_size) == config.capacity_bytes);
 
         auto inbound = journal.append(RecordKind::inbound, 1, 0, 0, "raw-inbound-1");
         CHECK(inbound.ok());
@@ -151,9 +154,8 @@ void test_parent_directory_creation_and_indexes() {
     }
     struct stat info {};
     CHECK(::stat(nested_path.c_str(), &info) == 0);
-    CHECK(::unlink(nested_path.c_str()) == 0);
-    CHECK(::rmdir((temp.directory + "/new/subdir").c_str()) == 0);
-    CHECK(::rmdir((temp.directory + "/new").c_str()) == 0);
+    CHECK(::stat((nested_path + ".seg0").c_str(), &info) == 0);
+    std::filesystem::remove_all(temp.directory + "/new");
 }
 
 void test_gapfill_sequence_decision_is_inbound_commit() {
@@ -313,7 +315,7 @@ void test_identity_truncation_version_and_committed_corruption() {
     TempJournal truncation_temp;
     const auto truncation_config = truncation_temp.config();
     create_one_inbound(truncation_config);
-    CHECK(::truncate(truncation_temp.path.c_str(), 4096) == 0);
+    CHECK(::truncate((truncation_temp.path + ".seg0").c_str(), 4096) == 0);
     auto truncated = Journal::open(truncation_config);
     CHECK(truncated.status().code == ErrorCode::corrupt_store);
 
@@ -344,7 +346,7 @@ void test_identity_truncation_version_and_committed_corruption() {
         if (!record.ok()) return;
         id = record.value().id;
     }
-    int corruption_fd = ::open(corruption_temp.path.c_str(), O_RDWR | O_CLOEXEC);
+    int corruption_fd = ::open((corruption_temp.path + ".seg0").c_str(), O_RDWR | O_CLOEXEC);
     CHECK(corruption_fd >= 0);
     if (corruption_fd >= 0) {
         const unsigned char corrupted = 'X';
@@ -367,7 +369,7 @@ void test_identity_truncation_version_and_committed_corruption() {
         if (!first.ok() || !second.ok()) return;
         first_id = first.value().id;
     }
-    int marker_fd = ::open(marker_temp.path.c_str(), O_RDWR | O_CLOEXEC);
+    int marker_fd = ::open((marker_temp.path + ".seg0").c_str(), O_RDWR | O_CLOEXEC);
     CHECK(marker_fd >= 0);
     if (marker_fd >= 0) {
         const std::array<unsigned char, 4> zero{};
@@ -379,6 +381,37 @@ void test_identity_truncation_version_and_committed_corruption() {
     CHECK(missing_middle_commit.status().code == ErrorCode::corrupt_store);
 }
 
+void test_reserve_commit_and_zero_reader_mode() {
+    TempJournal temp;
+    auto config = temp.config();
+    config.max_readers = 0;
+    {
+        auto opened = Journal::open(config);
+        CHECK(opened.ok());
+        if (!opened.ok()) return;
+        auto& journal = opened.value();
+        CHECK(journal.create_reader().status().code == ErrorCode::invalid_config);
+
+        auto reserved = journal.reserve(RecordKind::outbound, 1, 9001, 0, 128);
+        CHECK(reserved.ok());
+        if (!reserved.ok()) return;
+        const std::string_view frame = "8=FIX.4.4\x01""9=5\x01""35=0\x01""10=000\x01";
+        std::memcpy(reserved.value().payload.data(), frame.data(), frame.size());
+        auto committed = journal.commit(reserved.value(), frame.size());
+        CHECK(committed.ok());
+        if (!committed.ok()) return;
+        CHECK(committed.value().payload == frame);
+        CHECK(committed.value().receipt == 9001);
+        CHECK(journal.next_outbound_seq() == 2);
+    }
+    auto reopened = Journal::open(config);
+    CHECK(reopened.ok());
+    if (!reopened.ok()) return;
+    CHECK(reopened.value().records().size() == 1);
+    CHECK(reopened.value().find_outbound(1) != nullptr);
+    CHECK(reopened.value().find_outbound(1)->receipt == 9001);
+}
+
 } // namespace
 
 int main() {
@@ -388,6 +421,7 @@ int main() {
     test_bounded_capacity_and_record_count();
     test_process_death_at_commit_boundaries();
     test_identity_truncation_version_and_committed_corruption();
+    test_reserve_commit_and_zero_reader_mode();
     if (failures != 0) {
         std::cerr << failures << " journal test(s) failed\n";
         return 1;

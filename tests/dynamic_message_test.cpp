@@ -59,7 +59,8 @@ void test_limits_and_invalid_runtime_tags() {
     DynamicMessage bad_data{"Z"};
     const std::string_view invalid_source{nullptr, 1};
     CHECK(bad_data.set_data(900020, 900021, invalid_source).code == ErrorCode::invalid_value);
-    CHECK(bad_data.set_data(900022, 900023, {}).ok());
+    // FIX TagValue requires binary DATA fields to have positive length.
+    CHECK(bad_data.set_data(900022, 900023, {}).code == ErrorCode::invalid_value);
 }
 
 } // namespace

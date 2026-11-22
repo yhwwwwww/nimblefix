@@ -540,19 +540,25 @@ def _locations(locations: Iterable[Location]) -> str:
 def _expand_members(members: tuple[MemberDef, ...] | list[MemberDef],
                     components: dict[str, ComponentDef],
                     inherited_required: bool = True,
-                    stack: tuple[str, ...] = ()) -> tuple[MemberDef, ...]:
+                    stack: tuple[str, ...] = (),
+                    budget: list[int] | None = None) -> tuple[MemberDef, ...]:
+    if budget is None:
+        budget = [100_000]
     expanded: list[MemberDef] = []
     for member in members:
+        if budget[0] <= 0:
+            raise SchemaError("expanded component member limit exceeded", member.location)
+        budget[0] -= 1
         required = inherited_required and member.required
         if member.kind == "component":
             component = components[member.field_name]
             if component.name in stack:
                 chain = " -> ".join((*stack, component.name))
                 raise SchemaError(f"recursive component reference: {chain}", member.location)
-            expanded.extend(_expand_members(component.members, components, required, (*stack, component.name)))
+            expanded.extend(_expand_members(component.members, components, required, (*stack, component.name), budget))
         elif member.kind == "group":
             expanded.append(dataclasses.replace(member, required=required,
-                members=_expand_members(member.members, components, True, stack)))
+                members=_expand_members(member.members, components, True, stack, budget)))
         else:
             expanded.append(dataclasses.replace(member, required=required))
     return tuple(expanded)
@@ -560,7 +566,10 @@ def _expand_members(members: tuple[MemberDef, ...] | list[MemberDef],
 
 def _check_member_references(members: tuple[MemberDef, ...] | list[MemberDef],
                              fields: dict[str, FieldDef], components: dict[str, ComponentDef],
-                             context: str, stack: tuple[str, ...] = ()) -> None:
+                             context: str, stack: tuple[str, ...] = (),
+                             verified_components: set[str] | None = None) -> None:
+    if verified_components is None:
+        verified_components = set()
     for member in members:
         if member.kind == "field":
             if member.field_name not in fields:
@@ -572,8 +581,11 @@ def _check_member_references(members: tuple[MemberDef, ...] | list[MemberDef],
             if component.name in stack:
                 chain = " -> ".join((*stack, component.name))
                 raise SchemaError(f"recursive component reference: {chain}", member.location)
+            if component.name in verified_components:
+                continue
             _check_member_references(component.members, fields, components, context,
-                (*stack, component.name))
+                (*stack, component.name), verified_components)
+            verified_components.add(component.name)
         elif member.kind == "group":
             count_field = fields.get(member.field_name)
             if count_field is None:
@@ -582,7 +594,7 @@ def _check_member_references(members: tuple[MemberDef, ...] | list[MemberDef],
             # dictionaries use NUMINGROUP for the same wire role.
             if count_field.field_type not in {"NUMINGROUP", "INT"}:
                 raise SchemaError(f"repeating group counter {member.field_name!r} must have NUMINGROUP or legacy INT type", member.location)
-            _check_member_references(member.members, fields, components, context, stack)
+            _check_member_references(member.members, fields, components, context, stack, verified_components)
 
 
 def _validate_member_scope(members: tuple[MemberDef, ...], fields: dict[str, FieldDef],
@@ -662,17 +674,20 @@ def load_schema(paths: list[Path]) -> Schema:
     if not messages_by_name:
         raise SchemaError("merged XML inputs contain no <message> definitions")
 
+    verified_components: set[str] = set()
+    expanded_components_cache: dict[str, tuple[MemberDef, ...]] = {}
     for component in components_by_name.values():
         _check_member_references(component.members, fields_by_name, components_by_name,
-            f"component {component.name!r}", (component.name,))
+            f"component {component.name!r}", (component.name,), verified_components)
         expanded = _expand_members(component.members, components_by_name, True, (component.name,))
         _validate_member_scope(expanded, fields_by_name, f"component {component.name!r}",
             component.name in {"Header", "Trailer"})
+        expanded_components_cache[component.name] = expanded
 
     expanded_messages: dict[str, tuple[MemberDef, ...]] = {}
     for message in messages_by_name.values():
         _check_member_references(message.members, fields_by_name, components_by_name,
-            f"message {message.name!r}")
+            f"message {message.name!r}", (), verified_components)
         expanded = _expand_members(message.members, components_by_name)
         _validate_member_scope(expanded, fields_by_name, f"message {message.name!r}")
         expanded_messages[message.name] = expanded
@@ -711,11 +726,67 @@ def load_schema(paths: list[Path]) -> Schema:
     # Cache the expanded wire model for deterministic rendering without mutating
     # any user-visible XML definitions.
     schema._expanded_messages = expanded_messages
-    schema._expanded_components = {
-        name: _expand_members(component.members, components_by_name, True, (name,))
-        for name, component in components_by_name.items()
-    }
+    schema._expanded_components = expanded_components_cache
     return schema
+
+
+def filter_schema_messages(schema: Schema, requested: list[str]) -> Schema:
+    """Subset a loaded schema to only the requested message names or MsgTypes."""
+    selected_messages: dict[str, MessageDef] = {}
+    by_type = {msg.msg_type: msg for msg in schema.messages_by_name.values()}
+    for token in requested:
+        name = token.strip()
+        if not name:
+            continue
+        msg = schema.messages_by_name.get(name) or by_type.get(name)
+        if msg is None:
+            raise SchemaError(f"unknown message selector {name!r} for --messages")
+        selected_messages[msg.name] = msg
+    if not selected_messages:
+        raise SchemaError("--messages selected no messages")
+
+    used_fields: set[str] = set()
+
+    def collect_fields(members: tuple[MemberDef, ...]) -> None:
+        for member in members:
+            used_fields.add(member.field_name)
+            if member.kind == "group":
+                collect_fields(member.members)
+
+    selected_components: dict[str, ComponentDef] = {}
+    selected_expanded_components: dict[str, tuple[MemberDef, ...]] = {}
+    for comp_name in ("Header", "Trailer"):
+        if comp_name in schema.components_by_name:
+            selected_components[comp_name] = schema.components_by_name[comp_name]
+            selected_expanded_components[comp_name] = schema._expanded_components[comp_name]
+            collect_fields(selected_expanded_components[comp_name])
+
+    selected_expanded_messages: dict[str, tuple[MemberDef, ...]] = {}
+    for name, msg in selected_messages.items():
+        expanded = schema._expanded_messages[name]
+        selected_expanded_messages[name] = expanded
+        collect_fields(expanded)
+
+    # Ensure paired LENGTH fields for any selected DATA/XMLDATA field are kept.
+    def expand_pair_name(value: str) -> tuple[str, ...]:
+        compact = value.replace("Security", "Sec")
+        expanded = value.replace("Sec", "Security") if "Security" not in value else value
+        return (value, compact, expanded)
+
+    for fname in list(used_fields):
+        fdef = schema.fields_by_name[fname]
+        if fdef.field_type in {"DATA", "XMLDATA"}:
+            for base in expand_pair_name(fdef.name):
+                for suffix in ("Length", "Len"):
+                    cand = base + suffix
+                    if cand in schema.fields_by_name and schema.fields_by_name[cand].field_type == "LENGTH":
+                        used_fields.add(cand)
+
+    selected_fields = {name: schema.fields_by_name[name] for name in used_fields if name in schema.fields_by_name}
+    subset = Schema(schema.identity, selected_fields, selected_messages, selected_components)
+    subset._expanded_messages = selected_expanded_messages
+    subset._expanded_components = selected_expanded_components
+    return subset
 
 
 def _cpp_string(value: str) -> str:
@@ -804,9 +875,15 @@ def render_header(schema: Schema, namespace: str) -> str:
         elif field.field_type in {"LENGTH", "NUMINGROUP"}:
             bases = (field.name[:-6] if field.name.endswith("Length") else "",
                      field.name[:-3] if field.name.endswith("Len") else "")
-            candidates = tuple(candidate for base in bases if base
-                for candidate in (base, pair_name_key(base)))
-            data = next((schema.fields_by_name[name] for name in candidates
+            candidates_list: list[str] = []
+            for base in bases:
+                if not base:
+                    continue
+                candidates_list.append(base)
+                candidates_list.append(pair_name_key(base))
+                if "Security" not in base and "Sec" in base:
+                    candidates_list.append(base.replace("Sec", "Security"))
+            data = next((schema.fields_by_name[name] for name in candidates_list
                            if name in schema.fields_by_name and
                            schema.fields_by_name[name].field_type in {"DATA", "XMLDATA"}), None)
             if data is not None:
@@ -956,22 +1033,38 @@ def render_header(schema: Schema, namespace: str) -> str:
         )
     lines += ["}};", ""]
 
-    def emit_members(name: str, members: tuple[MemberDef, ...]) -> None:
+    def emit_members(name: str, members: tuple[MemberDef, ...], emit_required: bool = False) -> None:
         lines.append(f"inline constexpr std::array<MessageMemberDescriptor, {len(members)}> {name}{{{{")
-        for member in members:
+        indexed_tags: list[tuple[int, int]] = []
+        required_indices: list[int] = []
+        for idx, member in enumerate(members):
+            tag_num = schema.fields_by_name[member.field_name].number
+            indexed_tags.append((tag_num, idx))
+            if member.required:
+                required_indices.append(idx)
             if member.kind == "field":
                 lines.append(f"    {{::nimblefix::MemberKind::field, {field_indexes[member.field_name]}u, 0u, {'true' if member.required else 'false'}}},")
             else:
                 group_index = group_indexes[group_key(member)]
                 lines.append(f"    {{::nimblefix::MemberKind::group, 0u, {group_index}u, {'true' if member.required else 'false'}}},")
         lines.extend(["}};", ""])
+        indexed_tags.sort(key=lambda item: item[0])
+        lines.append(f"inline constexpr std::array<::nimblefix::MemberTagEntry, {len(indexed_tags)}> {name}_by_tag{{{{")
+        for tag_num, idx in indexed_tags:
+            lines.append(f"    {{{tag_num}u, {idx}u}},")
+        lines.extend(["}};", ""])
+        if emit_required:
+            lines.append(f"inline constexpr std::array<std::uint32_t, {len(required_indices)}> {name}_required{{{{")
+            for idx in required_indices:
+                lines.append(f"    {idx}u,")
+            lines.extend(["}};", ""])
 
     for index, key in enumerate(group_keys):
-        emit_members(f"group_{index}_members", group_by_key[key].members)
+        emit_members(f"group_{index}_members", group_by_key[key].members, emit_required=True)
     for index, component in enumerate(components):
-        emit_members(f"component_{index}_members", expanded_components[component.name])
+        emit_members(f"component_{index}_members", expanded_components[component.name], emit_required=False)
     for index, message in enumerate(messages):
-        emit_members(f"message_{index}_members", expanded_messages[message.name])
+        emit_members(f"message_{index}_members", expanded_messages[message.name], emit_required=True)
 
     lines.append(f"inline constexpr std::array<GroupDescriptor, {len(group_keys)}> groups{{{{")
     for index, key in enumerate(group_keys):
@@ -979,13 +1072,23 @@ def render_header(schema: Schema, namespace: str) -> str:
         counter = schema.fields_by_name[group.field_name].number
         first = group.members[0]
         delimiter = schema.fields_by_name[first.field_name].number
-        lines.append(f"    {{{_cpp_string(group.field_name)}, {counter}u, {delimiter}u, std::span<const MessageMemberDescriptor>{{group_{index}_members}}}},")
+        lines.append(
+            f"    {{{_cpp_string(group.field_name)}, {counter}u, {delimiter}u, "
+            f"std::span<const MessageMemberDescriptor>{{group_{index}_members}}, "
+            f"std::span<const ::nimblefix::MemberTagEntry>{{group_{index}_members_by_tag}}, "
+            f"std::span<const std::uint32_t>{{group_{index}_members_required}}}},")
     lines += ["}};", "", f"inline constexpr std::array<ComponentDescriptor, {len(components)}> components{{{{"]
     for index, component in enumerate(components):
-        lines.append(f"    {{{_cpp_string(component.name)}, std::span<const MessageMemberDescriptor>{{component_{index}_members}}}},")
+        lines.append(
+            f"    {{{_cpp_string(component.name)}, std::span<const MessageMemberDescriptor>{{component_{index}_members}}, "
+            f"std::span<const ::nimblefix::MemberTagEntry>{{component_{index}_members_by_tag}}}},")
     lines += ["}};", "", f"inline constexpr std::array<MessageDescriptor, {len(messages)}> messages{{{{"]
     for index, message in enumerate(messages):
-        lines.append(f"    {{{_cpp_string(message.name)}, {_cpp_string(message.msg_type)}, {_cpp_string(message.category)}, std::span<const MessageMemberDescriptor>{{message_{index}_members}}}},")
+        lines.append(
+            f"    {{{_cpp_string(message.name)}, {_cpp_string(message.msg_type)}, {_cpp_string(message.category)}, "
+            f"std::span<const MessageMemberDescriptor>{{message_{index}_members}}, "
+            f"std::span<const ::nimblefix::MemberTagEntry>{{message_{index}_members_by_tag}}, "
+            f"std::span<const std::uint32_t>{{message_{index}_members_required}}}},")
     lines += [
         "}};",
         "",
@@ -1035,18 +1138,20 @@ def render_header(schema: Schema, namespace: str) -> str:
         ]
     lines += ["} // namespace nimblefix", "", f"namespace {ns} {{", ""]
 
-    def member_tag_and_name(member: MemberDef) -> tuple[int, str]:
-        field = schema.fields_by_name[member.field_name]
-        return field.number, field.name
-
-    def member_wire_kind(member: MemberDef) -> str:
-        wire_type = FIX_WIRE_TYPES[schema.fields_by_name[member.field_name].field_type]
-        return {"string": "string", "utc_timestamp": "string", "character": "character",
-                "integer": "signed_integer", "decimal": "decimal"}[wire_type]
-
     def immediate_tags(members: tuple[MemberDef, ...]) -> list[tuple[int, bool, MemberDef]]:
         return [(schema.fields_by_name[member.field_name].number, member.required, member)
                 for member in members]
+
+    # Fields whose wire values require schema-level text/enum checking beyond
+    # what SlotValue and the encoder already enforce directly on typed slots.
+    _NEEDS_ENUM_OR_FORMAT_CHECK = {
+        "BOOLEAN", "UTCDATE", "UTCDATEONLY", "LOCALMKTDATE", "UTCTIMEONLY",
+        "MONTHYEAR", "DAYOFMONTH", "TAGNUM", "MULTIPLEVALUESTRING",
+        "MULTIPLECHARVALUE", "MULTIPLESTRINGVALUE", "LENGTH", "NUMINGROUP", "SEQNUM",
+    }
+
+    def field_needs_policy_check(field: FieldDef) -> bool:
+        return bool(field.enum_values) or field.field_type in _NEEDS_ENUM_OR_FORMAT_CHECK
 
     # Group policies and their trait specializations are emitted before the
     # entry wrappers instantiate FixedShapeMessage. This keeps group entry
@@ -1055,15 +1160,20 @@ def render_header(schema: Schema, namespace: str) -> str:
         group = group_by_key[group_keys[group_index]]
         policy = group_symbol(group_index, "EntryPolicy")
         builder = group_symbol(group_index, "EntryBuilder")
+        setters_mixin = group_symbol(group_index, "EntrySetters")
         members = group.members
         allowed = [tag for tag, _required, _member in immediate_tags(members)]
         required = [tag for tag, is_required, _member in immediate_tags(members) if is_required]
         lines += [
             f"template<class... Slots> class {builder};",
+            f"template<class Derived> struct {setters_mixin};",
             f"struct {policy} {{",
             "    template<class... Slots>",
             f"    using rebind = {builder}<Slots...>;",
-            "    static constexpr std::string_view msg_type = \"G\";",
+            "    template<class Derived>",
+            f"    using named_setters = {setters_mixin}<Derived>;",
+            "    static constexpr bool is_group_entry = true;",
+            "    static constexpr std::string_view msg_type = \"__entry__\";",
             f"    inline static constexpr std::array<std::uint32_t, {len(allowed)}> allowed_tags{{{{",
         ]
         lines.extend(f"        {tag}u," for tag in allowed)
@@ -1074,6 +1184,8 @@ def render_header(schema: Schema, namespace: str) -> str:
             if member.kind != "field":
                 continue
             field = schema.fields_by_name[member.field_name]
+            if not field_needs_policy_check(field):
+                continue
             lines += [f"        case {field.number}u:",
                 f"            return ::nimblefix::is_valid_schema_field_value(fields[{field_indexes[field.name]}], value);"]
         lines += ["        default:", "            (void)value;", "            return true;", "        }", "    }", "};", ""]
@@ -1082,15 +1194,20 @@ def render_header(schema: Schema, namespace: str) -> str:
         name = message.name
         policy = f"{name}Policy"
         builder = f"{name}Builder"
+        setters_mixin = f"{name}Setters"
         members = expanded_messages[name]
         allowed_tags = [tag for tag, _required, _member in immediate_tags(members)]
         required_tags = [tag for tag, is_required, _member in immediate_tags(members) if is_required]
         direct_fields = [member for member in members if member.kind == "field"]
         lines += [
             f"template<class... Slots> class {builder};",
+            f"template<class Derived> struct {setters_mixin};",
             f"struct {policy} {{",
+            "    using schema_type = Schema;",
             "    template<class... Slots>",
             f"    using rebind = {builder}<Slots...>;",
+            "    template<class Derived>",
+            f"    using named_setters = {setters_mixin}<Derived>;",
             f"    static constexpr std::string_view msg_type = {_cpp_string(message.msg_type)};",
             f"    inline static constexpr std::array<std::uint32_t, {len(allowed_tags)}> allowed_tags{{{{",
         ]
@@ -1100,6 +1217,8 @@ def render_header(schema: Schema, namespace: str) -> str:
         lines += ["    }};", "    static constexpr bool enum_value_allowed(std::uint32_t tag, std::string_view value) noexcept {", "        switch (tag) {"]
         for member in direct_fields:
             field = schema.fields_by_name[member.field_name]
+            if not field_needs_policy_check(field):
+                continue
             lines += [f"        case {field.number}u:",
                 f"            return ::nimblefix::is_valid_schema_field_value(fields[{field_indexes[field.name]}], value);"]
         lines += ["        default:", "            (void)value;", "            return true;", "        }", "    }", "};", ""]
@@ -1138,22 +1257,15 @@ def render_header(schema: Schema, namespace: str) -> str:
         symbol = group_symbol(group_index, "")
         entry_name = group_symbol(group_index, "Entry")
         builder = group_symbol(group_index, "EntryBuilder")
+        setters_mixin = group_symbol(group_index, "EntrySetters")
         policy = group_symbol(group_index, "EntryPolicy")
         count_tag = schema.fields_by_name[group.field_name].number
         delimiter_tag = schema.fields_by_name[group.members[0].field_name].number
         members = group.members
         lines += [
-            f"struct {entry_name} {{",
-            f"    using policy_type = {policy};",
-            f"    static auto make(::nimblefix::MessageLimits limits = {{}});",
-            "};",
-            "",
-            f"template<class... Slots>",
-            f"class {builder} : public ::nimblefix::MessageBuilder<{policy}, \"G\", ::nimblefix::FieldList<Slots...>> {{",
-            f"    using Base = ::nimblefix::MessageBuilder<{policy}, \"G\", ::nimblefix::FieldList<Slots...>>;",
-            "public:",
-            "    using schema_type = Schema;",
-            "    using Base::Base;",
+            f"template<class Derived>",
+            f"struct {setters_mixin} {{",
+            "    static constexpr bool is_group_entry = true;",
         ]
         for member in members:
             if member.kind == "field":
@@ -1162,7 +1274,7 @@ def render_header(schema: Schema, namespace: str) -> str:
                 lines += [
                     "    template<class V>",
                     f"    auto {setter}(V&& value) && {{",
-                    f"        return std::move(*this).template set<{field.number}u>(std::forward<V>(value));",
+                    f"        return std::move(static_cast<Derived&>(*this)).template set<{field.number}u>(std::forward<V>(value));",
                     "    }",
                 ]
             else:
@@ -1172,10 +1284,24 @@ def render_header(schema: Schema, namespace: str) -> str:
                     "    template<class G>",
                     f"    auto {group_setter}(G&& group) && {{",
                     f"        static_assert(std::remove_cvref_t<G>::count_tag == {child.number}u, \"wrong nested repeating group type\");",
-                    "        return ::nimblefix::attach_group(std::move(*this), std::forward<G>(group));",
+                    "        return ::nimblefix::attach_group(std::move(static_cast<Derived&>(*this)), std::forward<G>(group));",
                     "    }",
                 ]
         lines += [
+            "};",
+            "",
+            f"struct {entry_name} {{",
+            f"    using policy_type = {policy};",
+            "    static constexpr bool is_group_entry = true;",
+            f"    static auto make(::nimblefix::MessageLimits limits = {{}});",
+            "};",
+            "",
+            f"template<class... Slots>",
+            f"class {builder} : public ::nimblefix::MessageBuilder<{policy}, \"__entry__\", ::nimblefix::FieldList<Slots...>>, public {setters_mixin}<{builder}<Slots...>> {{",
+            f"    using Base = ::nimblefix::MessageBuilder<{policy}, \"__entry__\", ::nimblefix::FieldList<Slots...>>;",
+            "public:",
+            "    static constexpr bool is_group_entry = true;",
+            "    using Base::Base;",
             "};",
             f"inline auto {entry_name}::make(::nimblefix::MessageLimits limits) {{ return {builder}<>{{limits}}; }}",
             f"template<std::size_t Capacity = 16>",
@@ -1187,6 +1313,8 @@ def render_header(schema: Schema, namespace: str) -> str:
         name = message.name
         policy = f"{name}Policy"
         builder = f"{name}Builder"
+        setters_mixin = f"{name}Setters"
+        fixed_name = f"{name}Fixed"
         members = expanded_messages[name]
         direct_fields = [member for member in members if member.kind == "field"]
 
@@ -1218,21 +1346,8 @@ def render_header(schema: Schema, namespace: str) -> str:
         lines += ["};", ""]
 
         lines += [
-            f"struct {name} {{",
-            "    using schema_type = Schema;",
-            f"    using view_type = {name}View;",
-            f"    using policy_type = {policy};",
-            f"    static constexpr std::string_view msg_type = {_cpp_string(message.msg_type)};",
-            f"    inline static constexpr const MessageDescriptor& descriptor = messages[{index}];",
-            f"    static auto make(::nimblefix::MessageLimits limits = {{}});",
-            "};",
-            "",
-            "template<class... Slots>",
-            f"class {builder} : public ::nimblefix::MessageBuilder<{policy}, {_cpp_string(message.msg_type)}, ::nimblefix::FieldList<Slots...>> {{",
-            f"    using Base = ::nimblefix::MessageBuilder<{policy}, {_cpp_string(message.msg_type)}, ::nimblefix::FieldList<Slots...>>;",
-            "public:",
-            "    using schema_type = Schema;",
-            "    using Base::Base;",
+            f"template<class Derived>",
+            f"struct {setters_mixin} {{",
         ]
         for member in direct_fields:
             field = schema.fields_by_name[member.field_name]
@@ -1240,7 +1355,7 @@ def render_header(schema: Schema, namespace: str) -> str:
             lines += [
                 "    template<class V>",
                 f"    auto {setter}(V&& value) && {{",
-                f"        return std::move(*this).template set<{field.number}>(std::forward<V>(value));",
+                f"        return std::move(static_cast<Derived&>(*this)).template set<{field.number}>(std::forward<V>(value));",
                 "    }",
             ]
         for member in members:
@@ -1253,13 +1368,54 @@ def render_header(schema: Schema, namespace: str) -> str:
                 "    template<class G>",
                 f"    auto {setter}(G&& group) && {{",
                 f"        static_assert(std::remove_cvref_t<G>::count_tag == {counter.number}u, \"wrong repeating group type\");",
-                "        return ::nimblefix::attach_group(std::move(*this), std::forward<G>(group));",
+                "        return ::nimblefix::attach_group(std::move(static_cast<Derived&>(*this)), std::forward<G>(group));",
                 "    }",
                 f"    auto {setter}({group_type}&& group) && {{",
-                "        return ::nimblefix::attach_group(std::move(*this), std::move(group));",
+                "        return ::nimblefix::attach_group(std::move(static_cast<Derived&>(*this)), std::move(group));",
                 "    }",
             ]
-        lines += ["};", f"inline auto {name}::make(::nimblefix::MessageLimits limits) {{ return {builder}<>{{limits}}; }}", ""]
+        lines += ["};", ""]
+
+        lines += [
+            f"template<class Shape, std::size_t ByteCapacity = 512>",
+            f"class {fixed_name} : public ::nimblefix::FixedShapeMessage<{_cpp_string(message.msg_type)}, Shape, ByteCapacity, {policy}> {{",
+            f"    using Base = ::nimblefix::FixedShapeMessage<{_cpp_string(message.msg_type)}, Shape, ByteCapacity, {policy}>;",
+            "public:",
+            "    using Base::Base;",
+        ]
+        for member in direct_fields:
+            field = schema.fields_by_name[member.field_name]
+            setter = _snake_case(field.name)
+            lines += [
+                "    template<class V>",
+                f"    [[nodiscard]] ::nimblefix::Status {setter}(V&& value) noexcept {{",
+                f"        return this->template set<{field.number}>(std::forward<V>(value));",
+                "    }",
+            ]
+        lines += ["};", ""]
+
+        lines += [
+            f"struct {name} {{",
+            "    using schema_type = Schema;",
+            f"    using view_type = {name}View;",
+            f"    using policy_type = {policy};",
+            f"    template<class Shape, std::size_t ByteCapacity = 512>",
+            f"    using fixed_type = {fixed_name}<Shape, ByteCapacity>;",
+            f"    static constexpr std::string_view msg_type = {_cpp_string(message.msg_type)};",
+            f"    inline static constexpr const MessageDescriptor& descriptor = messages[{index}];",
+            f"    static auto make(::nimblefix::MessageLimits limits = {{}});",
+            "};",
+            "",
+            "template<class... Slots>",
+            f"class {builder} : public ::nimblefix::MessageBuilder<{policy}, {_cpp_string(message.msg_type)}, ::nimblefix::FieldList<Slots...>>, public {setters_mixin}<{builder}<Slots...>> {{",
+            f"    using Base = ::nimblefix::MessageBuilder<{policy}, {_cpp_string(message.msg_type)}, ::nimblefix::FieldList<Slots...>>;",
+            "public:",
+            "    using schema_type = Schema;",
+            "    using Base::Base;",
+            "};",
+            f"inline auto {name}::make(::nimblefix::MessageLimits limits) {{ return {builder}<>{{limits}}; }}",
+            "",
+        ]
 
     lines += ["template<class Visitor>", "inline void Schema::for_each_message(Visitor&& visitor) {"]
     lines.append("    auto&& callable = visitor;")
@@ -1339,10 +1495,14 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", required=True, type=Path, help="generated C++ header path")
     parser.add_argument("--namespace", required=True, help="C++ namespace for generated types")
+    parser.add_argument("--messages", default="",
+        help="optional comma-separated subset of message names or MsgTypes to generate")
     parser.add_argument("xml", nargs="+", type=Path, help="FIX XML schema input(s)")
     args = parser.parse_args(argv)
     try:
         schema = load_schema(args.xml)
+        if args.messages:
+            schema = filter_schema_messages(schema, args.messages.split(","))
         header = render_header(schema, args.namespace)
         write_if_changed(args.output, header)
     except SchemaError as exc:

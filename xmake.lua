@@ -1,5 +1,5 @@
 set_project("nimblefix")
-set_version("0.2.0")
+set_version("0.3.0")
 set_xmakever("2.9.8")
 set_languages("cxx20")
 add_rules("mode.debug", "mode.release")
@@ -78,17 +78,24 @@ end
 local generated_dir = path.join(get_config("builddir") or get_config("buildir") or "build", "generated")
 local sample_header = path.join(generated_dir, "nimblefix", "fix44_sample.hpp")
 
-target("nimblefix")
+target("nimblefix-core")
     set_kind("static")
     add_includedirs("include", {public = true})
     add_headerfiles("include/(nimblefix/**.hpp)")
     add_files("src/codec/parser.cpp", "src/codec/encoder.cpp", "src/message/decimal.cpp")
-    add_files("src/store/*.cpp", "src/session/*.cpp", "src/runtime/*.cpp", "src/transport/*.cpp")
+    add_files("src/store/*.cpp", "src/session/core.cpp", "src/session/settings.cpp", "src/transport/tcp.cpp")
+    add_syslinks("pthread", {public = true})
+target_end()
+
+target("nimblefix")
+    set_kind("static")
+    add_deps("nimblefix-core")
+    add_includedirs("include", {public = true})
+    add_files("src/session/driver.cpp", "src/runtime/*.cpp", "src/transport/tls.cpp")
     if has_config("tls") then
         add_defines("NIMBLEFIX_ENABLE_TLS=1")
         add_syslinks("ssl", "crypto", {public = true})
     end
-    add_syslinks("pthread", {public = true})
 target_end()
 
 if has_config("standard_schemas") then
@@ -97,10 +104,15 @@ if has_config("standard_schemas") then
             set_kind("phony")
             set_policy("build.fence", true)
             set_default(false)
-            on_build(function ()
-                os.vrunv("python3", {"tools/schema/generate.py", "--output",
-                    path.join(generated_dir, "nimblefix", schema .. ".hpp"), "--namespace", "nimblefix::" .. schema,
-                    path.join("schemas", "standard", schema:upper() .. ".xml")})
+            on_build(function (target)
+                import("core.project.depend")
+                local output = path.join(generated_dir, "nimblefix", schema .. ".hpp")
+                local xml = path.join("schemas", "standard", schema:upper() .. ".xml")
+                depend.on_changed(function ()
+                    os.vrunv("python3", {"tools/schema/generate.py", "--output", output,
+                        "--namespace", "nimblefix::" .. schema, xml})
+                end, {files = {xml, "tools/schema/generate.py"}, values = {output},
+                      changed = not os.isfile(output)})
             end)
         target_end()
     end
@@ -165,9 +177,20 @@ target("fix44-sample")
     set_policy("build.fence", true)
     set_default(false)
     on_build(function ()
-        os.vrunv("python3", {"tools/schema/generate.py", "--output", sample_header,
-            "--namespace", "nimblefix::fix44_sample", "schemas/fix44-sample.xml"})
+        import("core.project.depend")
+        depend.on_changed(function ()
+            os.vrunv("python3", {"tools/schema/generate.py", "--output", sample_header,
+                "--namespace", "nimblefix::fix44_sample", "schemas/fix44-sample.xml"})
+        end, {files = {"schemas/fix44-sample.xml", "tools/schema/generate.py"},
+              values = {sample_header}, changed = not os.isfile(sample_header)})
     end)
+target_end()
+
+target("direct-initiator-example")
+    set_kind("binary")
+    add_files("examples/direct_initiator.cpp")
+    add_deps("nimblefix-core", "fix44-sample")
+    add_includedirs(generated_dir)
 target_end()
 
 target("codec-demo")
@@ -199,7 +222,7 @@ if has_config("tests") then
         add_files("tests/initiator_probe.cpp")
         add_deps("nimblefix")
     target_end()
-    for _, name in ipairs({"parser", "message", "generated", "contract", "journal", "session", "session_boundary", "session_limits", "network", "settings", "journal_reader", "journal_rotation", "protocol_core", "protocol_session", "queued_runtime", "sender_schema", "schema_codec", "dynamic_message", "engine_features", "producer_lane", "queued_shutdown", "sender_expiry"}) do
+    for _, name in ipairs({"parser", "message", "generated", "contract", "journal", "session", "session_boundary", "session_limits", "network", "settings", "journal_reader", "journal_rotation", "protocol_core", "protocol_session", "protocol_security", "queued_runtime", "sender_schema", "schema_codec", "dynamic_message", "engine_features", "producer_lane", "queued_shutdown", "sender_expiry"}) do
         target(name .. "-test")
             set_kind("binary")
             add_files("tests/" .. name .. "_test.cpp")
@@ -211,6 +234,15 @@ if has_config("tests") then
             add_tests("default", {run_timeout = 30000})
         target_end()
     end
+    if has_config("standard_schemas") then
+        target("schema_nested_group-test")
+            set_kind("binary")
+            add_files("tests/schema_nested_group_test.cpp")
+            add_deps("nimblefix", "fix44-schema")
+            add_includedirs(generated_dir)
+            add_tests("default", {run_timeout = 30000})
+        target_end()
+    end
     if has_config("xml") then
         target("xml-schema-test")
             set_kind("binary")
@@ -219,6 +251,20 @@ if has_config("tests") then
             add_tests("default", {runargs = {"schemas"}})
         target_end()
     end
+    target("direct_initiator-test")
+        set_kind("binary")
+        add_files("tests/direct_initiator_test.cpp")
+        add_deps("nimblefix-core", "fix44-sample")
+        add_includedirs(generated_dir)
+        if not has_config("sanitize") and not has_config("thread_sanitize") then
+            add_defines("NIMBLEFIX_AUDIT_WRAPS=1")
+            for _, symbol in ipairs({"malloc", "pthread_mutex_lock", "fsync", "fdatasync", "msync"}) do
+                add_ldflags("-Wl,--wrap=" .. symbol, {force = true})
+            end
+        end
+        add_tests("default", {run_timeout = 30000})
+    target_end()
+
     target("queued-crash-probe")
         set_kind("binary")
         add_files("tests/queued_crash_probe.cpp")
@@ -315,6 +361,12 @@ if has_config("benchmarks") then
         add_deps("nimblefix", "fix44-sample")
         add_includedirs(generated_dir)
         add_ldflags("-Wl,--wrap=malloc", {force = true})
+    target_end()
+    target("direct-initiator-bench")
+        set_kind("binary")
+        add_files("bench/direct_initiator_bench.cpp")
+        add_deps("nimblefix-core", "fix44-sample")
+        add_includedirs(generated_dir)
     target_end()
 end
 

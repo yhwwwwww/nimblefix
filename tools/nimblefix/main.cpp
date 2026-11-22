@@ -39,7 +39,7 @@
 extern char **environ;
 namespace nf = nimblefix;
 namespace {
-constexpr std::string_view version = "0.2.0";
+constexpr std::string_view version = "0.3.0";
 static_assert(std::atomic<int>::is_always_lock_free);
 std::atomic<int> interrupted{};
 extern "C" void signal_handler(int signal) {
@@ -471,8 +471,11 @@ int inspect_frame(const Arguments &args) {
     std::ifstream input(args.path, std::ios::binary);
     std::string wire{std::istreambuf_iterator<char>{input}, {}};
     std::size_t consumed = 0, frames = 0;
-    if (args.json)
-        std::cout << '[';
+    std::string json_output;
+    if (args.json) {
+        json_output.reserve(wire.size() * 2 + 2);
+        json_output.push_back('[');
+    }
     while (consumed < wire.size()) {
         nf::FrameView frame;
         const auto inspected = nf::inspect_frame(std::string_view{wire}.substr(consumed), frame);
@@ -491,8 +494,9 @@ int inspect_frame(const Arguments &args) {
         const bool logon = type.ok() && type.value().value == "A";
         if (args.json) {
             if (frames != 0)
-                std::cout << ',';
-            std::cout << "{\"offset\":" << consumed << ",\"bytes\":" << frame.consumed << ",\"fields\":[";
+                json_output.push_back(',');
+            json_output += "{\"offset\":" + std::to_string(consumed) +
+                           ",\"bytes\":" + std::to_string(frame.consumed) + ",\"fields\":[";
         } else
             std::cout << "frame offset=" << consumed << " bytes=" << frame.consumed << '\n';
         std::size_t index = 0;
@@ -503,18 +507,20 @@ int inspect_frame(const Arguments &args) {
             const std::string_view value = hidden ? std::string_view{"<redacted>"} : field.value;
             if (args.json) {
                 if (index++ != 0)
-                    std::cout << ',';
-                std::cout << "{\"tag\":" << field.tag << ",\"value\":" << quote(value, true) << '}';
+                    json_output.push_back(',');
+                json_output += "{\"tag\":" + std::to_string(field.tag) + ",\"value\":" + quote(value, true) + '}';
             } else
                 std::cout << "  " << field.tag << '=' << (hidden ? "<redacted>" : quote(value, true)) << '\n';
         }
         if (args.json)
-            std::cout << "]}";
+            json_output += "]}";
         consumed += frame.consumed;
         ++frames;
     }
-    if (args.json)
-        std::cout << "]\n";
+    if (args.json) {
+        json_output += "]\n";
+        std::cout << json_output;
+    }
     return 0;
 }
 
@@ -600,14 +606,28 @@ int run_engine(const nf::ConfigDocument &configuration, const Arguments &args, n
         std::cerr << valid.message() << '\n';
         return 2;
     }
-    std::signal(SIGINT, signal_handler);
-    std::signal(SIGTERM, signal_handler);
+    struct sigaction sa{};
+    sa.sa_handler = signal_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+    (void)::sigaction(SIGINT, &sa, nullptr);
+    (void)::sigaction(SIGTERM, &sa, nullptr);
     std::atomic<bool> done{};
     nf::Status status;
     std::thread owner([&] {
         status = engine.run();
         done.store(true, std::memory_order_release);
     });
+    struct ThreadJoinGuard {
+        std::thread& t;
+        nf::Engine<Schema, Policy>& eng;
+        ~ThreadJoinGuard() {
+            if (t.joinable()) {
+                eng.request_stop();
+                t.join();
+            }
+        }
+    } owner_guard{owner, engine};
     const auto start = std::chrono::steady_clock::now();
     std::set<std::string> published_listeners;
     std::map<std::string, nf::SessionState> displayed_states;

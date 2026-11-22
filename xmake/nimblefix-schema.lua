@@ -23,18 +23,21 @@ rule("nimblefix.schema")
         if not generator or not os.isfile(generator) then raise("set nimblefix.schema.generator to the installed generate.py") end
         local output_dir = path.join(target:autogendir(), "nimblefix-schema")
         target:add("includedirs", output_dir)
+        local messages = table.wrap(target:values("nimblefix.schema.messages"))
         target:data_set("nimblefix.schema", {namespace = name_space, header = path.join(output_dir, header),
-            generator = path.absolute(generator), xml = xml_files})
+            generator = path.absolute(generator), xml = xml_files, messages = messages})
     end)
     before_build(function (target)
         import("core.project.depend")
         local settings = target:data("nimblefix.schema")
         local inputs = table.join({settings.generator}, settings.xml)
+        local msg_csv = table.concat(settings.messages or {}, ",")
         depend.on_changed(function ()
             os.mkdir(path.directory(settings.header))
-            os.vrunv("python3", table.join({settings.generator, "--namespace", settings.namespace,
-                "--output", settings.header}, settings.xml))
+            local argv = {settings.generator, "--namespace", settings.namespace, "--output", settings.header}
+            if #msg_csv > 0 then table.insert(argv, "--messages"); table.insert(argv, msg_csv) end
+            os.vrunv("python3", table.join(argv, settings.xml))
         end, {dependfile = path.join(target:autogendir(), "nimblefix-schema.depend"), files = inputs,
-            values = {settings.namespace, settings.header}, changed = not os.isfile(settings.header)})
+            values = {settings.namespace, settings.header, msg_csv}, changed = not os.isfile(settings.header)})
     end)
 rule_end()

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.23)
-project(NimbleFIX VERSION 0.2.0 LANGUAGES CXX)
+project(NimbleFIX VERSION 0.3.0 LANGUAGES CXX)
 
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
@@ -14,11 +14,35 @@ option(NIMBLEFIX_ENABLE_XML "Build optional system libxml2 runtime XML component
 option(NIMBLEFIX_SANITIZE "Enable AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
 option(NIMBLEFIX_THREAD_SANITIZE "Enable ThreadSanitizer in a separate build" OFF)
 
-add_library(nimblefix STATIC src/codec/parser.cpp src/codec/encoder.cpp src/message/decimal.cpp)
-file(GLOB runtime_sources CONFIGURE_DEPENDS src/store/*.cpp src/session/*.cpp src/runtime/*.cpp src/transport/*.cpp)
-target_sources(nimblefix PRIVATE ${runtime_sources})
+# Layer 0: Lightweight initiator-first zero-overhead core (Codec + v2 Journal + SessionCore + TcpTransport).
+file(GLOB core_store_sources CONFIGURE_DEPENDS src/store/*.cpp)
+add_library(nimblefix_core STATIC
+    src/codec/parser.cpp
+    src/codec/encoder.cpp
+    src/message/decimal.cpp
+    ${core_store_sources}
+    src/session/core.cpp
+    src/session/settings.cpp
+    src/transport/tcp.cpp)
 find_package(Threads REQUIRED)
-target_link_libraries(nimblefix PUBLIC Threads::Threads)
+target_link_libraries(nimblefix_core PUBLIC Threads::Threads)
+add_library(NimbleFIX::nimblefix_core ALIAS nimblefix_core)
+target_compile_features(nimblefix_core PUBLIC cxx_std_20)
+target_include_directories(nimblefix_core PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
+set_target_properties(nimblefix_core PROPERTIES CXX_EXTENSIONS OFF)
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(nimblefix_core PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
+# Layer 1/2: Full runtime library (SessionDriver + Engine + Acceptor + Queued + optional TLS).
+file(GLOB runtime_sources CONFIGURE_DEPENDS src/runtime/*.cpp)
+add_library(nimblefix STATIC
+    src/session/driver.cpp
+    src/transport/tls.cpp
+    ${runtime_sources})
+target_link_libraries(nimblefix PUBLIC nimblefix_core)
 if(NIMBLEFIX_ENABLE_TLS)
     find_package(OpenSSL 3.0 REQUIRED)
     target_link_libraries(nimblefix PUBLIC OpenSSL::SSL OpenSSL::Crypto)
@@ -26,23 +50,20 @@ if(NIMBLEFIX_ENABLE_TLS)
 endif()
 add_library(NimbleFIX::nimblefix ALIAS nimblefix)
 target_compile_features(nimblefix PUBLIC cxx_std_20)
-target_include_directories(nimblefix PUBLIC
-    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
 set_target_properties(nimblefix PROPERTIES CXX_EXTENSIONS OFF)
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(nimblefix PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 if(NIMBLEFIX_SANITIZE)
-    target_compile_options(nimblefix PUBLIC -fsanitize=address,undefined -fno-omit-frame-pointer)
-    target_link_options(nimblefix PUBLIC -fsanitize=address,undefined)
+    target_compile_options(nimblefix_core PUBLIC -fsanitize=address,undefined -fno-omit-frame-pointer)
+    target_link_options(nimblefix_core PUBLIC -fsanitize=address,undefined)
 endif()
 if(NIMBLEFIX_THREAD_SANITIZE)
     if(NIMBLEFIX_SANITIZE)
         message(FATAL_ERROR "ThreadSanitizer needs a separate configuration")
     endif()
-    target_compile_options(nimblefix PUBLIC -fsanitize=thread -fno-omit-frame-pointer)
-    target_link_options(nimblefix PUBLIC -fsanitize=thread)
+    target_compile_options(nimblefix_core PUBLIC -fsanitize=thread -fno-omit-frame-pointer)
+    target_link_options(nimblefix_core PUBLIC -fsanitize=thread)
 endif()
 
 set(NIMBLEFIX_SCHEMA_GENERATOR "${CMAKE_CURRENT_SOURCE_DIR}/tools/schema/generate.py")
@@ -121,6 +142,11 @@ if(NIMBLEFIX_BUILD_EXAMPLES)
             target_link_libraries(${role}-example PRIVATE fix44)
         endif()
     endforeach()
+    if(NIMBLEFIX_BUILD_SAMPLE_SCHEMA)
+        add_executable(direct-initiator-example examples/direct_initiator.cpp)
+        target_link_libraries(direct-initiator-example PRIVATE nimblefix_core fix44_sample)
+        install(TARGETS direct-initiator-example RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
+    endif()
     install(TARGETS codec-demo hello-fix initiator-example acceptor-example
         RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
 endif()
@@ -136,7 +162,7 @@ if(NIMBLEFIX_BUILD_TESTS)
     add_test(NAME outbound-reconnect COMMAND "${Python3_EXECUTABLE}"
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/outbound_reconnect_test.py" --binary $<TARGET_FILE:initiator-probe>)
     set_tests_properties(outbound-reconnect PROPERTIES TIMEOUT 30)
-    foreach(name parser message contract generated journal session session_boundary session_limits network settings journal_reader journal_rotation protocol_core protocol_session queued_runtime sender_schema schema_codec dynamic_message engine_features producer_lane queued_shutdown sender_expiry)
+    foreach(name parser message contract generated journal session session_boundary session_limits network settings journal_reader journal_rotation protocol_core protocol_session protocol_security queued_runtime sender_schema schema_codec dynamic_message engine_features producer_lane queued_shutdown sender_expiry)
         if((name STREQUAL "contract" OR name STREQUAL "generated" OR name STREQUAL "sender_schema") AND NOT NIMBLEFIX_BUILD_SAMPLE_SCHEMA)
             continue()
         endif()
@@ -147,6 +173,22 @@ if(NIMBLEFIX_BUILD_TESTS)
         endif()
         add_test(NAME ${name} COMMAND ${name}-test)
     endforeach()
+    if(NIMBLEFIX_BUILD_STANDARD_SCHEMAS)
+        add_executable(schema_nested_group-test tests/schema_nested_group_test.cpp)
+        target_link_libraries(schema_nested_group-test PRIVATE nimblefix fix44)
+        add_test(NAME schema_nested_group COMMAND schema_nested_group-test)
+    endif()
+    if(NIMBLEFIX_BUILD_SAMPLE_SCHEMA)
+        add_executable(direct_initiator-test tests/direct_initiator_test.cpp)
+        target_link_libraries(direct_initiator-test PRIVATE nimblefix_core fix44_sample)
+        if(NOT NIMBLEFIX_SANITIZE AND NOT NIMBLEFIX_THREAD_SANITIZE)
+            target_compile_definitions(direct_initiator-test PRIVATE NIMBLEFIX_AUDIT_WRAPS=1)
+            target_link_options(direct_initiator-test PRIVATE
+                -Wl,--wrap=malloc -Wl,--wrap=pthread_mutex_lock
+                -Wl,--wrap=fsync -Wl,--wrap=fdatasync -Wl,--wrap=msync)
+        endif()
+        add_test(NAME direct_initiator COMMAND direct_initiator-test)
+    endif()
     if(NIMBLEFIX_ENABLE_XML)
         add_executable(xml-schema-test tests/xml_schema_test.cpp)
         target_link_libraries(xml-schema-test PRIVATE nimblefix_xml)
@@ -268,6 +310,8 @@ if(NIMBLEFIX_BUILD_BENCHMARKS)
     add_executable(codec-bench bench/codec_bench.cpp)
     target_link_libraries(codec-bench PRIVATE nimblefix fix44_sample)
     target_link_options(codec-bench PRIVATE -Wl,--wrap=malloc)
+    add_executable(direct-initiator-bench bench/direct_initiator_bench.cpp)
+    target_link_libraries(direct-initiator-bench PRIVATE nimblefix_core fix44_sample)
     add_executable(session-bench bench/session_bench.cpp)
     target_link_libraries(session-bench PRIVATE nimblefix)
     target_link_options(session-bench PRIVATE -Wl,--wrap=malloc -Wl,--wrap=fsync -Wl,--wrap=fdatasync -Wl,--wrap=msync)
@@ -296,7 +340,7 @@ if(NIMBLEFIX_BUILD_FUZZERS)
     endforeach()
 endif()
 
-install(TARGETS nimblefix EXPORT NimbleFIXTargets ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}")
+install(TARGETS nimblefix_core nimblefix EXPORT NimbleFIXTargets ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}")
 install(DIRECTORY include/nimblefix DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}")
 install(FILES tools/schema/generate.py DESTINATION "${CMAKE_INSTALL_DATADIR}/nimblefix/schema")
 install(FILES xmake/nimblefix-schema.lua DESTINATION "${CMAKE_INSTALL_DATADIR}/nimblefix/xmake")

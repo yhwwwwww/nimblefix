@@ -60,16 +60,24 @@ struct MessageMemberDescriptor {
     bool required{};
 };
 
+struct MemberTagEntry {
+    std::uint32_t tag{};
+    std::uint32_t member_index{};
+};
+
 struct GroupDescriptor {
     std::string_view name{};
     std::uint32_t count_tag{};
     std::uint32_t delimiter_tag{};
     std::span<const MessageMemberDescriptor> members{};
+    std::span<const MemberTagEntry> members_by_tag{};
+    std::span<const std::uint32_t> required_members{};
 };
 
 struct ComponentDescriptor {
     std::string_view name{};
     std::span<const MessageMemberDescriptor> members{};
+    std::span<const MemberTagEntry> members_by_tag{};
 };
 
 struct MessageDescriptor {
@@ -77,6 +85,8 @@ struct MessageDescriptor {
     std::string_view msg_type{};
     std::string_view category{};
     std::span<const MessageMemberDescriptor> members{};
+    std::span<const MemberTagEntry> members_by_tag{};
+    std::span<const std::uint32_t> required_members{};
 
     [[nodiscard]] constexpr std::uint32_t member_tag(
         const MessageMemberDescriptor& member,
@@ -221,9 +231,9 @@ inline constexpr std::size_t max_schema_group_depth = 64;
 [[nodiscard]] inline bool valid_date(std::string_view value) noexcept {
     if (value.size() != 8) return false;
     for (const char c : value) if (c < '0' || c > '9') return false;
-    unsigned month = static_cast<unsigned>((value[4] - '0') * 10 + value[5] - '0');
-    unsigned day = static_cast<unsigned>((value[6] - '0') * 10 + value[7] - '0');
-    unsigned year = static_cast<unsigned>((value[0] - '0') * 1000 + (value[1] - '0') * 100 +
+    const unsigned month = static_cast<unsigned>((value[4] - '0') * 10 + value[5] - '0');
+    const unsigned day = static_cast<unsigned>((value[6] - '0') * 10 + value[7] - '0');
+    const unsigned year = static_cast<unsigned>((value[0] - '0') * 1000 + (value[1] - '0') * 100 +
         (value[2] - '0') * 10 + value[3] - '0');
     constexpr unsigned month_days[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
     if (month < 1 || month > 12) return false;
@@ -283,6 +293,7 @@ inline constexpr std::size_t max_schema_group_depth = 64;
         return field.field_class != FieldClass::day_of_month || (parsed >= 1 && parsed <= 31);
     }
     case FieldClass::tag_number: {
+        if (value.empty() || value[0] == '0') return false;
         std::uint64_t parsed{};
         return parse_unsigned(value, parsed) && parsed > 0 && parsed <= maximum_fix_tag;
     }
@@ -292,13 +303,12 @@ inline constexpr std::size_t max_schema_group_depth = 64;
     case FieldClass::local_market_date: return valid_date(value);
     case FieldClass::utc_time: return valid_time(value);
     case FieldClass::month_year: return valid_month_year(value);
-    case FieldClass::binary_data: return true;
+    case FieldClass::binary_data: return !value.empty();
     case FieldClass::text:
     case FieldClass::multiple_value_string:
     case FieldClass::multiple_char_value:
     case FieldClass::multiple_string_value: {
-        if (value.empty() || value.data() == nullptr || value.find('\x01') != std::string_view::npos ||
-            value.find('\0') != std::string_view::npos) return false;
+        if (!detail::is_valid_text(value)) return false;
         if (field.field_class == FieldClass::text) return true;
         for (std::size_t first = 0; first < value.size();) {
             const auto separator = value.find(' ', first);
@@ -333,10 +343,43 @@ inline constexpr std::size_t max_schema_group_depth = 64;
     return true;
 }
 
+struct MemberLevel {
+    std::span<const MessageMemberDescriptor> members{};
+    std::span<const MemberTagEntry> members_by_tag{};
+};
+
+[[nodiscard]] inline const MessageMemberDescriptor* find_member_in_level(
+    const SchemaDescriptor& schema, const MemberLevel& level,
+    std::uint32_t tag, std::size_t* out_index = nullptr) noexcept {
+    if (!level.members_by_tag.empty()) {
+        std::size_t first = 0;
+        std::size_t last = level.members_by_tag.size();
+        while (first < last) {
+            const std::size_t mid = first + (last - first) / 2;
+            if (level.members_by_tag[mid].tag < tag) first = mid + 1;
+            else last = mid;
+        }
+        if (first < level.members_by_tag.size() && level.members_by_tag[first].tag == tag) {
+            const auto idx = level.members_by_tag[first].member_index;
+            if (idx < level.members.size()) {
+                if (out_index != nullptr) *out_index = idx;
+                return &level.members[idx];
+            }
+        }
+        return nullptr;
+    }
+    for (std::size_t i = 0; i < level.members.size(); ++i) {
+        if (member_tag(schema, level.members[i]) == tag) {
+            if (out_index != nullptr) *out_index = i;
+            return &level.members[i];
+        }
+    }
+    return nullptr;
+}
+
 [[nodiscard]] inline bool member_contains_tag(const SchemaDescriptor& schema,
-    std::span<const MessageMemberDescriptor> members, std::uint32_t tag) noexcept {
-    for (const auto& member : members) if (member_tag(schema, member) == tag) return true;
-    return false;
+    const MemberLevel& level, std::uint32_t tag) noexcept {
+    return find_member_in_level(schema, level, tag) != nullptr;
 }
 
 [[nodiscard]] inline const ComponentDescriptor* find_component(
@@ -345,26 +388,41 @@ inline constexpr std::size_t max_schema_group_depth = 64;
     return nullptr;
 }
 
+struct AncestorStack {
+    std::array<MemberLevel, max_schema_group_depth + 2> levels{};
+    std::size_t count{};
+    const ComponentDescriptor* trailer{};
+
+    [[nodiscard]] bool contains_tag(const SchemaDescriptor& schema, std::uint32_t tag) const noexcept {
+        for (std::size_t i = count; i > 0; --i) {
+            if (member_contains_tag(schema, levels[i - 1], tag)) return true;
+        }
+        if (trailer != nullptr) {
+            const MemberLevel trailer_level{trailer->members, trailer->members_by_tag};
+            if (member_contains_tag(schema, trailer_level, tag)) return true;
+        }
+        return false;
+    }
+};
+
 struct GroupScan {
     Status status{};
     std::size_t end{};
 };
 
 [[nodiscard]] inline GroupScan scan_group_entry(const SchemaDescriptor& schema,
-    std::span<const FieldView> wire_fields, std::span<const MessageMemberDescriptor> parent_members,
+    std::span<const FieldView> wire_fields, const AncestorStack& ancestors,
     const GroupDescriptor& descriptor, std::size_t entry_start, std::size_t depth) noexcept;
 
 [[nodiscard]] inline GroupScan skip_group(const SchemaDescriptor& schema,
-    std::span<const FieldView> wire_fields, std::span<const MessageMemberDescriptor> parent_members,
-    std::size_t count_index, std::size_t depth) noexcept {
+    std::span<const FieldView> wire_fields, const AncestorStack& ancestors,
+    const MemberLevel& parent_level, std::size_t count_index, std::size_t depth) noexcept {
     if (depth > max_schema_group_depth || count_index >= wire_fields.size())
         return {{ErrorCode::invalid_value, 0, count_index}, count_index};
-    const auto group_member = std::find_if(parent_members.begin(), parent_members.end(), [&](const auto& member) {
-        const auto* group = descriptor_group(schema, member);
-        return group != nullptr && group->count_tag == wire_fields[count_index].tag;
-    });
-    if (group_member == parent_members.end()) return {{ErrorCode::invalid_value,
-        static_cast<int>(wire_fields[count_index].tag), wire_fields[count_index].offset}, count_index};
+    const auto* group_member = find_member_in_level(schema, parent_level, wire_fields[count_index].tag);
+    if (group_member == nullptr || group_member->kind != MemberKind::group)
+        return {{ErrorCode::invalid_value,
+            static_cast<int>(wire_fields[count_index].tag), wire_fields[count_index].offset}, count_index};
     const auto* descriptor = descriptor_group(schema, *group_member);
     std::uint64_t count{};
     if (descriptor == nullptr || !parse_unsigned(wire_fields[count_index].value, count) ||
@@ -372,9 +430,12 @@ struct GroupScan {
         return {{ErrorCode::invalid_value, static_cast<int>(wire_fields[count_index].tag),
             wire_fields[count_index].offset}, count_index};
     }
+    AncestorStack child_ancestors = ancestors;
+    if (child_ancestors.count < child_ancestors.levels.size())
+        child_ancestors.levels[child_ancestors.count++] = parent_level;
     std::size_t cursor = count_index + 1;
     for (std::size_t entry_index = 0; entry_index < count; ++entry_index) {
-        const auto entry = scan_group_entry(schema, wire_fields, parent_members,
+        const auto entry = scan_group_entry(schema, wire_fields, child_ancestors,
             *descriptor, cursor, depth + 1);
         if (!entry.status.ok()) return entry;
         cursor = entry.end;
@@ -383,41 +444,36 @@ struct GroupScan {
 }
 
 [[nodiscard]] inline GroupScan scan_group_entry(const SchemaDescriptor& schema,
-    std::span<const FieldView> wire_fields, std::span<const MessageMemberDescriptor> parent_members,
+    std::span<const FieldView> wire_fields, const AncestorStack& ancestors,
     const GroupDescriptor& descriptor, std::size_t entry_start, std::size_t depth) noexcept {
     if (depth > max_schema_group_depth || entry_start >= wire_fields.size() ||
         wire_fields[entry_start].tag != descriptor.delimiter_tag) {
         const auto offset = entry_start < wire_fields.size() ? wire_fields[entry_start].offset : 0;
         return {{ErrorCode::invalid_value, static_cast<int>(descriptor.delimiter_tag), offset}, entry_start};
     }
+    const MemberLevel group_level{descriptor.members, descriptor.members_by_tag};
     std::size_t cursor = entry_start + 1;
     if (!descriptor.members.empty() && descriptor.members.front().kind == MemberKind::group) {
-        const auto delimiter_group = skip_group(schema, wire_fields, descriptor.members, entry_start, depth + 1);
+        const auto delimiter_group = skip_group(schema, wire_fields, ancestors, group_level, entry_start, depth + 1);
         if (!delimiter_group.status.ok()) return delimiter_group;
         cursor = delimiter_group.end;
     }
     while (cursor < wire_fields.size()) {
-        if (wire_fields[cursor].tag == descriptor.delimiter_tag) break;
-        bool consumed_member = false;
-        for (const auto& member : descriptor.members) {
-            if (member_tag(schema, member) != wire_fields[cursor].tag) continue;
-            if (member.kind == MemberKind::group) {
-                const auto nested = skip_group(schema, wire_fields, descriptor.members, cursor, depth + 1);
+        const auto tag = wire_fields[cursor].tag;
+        if (tag == descriptor.delimiter_tag) break;
+        if (const auto* member = find_member_in_level(schema, group_level, tag)) {
+            if (member->kind == MemberKind::group) {
+                const auto nested = skip_group(schema, wire_fields, ancestors, group_level, cursor, depth + 1);
                 if (!nested.status.ok()) return nested;
                 cursor = nested.end;
             } else {
                 ++cursor;
             }
-            consumed_member = true;
-            break;
+            continue;
         }
-        if (consumed_member) continue;
-        if (member_contains_tag(schema, parent_members, wire_fields[cursor].tag) ||
-            wire_fields[cursor].tag == 10) break;
-        const auto* trailer = find_component(schema, "Trailer");
-        if (trailer != nullptr && member_contains_tag(schema, trailer->members, wire_fields[cursor].tag)) break;
+        if (tag == 10 || ancestors.contains_tag(schema, tag)) break;
         // Unknown extension fields stay within this entry until a delimiter or
-        // a known field owned by the parent message starts the next level.
+        // a known field owned by any ancestor level or Trailer starts.
         ++cursor;
     }
     return {Status::success(), cursor};
@@ -431,29 +487,25 @@ struct LevelLookup {
 
 // Most levels contain only a few groups. Discover those once rather than
 // searching every scalar member for every wire field and requested tag.
-// Larger custom levels retain the original search with no fixed schema limit.
 class LevelGroupLookup {
 public:
     LevelGroupLookup(const SchemaDescriptor& schema,
-        std::span<const MessageMemberDescriptor> members) noexcept
-        : schema_(schema), members_(members) {
-        for (const auto& member : members) {
-            const auto* group = descriptor_group(schema, member);
-            if (group == nullptr) continue;
-            if (count_ == groups_.size()) {
-                overflow_ = true;
-                break;
-            }
-            groups_[count_++] = group;
-        }
+        std::span<const MessageMemberDescriptor> members,
+        const ComponentDescriptor* header = nullptr) noexcept
+        : schema_(schema), members_(members), header_(header) {
+        add_groups(members);
+        if (header != nullptr) add_groups(header->members);
     }
 
     [[nodiscard]] bool contains(std::uint32_t tag) const noexcept {
         if (overflow_) {
-            return std::any_of(members_.begin(), members_.end(), [&](const auto& member) {
-                const auto* group = descriptor_group(schema_, member);
-                return group != nullptr && group->count_tag == tag;
-            });
+            const auto has_in = [this, tag](std::span<const MessageMemberDescriptor> list) noexcept {
+                return std::any_of(list.begin(), list.end(), [&](const auto& member) {
+                    const auto* group = descriptor_group(schema_, member);
+                    return group != nullptr && group->count_tag == tag;
+                });
+            };
+            return has_in(members_) || (header_ != nullptr && has_in(header_->members));
         }
         for (std::size_t i = 0; i < count_; ++i)
             if (groups_[i]->count_tag == tag) return true;
@@ -461,16 +513,30 @@ public:
     }
 
 private:
+    void add_groups(std::span<const MessageMemberDescriptor> list) noexcept {
+        for (const auto& member : list) {
+            const auto* group = descriptor_group(schema_, member);
+            if (group == nullptr) continue;
+            if (count_ == groups_.size()) {
+                overflow_ = true;
+                return;
+            }
+            groups_[count_++] = group;
+        }
+    }
+
     const SchemaDescriptor& schema_;
     std::span<const MessageMemberDescriptor> members_;
+    const ComponentDescriptor* header_{};
     std::array<const GroupDescriptor*, 16> groups_;
     std::size_t count_{};
     bool overflow_{};
 };
 
 [[nodiscard]] inline LevelLookup find_level_field(const SchemaDescriptor& schema,
-    std::span<const MessageMemberDescriptor> members, std::span<const FieldView> fields,
-    std::uint32_t tag, const LevelGroupLookup& groups) noexcept {
+    const MemberLevel& level, std::span<const FieldView> fields,
+    std::uint32_t tag, const LevelGroupLookup& groups,
+    const AncestorStack& ancestors, const ComponentDescriptor* header = nullptr) noexcept {
     LevelLookup result{};
     for (std::size_t cursor = 0; cursor < fields.size();) {
         const auto current_tag = fields[cursor].tag;
@@ -483,7 +549,13 @@ private:
             result.found = true;
         }
         if (groups.contains(current_tag)) {
-            const auto scan = skip_group(schema, fields, members, cursor, 0);
+            const MemberLevel* owner = &level;
+            MemberLevel header_level{};
+            if (header != nullptr && find_member_in_level(schema, level, current_tag) == nullptr) {
+                header_level = {header->members, header->members_by_tag};
+                owner = &header_level;
+            }
+            const auto scan = skip_group(schema, fields, ancestors, *owner, cursor, 0);
             if (!scan.status.ok()) { result.status = scan.status; return result; }
             cursor = scan.end;
             continue;
@@ -496,144 +568,264 @@ private:
 
 [[nodiscard]] inline LevelLookup find_level_field(const SchemaDescriptor& schema,
     std::span<const MessageMemberDescriptor> members, std::span<const FieldView> fields,
-    std::uint32_t tag) noexcept {
-    const LevelGroupLookup groups{schema, members};
-    return find_level_field(schema, members, fields, tag, groups);
-}
-
-[[nodiscard]] inline Status validate_unknown_fields(const SchemaDescriptor& schema,
-    std::span<const MessageMemberDescriptor> members, std::span<const FieldView> fields,
-    ValidationLevel level, std::size_t depth, bool top_level) noexcept {
-    if (level != ValidationLevel::strict) return Status::success();
-    const auto* header = top_level ? find_component(schema, "Header") : nullptr;
-    const auto* trailer = top_level ? find_component(schema, "Trailer") : nullptr;
-    for (std::size_t cursor = 0; cursor < fields.size();) {
-        const auto tag = fields[cursor].tag;
-        const auto member = std::find_if(members.begin(), members.end(), [&](const auto& value) {
-            return member_tag(schema, value) == tag;
-        });
-        if (member != members.end()) {
-            if (member->kind == MemberKind::group) {
-                const auto skipped = skip_group(schema, fields, members, cursor, depth);
-                if (!skipped.status.ok()) return skipped.status;
-                cursor = skipped.end;
-            } else {
-                ++cursor;
-            }
-            continue;
-        }
-        if (top_level && is_session_or_frame_tag(tag)) {
-            ++cursor;
-            continue;
-        }
-        bool allowed_header_field = false;
-        for (const auto* component : {header, trailer}) {
-            if (component == nullptr) continue;
-            const auto component_member = std::find_if(component->members.begin(), component->members.end(),
-                [&](const auto& value) { return member_tag(schema, value) == tag; });
-            if (component_member == component->members.end()) continue;
-            if (component_member->kind == MemberKind::group) {
-                const auto skipped = skip_group(schema, fields, component->members, cursor, depth);
-                if (!skipped.status.ok()) return skipped.status;
-                cursor = skipped.end;
-            } else {
-                ++cursor;
-            }
-            allowed_header_field = true;
-            break;
-        }
-        if (!allowed_header_field)
-            return {ErrorCode::invalid_value, static_cast<int>(tag), fields[cursor].offset};
+    std::uint32_t tag, std::span<const MemberTagEntry> members_by_tag = {},
+    const AncestorStack* existing_ancestors = nullptr,
+    const ComponentDescriptor* header = nullptr) noexcept {
+    const MemberLevel level{members, members_by_tag};
+    const LevelGroupLookup groups{schema, members, header};
+    AncestorStack default_ancestors{};
+    if (existing_ancestors == nullptr) {
+        default_ancestors.trailer = find_component(schema, "Trailer");
     }
-    return Status::success();
+    return find_level_field(schema, level, fields, tag, groups,
+        existing_ancestors != nullptr ? *existing_ancestors : default_ancestors, header);
 }
 
 [[nodiscard]] inline const FieldView* find_top_level_field(
     const SchemaDescriptor& schema, const MessageDescriptor& message,
     const FlatMessageView& flat, std::uint32_t tag, Status& status) noexcept {
     const auto fields = flat.fields();
-    const auto result = find_level_field(schema, message.members, fields, tag);
+    const auto* header = find_component(schema, "Header");
+    const auto result = find_level_field(schema, message.members, fields, tag,
+        message.members_by_tag, nullptr, header);
     status = result.status;
     return result.found ? &fields[result.index] : nullptr;
 }
 
-[[nodiscard]] inline Status validate_members(const SchemaDescriptor& schema,
-    std::span<const MessageMemberDescriptor> members, std::span<const FieldView> fields,
-    ValidationLevel level, std::size_t depth = 0) noexcept {
+// Single-pass wire-order validation: O(F log M + R) with zero heap allocations.
+// Preserves structural error precedence (malformed group boundaries and
+// duplicates fail before scalar or missing-required diagnostics).
+[[nodiscard]] inline Status validate_members_fast(const SchemaDescriptor& schema,
+    const MemberLevel& level, std::span<const std::uint32_t> required_members,
+    std::span<const FieldView> fields, ValidationLevel validation_level,
+    const AncestorStack& ancestors, std::size_t depth) noexcept {
     if (depth > max_schema_group_depth) return {ErrorCode::invalid_value};
-    const LevelGroupLookup groups{schema, members};
-    for (std::size_t i = 0; i < members.size(); ++i) {
-        const auto& member = members[i];
-        const auto tag = member_tag(schema, member);
+
+    const bool top_level = (depth == 0);
+    const auto* header = top_level ? find_component(schema, "Header") : nullptr;
+    const auto* trailer = top_level ? ancestors.trailer : nullptr;
+    const MemberLevel header_level = header != nullptr
+        ? MemberLevel{header->members, header->members_by_tag} : MemberLevel{};
+    const MemberLevel trailer_level = trailer != nullptr
+        ? MemberLevel{trailer->members, trailer->members_by_tag} : MemberLevel{};
+
+    // Track seen members without heap allocation (covers up to 2,048 members per level).
+    constexpr std::size_t max_bitset_words = 32;
+    constexpr std::size_t max_indexed_members = max_bitset_words * 64;
+    std::array<std::uint64_t, max_bitset_words> seen_bits{};
+    const bool use_bitset = level.members.size() <= max_indexed_members;
+
+    struct SeenMember {
+        std::uint32_t member_index{};
+        std::uint32_t wire_index{};
+        std::uint32_t group_end{};
+    };
+    constexpr std::size_t stack_seen_cap = 256;
+    std::array<SeenMember, stack_seen_cap> seen_list{};
+    std::size_t seen_count = 0;
+    bool seen_overflow = false;
+    Status first_unknown_error{};
+
+    // Pass 1: Walk wire fields once to validate group structure, detect duplicates,
+    // and collect seen member positions.
+    for (std::size_t cursor = 0; cursor < fields.size();) {
+        const auto tag = fields[cursor].tag;
+        std::size_t member_idx = 0;
+        const auto* member = find_member_in_level(schema, level, tag, &member_idx);
+        if (member != nullptr) {
+            // Check duplicates.
+            bool is_dup = false;
+            if (use_bitset) {
+                const auto mask = std::uint64_t{1} << (member_idx & 63U);
+                if ((seen_bits[member_idx >> 6U] & mask) != 0) is_dup = true;
+                else seen_bits[member_idx >> 6U] |= mask;
+            } else {
+                for (std::size_t s = 0; s < seen_count; ++s) {
+                    if (seen_list[s].member_index == member_idx) { is_dup = true; break; }
+                }
+            }
+            if (is_dup) {
+                return {ErrorCode::duplicate_field, static_cast<int>(tag), fields[cursor].offset};
+            }
+
+            std::size_t next_cursor = cursor + 1;
+            if (member->kind == MemberKind::group) {
+                const auto scan = skip_group(schema, fields, ancestors, level, cursor, depth);
+                if (!scan.status.ok()) return scan.status;
+                next_cursor = scan.end;
+            }
+            if (seen_count < stack_seen_cap) {
+                seen_list[seen_count++] = SeenMember{
+                    static_cast<std::uint32_t>(member_idx),
+                    static_cast<std::uint32_t>(cursor),
+                    static_cast<std::uint32_t>(next_cursor)};
+            } else {
+                seen_overflow = true;
+            }
+            cursor = next_cursor;
+            continue;
+        }
+
+        if (top_level && is_session_or_frame_tag(tag)) {
+            ++cursor;
+            continue;
+        }
+
+        bool allowed_envelope = false;
+        if (header != nullptr) {
+            if (const auto* hm = find_member_in_level(schema, header_level, tag)) {
+                if (hm->kind == MemberKind::group) {
+                    const auto scan = skip_group(schema, fields, ancestors, header_level, cursor, depth);
+                    if (!scan.status.ok()) return scan.status;
+                    cursor = scan.end;
+                } else {
+                    ++cursor;
+                }
+                allowed_envelope = true;
+            }
+        }
+        if (!allowed_envelope && trailer != nullptr) {
+            if (const auto* tm = find_member_in_level(schema, trailer_level, tag)) {
+                if (tm->kind == MemberKind::group) {
+                    const auto scan = skip_group(schema, fields, ancestors, trailer_level, cursor, depth);
+                    if (!scan.status.ok()) return scan.status;
+                    cursor = scan.end;
+                } else {
+                    ++cursor;
+                }
+                allowed_envelope = true;
+            }
+        }
+        if (!allowed_envelope) {
+            if (validation_level == ValidationLevel::strict && first_unknown_error.ok()) {
+                first_unknown_error = {ErrorCode::invalid_value, static_cast<int>(tag), fields[cursor].offset};
+            }
+            ++cursor;
+        }
+    }
+
+    // Helper to look up a seen wire index by tag (for Length/Data pair checks).
+    const auto find_seen_wire_index = [&](std::uint32_t target_tag) noexcept -> const FieldView* {
+        if (!seen_overflow) {
+            for (std::size_t s = 0; s < seen_count; ++s) {
+                const auto& f = fields[seen_list[s].wire_index];
+                if (f.tag == target_tag) return &f;
+            }
+            return nullptr;
+        }
+        const auto lookup = find_level_field(schema, level.members, fields, target_tag,
+            level.members_by_tag, &ancestors, header);
+        return lookup.found ? &fields[lookup.index] : nullptr;
+    };
+
+    // Pass 2: Validate scalar values, enums, Length/Data pairs, and nested groups
+    // for all seen members (O(F) instead of O(M * F)).
+    const auto validate_seen = [&](std::size_t member_idx, std::size_t wire_idx) noexcept -> Status {
+        const auto& member = level.members[member_idx];
+        const auto& found = fields[wire_idx];
+        const auto tag = found.tag;
         if (member.kind == MemberKind::field) {
             const auto* descriptor = descriptor_field(schema, member);
             if (descriptor == nullptr) return {ErrorCode::invalid_value, static_cast<int>(tag)};
-            const auto lookup = find_level_field(schema, members, fields, tag, groups);
-            if (!lookup.status.ok() && lookup.status.code != ErrorCode::missing_field) return lookup.status;
-            const FieldView* found = lookup.found ? &fields[lookup.index] : nullptr;
-            if (found == nullptr) {
-                if (level != ValidationLevel::structure && member.required)
-                    return {ErrorCode::required_field_missing, static_cast<int>(tag)};
-                continue;
+            if (!valid_field_value(*descriptor, found.value)) {
+                return {descriptor->field_class == FieldClass::utc_timestamp
+                    ? ErrorCode::invalid_timestamp : ErrorCode::invalid_value,
+                    static_cast<int>(tag), found.offset};
             }
-            if (!valid_field_value(*descriptor, found->value))
-                return {descriptor->field_class == FieldClass::utc_timestamp ? ErrorCode::invalid_timestamp : ErrorCode::invalid_value,
-                    static_cast<int>(tag), found->offset};
-            if (level == ValidationLevel::strict && !enum_values_accept(*descriptor, found->value))
-                return {ErrorCode::invalid_value, static_cast<int>(tag), found->offset};
+            if (validation_level == ValidationLevel::strict && !enum_values_accept(*descriptor, found.value)) {
+                return {ErrorCode::invalid_value, static_cast<int>(tag), found.offset};
+            }
             if (descriptor->length_tag != 0) {
-                const auto length_lookup = find_level_field(schema, members, fields, descriptor->length_tag, groups);
-                if (!length_lookup.status.ok()) return length_lookup.status;
+                const auto* len_field = find_seen_wire_index(descriptor->length_tag);
+                if (len_field == nullptr)
+                    return {ErrorCode::missing_field, static_cast<int>(descriptor->length_tag)};
                 std::uint64_t length{};
-                if (!parse_unsigned(fields[length_lookup.index].value, length) || length != found->value.size())
-                    return {ErrorCode::invalid_value, static_cast<int>(descriptor->length_tag),
-                        fields[length_lookup.index].offset};
+                if (!parse_unsigned(len_field->value, length) || length == 0 || length != found.value.size())
+                    return {ErrorCode::invalid_value, static_cast<int>(descriptor->length_tag), len_field->offset};
             } else if (descriptor->data_tag != 0 && descriptor->field_class == FieldClass::unsigned_integer) {
-                const auto data_lookup = find_level_field(schema, members, fields, descriptor->data_tag, groups);
                 std::uint64_t length{};
-                if (!parse_unsigned(found->value, length))
-                    return {ErrorCode::invalid_value, static_cast<int>(tag), found->offset};
-                if (data_lookup.status.ok()) {
-                    if (length != fields[data_lookup.index].value.size())
-                        return {ErrorCode::invalid_value, static_cast<int>(tag), found->offset};
-                } else if (data_lookup.status.code != ErrorCode::missing_field || length != 0) {
-                    return data_lookup.status.code == ErrorCode::missing_field
-                        ? Status{ErrorCode::invalid_value, static_cast<int>(tag), found->offset}
-                        : data_lookup.status;
+                if (!parse_unsigned(found.value, length) || length == 0)
+                    return {ErrorCode::invalid_value, static_cast<int>(tag), found.offset};
+                const auto* data_field = find_seen_wire_index(descriptor->data_tag);
+                if (data_field == nullptr || length != data_field->value.size())
+                    return {ErrorCode::invalid_value, static_cast<int>(tag), found.offset};
+            }
+            return Status::success();
+        }
+
+        const auto* group = descriptor_group(schema, member);
+        if (group == nullptr) return {ErrorCode::invalid_value, static_cast<int>(tag)};
+        std::uint64_t count{};
+        if (!parse_unsigned(found.value, count) || count > fields.size() - wire_idx - 1)
+            return {ErrorCode::invalid_value, static_cast<int>(tag), found.offset};
+        if (validation_level != ValidationLevel::structure) {
+            AncestorStack child_ancestors = ancestors;
+            if (child_ancestors.count < child_ancestors.levels.size())
+                child_ancestors.levels[child_ancestors.count++] = level;
+            const MemberLevel group_level{group->members, group->members_by_tag};
+            std::size_t cursor = wire_idx + 1;
+            for (std::size_t entry = 0; entry < count; ++entry) {
+                const auto entry_start = cursor;
+                const auto entry_scan = scan_group_entry(schema, fields, child_ancestors, *group, cursor, depth + 1);
+                if (!entry_scan.status.ok()) return entry_scan.status;
+                cursor = entry_scan.end;
+                const auto status = validate_members_fast(schema, group_level, group->required_members,
+                    fields.subspan(entry_start, cursor - entry_start), validation_level,
+                    child_ancestors, depth + 1);
+                if (!status.ok()) return status;
+            }
+        }
+        return Status::success();
+    };
+
+    if (!seen_overflow) {
+        for (std::size_t s = 0; s < seen_count; ++s) {
+            if (const auto st = validate_seen(seen_list[s].member_index, seen_list[s].wire_index); !st.ok())
+                return st;
+        }
+    } else {
+        // Fallback for messages with >256 distinct present top-level fields.
+        for (std::size_t cursor = 0; cursor < fields.size();) {
+            std::size_t member_idx = 0;
+            if (const auto* member = find_member_in_level(schema, level, fields[cursor].tag, &member_idx)) {
+                if (const auto st = validate_seen(member_idx, cursor); !st.ok()) return st;
+                if (member->kind == MemberKind::group) {
+                    const auto scan = skip_group(schema, fields, ancestors, level, cursor, depth);
+                    if (!scan.status.ok()) return scan.status;
+                    cursor = scan.end;
+                    continue;
+                }
+            }
+            ++cursor;
+        }
+    }
+
+    // Pass 3: Check required members (O(R) when required_members is populated).
+    if (validation_level != ValidationLevel::structure) {
+        const auto is_member_seen = [&](std::size_t idx) noexcept -> bool {
+            if (use_bitset) return (seen_bits[idx >> 6U] & (std::uint64_t{1} << (idx & 63U))) != 0;
+            const auto tag = member_tag(schema, level.members[idx]);
+            return find_seen_wire_index(tag) != nullptr;
+        };
+        if (!required_members.empty()) {
+            for (const auto req_idx : required_members) {
+                if (req_idx < level.members.size() && !is_member_seen(req_idx)) {
+                    return {ErrorCode::required_field_missing,
+                        static_cast<int>(member_tag(schema, level.members[req_idx]))};
                 }
             }
         } else {
-            const auto* group = descriptor_group(schema, member);
-            if (group == nullptr) return {ErrorCode::invalid_value, static_cast<int>(tag)};
-            const auto lookup = find_level_field(schema, members, fields, group->count_tag, groups);
-            if (!lookup.status.ok() && lookup.status.code != ErrorCode::missing_field) return lookup.status;
-            if (!lookup.found) {
-                if (level != ValidationLevel::structure && member.required)
-                    return {ErrorCode::required_field_missing, static_cast<int>(tag)};
-                continue;
-            }
-            const std::size_t count_index = lookup.index;
-            std::uint64_t count{};
-            if (!parse_unsigned(fields[count_index].value, count) || count > fields.size() - count_index - 1)
-                return {ErrorCode::invalid_value, static_cast<int>(tag), fields[count_index].offset};
-            const auto group_scan = skip_group(schema, fields, members, count_index, depth);
-            if (!group_scan.status.ok()) return group_scan.status;
-            if (level != ValidationLevel::structure) {
-                std::size_t cursor = count_index + 1;
-                for (std::size_t entry = 0; entry < count; ++entry) {
-                    const auto entry_start = cursor;
-                    const auto entry_scan = scan_group_entry(schema, fields, members, *group, cursor, depth + 1);
-                    if (!entry_scan.status.ok()) return entry_scan.status;
-                    cursor = entry_scan.end;
-                    const std::size_t entry_end = cursor;
-                    const auto status = validate_members(schema, group->members,
-                        fields.subspan(entry_start, entry_end - entry_start), level, depth + 1);
-                    if (!status.ok()) return status;
+            for (std::size_t i = 0; i < level.members.size(); ++i) {
+                if (level.members[i].required && !is_member_seen(i)) {
+                    return {ErrorCode::required_field_missing,
+                        static_cast<int>(member_tag(schema, level.members[i]))};
                 }
             }
         }
     }
-    return validate_unknown_fields(schema, members, fields, level, depth, depth == 0);
+
+    if (!first_unknown_error.ok()) return first_unknown_error;
+    return Status::success();
 }
 
 template <class T>
@@ -663,13 +855,10 @@ template <class T>
 }
 
 [[nodiscard]] inline const GroupDescriptor* find_group_descriptor(
-    const SchemaDescriptor& schema, std::span<const MessageMemberDescriptor> members,
+    const SchemaDescriptor& schema, const MemberLevel& level,
     std::uint32_t count_tag) noexcept {
-    for (const auto& member : members) {
-        const auto* group = descriptor_group(schema, member);
-        if (group != nullptr && group->count_tag == count_tag) return group;
-    }
-    return nullptr;
+    const auto* member = find_member_in_level(schema, level, count_tag);
+    return member != nullptr ? descriptor_group(schema, *member) : nullptr;
 }
 
 } // namespace detail
@@ -686,7 +875,11 @@ template <class T>
     if (!msg_type.ok()) return msg_type.status();
     const auto* descriptor = schema.find_message(msg_type.value().value);
     if (descriptor == nullptr) return {ErrorCode::unsupported, 35, msg_type.value().offset};
-    return detail::validate_members(schema, descriptor->members, message.fields(), level);
+    detail::AncestorStack ancestors{};
+    ancestors.trailer = detail::find_component(schema, "Trailer");
+    const detail::MemberLevel root_level{descriptor->members, descriptor->members_by_tag};
+    return detail::validate_members_fast(schema, root_level, descriptor->required_members,
+        message.fields(), level, ancestors, 0);
 }
 
 template <class Schema>
@@ -695,38 +888,87 @@ class GroupEntryView;
 template <class Schema>
 class GroupView {
 public:
+    class Iterator {
+    public:
+        Iterator(const GroupView* view, std::size_t index, std::size_t cursor) noexcept
+            : view_(view), index_(index), cursor_(cursor) {
+            if (view_ != nullptr && index_ < view_->entry_count_) advance_scan();
+        }
+        [[nodiscard]] GroupEntryView<Schema> operator*() const noexcept;
+        Iterator& operator++() noexcept {
+            ++index_;
+            cursor_ = next_cursor_;
+            if (view_ != nullptr && index_ < view_->entry_count_) advance_scan();
+            return *this;
+        }
+        [[nodiscard]] bool operator==(const Iterator& other) const noexcept {
+            return index_ == other.index_;
+        }
+        [[nodiscard]] bool operator!=(const Iterator& other) const noexcept {
+            return index_ != other.index_;
+        }
+    private:
+        void advance_scan() noexcept {
+            const auto scan = detail::scan_group_entry(*view_->schema_, view_->fields_,
+                view_->ancestors_, *view_->descriptor_, cursor_, 0);
+            status_ = scan.status;
+            next_cursor_ = scan.end;
+        }
+        const GroupView* view_{};
+        std::size_t index_{};
+        std::size_t cursor_{};
+        std::size_t next_cursor_{};
+        Status status_{};
+    };
+
     [[nodiscard]] std::size_t size() const noexcept { return entry_count_; }
+    [[nodiscard]] bool empty() const noexcept { return entry_count_ == 0; }
     [[nodiscard]] std::uint32_t count_tag() const noexcept { return descriptor_ == nullptr ? 0 : descriptor_->count_tag; }
     [[nodiscard]] std::uint32_t delimiter_tag() const noexcept { return descriptor_ == nullptr ? 0 : descriptor_->delimiter_tag; }
     [[nodiscard]] GroupEntryView<Schema> at(std::size_t index) const noexcept;
+    [[nodiscard]] Iterator begin() const noexcept { return Iterator{this, 0, count_index_ + 1}; }
+    [[nodiscard]] Iterator end() const noexcept { return Iterator{this, entry_count_, fields_.size()}; }
 
     [[nodiscard]] static Result<GroupView<Schema>> find(const SchemaDescriptor& schema,
         std::span<const MessageMemberDescriptor> parent_members,
-        std::span<const FieldView> fields, std::uint32_t count_tag) noexcept {
-        const auto* descriptor = detail::find_group_descriptor(schema, parent_members, count_tag);
+        std::span<const FieldView> fields, std::uint32_t count_tag,
+        std::span<const MemberTagEntry> parent_by_tag = {},
+        const detail::AncestorStack* existing_ancestors = nullptr) noexcept {
+        const detail::MemberLevel parent_level{parent_members, parent_by_tag};
+        const auto* descriptor = detail::find_group_descriptor(schema, parent_level, count_tag);
         if (descriptor == nullptr) return Status{ErrorCode::unsupported, static_cast<int>(count_tag)};
-        const auto lookup = detail::find_level_field(schema, parent_members, fields, count_tag);
+        detail::AncestorStack ancestors{};
+        if (existing_ancestors != nullptr) {
+            ancestors = *existing_ancestors;
+        } else {
+            ancestors.trailer = detail::find_component(schema, "Trailer");
+        }
+        const auto lookup = detail::find_level_field(schema, parent_members, fields, count_tag,
+            parent_by_tag, &ancestors);
         if (!lookup.status.ok()) return lookup.status;
         std::uint64_t count{};
         if (!detail::parse_unsigned(fields[lookup.index].value, count) || count > fields.size() - lookup.index - 1)
             return Status{ErrorCode::invalid_value, static_cast<int>(count_tag), fields[lookup.index].offset};
-        const auto scan = detail::skip_group(schema, fields, parent_members, lookup.index, 0);
+        const auto scan = detail::skip_group(schema, fields, ancestors, parent_level, lookup.index, 0);
         if (!scan.status.ok()) return scan.status;
-        return GroupView{schema, *descriptor, parent_members, fields, lookup.index,
+        if (ancestors.count < ancestors.levels.size())
+            ancestors.levels[ancestors.count++] = parent_level;
+        return GroupView{schema, *descriptor, ancestors, fields, lookup.index,
             static_cast<std::size_t>(count)};
     }
 
 private:
     friend class GroupEntryView<Schema>;
+    friend class Iterator;
     GroupView(const SchemaDescriptor& schema, const GroupDescriptor& descriptor,
-        std::span<const MessageMemberDescriptor> parent_members, std::span<const FieldView> fields,
+        detail::AncestorStack ancestors, std::span<const FieldView> fields,
         std::size_t count_index, std::size_t entry_count) noexcept
-        : schema_(&schema), descriptor_(&descriptor), parent_members_(parent_members), fields_(fields),
+        : schema_(&schema), descriptor_(&descriptor), ancestors_(ancestors), fields_(fields),
           count_index_(count_index), entry_count_(entry_count) {}
 
     const SchemaDescriptor* schema_{};
     const GroupDescriptor* descriptor_{};
-    std::span<const MessageMemberDescriptor> parent_members_{};
+    detail::AncestorStack ancestors_{};
     std::span<const FieldView> fields_{};
     std::size_t count_index_{};
     std::size_t entry_count_{};
@@ -741,7 +983,8 @@ public:
     template <std::uint32_t Tag>
     [[nodiscard]] Result<FieldValueType<Schema, Tag>> get() const noexcept {
         if (!status_.ok()) return status_;
-        const auto lookup = detail::find_level_field(*schema_, descriptor_->members, fields_, Tag);
+        const auto lookup = detail::find_level_field(*schema_, descriptor_->members, fields_, Tag,
+            descriptor_->members_by_tag, &ancestors_);
         if (!lookup.status.ok()) return lookup.status;
         using Value = FieldValueType<Schema, Tag>;
         return detail::parse_field_value<Value>(fields_[lookup.index].value, Tag);
@@ -750,7 +993,8 @@ public:
     template <std::uint32_t CountTag>
     [[nodiscard]] Result<GroupView<Schema>> group() const noexcept {
         if (!status_.ok()) return status_;
-        return GroupView<Schema>::find(*schema_, descriptor_->members, fields_, CountTag);
+        return GroupView<Schema>::find(*schema_, descriptor_->members, fields_, CountTag,
+            descriptor_->members_by_tag, &ancestors_);
     }
 
 private:
@@ -758,29 +1002,39 @@ private:
     template <class> friend class GroupView;
 
     GroupEntryView(const SchemaDescriptor& schema, const GroupDescriptor& descriptor,
-        std::span<const FieldView> fields, Status status = Status::success()) noexcept
-        : schema_(&schema), descriptor_(&descriptor), fields_(fields), status_(status) {}
+        detail::AncestorStack ancestors, std::span<const FieldView> fields,
+        Status status = Status::success()) noexcept
+        : schema_(&schema), descriptor_(&descriptor), ancestors_(ancestors), fields_(fields), status_(status) {}
 
     const SchemaDescriptor* schema_{};
     const GroupDescriptor* descriptor_{};
+    detail::AncestorStack ancestors_{};
     std::span<const FieldView> fields_{};
     Status status_{};
 };
 
 template <class Schema>
+inline GroupEntryView<Schema> GroupView<Schema>::Iterator::operator*() const noexcept {
+    if (!status_.ok())
+        return GroupEntryView<Schema>{*view_->schema_, *view_->descriptor_, view_->ancestors_, {}, status_};
+    return GroupEntryView<Schema>{*view_->schema_, *view_->descriptor_, view_->ancestors_,
+        view_->fields_.subspan(cursor_, next_cursor_ - cursor_)};
+}
+
+template <class Schema>
 inline GroupEntryView<Schema> GroupView<Schema>::at(std::size_t index) const noexcept {
     if (index >= entry_count_)
-        return GroupEntryView<Schema>{*schema_, *descriptor_, {},
+        return GroupEntryView<Schema>{*schema_, *descriptor_, ancestors_, {},
             Status{ErrorCode::missing_field, static_cast<int>(count_tag()), index}};
     std::size_t cursor = count_index_ + 1;
     for (std::size_t entry = 0; entry <= index; ++entry) {
         const auto start = cursor;
-        const auto scan = detail::scan_group_entry(*schema_, fields_, parent_members_, *descriptor_, cursor, 0);
-        if (!scan.status.ok()) return GroupEntryView<Schema>{*schema_, *descriptor_, {}, scan.status};
+        const auto scan = detail::scan_group_entry(*schema_, fields_, ancestors_, *descriptor_, cursor, 0);
+        if (!scan.status.ok()) return GroupEntryView<Schema>{*schema_, *descriptor_, ancestors_, {}, scan.status};
         cursor = scan.end;
-        if (entry == index) return GroupEntryView<Schema>{*schema_, *descriptor_, fields_.subspan(start, cursor - start)};
+        if (entry == index) return GroupEntryView<Schema>{*schema_, *descriptor_, ancestors_, fields_.subspan(start, cursor - start)};
     }
-    return GroupEntryView<Schema>{*schema_, *descriptor_, {}, Status{ErrorCode::invalid_value}};
+    return GroupEntryView<Schema>{*schema_, *descriptor_, ancestors_, {}, Status{ErrorCode::invalid_value}};
 }
 
 template <class Schema>
@@ -795,7 +1049,8 @@ public:
 
     template <std::uint32_t CountTag>
     [[nodiscard]] Result<GroupView<Schema>> group() const noexcept {
-        return GroupView<Schema>::find(Schema::descriptor(), descriptor_->members, flat_.fields(), CountTag);
+        return GroupView<Schema>::find(Schema::descriptor(), descriptor_->members, flat_.fields(), CountTag,
+            descriptor_->members_by_tag);
     }
 
     template <std::uint32_t Tag>

@@ -1,8 +1,8 @@
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
-#include <atomic>
 #include <memory>
 #include <span>
 #include <string>
@@ -13,6 +13,10 @@
 #include "nimblefix/status.hpp"
 
 namespace nimblefix {
+
+namespace store {
+struct Segment;
+}
 
 using RecordId = std::uint64_t;
 
@@ -42,34 +46,49 @@ struct JournalTestHook {
 };
 
 struct JournalConfig {
-    // Full path to one session's journal. The parent directory must exist.
+    // Full base path to one session's segmented journal. Parent directories are created.
     std::string_view path{};
-    // Stable identity, for example FIX.4.4/localCompId/remoteCompId.
+    // Stable identity, for example FIX.4.4|local|remote.
     std::string_view session_key{};
     std::size_t capacity_bytes{16U * 1024U * 1024U};
     std::size_t max_records{65'536};
     // Test-only crash injection. Production configurations leave this empty.
     JournalTestHook test_hook{};
-    // Nonzero opts into the v2 segmented queue. capacity_bytes is the total
-    // preallocated storage budget, including the fixed epoch-audit file when
-    // the budget can hold it and at least one segment. max_segments is capped
-    // by that budget. Zero preserves the v1 single-file format and behavior.
+    // Segment size in bytes. Zero automatically selects min(capacity_bytes, 1 MiB)
+    // aligned to 8 bytes.
     std::size_t segment_bytes{};
     std::size_t max_segments{};
+    // Zero disables the concurrent JournalReader registry (zero hot-path reader overhead).
     std::size_t max_readers{16};
     std::uint64_t max_reader_lag_records{65'536};
 };
 
 struct JournalRecord {
-    RecordId id{};                 // Stable offset; v2 uses segment index in the high 16 bits.
+    RecordId id{};                 // High 16 bits: segment index; low 48 bits: byte offset.
     RecordKind kind{};
-    std::uint64_t seq{};            // FIX sequence for inbound/outbound/delivery.
-    std::uint64_t receipt{};        // Application receipt id for outbound, zero otherwise.
-    RecordId dependency{};          // Inbound record id for its outbound/delivery dependents.
-    std::uint64_t next_seq{};       // Persisted next-in sequence decision for inbound, zero otherwise.
-    std::string_view payload{};     // Raw FIX frame for inbound/outbound; empty for delivery.
-    bool delivered{};               // Rebuilt completion cursor; true for delivery or auto-complete GapFill.
+    std::uint64_t seq{};           // FIX sequence for inbound/outbound/delivery.
+    std::uint64_t receipt{};       // Application receipt id for outbound, zero otherwise.
+    RecordId dependency{};         // Inbound record id for its outbound/delivery dependents.
+    std::uint64_t next_seq{};      // Persisted next-in sequence decision for inbound, zero otherwise.
+    std::string_view payload{};    // Raw FIX frame for inbound/outbound; empty for delivery.
+    bool delivered{};              // Rebuilt completion cursor; true for delivery or auto-complete GapFill.
     std::uint32_t epoch{1};
+};
+
+// Handle returned by Journal::reserve() for zero-copy in-place encoding directly
+// into the pre-faulted mmap segment. Must be committed via Journal::commit() before
+// any other mutation on the Journal, or discarded without writing a commit marker.
+struct ReservedRecord {
+    std::span<char> payload{};
+    RecordKind kind{};
+    std::uint64_t seq{};
+    std::uint64_t receipt{};
+    RecordId dependency{};
+    std::uint64_t persisted_next{};
+    std::size_t segment_slot{};
+    std::size_t offset{};
+    std::size_t max_payload_bytes{};
+    bool rotated{};
 };
 
 struct JournalCheckpoint {
@@ -77,7 +96,7 @@ struct JournalCheckpoint {
     std::uint64_t next_inbound_seq{1};
     std::uint64_t next_outbound_seq{1};
     RecordId delivery_cursor{};        // Highest contiguous completed inbound record.
-    std::uint64_t replay_cursor{1};   // Lowest outbound sequence that may still be requested.
+    std::uint64_t replay_cursor{1};    // Lowest outbound sequence that may still be requested.
     RecordId last_record_id{};
     std::uint64_t generation{};
     std::uint32_t first_segment_index{};
@@ -135,11 +154,6 @@ public:
     JournalReader& operator=(JournalReader&&) noexcept;
     ~JournalReader();
 
-    // In v2, this reader pins the segment mappings it can read and pauses
-    // retention until released. Journal must remain alive while calling next.
-    // The returned payload is borrowed: copy it before the next next() call,
-    // reader expiry/destruction, or releasing the reader. pin_record() creates
-    // an explicit owner-side lease when a payload must live independently.
     [[nodiscard]] Status next(JournalRecord& record) noexcept;
     [[nodiscard]] RecordId cursor() const noexcept;
     [[nodiscard]] std::uint64_t lag_records() const noexcept;
@@ -164,15 +178,20 @@ public:
     // Read-only inspection does not acquire the writer lock and never repairs files.
     [[nodiscard]] static JournalInspection inspect_snapshot(JournalConfig config) noexcept;
 
-    // Mutations, reader creation, and moving the owner are owner-thread work.
-    // Existing JournalReader::next/lag_records calls may run on workers;
-    // destruction disarms their owner pointer and waits for in-flight calls.
+    // Zero-copy in-place reservation: returns a writable payload span directly inside
+    // the pre-faulted mmap segment. No heap allocation or synchronous disk flush occurs.
+    [[nodiscard]] Result<ReservedRecord> reserve(RecordKind kind,
+                                                 std::uint64_t seq,
+                                                 std::uint64_t receipt,
+                                                 RecordId dependency,
+                                                 std::size_t max_payload_bytes,
+                                                 std::uint64_t next_inbound = 0) noexcept;
 
-    // Appends one record and publishes it with a release commit marker. The
-    // payload is copied into the preallocated mapping; no append-time allocation
-    // or synchronous disk flush is performed. For inbound records, next_inbound
-    // is committed atomically with the raw frame; zero means seq + 1, and a
-    // SequenceReset GapFill supplies its NewSeqNo. Other record kinds require 0.
+    // Finalizes a reserved record with hardware CRC32C and release commit marker.
+    [[nodiscard]] Result<JournalRecord> commit(const ReservedRecord& reserved,
+                                               std::size_t actual_payload_bytes) noexcept;
+
+    // Convenience copy-append implemented via reserve() + memcpy + commit().
     [[nodiscard]] Result<JournalRecord> append(RecordKind kind,
                                                std::uint64_t seq,
                                                std::uint64_t receipt,
@@ -180,15 +199,17 @@ public:
                                                std::string_view payload,
                                                std::uint64_t next_inbound = 0) noexcept;
 
-    [[nodiscard]] std::span<const JournalRecord> records() const noexcept {
-        return records_;
-    }
+    // Off-hot-path maintenance: flushes pending rotation checkpoint and refills
+    // preallocated spare segments. Returns success when idle.
+    [[nodiscard]] Status poll_maintenance() noexcept;
+    [[nodiscard]] bool needs_maintenance() const noexcept { return maintenance_needed_; }
+
+    [[nodiscard]] std::span<const JournalRecord> records() const noexcept { return records_; }
     [[nodiscard]] const JournalRecord* find_record(RecordId id) const noexcept;
     [[nodiscard]] Result<JournalLease> pin_record(RecordId id) const noexcept;
     [[nodiscard]] const JournalRecord* find_outbound(std::uint64_t seq) const noexcept;
     [[nodiscard]] bool has_delivery(RecordId inbound_id) const noexcept;
     [[nodiscard]] Result<JournalReader> create_reader(RecordId start_id = 0) noexcept;
-    // Publish cursor metadata after its referenced records are committed.
     [[nodiscard]] Status publish_checkpoint(RecordId delivery_cursor,
                                             std::uint64_t replay_cursor) noexcept;
     [[nodiscard]] Status begin_epoch(std::string_view reason) noexcept;
@@ -198,19 +219,16 @@ public:
     }
     [[nodiscard]] bool checkpoint_stale() const noexcept { return checkpoint_stale_; }
     // Floors are monotonic. Only whole sealed segments below both floors are reclaimed.
-    // Retention is disabled until the caller explicitly publishes a floor.
     [[nodiscard]] Status set_retention_floor(std::uint64_t lowest_outbound_seq,
                                              RecordId delivery_cursor) noexcept;
     [[nodiscard]] RecordId lowest_retained_record_id() const noexcept {
-        return lowest_retained_record_id_;
+        return lowest_retained_record_id_.load(std::memory_order_acquire);
     }
     [[nodiscard]] std::uint64_t lowest_retained_outbound_seq() const noexcept {
         return lowest_retained_outbound_seq_;
     }
     [[nodiscard]] std::uint64_t next_inbound_seq() const noexcept { return next_inbound_seq_; }
     [[nodiscard]] std::uint64_t next_outbound_seq() const noexcept { return next_outbound_seq_; }
-    // Highest contiguous inbound FIX sequence completed by a delivery marker
-    // or an automatic GapFill decision in the current epoch.
     [[nodiscard]] std::uint64_t completed_inbound_seq() const noexcept {
         return completed_inbound_seq_;
     }
@@ -218,36 +236,25 @@ public:
         return completed_inbound_record_id_;
     }
     [[nodiscard]] std::size_t capacity_bytes() const noexcept { return capacity_bytes_; }
-    [[nodiscard]] std::size_t used_bytes() const noexcept {
-        return format_version_ >= 2 ? used_total_bytes_ : write_offset_;
-    }
+    [[nodiscard]] std::size_t used_bytes() const noexcept { return used_total_bytes_; }
 
 private:
     friend class JournalReader;
     Journal() noexcept = default;
     void reset() noexcept;
     void quiesce_readers() noexcept;
-    struct Segment;
-    [[nodiscard]] static Result<Journal> open_segmented(JournalConfig config) noexcept;
-    [[nodiscard]] Result<JournalRecord> append_segmented(RecordKind kind,
-                                                         std::uint64_t seq,
-                                                         std::uint64_t receipt,
-                                                         RecordId dependency,
-                                                         std::string_view payload,
-                                                         std::uint64_t next_inbound) noexcept;
+    using Segment = store::Segment;
     [[nodiscard]] Status reader_next(JournalReader::State& state, JournalRecord& record) noexcept;
     void advance_completed_inbound_cursor() noexcept;
     [[nodiscard]] Status write_checkpoint_file(const JournalCheckpoint& checkpoint) noexcept;
+    [[nodiscard]] Status refill_spare_segments() noexcept;
     [[nodiscard]] Status append_epoch_audit(std::uint32_t previous_epoch,
                                             std::uint32_t next_epoch,
                                             RecordId record_id,
                                             std::string_view reason) noexcept;
 
     int fd_{-1};
-    void* mapping_{};
-    std::size_t mapping_size_{};
     std::size_t capacity_bytes_{};
-    std::size_t write_offset_{};
     std::uint64_t next_inbound_seq_{1};
     std::uint64_t next_outbound_seq_{1};
     std::size_t max_records_{};
@@ -263,17 +270,17 @@ private:
     std::size_t max_segments_{};
     std::uint32_t next_segment_index_{};
     std::uint32_t first_segment_index_{};
-    std::uint32_t format_version_{1};
     std::size_t used_total_bytes_{};
     std::size_t max_readers_{};
     std::uint64_t max_reader_lag_records_{};
     std::uint64_t lowest_retained_outbound_seq_{1};
-    RecordId lowest_retained_record_id_{4096};
+    std::atomic<RecordId> lowest_retained_record_id_{4096};
     std::uint64_t completed_inbound_seq_{};
     RecordId completed_inbound_record_id_{};
     std::size_t completed_scan_index_{};
     JournalCheckpoint checkpoint_{};
     bool checkpoint_stale_{};
+    bool maintenance_needed_{};
     std::uint32_t current_epoch_{1};
     bool epoch_reset_armed_{};
     std::string base_path_{};
@@ -286,7 +293,7 @@ private:
     std::vector<EpochAuditRecord> epoch_audit_records_{};
 };
 
-inline constexpr std::uint32_t journal_format_version = 1;
+inline constexpr std::uint32_t journal_format_version = 2;
 inline constexpr std::uint32_t journal_initial_epoch = 1;
 inline constexpr std::size_t journal_max_session_key_bytes = 256;
 
