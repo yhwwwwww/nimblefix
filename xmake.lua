@@ -404,6 +404,13 @@ if has_config("benchmarks") then
             add_includedirs(generated_dir)
             add_ldflags("-Wl,--wrap=malloc", {force = true})
         target_end()
+        target("initiator-burst-bench")
+            set_kind("binary")
+            add_files("bench/initiator_burst_bench.cpp")
+            add_deps("nimblefix", "fix44-schema")
+            add_includedirs(generated_dir)
+            add_ldflags("-Wl,--wrap=malloc", {force = true})
+        target_end()
     end
 end
 
