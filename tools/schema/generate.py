@@ -1199,6 +1199,8 @@ def render_header(schema: Schema, namespace: str) -> str:
             f"struct {policy} {{",
             "    template<class... Slots>",
             f"    using rebind = {builder}<Slots...>;",
+            "    template<std::size_t InlineSlots, std::size_t InlineBytes, class... Slots>",
+            f"    using rebind_sso = {builder}<Slots...>;",
             "    template<class Derived>",
             f"    using named_setters = {setters_mixin}<Derived>;",
             "    static constexpr bool is_group_entry = true;",
@@ -1229,14 +1231,18 @@ def render_header(schema: Schema, namespace: str) -> str:
         allowed_tags = [tag for tag, _required, _member in immediate_tags(members)]
         required_tags = [tag for tag, is_required, _member in immediate_tags(members) if is_required]
         direct_fields = [member for member in members if member.kind == "field"]
+        sso_builder = f"{name}SsoBuilder"
         lines += [
             f"template<class... Slots> class {builder};",
+            f"template<std::size_t InlineSlots, std::size_t InlineBytes, class... Slots> class {sso_builder};",
             f"template<class Derived> struct {setters_mixin};",
             f"struct {policy} {{",
             "    using schema_type = Schema;",
             "    static constexpr bool has_field_policy_check_traits = true;",
             "    template<class... Slots>",
             f"    using rebind = {builder}<Slots...>;",
+            "    template<std::size_t InlineSlots, std::size_t InlineBytes, class... Slots>",
+            f"    using rebind_sso = std::conditional_t<InlineSlots == 16 && InlineBytes == 256, {builder}<Slots...>, {sso_builder}<InlineSlots, InlineBytes, Slots...>>;",
             "    template<class Derived>",
             f"    using named_setters = {setters_mixin}<Derived>;",
             f"    static constexpr std::string_view msg_type = {_cpp_string(message.msg_type)};",
@@ -1451,6 +1457,7 @@ def render_header(schema: Schema, namespace: str) -> str:
             ]
         lines += ["};", ""]
 
+        sso_builder = f"{name}SsoBuilder"
         lines += [
             f"struct {name} {{",
             "    using schema_type = Schema;",
@@ -1466,16 +1473,27 @@ def render_header(schema: Schema, namespace: str) -> str:
             f"    static constexpr std::string_view msg_type = {_cpp_string(message.msg_type)};",
             f"    inline static constexpr const MessageDescriptor& descriptor = messages[{index}];",
             f"    static auto make(::nimblefix::MessageLimits limits = {{}});",
+            f"    template<std::size_t InlineSlots, std::size_t InlineBytes = 256>",
+            f"    static auto make(::nimblefix::MessageLimits limits = {{}});",
             "};",
             "",
             "template<class... Slots>",
-            f"class {builder} : public ::nimblefix::MessageBuilder<{policy}, {_cpp_string(message.msg_type)}, ::nimblefix::FieldList<Slots...>>, public {setters_mixin}<{builder}<Slots...>> {{",
-            f"    using Base = ::nimblefix::MessageBuilder<{policy}, {_cpp_string(message.msg_type)}, ::nimblefix::FieldList<Slots...>>;",
+            f"class {builder} : public ::nimblefix::MessageBuilder<{policy}, {_cpp_string(message.msg_type)}, ::nimblefix::FieldList<Slots...>, 16, 256>, public {setters_mixin}<{builder}<Slots...>> {{",
+            f"    using Base = ::nimblefix::MessageBuilder<{policy}, {_cpp_string(message.msg_type)}, ::nimblefix::FieldList<Slots...>, 16, 256>;",
+            "public:",
+            "    using schema_type = Schema;",
+            "    using Base::Base;",
+            "};",
+            "template<std::size_t InlineSlots, std::size_t InlineBytes, class... Slots>",
+            f"class {sso_builder} : public ::nimblefix::MessageBuilder<{policy}, {_cpp_string(message.msg_type)}, ::nimblefix::FieldList<Slots...>, InlineSlots, InlineBytes>, public {setters_mixin}<{sso_builder}<InlineSlots, InlineBytes, Slots...>> {{",
+            f"    using Base = ::nimblefix::MessageBuilder<{policy}, {_cpp_string(message.msg_type)}, ::nimblefix::FieldList<Slots...>, InlineSlots, InlineBytes>;",
             "public:",
             "    using schema_type = Schema;",
             "    using Base::Base;",
             "};",
             f"inline auto {name}::make(::nimblefix::MessageLimits limits) {{ return {builder}<>{{limits}}; }}",
+            f"template<std::size_t InlineSlots, std::size_t InlineBytes>",
+            f"inline auto {name}::make(::nimblefix::MessageLimits limits) {{ return {sso_builder}<InlineSlots, InlineBytes>{{limits}}; }}",
             "",
         ]
 

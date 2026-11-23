@@ -51,17 +51,19 @@ auto init = nf::DirectInitiator<fix::Schema, MyHandler>::open({
 (void)init.connect();
 while (!init.is_active()) (void)init.poll_once();
 
-// Option A: Fluent make() + std::optional (0 malloc via 16-slot / 256B SSO; spills to heap if larger):
+// Option A: One-shot fluent chain make() / make<Slots, Bytes>() (compile-time wire order,
+//           conditional fields via std::optional, default 16-slot / 256B SSO with heap spill):
 auto order = fix::NewOrderSingle::make()
     .cl_ord_id("ORD-001").symbol("AAPL").side('1')
     .transact_time("20261123-00:00:00.000")
     .order_qty(nf::Decimal{100, 0}).ord_type('1')
     .price(std::optional<nf::Decimal>{std::nullopt}); // absent optional skipped automatically
 
-// Option B: Reusable Draft + native runtime `if` (no upfront field declaration, 0 malloc via SSO):
+// Option B: Mutable reusable Draft / DraftWith<Slots, Bytes> (statement-by-statement mutation,
+//           native runtime `if`, field overwrite, and reset() reuse; same 16-slot / 256B SSO):
 // fix::NewOrderSingle::Draft order;
-// order.cl_ord_id("ORD-001").symbol("AAPL").side('1')
-//      .transact_time("20261123-00:00:00.000").order_qty(nf::Decimal{100, 0}).ord_type('2');
+// order.cl_ord_id("ORD-001");
+// order.symbol("AAPL");
 // if (has_price) order.price(nf::Decimal{15025, 2});
 
 // 3 send modes on DirectInitiator:

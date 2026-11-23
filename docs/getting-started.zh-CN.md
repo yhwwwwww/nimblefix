@@ -16,43 +16,52 @@ NimbleFIX 0.3 按**用多少付多少**分成三层，全部接口统一使用�
 
 初学者最容易混淆“消息的构造方式”和“网络发送方式”，其实它们完全正交、可以自由组合：
 
-### 1. 怎么构造一条消息（2 种常用写法，全部不用提前声明字段，全部默认 0 `malloc`）
+### 1. 怎么构造一条消息（两种风格，按写法习惯二选一）
 
-两种写法内部都采用 **SSO 栈缓冲（默认 16 字段 / 256B 字符串区，覆盖绝大多数订单，全程 0 `malloc`；偶发超长备注或超多字段会自动溢到堆上，绝不会粗暴拒单）**：
+两种写法默认都在栈上内置 **16 字段槽 + 256B 字符串区（SSO）**，常规订单均为 **0 `malloc`**；遇到偶发超多字段或超长字符串时**自动溢到堆上，绝不拒单**。如果需要更大的栈上免分配阈值，两者都支持直接自定义 `<槽位数, 字节数>`。
 
-| 构造方式 | 适合怎么写条件字段 | 需要提前声明字段吗？ | 正常订单堆分配 | 超长/超多字段 |
-| :--- | :--- | :---: | :---: | :---: |
-| **写法 A：`NewOrderSingle::make()`** | 链式写法 + 传 `std::optional`（`nullopt` 自动跳过） | **不需要** | **0 `malloc`** | 自动溢到堆 |
-| **写法 B：`NewOrderSingle::Draft`** | 原生 `if` 分支随便写，支持 `reset()` 复用与覆盖赋值 | **不需要** | **0 `malloc`** | 自动溢到堆 |
+**它们的核心区别在于“一次性链式表达式”还是“可逐句修改的普通对象”：**
+
+| 对比维度 | 写法 A：`NewOrderSingle::make()` | 写法 B：`NewOrderSingle::Draft` |
+| :--- | :--- | :--- |
+| **对象性质** | **不可变链式构造器（右值消费）**——必须一条链拼完 | **常规可变对象**——先声明变量，再逐句赋值 |
+| **能否拆开写 `order.symbol(...)`** | **不能**（每次 setter 返回新类型，不能对左值变量继续追加字段） | **可以**，逐句写、链式写都行 |
+| **如何写条件可选字段** | 传 `std::optional`（`nullopt` 自动跳过） | 原生 `if (...) order.price(...)` 和 `std::optional` 都可以 |
+| **覆盖已填字段 / `reset()` 复用** | **不支持**（一次性构造即用） | **支持**（同名字段直接覆盖，循环里 `order.reset()` 原地复用） |
+| **自定义 SSO 容量** | `NewOrderSingle::make<32, 1024>()`（默认 `<16, 256>`） | `NewOrderSingle::DraftWith<32, 1024>`（默认 `<16, 256>`） |
+| **什么时候选它** | 一行链式写完、字段来源直接就是结构体/optional（编译期定序，无运行期排序） | 业务里有多条 `if` 分段拼装、需要改写字段，或在热循环里 `reset()` 复用 |
 
 ```cpp
 namespace nf  = nimblefix;
 namespace fix = nimblefix::fix44;
 
-// 写法 A：链式 make() + std::optional（不用提前声明，0 malloc）
+// 写法 A：一次性链式 make()（必须一气呵成拼完；可选字段传 std::optional）
 std::optional<nf::Decimal> opt_price = is_limit ? std::optional{nf::Decimal{15025, 2}} : std::nullopt;
-auto order_a = fix::NewOrderSingle::make()
+auto order_a = fix::NewOrderSingle::make() // 如需更大栈缓冲：make<32, 1024>()
     .cl_ord_id("ORD-001")
     .symbol("AAPL")
     .side('1')
     .transact_time("20261123-09:30:00.000")
     .order_qty(nf::Decimal{100, 0})
     .ord_type(is_limit ? '2' : '1')
-    .price(opt_price); // 有值就编 44=...，nullopt 自动跳过
+    .price(opt_price);                     // 有值就编 44=...，nullopt 自动跳过
+// 注意：下面这样对已有变量追加字段在写法 A 上是不允许的：
+// order_a.price(...);  // ❌ 编译不通过；需要逐句赋值/if 请用写法 B
 
-// 写法 B：Draft 草稿对象 + 原生 if（不用提前声明，可 reset() 复用，0 malloc）
-fix::NewOrderSingle::Draft order_b;
-order_b.cl_ord_id("ORD-001")
-       .symbol("AAPL")
-       .side('1')
-       .transact_time("20261123-09:30:00.000")
-       .order_qty(nf::Decimal{100, 0})
-       .ord_type(is_limit ? '2' : '1');
-if (is_limit) order_b.price(nf::Decimal{15025, 2}); // 普通运行期 if，赋了就有，没赋就跳过
-// 下一笔直接原地复用：order_b.reset();
+// 写法 B：普通可变对象 Draft（支持逐句赋值、原生 if、覆盖改写、reset() 复用）
+fix::NewOrderSingle::Draft order_b;        // 如需更大栈缓冲：DraftWith<32, 1024>
+order_b.cl_ord_id("ORD-001");
+order_b.symbol("AAPL");
+order_b.side('1');
+order_b.transact_time("20261123-09:30:00.000");
+order_b.order_qty(nf::Decimal{100, 0});
+order_b.ord_type(is_limit ? '2' : '1');
+if (is_limit) order_b.price(nf::Decimal{15025, 2}); // 原生 if，随便写
+// 下一笔直接原地复用：
+// order_b.reset();
 ```
 
-> 以上两种写法构造出来的消息，都能直接传给下面任意一种发送方式。（高级场景如需硬性禁用堆溢出并限定编译期字段集合，也保留了 `NewOrderSingle::Fixed<ByteCap, fix::field::...>`。）
+> 无论用写法 A 还是写法 B 构造的消息，都可以直接传给下面任意一种发送方式。
 
 ---
 

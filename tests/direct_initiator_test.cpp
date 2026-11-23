@@ -659,6 +659,25 @@ void test_named_fixed_enqueue_batch_and_spsc_queue() {
     CHECK(spilled_draft.spilled());
     CHECK(spilled_draft.status().ok());
     CHECK(init.send(spilled_draft, 33, t2).ok());
+    // Verify custom SSO capacities: make<24, 512>() and DraftWith<24, 512> stay 0-malloc even for 320B string!
+    g_malloc_calls.store(0);
+    g_audit_hot_path.store(true);
+    {
+        auto big_make = fix::NewOrderSingle::make<24, 512>()
+            .cl_ord_id(long_id).symbol("AAPL").side('1')
+            .transact_time(t2).order_qty(nf::Decimal{1, 0}).ord_type('1');
+        CHECK(init.send(big_make, 34, t2).ok());
+
+        fix::NewOrderSingle::DraftWith<24, 512> big_draft;
+        big_draft.cl_ord_id(long_id).symbol("AAPL").side('1')
+            .transact_time(t2).order_qty(nf::Decimal{1, 0}).ord_type('1');
+        CHECK(!big_draft.spilled());
+        CHECK(init.send(big_draft, 35, t2).ok());
+    }
+    g_audit_hot_path.store(false);
+    CHECK(g_malloc_calls.load() == 0);
+    CHECK(init.transport().pop_sent_frame(wire));
+    CHECK(field(wire, 11) == long_id);
     CHECK(init.transport().pop_sent_frame(wire));
     CHECK(field(wire, 11) == long_id);
 }

@@ -395,12 +395,15 @@ struct fixed_shape_allowed<Policy, Fields<F...>>
     return Status::success();
 }
 
-// SSO storage for MessageBuilder: zero malloc up to 16 fields and 256 text bytes;
+// SSO storage for MessageBuilder: zero malloc up to InlineSlots fields and InlineBytes text bytes;
 // automatically spills to a bounded heap StorageBlock if either threshold is exceeded.
+template <std::size_t InlineSlots = 16, std::size_t InlineBytes = 256>
 struct SsoStorage {
-    static constexpr std::size_t inline_slot_cap = 16;
-    static constexpr std::size_t inline_byte_cap = 256;
-    static constexpr std::size_t inline_presence_cap = (inline_slot_cap + 7U) / 8U;
+    static_assert(InlineSlots > 0, "InlineSlots must be positive");
+    static_assert(InlineBytes > 0, "InlineBytes must be positive");
+    static constexpr std::size_t inline_slot_cap = InlineSlots;
+    static constexpr std::size_t inline_byte_cap = InlineBytes;
+    static constexpr std::size_t inline_presence_cap = (InlineSlots + 7U) / 8U;
 
     StorageBlock* heap{};
     std::size_t field_count{};
@@ -596,8 +599,8 @@ struct FieldListTraits;
 template <class... FieldTypes>
 struct FieldListTraits<FieldList<FieldTypes...>> {
     static constexpr std::size_t size = sizeof...(FieldTypes);
-    template <class Policy, class NewField>
-    using append_builder = typename Policy::template rebind<FieldTypes..., NewField>;
+    template <class Policy, class NewField, std::size_t InlineSlots = 16, std::size_t InlineBytes = 256>
+    using append_builder = typename Policy::template rebind_sso<InlineSlots, InlineBytes, FieldTypes..., NewField>;
 };
 
 template <class Shape, std::uint32_t Tag>
@@ -892,21 +895,26 @@ template <WireType Type, class T>
 
 // The declaration is completed below. Policies let generated names preserve their
 // fluent wrapper type while the core builder owns all storage and encoding behavior.
-template <class Policy, FixedString MsgType, class Shape>
+template <class Policy, FixedString MsgType, class Shape,
+          std::size_t InlineSlots = 16, std::size_t InlineBytes = 256>
 class MessageBuilder;
 
 template <FixedString MsgType>
 struct FlatMessagePolicy {
     template <class... SlotTypes>
     using rebind = MessageBuilder<FlatMessagePolicy<MsgType>, MsgType, FieldList<SlotTypes...>>;
+    template <std::size_t InlineSlots, std::size_t InlineBytes, class... SlotTypes>
+    using rebind_sso = MessageBuilder<FlatMessagePolicy<MsgType>, MsgType, FieldList<SlotTypes...>,
+                                      InlineSlots, InlineBytes>;
 };
 
-template <FixedString MsgType, class Shape = FieldList<>>
-using StaticMessage = MessageBuilder<FlatMessagePolicy<MsgType>, MsgType, Shape>;
+template <FixedString MsgType, class Shape = FieldList<>,
+          std::size_t InlineSlots = 16, std::size_t InlineBytes = 256>
+using StaticMessage = MessageBuilder<FlatMessagePolicy<MsgType>, MsgType, Shape, InlineSlots, InlineBytes>;
 
-template <FixedString MsgType>
+template <FixedString MsgType, std::size_t InlineSlots = 16, std::size_t InlineBytes = 256>
 [[nodiscard]] auto message(MessageLimits limits = {}) noexcept {
-    return StaticMessage<MsgType>{limits};
+    return StaticMessage<MsgType, FieldList<>, InlineSlots, InlineBytes>{limits};
 }
 
 namespace detail {
@@ -1161,10 +1169,12 @@ template <FixedString MsgType, class Shape, std::size_t ByteCapacity = 4096,
     class Policy = FlatMessagePolicy<MsgType>>
 using FixedMessage = FixedShapeMessage<MsgType, Shape, ByteCapacity, Policy>;
 
-template <class Policy, FixedString MsgType, class Shape>
+template <class Policy, FixedString MsgType, class Shape,
+          std::size_t InlineSlots, std::size_t InlineBytes>
 class MessageBuilder {
-    template <class P, FixedString M, class S>
+    template <class P, FixedString M, class S, std::size_t IS, std::size_t IB>
     friend class MessageBuilder;
+    using StorageType = detail::SsoStorage<InlineSlots, InlineBytes>;
     using ShapeInfo = detail::FieldListTraits<Shape>;
     using CanonicalShape = typename detail::canonical_shape<Policy, Shape>::type;
     using Plan = detail::EncodingPlan<Policy, MsgType, CanonicalShape>;
@@ -1181,6 +1191,8 @@ public:
     static constexpr std::string_view msg_type = MsgType.view();
     static constexpr std::size_t slot_count = field_count_;
     static constexpr std::size_t slot_storage_bytes = field_count_ * sizeof(detail::SlotValue);
+    static constexpr std::size_t inline_slot_capacity = InlineSlots;
+    static constexpr std::size_t inline_byte_capacity = InlineBytes;
     static constexpr auto wire_order = []() consteval {
         std::array<std::uint32_t, field_count_> order{};
         for (std::size_t i = 0; i < field_count_; ++i) order[i] = plan_[i].tag;
@@ -1190,7 +1202,7 @@ public:
     static constexpr const auto& physical_slot_map = slot_map_;
 
     explicit MessageBuilder(MessageLimits limits = {}) noexcept : limits_(limits) {}
-    MessageBuilder(detail::SsoStorage&& storage, MessageLimits limits, Status status,
+    MessageBuilder(StorageType&& storage, MessageLimits limits, Status status,
         detail::AdoptStorage) noexcept
         : storage_(std::move(storage)), limits_(limits), status_(status) {}
     MessageBuilder(const MessageBuilder&) = delete;
@@ -1222,7 +1234,7 @@ public:
             "value type does not match the generated FIX field type");
         using NewField = Field<Tag, detail::schema_field_kind_v<Policy, Tag, ValueType>,
             WireRank<Policy, Tag>::value, wire_type>;
-        using Next = typename ShapeInfo::template append_builder<Policy, NewField>;
+        using Next = typename ShapeInfo::template append_builder<Policy, NewField, InlineSlots, InlineBytes>;
         if (status_.ok()) {
             if constexpr (detail::is_optional_v<V>) {
                 if (value.has_value()) {
@@ -1361,7 +1373,7 @@ private:
         storage_.field_count = next_count;
     }
 
-    detail::SsoStorage storage_{};
+    StorageType storage_{};
     MessageLimits limits_{};
     Status status_{};
 };
