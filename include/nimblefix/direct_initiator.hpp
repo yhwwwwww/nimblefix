@@ -21,6 +21,7 @@
 
 #include <nimblefix/codec.hpp>
 #include <nimblefix/detail/session_core.hpp>
+#include <nimblefix/direct_queue.hpp>
 #include <nimblefix/execution.hpp>
 #include <nimblefix/journal.hpp>
 #include <nimblefix/schema.hpp>
@@ -514,7 +515,78 @@ public:
             static_assert(Schema::template allows_outbound_message<Message>(),
                 "message type does not belong to this DirectInitiator's Schema");
         }
-        return send_view(message.view(), now_ms, wall_time);
+        return send_view(message.view(), now_ms, wall_time, true);
+    }
+
+    // Same-thread batched enqueue: commits directly to mmap Journal and pushes into tx_ring_
+    // WITHOUT issuing a socket syscall yet. Call flush() to send all queued frames in 1 writev/sendmsg.
+    template <class Message>
+        requires requires(const Message& m) { m.view(); }
+    [[nodiscard]] Result<std::uint64_t> enqueue(const Message& message) noexcept {
+        return enqueue(message, clock_.now_ms(), clock_.wall_time());
+    }
+
+    template <class Message>
+        requires requires(const Message& m) { m.view(); }
+    [[nodiscard]] Result<std::uint64_t> enqueue(const Message& message,
+                                                std::uint64_t now_ms,
+                                                std::string_view wall_time) noexcept {
+        static_assert(!requires { requires std::remove_cvref_t<Message>::is_group_entry; },
+            "repeating group entries cannot be sent as standalone FIX messages");
+        if constexpr (requires { Schema::template allows_outbound_message<Message>(); }) {
+            static_assert(Schema::template allows_outbound_message<Message>(),
+                "message type does not belong to this DirectInitiator's Schema");
+        }
+        return send_view(message.view(), now_ms, wall_time, false);
+    }
+
+    // Flush all queued outbound / replay frames to transport (coalesces via writev/sendmsg when available).
+    [[nodiscard]] Status flush() noexcept {
+        return flush(clock_.now_ms());
+    }
+
+    [[nodiscard]] Status flush(std::uint64_t now_ms) noexcept {
+        if (fatal_) return last_status_.ok() ? Status{ErrorCode::engine_stopped} : last_status_;
+        if (!wants_write()) return Status::success();
+        return flush_tx(now_ms);
+    }
+
+    // Drain up to max_batch pre-encoded messages from a lock-free SPSC DirectSendQueue,
+    // stamp FIX MsgSeqNum/SendingTime, commit to mmap Journal, and flush in a single writev/sendmsg.
+    [[nodiscard]] Result<std::size_t> drain(DirectSendQueue& queue,
+                                            std::size_t max_batch = 64) noexcept {
+        return drain(queue, max_batch, clock_.now_ms(), clock_.wall_time());
+    }
+
+    [[nodiscard]] Result<std::size_t> drain(DirectSendQueue& queue,
+                                            std::size_t max_batch,
+                                            std::uint64_t now_ms,
+                                            std::string_view wall_time) noexcept {
+        if (fatal_) return last_status_.ok() ? Status{ErrorCode::engine_stopped} : last_status_;
+        if (!is_active()) return Status{ErrorCode::not_ready};
+        if (max_batch == 0) return std::size_t{0};
+
+        std::size_t drained = 0;
+        bool wall_set = false;
+        DirectSendQueue::SlotView slot{};
+        while (drained < max_batch && tx_count_ < tx_ring_.size() - 2 && queue.try_peek(slot)) {
+            if (!wall_set) {
+                if (const auto ts = set_wall_time(wall_time); !ts.ok()) return ts;
+                now_ms_ = now_ms;
+                wall_set = true;
+            }
+            const auto st = enqueue_prebuilt_body(slot.msg_type, slot.body, now_ms);
+            if (!st.ok()) {
+                if (drained == 0) return st.status();
+                break;
+            }
+            queue.consume_one();
+            ++drained;
+        }
+        if (drained != 0 && wants_write() && transport_.valid() && !transport_.is_connecting()) {
+            if (const auto fl = flush_tx(now_ms); !fl.ok()) return fl;
+        }
+        return drained;
     }
 
     // Off-hot-path journal maintenance (checkpoint flush & spare segment refill).
@@ -806,7 +878,8 @@ private:
 
     [[nodiscard]] Result<std::uint64_t> send_view(detail::MessageView msg,
                                                   std::uint64_t now_ms,
-                                                  std::string_view wt) noexcept {
+                                                  std::string_view wt,
+                                                  bool immediate_write) noexcept {
         if (fatal_) return last_status_.ok() ? Status{ErrorCode::engine_stopped} : last_status_;
         if (!is_active()) return Status{ErrorCode::not_ready};
         if (msg.msg_type.empty() || detail::direct_is_admin(msg.msg_type))
@@ -863,9 +936,9 @@ private:
         const auto aout = core_.process(app);
         if (!aout.status.ok()) return fail(aout.status);
 
-        // Fast-path direct socket write when TX queue & replay are idle!
+        // Fast-path direct socket write when immediate_write is requested and TX queue & replay are idle!
         const auto payload = committed_rec.payload;
-        if (tx_count_ == 0 && !replay_active_ && replay_count_ == 0 &&
+        if (immediate_write && tx_count_ == 0 && !replay_active_ && replay_count_ == 0 &&
             transport_.valid() && !transport_.is_connecting()) {
             const auto io = transport_.write(std::span<const char>{payload.data(), payload.size()});
             if (io.bytes == payload.size() && io.status.ok()) {
@@ -890,6 +963,51 @@ private:
         }
 
         if (const auto st = enqueue_tx(committed_rec.id, payload.size(), seq, msg.msg_type); !st.ok())
+            return fail(st);
+        return seq;
+    }
+
+    [[nodiscard]] Result<std::uint64_t> enqueue_prebuilt_body(std::string_view msg_type,
+                                                              std::string_view body,
+                                                              std::uint64_t now_ms) noexcept {
+        if (msg_type.empty() || detail::direct_is_admin(msg_type))
+            return Status{ErrorCode::managed_field, 35};
+        const auto seq = core_.next_outbound();
+        const auto header = make_header(seq, wall_time_);
+        const std::size_t reserve_bound = std::min(config_.max_frame_bytes, std::size_t{192} + body.size());
+
+        JournalRecord committed_rec{};
+        bool committed_ok = false;
+        auto reserved = journal_.reserve(RecordKind::outbound, seq, seq, 0, reserve_bound);
+        if (reserved.ok()) {
+            const auto encoded = encode_fix_from_body(msg_type, body, header, reserved.value().payload);
+            if (encoded.ok()) {
+                const auto committed = journal_.commit(reserved.value(), encoded.value());
+                if (!committed.ok()) return fail(committed.status());
+                committed_rec = committed.value();
+                committed_ok = true;
+            } else if (encoded.status().code != ErrorCode::capacity_exceeded) {
+                return encoded.status();
+            }
+        }
+        if (!committed_ok) {
+            const auto encoded = encode_fix_from_body(msg_type, body, header, encode_buf_);
+            if (!encoded.ok()) return encoded.status();
+            const auto appended = journal_.append(RecordKind::outbound, seq, seq, 0,
+                std::string_view{encode_buf_.data(), encoded.value()});
+            if (!appended.ok()) return fail(appended.status());
+            committed_rec = appended.value();
+        }
+
+        detail::CoreEvent app{};
+        app.kind = detail::CoreEventKind::outbound_appended;
+        app.now_ms = now_ms;
+        app.sequence = seq;
+        app.msg_type = msg_type;
+        const auto aout = core_.process(app);
+        if (!aout.status.ok()) return fail(aout.status);
+
+        if (const auto st = enqueue_tx(committed_rec.id, committed_rec.payload.size(), seq, msg_type); !st.ok())
             return fail(st);
         return seq;
     }
@@ -1096,6 +1214,48 @@ private:
             const bool replay_due = replay_active_ && replay_prepared_ &&
                 (q == nullptr || (q->offset == 0 && replay_seq_ <= q->seq));
             if (!replay_due && q == nullptr) break;
+
+            // Coalesce multiple queued frames into 1 writev/sendmsg syscall when transport supports write_batch.
+            if constexpr (requires(Transport& tr, std::span<const std::span<const char>> ch) {
+                              tr.write_batch(ch);
+                          }) {
+                if (!replay_due && !replay_active_ && tx_count_ >= 2) {
+                    std::array<std::span<const char>, 64> chunks{};
+                    std::size_t n_chunks = 0;
+                    const std::size_t limit = std::min<std::size_t>(tx_count_, chunks.size());
+                    for (std::size_t i = 0; i < limit; ++i) {
+                        const auto& entry = tx_ring_[(tx_head_ + i) % tx_ring_.size()];
+                        if (entry.ephemeral) {
+                            chunks[n_chunks++] = {logon_tx_buf_.data() + entry.offset, logon_tx_size_ - entry.offset};
+                        } else {
+                            const auto* rec = journal_.find_record(entry.record_id);
+                            if (rec == nullptr || rec->payload.size() != entry.size)
+                                return fail(Status{ErrorCode::corrupt_store});
+                            chunks[n_chunks++] = {rec->payload.data() + entry.offset, entry.size - entry.offset};
+                        }
+                    }
+                    const auto io = transport_.write_batch(std::span<const std::span<const char>>{chunks.data(), n_chunks});
+                    std::size_t remaining = io.bytes;
+                    while (remaining > 0 && tx_count_ != 0) {
+                        auto& front = tx_ring_[tx_head_];
+                        const std::size_t left = front.size - front.offset;
+                        if (remaining >= left) {
+                            remaining -= left;
+                            front.offset = front.size;
+                            if (const auto st = pop_tx(true, now_ms); !st.ok()) return st;
+                        } else {
+                            front.offset += remaining;
+                            remaining = 0;
+                        }
+                    }
+                    if (!io.status.ok()) {
+                        handle_disconnect(io.status, now_ms);
+                        return io.status;
+                    }
+                    if (io.would_block || io.bytes == 0) break;
+                    continue;
+                }
+            }
 
             std::span<const char> slice;
             if (replay_due) {

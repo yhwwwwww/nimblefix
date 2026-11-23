@@ -1,5 +1,6 @@
 #pragma once
 
+#include <concepts>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -57,6 +58,21 @@ public:
     [[nodiscard]] std::string_view frame() const noexcept { return frame_; }
     [[nodiscard]] std::span<const FieldView> fields() const noexcept { return fields_; }
     [[nodiscard]] Result<FieldView> find_unique(std::uint32_t tag) const noexcept;
+    [[nodiscard]] std::string_view msg_type() const noexcept {
+        if (fields_.size() >= 3 && fields_[2].tag == 35) return fields_[2].value;
+        const auto found = find_unique(35);
+        return found.ok() ? found.value().value : std::string_view{};
+    }
+    template <class Message>
+        requires requires { { Message::msg_type } -> std::convertible_to<std::string_view>; }
+    [[nodiscard]] bool is() const noexcept {
+        return msg_type() == Message::msg_type;
+    }
+    template <class Message>
+        requires requires(const FlatMessageView& v) { typename Message::view_type(v); }
+    [[nodiscard]] typename Message::view_type as() const noexcept {
+        return typename Message::view_type{*this};
+    }
 
 private:
     friend Status parse_flat(FrameView,
@@ -116,6 +132,15 @@ struct SessionHeader {
 // destination span is left unchanged. The destination must not overlap input storage.
 [[nodiscard]] Result<std::size_t> encode_fix(detail::MessageView message,
     SessionHeader header, std::span<char> output) noexcept;
+
+// Validate and encode only the application body fields (without session header/trailer).
+// Useful for lock-free producer-to-I/O queueing where MsgSeqNum/SendingTime are stamped by the I/O thread.
+[[nodiscard]] Result<std::size_t> encode_fix_body(detail::MessageView message,
+    std::span<char> output) noexcept;
+
+// Wrap a pre-encoded body (from encode_fix_body) with session header, BodyLength and CheckSum.
+[[nodiscard]] Result<std::size_t> encode_fix_from_body(std::string_view msg_type,
+    std::string_view prebuilt_body, SessionHeader header, std::span<char> output) noexcept;
 
 // Re-encode a parsed frame for replay. BeginString remains the original version.
 [[nodiscard]] Result<std::size_t> encode_fix_replay(const FlatMessageView& original,

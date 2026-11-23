@@ -1032,6 +1032,22 @@ def render_header(schema: Schema, namespace: str) -> str:
             f"::nimblefix::WireType::{FIX_WIRE_TYPES[field.field_type]}, {enum_span}, {length_tag}u, {data_tag}u}},"
         )
     lines += ["}};", ""]
+    lines.append("namespace field {")
+    for field in fields:
+        wire_t = FIX_WIRE_TYPES[field.field_type]
+        if wire_t == "character":
+            kind = "character"
+        elif wire_t == "decimal":
+            kind = "decimal"
+        elif field.field_type == "INT":
+            kind = "signed_integer"
+        elif wire_t == "integer":
+            kind = "unsigned_integer"
+        else:
+            kind = "string"
+        ident = f"{field.name}_" if field.name in _CPP_KEYWORDS else field.name
+        lines.append(f"using {ident} = ::nimblefix::Field<{field.number}u, ::nimblefix::FieldKind::{kind}>;")
+    lines += ["} // namespace field", ""]
 
     def emit_members(name: str, members: tuple[MemberDef, ...], emit_required: bool = False) -> None:
         lines.append(f"inline constexpr std::array<MessageMemberDescriptor, {len(members)}> {name}{{{{")
@@ -1421,6 +1437,8 @@ def render_header(schema: Schema, namespace: str) -> str:
             f"    using policy_type = {policy};",
             f"    template<class Shape, std::size_t ByteCapacity = 512>",
             f"    using fixed_type = {fixed_name}<Shape, ByteCapacity>;",
+            f"    template<std::size_t ByteCapacity, class... FieldSpecs>",
+            f"    using Fixed = {fixed_name}<::nimblefix::Fields<FieldSpecs...>, ByteCapacity>;",
             f"    static constexpr std::string_view msg_type = {_cpp_string(message.msg_type)};",
             f"    inline static constexpr const MessageDescriptor& descriptor = messages[{index}];",
             f"    static auto make(::nimblefix::MessageLimits limits = {{}});",

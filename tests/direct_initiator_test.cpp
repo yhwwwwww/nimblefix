@@ -9,6 +9,7 @@
 #include <iostream>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 #include <sys/wait.h>
@@ -94,6 +95,8 @@ struct LoopbackTransport {
     std::string tx_wire;
     bool open_state{};
     bool peer_eof{};
+    std::size_t write_batch_calls{};
+    std::size_t write_batch_chunks{};
 
     [[nodiscard]] nf::Status connect(std::string_view, std::uint16_t) noexcept {
         open_state = true;
@@ -117,6 +120,17 @@ struct LoopbackTransport {
         if (!open_state) return {0, false, true, nf::Status{nf::ErrorCode::io_error}};
         tx_wire.append(in.data(), in.size());
         return {in.size(), false, false, nf::Status::success()};
+    }
+    [[nodiscard]] nf::TransportIoResult write_batch(std::span<const std::span<const char>> chunks) noexcept {
+        if (!open_state) return {0, false, true, nf::Status{nf::ErrorCode::io_error}};
+        ++write_batch_calls;
+        write_batch_chunks += chunks.size();
+        std::size_t total = 0;
+        for (const auto& c : chunks) {
+            tx_wire.append(c.data(), c.size());
+            total += c.size();
+        }
+        return {total, false, false, nf::Status::success()};
     }
     void close() noexcept { open_state = false; }
     [[nodiscard]] int native_fd() const noexcept { return open_state ? 1 : -1; }
@@ -438,10 +452,151 @@ void test_default_session_key_auto_derivation() {
     CHECK(opened.ok());
 }
 
+void test_named_fixed_enqueue_batch_and_spsc_queue() {
+    TempDir dir;
+    nf::DirectInitiatorConfig cfg{};
+    cfg.host = "127.0.0.1";
+    cfg.port = 9876;
+    cfg.storage_directory = dir.path;
+    cfg.local_comp_id = "BUY";
+    cfg.remote_comp_id = "SELL";
+
+    struct TypedHandler {
+        std::uint64_t er_count{};
+        std::string last_exec_id;
+        [[nodiscard]] nf::Status on_message(const nf::FlatMessageView& msg, const nf::DeliveryInfo&) noexcept {
+            if (msg.is<fix::ExecutionReport>()) {
+                const auto er = msg.as<fix::ExecutionReport>();
+                ++er_count;
+                if (const auto id = er.exec_id(); id.ok()) last_exec_id.assign(id.value());
+            }
+            return nf::Status::success();
+        }
+    };
+
+    auto opened = nf::DirectInitiator<fix::Schema, TypedHandler, LoopbackTransport>::open(cfg);
+    CHECK(opened.ok());
+    if (!opened.ok()) return;
+    auto init = std::move(opened).value();
+    init.transport().tx_wire.reserve(256U * 1024U);
+    CHECK(init.connect(1, t0).ok());
+
+    std::string wire;
+    CHECK(init.transport().pop_sent_frame(wire));
+    CHECK(field(wire, 35) == "A");
+    init.transport().push_from_peer(make_frame(nf::message<"A">().set<98>(0).set<108>(30), "SELL", "BUY", 1, t0));
+    CHECK(init.poll_once(2, t0).ok());
+    CHECK(init.is_active());
+
+    // 1. Named zero-alloc Fixed<ByteCapacity, fix::field::...> + enqueue() + write_batch coalescing.
+    using FastOrder = fix::NewOrderSingle::Fixed<128,
+        fix::field::ClOrdID,
+        fix::field::Symbol,
+        fix::field::Side,
+        fix::field::TransactTime,
+        fix::field::OrderQty,
+        fix::field::OrdType>;
+
+    FastOrder order;
+    g_malloc_calls.store(0);
+    g_mutex_calls.store(0);
+    g_fsync_calls.store(0);
+    g_audit_hot_path.store(true);
+    for (int i = 0; i < 10; ++i) {
+        order.reset();
+        char cid[16] = "BATCH-00";
+        cid[6] = static_cast<char>('0' + (i / 10));
+        cid[7] = static_cast<char>('0' + (i % 10));
+        CHECK(order.cl_ord_id(std::string_view{cid, 8}).ok());
+        CHECK(order.symbol("AAPL").ok());
+        CHECK(order.side('1').ok());
+        CHECK(order.transact_time(t1).ok());
+        CHECK(order.order_qty(nf::Decimal{100, 0}).ok());
+        CHECK(order.ord_type('1').ok());
+        const auto seq = init.enqueue(order, 10, t1);
+        CHECK(seq.ok() && seq.value() == static_cast<std::uint64_t>(2 + i));
+    }
+    CHECK(init.transport().tx_wire.empty()); // Enqueued only; no socket write yet.
+    CHECK(init.flush(10).ok());
+    g_audit_hot_path.store(false);
+
+    CHECK(init.transport().write_batch_calls == 1);
+    CHECK(init.transport().write_batch_chunks == 10);
+    CHECK(g_malloc_calls.load() == 0);
+    CHECK(g_mutex_calls.load() == 0);
+    CHECK(g_fsync_calls.load() == 0);
+    for (int i = 0; i < 10; ++i) {
+        CHECK(init.transport().pop_sent_frame(wire));
+        CHECK(field(wire, 35) == "D");
+        CHECK(field(wire, 34) == std::to_string(2 + i));
+    }
+
+    // 2. Verify msg.is<ExecutionReport>() / msg.as<ExecutionReport>() typed handler dispatch.
+    auto er = fix::ExecutionReport::make()
+        .order_id("O1").exec_id("EX-TYPED-1").cl_ord_id("BATCH-00")
+        .exec_type('0').ord_status('0').symbol("AAPL").side('1')
+        .leaves_qty(nf::Decimal{100, 0}).cum_qty(nf::Decimal{0, 0}).avg_px(nf::Decimal{0, 0});
+    init.transport().push_from_peer(make_frame(er, "SELL", "BUY", 2, t1));
+    CHECK(init.poll_once(11, t1).ok());
+    CHECK(init.handler().er_count == 1);
+    CHECK(init.handler().last_exec_id == "EX-TYPED-1");
+
+    // 3. 2-thread lock-free SPSC DirectSendQueue: producer thread pushes 100 orders, I/O thread drains.
+    nf::DirectSendQueue queue{64, 512};
+    constexpr int total_queued = 100;
+    std::atomic<bool> producer_done{false};
+    std::thread producer([&] {
+        FastOrder local_order;
+        for (int i = 0; i < total_queued; ++i) {
+            local_order.reset();
+            char cid[16] = "SPSC-000";
+            cid[5] = static_cast<char>('0' + (i / 100));
+            cid[6] = static_cast<char>('0' + ((i / 10) % 10));
+            cid[7] = static_cast<char>('0' + (i % 10));
+            (void)local_order.cl_ord_id(std::string_view{cid, 8});
+            (void)local_order.symbol("MSFT");
+            (void)local_order.side('2');
+            (void)local_order.transact_time(t2);
+            (void)local_order.order_qty(nf::Decimal{50, 0});
+            (void)local_order.ord_type('1');
+            while (true) {
+                const auto st = queue.try_push(local_order);
+                if (st.ok()) break;
+                if (st.code == nf::ErrorCode::queue_full) {
+                    std::this_thread::yield();
+                    continue;
+                }
+                CHECK(st.ok());
+                break;
+            }
+        }
+        producer_done.store(true, std::memory_order_release);
+    });
+
+    std::size_t drained_total = 0;
+    while (drained_total < static_cast<std::size_t>(total_queued)) {
+        const auto d = init.drain(queue, 32, 20, t2);
+        CHECK(d.ok());
+        if (d.ok()) drained_total += d.value();
+        if (d.ok() && d.value() == 0) std::this_thread::yield();
+    }
+    producer.join();
+    CHECK(producer_done.load());
+    CHECK(queue.empty());
+
+    for (int i = 0; i < total_queued; ++i) {
+        CHECK(init.transport().pop_sent_frame(wire));
+        CHECK(field(wire, 35) == "D");
+        CHECK(field(wire, 34) == std::to_string(12 + i));
+        CHECK(field(wire, 55) == "MSFT");
+    }
+}
+
 } // namespace
 
 int main() {
     test_default_session_key_auto_derivation();
+    test_named_fixed_enqueue_batch_and_spsc_queue();
     test_zero_alloc_zero_lock_zero_fsync_steady_state();
     test_restart_recovery_resend_replay_and_gapfill();
     test_sigkill_crash_recovery_redelivers_uncommitted_delivery();

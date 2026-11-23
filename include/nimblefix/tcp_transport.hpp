@@ -47,6 +47,7 @@ public:
     [[nodiscard]] Status finish_connect() noexcept;
     [[nodiscard]] TransportIoResult read(std::span<char> output) noexcept;
     [[nodiscard]] TransportIoResult write(std::span<const char> input) noexcept;
+    [[nodiscard]] TransportIoResult write_batch(std::span<const std::span<const char>> chunks) noexcept;
     void close() noexcept;
 
     [[nodiscard]] int native_fd() const noexcept { return fd_; }

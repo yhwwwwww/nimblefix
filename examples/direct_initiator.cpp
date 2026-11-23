@@ -1,17 +1,9 @@
 #include <nimblefix/direct_initiator.hpp>
 #include <nimblefix/fix44_sample.hpp>
 
-#include <atomic>
 #include <cstdint>
-#include <cstring>
-#include <filesystem>
 #include <iostream>
 #include <string>
-#include <string_view>
-
-#include <arpa/inet.h>
-#include <netinet/in.h>
-#include <sys/socket.h>
 #include <unistd.h>
 
 namespace nf = nimblefix;
@@ -30,8 +22,10 @@ struct OrderHandler {
 
     [[nodiscard]] nf::Status on_message(const nf::FlatMessageView& msg,
                                         const nf::DeliveryInfo& info) noexcept {
-        const auto mt = msg.find_unique(35);
-        if (mt.ok() && mt.value().value == "8") ++exec_reports;
+        if (msg.is<fix::ExecutionReport>()) {
+            const auto er = msg.as<fix::ExecutionReport>();
+            if (er.exec_id().ok()) ++exec_reports;
+        }
         (void)info;
         return nf::Status::success();
     }
@@ -44,15 +38,13 @@ int main(int argc, char** argv) {
     const std::uint16_t port = argc > 2 ? static_cast<std::uint16_t>(std::stoi(argv[2])) : 9876;
     const std::string store_dir = argc > 3 ? argv[3] : "/tmp/nimblefix-direct-initiator-example";
 
-    nf::DirectInitiatorConfig cfg{};
-    cfg.host = host;
-    cfg.port = port;
-    cfg.storage_directory = store_dir;
-    cfg.local_comp_id = "BUY";
-    cfg.remote_comp_id = "SELL";
-    cfg.heartbeat_ms = 30'000;
-
-    auto opened = nf::DirectInitiator<fix::Schema, OrderHandler>::open(std::move(cfg));
+    auto opened = nf::DirectInitiator<fix::Schema, OrderHandler>::open({
+        .host = host,
+        .port = port,
+        .storage_directory = store_dir,
+        .local_comp_id = "BUY",
+        .remote_comp_id = "SELL",
+    });
     if (!opened.ok()) {
         std::cerr << "open failed: " << opened.status().message() << '\n';
         return 1;
@@ -63,15 +55,6 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    // Reusable stack-allocated FixedMessage: zero heap allocations per order.
-    using OrderShape = nf::Fields<
-        nf::Field<11, nf::FieldKind::string>,
-        nf::Field<55, nf::FieldKind::string>,
-        nf::Field<54, nf::FieldKind::character>,
-        nf::Field<60, nf::FieldKind::string>,
-        nf::Field<38, nf::FieldKind::decimal>,
-        nf::Field<40, nf::FieldKind::character>>;
-    fix::NewOrderSingleFixed<OrderShape, 128> order;
     for (int step = 0; step < 200 && !initiator.is_active(); ++step) {
         if (const auto st = initiator.poll_once(); !st.ok()) {
             std::cerr << "poll failed: " << st.message() << '\n';
@@ -84,6 +67,16 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    // 零分配栈上复用消息：只需按字段名声明一次，全程无数字 tag、无堆分配。
+    using MyOrder = fix::NewOrderSingle::Fixed<128,
+        fix::field::ClOrdID,
+        fix::field::Symbol,
+        fix::field::Side,
+        fix::field::TransactTime,
+        fix::field::OrderQty,
+        fix::field::OrdType>;
+
+    MyOrder order;
     order.reset();
     (void)order.cl_ord_id("ORD-0001");
     (void)order.symbol("AAPL");
@@ -98,6 +91,7 @@ int main(int argc, char** argv) {
         return 1;
     }
     std::cout << "sent order seq=" << seq.value() << '\n';
+
     (void)initiator.logout("example done");
     for (int step = 0; step < 50 && initiator.valid_transport(); ++step) {
         (void)initiator.poll_once();

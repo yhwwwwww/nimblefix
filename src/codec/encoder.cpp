@@ -901,6 +901,112 @@ Result<std::size_t> encode_fix44(detail::MessageView message, SessionHeader head
     return encode_fix(message, header, output);
 }
 
+Result<std::size_t> encode_fix_body(detail::MessageView message,
+    std::span<char> output) noexcept {
+    if (!message.status.ok()) return message.status;
+    if (!message.presence_validated) {
+        if (const auto schema_status = detail::validate_schema_presence(message); !schema_status.ok())
+            return schema_status;
+        message.presence_validated = true;
+    }
+    if (message.msg_type.empty() || (!message.prevalidated_scalars && !valid_text(message.msg_type)))
+        return Status{ErrorCode::invalid_value, 35};
+
+    std::size_t max_body_bound = 0;
+    const bool bound_ok = estimate_max_body_bytes(message, max_body_bound, 0);
+    if (bound_ok && output.size() >= max_body_bound) {
+        FastSinglePassWriter writer{output.data(), 0, output.size()};
+        if (const auto st = encode_body_single_pass(message, writer, 0); !st.ok()) return st;
+        if (!writer.overflow()) return writer.pos();
+    }
+
+    if (const auto ms = validate_message(message); !ms.ok()) return ms;
+    std::size_t body_bytes = 0;
+    if (const auto sz = measure_body_fields(message, body_bytes, 0); !sz.ok()) return sz;
+    if (output.size() < body_bytes) return Status{ErrorCode::capacity_exceeded};
+    Writer writer{output};
+    append_body_fields(message, writer);
+    return body_bytes;
+}
+
+Result<std::size_t> encode_fix_from_body(std::string_view msg_type,
+    std::string_view prebuilt_body, SessionHeader header,
+    std::span<char> output) noexcept {
+    const auto begin = begin_string(header.version);
+    if (begin.empty()) return Status{ErrorCode::invalid_header, 8};
+    if (msg_type.empty() || !valid_text(msg_type)) return Status{ErrorCode::invalid_value, 35};
+    if (!valid_text(header.sender_comp_id)) return Status{ErrorCode::invalid_header, 49};
+    if (!valid_text(header.target_comp_id)) return Status{ErrorCode::invalid_header, 56};
+    if (header.msg_seq_num == 0) return Status{ErrorCode::invalid_header, 34};
+    if (!detail::is_valid_utc_timestamp(header.sending_time)) return Status{ErrorCode::invalid_timestamp, 52};
+    if (header.poss_dup && !detail::is_valid_utc_timestamp(header.orig_sending_time))
+        return Status{ErrorCode::invalid_timestamp, 122};
+
+    std::size_t body_length = prebuilt_body.size();
+    const auto add_len = [&](std::size_t n) noexcept {
+        if (n > std::numeric_limits<std::size_t>::max() - body_length) return false;
+        body_length += n;
+        return true;
+    };
+    if (!add_len(4 + msg_type.size()) ||
+        !add_len(4 + header.sender_comp_id.size()) ||
+        !add_len(4 + header.target_comp_id.size()) ||
+        !add_len(4 + decimal_digits(header.msg_seq_num)) ||
+        (header.poss_dup && !add_len(5)) ||
+        !add_len(4 + header.sending_time.size()) ||
+        (header.last_msg_seq_num_processed &&
+            !add_len(5 + decimal_digits(*header.last_msg_seq_num_processed))) ||
+        (header.poss_dup && !add_len(5 + header.orig_sending_time.size()))) {
+        return Status{ErrorCode::too_large};
+    }
+
+    const std::size_t header_prefix = 3 + begin.size() + 3 + decimal_digits(body_length);
+    if (body_length > std::numeric_limits<std::size_t>::max() - header_prefix - checksum_suffix_size)
+        return Status{ErrorCode::too_large};
+    const std::size_t total_size = header_prefix + body_length + checksum_suffix_size;
+    if (output.size() < total_size) return Status{ErrorCode::capacity_exceeded};
+
+    Writer writer{output};
+    writer.append("8=");
+    writer.append(begin);
+    writer.append(soh);
+    writer.append("9=");
+    writer.append_unsigned(body_length);
+    writer.append(soh);
+    writer.append("35=");
+    writer.append(msg_type);
+    writer.append(soh);
+    writer.append("49=");
+    writer.append(header.sender_comp_id);
+    writer.append(soh);
+    writer.append("56=");
+    writer.append(header.target_comp_id);
+    writer.append(soh);
+    writer.append("34=");
+    writer.append_unsigned(header.msg_seq_num);
+    writer.append(soh);
+    if (header.poss_dup) {
+        writer.append("43=Y");
+        writer.append(soh);
+    }
+    writer.append("52=");
+    writer.append(header.sending_time);
+    writer.append(soh);
+    if (header.last_msg_seq_num_processed) {
+        writer.append("369=");
+        writer.append_unsigned(*header.last_msg_seq_num_processed);
+        writer.append(soh);
+    }
+    if (header.poss_dup) {
+        writer.append("122=");
+        writer.append(header.orig_sending_time);
+        writer.append(soh);
+    }
+    if (!prebuilt_body.empty()) writer.append(prebuilt_body);
+    writer.append_checksum_suffix();
+    return total_size;
+}
+
 Result<std::size_t> encode_fix_replay(const FlatMessageView& original,
     SessionHeader header, std::span<char> output) noexcept {
     const auto fields = original.fields();

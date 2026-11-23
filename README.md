@@ -31,7 +31,12 @@ namespace fix = nimblefix::fix44_sample;
 struct MyHandler {
     [[nodiscard]] nf::Status on_message(const nf::FlatMessageView& msg,
                                         const nf::DeliveryInfo& info) noexcept {
-        // Zero-copy view; info.is_recovery == true for crash-recovered deliveries.
+        // Typed zero-copy view — no magic tag numbers required.
+        if (msg.is<fix::ExecutionReport>()) {
+            const auto er = msg.as<fix::ExecutionReport>();
+            (void)er.exec_id();
+        }
+        (void)info; // info.is_recovery == true for crash-recovered deliveries
         return nf::Status::success();
     }
 };
@@ -46,16 +51,23 @@ auto init = nf::DirectInitiator<fix::Schema, MyHandler>::open({
 (void)init.connect();
 while (!init.is_active()) (void)init.poll_once();
 
-// Simple everyday send (or use stack-allocated NewOrderSingleFixed for 0-alloc hot loops):
+// Everyday message construction (no upfront field declaration):
 auto order = fix::NewOrderSingle::make()
-    .cl_ord_id("ORD-001")
-    .symbol("AAPL")
-    .side('1')
+    .cl_ord_id("ORD-001").symbol("AAPL").side('1')
     .transact_time("20261123-00:00:00.000")
-    .order_qty(nf::Decimal{100, 0})
-    .ord_type('1');
+    .order_qty(nf::Decimal{100, 0}).ord_type('1');
 
-(void)init.send(order);
+// Or zero-alloc stack-reusable message (all named fields, no magic numbers):
+// using FastOrder = fix::NewOrderSingle::Fixed<128,
+//     fix::field::ClOrdID, fix::field::Symbol, fix::field::Side,
+//     fix::field::TransactTime, fix::field::OrderQty, fix::field::OrdType>;
+
+// 3 send modes on DirectInitiator:
+(void)init.send(order);               // 1) Direct immediate send (lowest single-order latency)
+// (void)init.enqueue(order);         // 2) Same-thread burst batching -> 1 writev/sendmsg
+// (void)init.flush();
+// nf::DirectSendQueue q{256, 512};   // 3) 2-thread lock-free SPSC: strategy q.try_push(order),
+// (void)init.drain(q);               //    I/O thread init.drain(q) -> Journal + 1 writev/sendmsg
 ```
 
 ### Enabling FIX over TLS (`DirectTlsTransport`)
