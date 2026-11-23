@@ -113,11 +113,21 @@ Measured with `direct-initiator-bench` (30,000 samples, 5,000 warmups, `-Wl,--wr
 
 Binary footprint (Release): `direct-initiator-example` is **336 KB** (`libnimblefix-core.a`: 409 KB) vs full multi-session `initiator-example` at **1.2 MB**.
 
+### Acceptor Benchmark (`acceptor-bench`, same full 912-field FIX 4.4 + `NoPartyIDs[3]` + v2 mmap Journal workload)
+
+| Acceptor Tier | p50 | p95 | p99 | Throughput |
+| :--- | ---: | ---: | ---: | ---: |
+| **Tier 1: Pre-TCP Acceptor** (`SessionDriver` wire-in -> 912-field Schema -> in-handler ER -> zero-copy v2 Journal -> flush) | **1.533 µs** | 1.723 µs | 2.184 µs | **621,161 orders/s** |
+| **Tier 2: Single-Session TCP** (`Engine<fix44::Schema, Inline>`, 1 `epoll` thread) | **11.681 µs** | 15.038 µs | 19.466 µs | **77,334 orders/s** |
+| **Tier 3: 8 Concurrent Sessions TCP** (`Engine<fix44::Schema, Inline>`, 1 `epoll` thread) | **36.678 µs** | 80.390 µs | 100.798 µs | **157,998 orders/s** |
+
 ---
 
 ## Layer 1 / 2: Multi-Session Engine, Acceptor & CLI
 
-For multi-session server/client gateways, Acceptor listeners, `Queued` worker dispatch, MPSC `Sender`, SPSC `ProducerLane`, or TOML-driven operations, start with [examples/acceptor.cpp](examples/acceptor.cpp) and [examples/initiator.cpp](examples/initiator.cpp):
+For multi-session server/client gateways, Acceptor listeners, `Queued` worker dispatch, MPSC `Sender`, SPSC `ProducerLane`, or TOML-driven operations, start with [examples/acceptor.cpp](examples/acceptor.cpp) and [examples/initiator.cpp](examples/initiator.cpp).
+
+> **Acceptor Threading & Roadmap**: The protocol I/O layer runs a single-threaded Linux `epoll` reactor over pre-configured sessions so every session remains strictly single-writer and lock-free (preserving FIX `MsgSeqNum` ordering, L1/L2 cache locality, and zero-lock v2 mmap Journal writes), while business callbacks can run either `Inline` or in per-session serialized `Queued` workers. For future multi-core scaling beyond single-core limits (hundreds/thousands of high-rate sessions), the planned architecture is a **Sharded Reactor** (`K` independent `epoll` threads with static session-to-shard pinning, keeping every shard 100% single-writer and lock-free — never work-stealing across protocol state).
 
 ```sh
 xmake f -m release --tls=y --xml=y

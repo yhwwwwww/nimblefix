@@ -33,37 +33,6 @@ Status error(ErrorCode code, std::uint32_t tag, std::size_t offset) noexcept {
     return {code, tag <= detail::maximum_fix_tag ? static_cast<int>(tag) : 0, offset};
 }
 
-Status validate_hints(WireHints hints) noexcept {
-    if (hints.length_data_pairs.size() > max_wire_hint_pairs)
-        return {ErrorCode::capacity_exceeded, 0, max_wire_hint_pairs};
-
-    const auto same_or_conflicting = [](LengthDataPair a, LengthDataPair b) noexcept {
-        return a.length_tag == b.length_tag || a.length_tag == b.data_tag ||
-               a.data_tag == b.length_tag || a.data_tag == b.data_tag;
-    };
-
-    for (std::size_t i = 0; i < hints.length_data_pairs.size(); ++i) {
-        const auto pair = hints.length_data_pairs[i];
-        if (pair.length_tag == 0 || pair.data_tag == 0 ||
-            pair.length_tag > detail::maximum_fix_tag ||
-            pair.data_tag > detail::maximum_fix_tag ||
-            pair.length_tag == pair.data_tag ||
-            detail::is_managed_tag(pair.length_tag) || detail::is_managed_tag(pair.data_tag))
-            return error(ErrorCode::invalid_value, pair.length_tag, i);
-
-        for (std::size_t j = i + 1; j < hints.length_data_pairs.size(); ++j) {
-            if (same_or_conflicting(pair, hints.length_data_pairs[j]))
-                return error(ErrorCode::invalid_value, pair.length_tag, i);
-        }
-        for (const auto builtin : fix44_pairs) {
-            if (pair.length_tag == builtin.length_tag && pair.data_tag == builtin.data_tag) continue;
-            if (same_or_conflicting(pair, builtin))
-                return error(ErrorCode::invalid_value, pair.length_tag, i);
-        }
-    }
-    return Status::success();
-}
-
 constexpr std::size_t builtin_mask_words = 10; // covers tags 0..639
 
 constexpr std::array<std::uint64_t, builtin_mask_words> make_builtin_len_mask() noexcept {
@@ -101,6 +70,63 @@ constexpr auto builtin_data_mask = make_builtin_data_mask();
         if (b.length_tag == p.length_tag && b.data_tag == p.data_tag) return true;
     }
     return false;
+}
+
+Status validate_hints(WireHints hints) noexcept {
+    if (hints.length_data_pairs.empty()) return Status::success();
+    if (hints.length_data_pairs.size() > max_wire_hint_pairs)
+        return {ErrorCode::capacity_exceeded, 0, max_wire_hint_pairs};
+
+    // Fast path: standard FIX schemas pass only built-in fix44_pairs (O(N) bitmask instead of O(N^2)).
+    std::uint32_t seen_builtin = 0;
+    bool all_builtin = true;
+    for (std::size_t i = 0; i < hints.length_data_pairs.size(); ++i) {
+        const auto pair = hints.length_data_pairs[i];
+        int match = -1;
+        if (is_builtin_len_tag(pair.length_tag)) {
+            for (std::size_t k = 0; k < fix44_pairs.size(); ++k) {
+                if (fix44_pairs[k].length_tag == pair.length_tag &&
+                    fix44_pairs[k].data_tag == pair.data_tag) {
+                    match = static_cast<int>(k);
+                    break;
+                }
+            }
+        }
+        if (match < 0) {
+            all_builtin = false;
+            break;
+        }
+        const std::uint32_t bit = std::uint32_t{1} << static_cast<unsigned>(match);
+        if ((seen_builtin & bit) != 0) return error(ErrorCode::invalid_value, pair.length_tag, i);
+        seen_builtin |= bit;
+    }
+    if (all_builtin) return Status::success();
+
+    const auto same_or_conflicting = [](LengthDataPair a, LengthDataPair b) noexcept {
+        return a.length_tag == b.length_tag || a.length_tag == b.data_tag ||
+               a.data_tag == b.length_tag || a.data_tag == b.data_tag;
+    };
+
+    for (std::size_t i = 0; i < hints.length_data_pairs.size(); ++i) {
+        const auto pair = hints.length_data_pairs[i];
+        if (pair.length_tag == 0 || pair.data_tag == 0 ||
+            pair.length_tag > detail::maximum_fix_tag ||
+            pair.data_tag > detail::maximum_fix_tag ||
+            pair.length_tag == pair.data_tag ||
+            detail::is_managed_tag(pair.length_tag) || detail::is_managed_tag(pair.data_tag))
+            return error(ErrorCode::invalid_value, pair.length_tag, i);
+
+        for (std::size_t j = i + 1; j < hints.length_data_pairs.size(); ++j) {
+            if (same_or_conflicting(pair, hints.length_data_pairs[j]))
+                return error(ErrorCode::invalid_value, pair.length_tag, i);
+        }
+        for (const auto builtin : fix44_pairs) {
+            if (pair.length_tag == builtin.length_tag && pair.data_tag == builtin.data_tag) continue;
+            if (same_or_conflicting(pair, builtin))
+                return error(ErrorCode::invalid_value, pair.length_tag, i);
+        }
+    }
+    return Status::success();
 }
 
 bool find_length_pair_fast(std::uint32_t length_tag,

@@ -230,6 +230,9 @@ public:
     [[nodiscard]] Status connected(std::uint64_t now_ms, std::string_view wall_time) noexcept;
     [[nodiscard]] Status receive(std::string_view complete_frame, std::uint64_t now_ms,
         std::string_view wall_time) noexcept;
+    // Fast path for callers that already ran inspect_frame() on complete_frame.
+    [[nodiscard]] Status receive_verified(FrameView verified_frame, std::uint64_t now_ms,
+        std::string_view wall_time) noexcept;
     [[nodiscard]] Status defer_delivery(DeliveryInfo info) noexcept;
     [[nodiscard]] Status defer_active() noexcept;
     [[nodiscard]] Status complete_active(Status callback_status,

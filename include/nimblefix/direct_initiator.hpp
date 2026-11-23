@@ -811,15 +811,42 @@ private:
         const auto seq = core_.next_outbound();
         const auto header = make_header(seq, wall_time_);
 
-        // Zero-copy path: reserve mmap payload slot directly and encode in-place!
-        auto reserved = journal_.reserve(RecordKind::outbound, seq, seq, 0, config_.max_frame_bytes);
-        if (!reserved.ok()) return fail(reserved.status());
+        // Zero-copy path with tight upper-bound reserve so small segments pack densely.
+        std::size_t reserve_bound = 192U + msg.value_byte_count + msg.field_count * 40U;
+        if (msg.group_count != 0 && msg.groups != nullptr) {
+            for (std::size_t g = 0; g < msg.group_count; ++g) {
+                const auto& grp = msg.groups[g];
+                if (grp.entries != nullptr) {
+                    for (std::size_t e = 0; e < grp.entry_count; ++e) {
+                        reserve_bound += grp.entries[e].value_byte_count + grp.entries[e].field_count * 40U;
+                    }
+                }
+            }
+        }
+        reserve_bound = std::min(config_.max_frame_bytes, reserve_bound);
 
-        const auto encoded = encode_fix(msg, header, reserved.value().payload);
-        if (!encoded.ok()) return encoded.status();
-
-        const auto committed = journal_.commit(reserved.value(), encoded.value());
-        if (!committed.ok()) return fail(committed.status());
+        JournalRecord committed_rec{};
+        bool committed_ok = false;
+        auto reserved = journal_.reserve(RecordKind::outbound, seq, seq, 0, reserve_bound);
+        if (reserved.ok()) {
+            const auto encoded = encode_fix(msg, header, reserved.value().payload);
+            if (encoded.ok()) {
+                const auto committed = journal_.commit(reserved.value(), encoded.value());
+                if (!committed.ok()) return fail(committed.status());
+                committed_rec = committed.value();
+                committed_ok = true;
+            } else if (encoded.status().code != ErrorCode::capacity_exceeded) {
+                return encoded.status();
+            }
+        }
+        if (!committed_ok) {
+            const auto encoded = encode_fix(msg, header, encode_buf_);
+            if (!encoded.ok()) return encoded.status();
+            const auto appended = journal_.append(RecordKind::outbound, seq, seq, 0,
+                std::string_view{encode_buf_.data(), encoded.value()});
+            if (!appended.ok()) return fail(appended.status());
+            committed_rec = appended.value();
+        }
 
         detail::CoreEvent app{};
         app.kind = detail::CoreEventKind::outbound_appended;
@@ -830,7 +857,7 @@ private:
         if (!aout.status.ok()) return fail(aout.status);
 
         // Fast-path direct socket write when TX queue & replay are idle!
-        const auto payload = committed.value().payload;
+        const auto payload = committed_rec.payload;
         if (tx_count_ == 0 && !replay_active_ && replay_count_ == 0 &&
             transport_.valid() && !transport_.is_connecting()) {
             const auto io = transport_.write(std::span<const char>{payload.data(), payload.size()});
@@ -849,13 +876,13 @@ private:
                 return seq; // Already durably committed in journal; will replay on reconnect!
             }
             // Partial write or EAGAIN: enqueue remaining tail in tx_ring_.
-            if (const auto st = enqueue_tx(committed.value().id, payload.size(), seq, msg.msg_type); !st.ok())
+            if (const auto st = enqueue_tx(committed_rec.id, payload.size(), seq, msg.msg_type); !st.ok())
                 return fail(st);
             tx_ring_[(tx_head_ + tx_count_ - 1) % tx_ring_.size()].offset = io.bytes;
             return seq;
         }
 
-        if (const auto st = enqueue_tx(committed.value().id, payload.size(), seq, msg.msg_type); !st.ok())
+        if (const auto st = enqueue_tx(committed_rec.id, payload.size(), seq, msg.msg_type); !st.ok())
             return fail(st);
         return seq;
     }
@@ -868,13 +895,32 @@ private:
         if (const auto st = detail::direct_build_admin(msg_type, fields, stg, admin_arena_); !st.ok())
             return st;
         const auto header = make_header(seq, wall_time_);
-        auto reserved = journal_.reserve(RecordKind::outbound, seq, 0, dependency, config_.max_frame_bytes);
-        if (!reserved.ok()) return reserved.status();
-        const auto encoded = encode_fix(stg.view, header, reserved.value().payload);
-        if (!encoded.ok()) return encoded.status();
-        const auto committed = journal_.commit(reserved.value(), encoded.value());
-        if (!committed.ok()) return committed.status();
-        if (const auto st = enqueue_tx(committed.value().id, encoded.value(), seq, msg_type); !st.ok())
+        const std::size_t admin_bound = std::min(config_.max_frame_bytes,
+            std::size_t{256} + stg.view.value_byte_count + stg.view.field_count * 40U);
+        RecordId committed_id = 0;
+        std::size_t encoded_size = 0;
+        auto reserved = journal_.reserve(RecordKind::outbound, seq, 0, dependency, admin_bound);
+        if (reserved.ok()) {
+            const auto encoded = encode_fix(stg.view, header, reserved.value().payload);
+            if (encoded.ok()) {
+                const auto committed = journal_.commit(reserved.value(), encoded.value());
+                if (!committed.ok()) return committed.status();
+                committed_id = committed.value().id;
+                encoded_size = encoded.value();
+            } else if (encoded.status().code != ErrorCode::capacity_exceeded) {
+                return encoded.status();
+            }
+        }
+        if (committed_id == 0) {
+            const auto encoded = encode_fix(stg.view, header, encode_buf_);
+            if (!encoded.ok()) return encoded.status();
+            const auto appended = journal_.append(RecordKind::outbound, seq, 0, dependency,
+                std::string_view{encode_buf_.data(), encoded.value()});
+            if (!appended.ok()) return appended.status();
+            committed_id = appended.value().id;
+            encoded_size = encoded.value();
+        }
+        if (const auto st = enqueue_tx(committed_id, encoded_size, seq, msg_type); !st.ok())
             return st;
         detail::CoreEvent ev{};
         ev.kind = detail::CoreEventKind::outbound_appended;

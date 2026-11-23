@@ -1164,5 +1164,6 @@ README 聚焦產品定位與第一筆收發，讓使用者分別找到「我要�
 - 無字典 wire 規則表的支援範圍、局部 group descriptor 介面，以及 flat / typed 共享的解析資料模型。
 - 每個 execution policy 的效能回歸預算、長時間負載下的尾延遲與飽和行為。
 - 哪些額外 backend 或編碼優化有足夠收益，值得增加建置與維護成本。
+- **Acceptor 多核擴展（未來規劃：Sharded Reactor）**：當前 Layer 1/2 `Engine` 的協議 I/O 層採用單線程 `epoll` Reactor 管理所有預配置 Session（每個 Session 維持單寫者、零鎖與 v2 mmap Journal 親和；業務層可選 `Inline` 或按 Session 串行化的 `Queued` 執行器），並禁止在協議層使用「空閒線程池隨機調度」以避免破壞 `MsgSeqNum` 全序與 Cache 局部性。未來面對百級/千級高活躍連接吃滿單核時，演進方向為 **Sharded Reactor**（啟動 `K` 個獨立 `epoll` I/O 線程，每個 Session 靜態歸屬到唯一 Shard，Shard 內部繼續保持 100% 單線程零鎖單寫者）。
 
 如果某個機制需要大量說明才能讓一般使用者避免誤用，應先調整 API 或預設值；如果某項優化無法用一致的公開契約描述，就不能直接進入主要業務路徑。

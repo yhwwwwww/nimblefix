@@ -1783,36 +1783,44 @@ struct EngineRuntime::Impl {
 
     [[nodiscard]] Status dispatch_business(SessionContext& context,
         const FlatMessageView& message, const DeliveryInfo& info) {
-        if (schema == nullptr) {
+        std::string_view msg_type{};
+        std::size_t msg_type_offset = 0;
+        const auto fields = message.fields();
+        if (fields.size() >= 3 && fields[2].tag == 35) {
+            msg_type = fields[2].value;
+            msg_type_offset = fields[2].offset;
+        } else {
             auto type_field = message.find_unique(35);
             if (!type_field.ok()) return type_field.status();
+            msg_type = type_field.value().value;
+            msg_type_offset = type_field.value().offset;
+        }
+        if (schema == nullptr) {
             const auto ignored_type = std::lower_bound(ignored_messages.begin(), ignored_messages.end(),
-                type_field.value().value, [](const IgnoredMessageType& item, std::string_view value) {
+                msg_type, [](const IgnoredMessageType& item, std::string_view value) {
                     return item.msg_type < value;
                 });
             if (ignored_type != ignored_messages.end() &&
-                ignored_type->msg_type == type_field.value().value) return Status::success();
+                ignored_type->msg_type == msg_type) return Status::success();
             if (!message_callback) return Status{ErrorCode::message_unhandled, 35};
             return message_callback(context, message, info);
         }
-        auto type_field = message.find_unique(35);
-        if (!type_field.ok()) return type_field.status();
-        const auto* descriptor = schema->find_message(type_field.value().value);
+        const auto* descriptor = schema->find_message(msg_type);
         if (descriptor == nullptr)
-            return Status{ErrorCode::message_unhandled, 35, type_field.value().offset};
+            return Status{ErrorCode::message_unhandled, 35, msg_type_offset};
         const auto handler = std::lower_bound(typed_handlers.begin(), typed_handlers.end(),
-            type_field.value().value, [](const RegisteredMessageHandler& item, std::string_view value) {
+            msg_type, [](const RegisteredMessageHandler& item, std::string_view value) {
                 return item.msg_type < value;
             });
-        if (handler != typed_handlers.end() && handler->msg_type == type_field.value().value)
+        if (handler != typed_handlers.end() && handler->msg_type == msg_type)
             return handler->callback(context, message, info);
         const auto ignored_type = std::lower_bound(ignored_messages.begin(), ignored_messages.end(),
-            type_field.value().value, [](const IgnoredMessageType& item, std::string_view value) {
+            msg_type, [](const IgnoredMessageType& item, std::string_view value) {
                 return item.msg_type < value;
             });
-        if (ignored_type != ignored_messages.end() && ignored_type->msg_type == type_field.value().value)
+        if (ignored_type != ignored_messages.end() && ignored_type->msg_type == msg_type)
             return Status::success();
-        return Status{ErrorCode::message_unhandled, 35, type_field.value().offset};
+        return Status{ErrorCode::message_unhandled, 35, msg_type_offset};
     }
 
     [[nodiscard]] Status enqueue_delivery(const DeliveryLease& lease,
@@ -2506,9 +2514,21 @@ struct EngineRuntime::Impl {
             callbacks.deferred_delivery = queued;
             {
                 callbacks.validate_message = [this](const FlatMessageView& message) {
+                    std::string_view msg_type{};
+                    std::size_t msg_type_offset = 0;
                     if (schema != nullptr) {
-                        const auto schema_status = validate_schema_message(
-                            *schema, message, ValidationLevel::strict);
+                        const auto fields = message.fields();
+                        if (fields.size() >= 3 && fields[2].tag == 35) {
+                            msg_type = fields[2].value;
+                            msg_type_offset = fields[2].offset;
+                        } else {
+                            const auto type = message.find_unique(35);
+                            if (!type.ok()) return type.status();
+                            msg_type = type.value().value;
+                            msg_type_offset = type.value().offset;
+                        }
+                        const auto schema_status = validate_schema_message_for_type(
+                            *schema, msg_type, msg_type_offset, fields, ValidationLevel::strict);
                         if (!schema_status.ok()) return schema_status;
                     }
                     if (config.message_validator) {
@@ -2516,13 +2536,19 @@ struct EngineRuntime::Impl {
                         if (!checked.ok()) return checked;
                     }
                     if (schema != nullptr) {
-                        const auto type = message.find_unique(35);
-                        if (!type.ok()) return type.status();
-                        const auto handled = std::any_of(typed_handlers.begin(), typed_handlers.end(),
-                            [&](const auto& item) { return item.msg_type == type.value().value; });
-                        const auto ignored = std::any_of(ignored_messages.begin(), ignored_messages.end(),
-                            [&](const auto& item) { return item.msg_type == type.value().value; });
-                        if (!handled && !ignored) return Status{ErrorCode::message_unhandled, 35};
+                        const auto h = std::lower_bound(typed_handlers.begin(), typed_handlers.end(),
+                            msg_type, [](const RegisteredMessageHandler& item, std::string_view value) {
+                                return item.msg_type < value;
+                            });
+                        const bool handled = h != typed_handlers.end() && h->msg_type == msg_type;
+                        if (!handled) {
+                            const auto ig = std::lower_bound(ignored_messages.begin(), ignored_messages.end(),
+                                msg_type, [](const IgnoredMessageType& item, std::string_view value) {
+                                    return item.msg_type < value;
+                                });
+                            const bool ignored = ig != ignored_messages.end() && ig->msg_type == msg_type;
+                            if (!ignored) return Status{ErrorCode::message_unhandled, 35};
+                        }
                     }
                     return Status::success();
                 };
@@ -2961,7 +2987,7 @@ struct EngineRuntime::Impl {
         while (!peer.closed && peer.connection == Connection::connected &&
                peer.unread_size() != 0 && processed < frame_budget && peer.driver->can_receive()) {
             FrameView frame{};
-            const auto status = inspect_frame(peer.unread_view(), frame, wire_hints,
+            const auto status = inspect_frame(peer.unread_view(), frame, {},
                 CodecLimits{config.max_frame_bytes});
             if (status.code == ErrorCode::need_more) return Status::success();
             if (!status.ok()) {
@@ -2969,7 +2995,7 @@ struct EngineRuntime::Impl {
                 return status;
             }
             const auto wall = wall_timestamp();
-            const auto received = peer.driver->receive(frame.bytes, now, timestamp_view(wall));
+            const auto received = peer.driver->receive_verified(frame, now, timestamp_view(wall));
             if (received.code == ErrorCode::queue_full) return Status::success();
             if (peer.session) {
                 peer.session->received_frames.fetch_add(1, std::memory_order_relaxed);
@@ -3013,7 +3039,7 @@ struct EngineRuntime::Impl {
     }
 
     [[nodiscard]] Status read_peer(Peer& peer, std::uint64_t now) noexcept {
-        std::array<char, read_chunk_size> scratch{};
+        char scratch[read_chunk_size];
         std::size_t total = 0;
         while (!peer.closed && peer.driver && peer.driver->can_receive() && total < io_byte_budget) {
             const auto already_buffered = process_peer_buffer(peer, now);
@@ -3028,10 +3054,10 @@ struct EngineRuntime::Impl {
             if (peer.receive_buffer.size() >= high_water) peer.compact_receive();
             const auto available = high_water - peer.unread_size();
             const auto budget = io_byte_budget - total;
-            const auto read_size = std::min({scratch.size(), available, budget});
+            const auto read_size = std::min({read_chunk_size, available, budget});
             if (read_size == 0) break;
-            const auto io = peer.tls ? peer.tls->read(std::span<char>{scratch.data(), read_size})
-                : peer.stream.read(std::span<char>{scratch.data(), read_size});
+            const auto io = peer.tls ? peer.tls->read(std::span<char>{scratch, read_size})
+                : peer.stream.read(std::span<char>{scratch, read_size});
             if (!io.status.ok()) {
                 drop_peer(peer, io.status, now, true);
                 return io.status;
@@ -3044,7 +3070,7 @@ struct EngineRuntime::Impl {
             if (io.bytes == 0) break;
             total += io.bytes;
             try {
-                peer.receive_buffer.append(scratch.data(), io.bytes);
+                peer.receive_buffer.append(scratch, io.bytes);
             } catch (...) {
                 drop_peer(peer, Status{ErrorCode::capacity_exceeded}, now, true);
                 return {ErrorCode::capacity_exceeded};
@@ -3060,6 +3086,9 @@ struct EngineRuntime::Impl {
                 drop_peer(peer, Status{ErrorCode::too_large}, now, true);
                 return {ErrorCode::too_large};
             }
+            // Short read on plaintext nonblocking TCP means the kernel receive buffer is drained;
+            // exit immediately so replies flush before any extra EAGAIN recv() syscall.
+            if (!peer.tls && io.bytes < read_size) break;
         }
         return Status::success();
     }
@@ -3357,11 +3386,11 @@ struct EngineRuntime::Impl {
             for (auto& peer : peers) {
                 if (peer->closed || !peer->driver || peer->connection != Connection::connected ||
                     !peer->session || peer->session->callback_in_flight.load(std::memory_order_acquire)) continue;
-                std::array<char, 256> reason{};
-                const auto size = peer->session->sender->take_logout(reason);
+                char reason[256];
+                const auto size = peer->session->sender->take_logout(std::span<char>{reason, sizeof(reason)});
                 if (size) {
                     const auto wall = wall_timestamp();
-                    const auto result = peer->driver->logout({reason.data(), *size}, now, timestamp_view(wall));
+                    const auto result = peer->driver->logout({reason, *size}, now, timestamp_view(wall));
                     if (!result.ok()) report_error(peer->name, result);
                 }
             }
@@ -3376,7 +3405,11 @@ struct EngineRuntime::Impl {
                     !stopping.load(std::memory_order_acquire))
                     (void)begin_connect(*peer, now);
             }
-            tick_sessions(now);
+            if (!last_tick_valid || now != last_tick_ms || shutdown_started) {
+                tick_sessions(now);
+                last_tick_ms = now;
+                last_tick_valid = true;
+            }
             publish_snapshots();
             bool buffered_work = false;
             for (auto& peer : peers) {
@@ -3536,8 +3569,10 @@ struct EngineRuntime::Impl {
                 if ((events & (EPOLLIN | EPOLLHUP)) ||
                     (peer->tls && peer->tls->read_wants_write() && (events & EPOLLOUT)))
                     (void)read_peer(*peer, now);
-                if (!peer->closed && ((events & EPOLLOUT) ||
-                    (peer->tls && peer->tls->write_wants_read() && (events & EPOLLIN))))
+                if (!peer->closed &&
+                    ((peer->driver && peer->driver->needs_write() && !(peer->tls && peer->tls->write_wants_read())) ||
+                     (events & EPOLLOUT) ||
+                     (peer->tls && peer->tls->write_wants_read() && (events & EPOLLIN))))
                     (void)write_peer(*peer, now);
                 if (observer_failed) { iteration_finished = true; return fatal_status; }
             }
@@ -3549,6 +3584,8 @@ struct EngineRuntime::Impl {
     EpollTag wake_tag{TargetKind::wake, nullptr, -1, 0};
     int epoll_fd{-1};
     std::size_t rotation{};
+    std::uint64_t last_tick_ms{};
+    bool last_tick_valid{};
     bool iteration_finished{};
     Status final_status{};
     std::thread::id owner_thread;

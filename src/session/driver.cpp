@@ -358,7 +358,7 @@ struct SessionDriver::Impl {
             }
             if (record.kind == RecordKind::outbound && record.receipt != 0) {
                 put_receipt(record.receipt, record.seq, ReceiptState::appended);
-                if (record.dependency != 0) ++dependent_reply_counts[record.dependency];
+                if (record.dependency != 0) increment_dependent_reply(record.dependency);
             }
             if (record.kind == RecordKind::inbound) {
                 FlatMessageView message{};
@@ -430,6 +430,8 @@ struct SessionDriver::Impl {
     std::vector<ReceiptSlot> receipt_slots;
     std::vector<ReplayRange> replay_slots;
     std::vector<RecoverySlot> recovery_slots;
+    RecordId hot_dependent_reply_id{};
+    std::size_t hot_dependent_reply_count{};
     std::unordered_map<RecordId, std::size_t> dependent_reply_counts;
     SessionDriver* public_owner{};
     std::thread::id owner_thread{};
@@ -788,26 +790,57 @@ struct SessionDriver::Impl {
         AdminMessageStorage storage{};
         if (const auto status = make_admin_view(msg_type, fields, storage, admin_arena); !status.ok()) return status;
         const auto header = make_header(sequence, wall_time, poss_dup, orig_time);
-        const auto encoded = encode_fix(storage.view, header, encode_buffer);
-        if (!encoded.ok()) return encoded.status();
-        if (encoded.value() > config.max_frame_bytes) return Status{ErrorCode::too_large};
-        const auto replay_reserve = replay_reservation_bytes();
-        if (tx_count == tx_slots.size() || admin_count >= config.admin_reserve_messages ||
-            encoded.value() > config.admin_reserve_bytes - admin_bytes ||
-            replay_reserve > config.admin_reserve_bytes - admin_bytes - encoded.value() ||
-            encoded.value() > config.max_pending_bytes - pending_bytes_count ||
-            replay_reserve > config.max_pending_bytes - pending_bytes_count - encoded.value()) {
-            return Status{ErrorCode::queue_full};
-        }
         RecordId record_id = 0;
-        if (persist) {
-            const auto appended = journal.append(RecordKind::outbound, sequence, 0, dependency,
-                std::string_view{encode_buffer.data(), encoded.value()}, 0);
-            if (!appended.ok()) return appended.status();
-            record_id = appended.value().id;
-            if (const auto status = update_retention_floor(); !status.ok()) return fail(status);
+        std::size_t encoded_size = 0;
+        const auto replay_reserve = replay_reservation_bytes();
+        const bool base_capacity_ok =
+            tx_count < tx_slots.size() &&
+            admin_count < config.admin_reserve_messages &&
+            replay_reserve <= config.admin_reserve_bytes - admin_bytes &&
+            replay_reserve <= config.max_pending_bytes - pending_bytes_count;
+        const std::size_t max_admin_frame = base_capacity_ok
+            ? std::min({config.max_frame_bytes,
+                        config.admin_reserve_bytes - admin_bytes - replay_reserve,
+                        config.max_pending_bytes - pending_bytes_count - replay_reserve})
+            : 0U;
+
+        const std::size_t admin_bound = std::min(config.max_frame_bytes,
+            std::size_t{256} + storage.view.value_byte_count + storage.view.field_count * 40U);
+        bool committed_zero_copy = false;
+        if (persist && base_capacity_ok && max_admin_frame > 0) {
+            auto reserved = journal.reserve(RecordKind::outbound, sequence, 0, dependency, admin_bound);
+            if (reserved.ok()) {
+                const auto encoded = encode_fix(storage.view, header, reserved.value().payload);
+                if (encoded.ok()) {
+                    if (encoded.value() > max_admin_frame) return Status{ErrorCode::queue_full};
+                    const auto committed = journal.commit(reserved.value(), encoded.value());
+                    if (!committed.ok()) return committed.status();
+                    record_id = committed.value().id;
+                    encoded_size = encoded.value();
+                    if (const auto status = update_retention_floor(); !status.ok()) return fail(status);
+                    committed_zero_copy = true;
+                } else if (encoded.status().code != ErrorCode::capacity_exceeded) {
+                    return encoded.status();
+                }
+            }
         }
-        if (const auto status = enqueue(record_id, encoded.value(), sequence, 0, msg_type,
+        if (!committed_zero_copy) {
+            const auto encoded = encode_fix(storage.view, header, encode_buffer);
+            if (!encoded.ok()) return encoded.status();
+            if (encoded.value() > config.max_frame_bytes) return Status{ErrorCode::too_large};
+            if (!base_capacity_ok || encoded.value() > max_admin_frame) {
+                return Status{ErrorCode::queue_full};
+            }
+            encoded_size = encoded.value();
+            if (persist) {
+                const auto appended = journal.append(RecordKind::outbound, sequence, 0, dependency,
+                    std::string_view{encode_buffer.data(), encoded_size}, 0);
+                if (!appended.ok()) return appended.status();
+                record_id = appended.value().id;
+                if (const auto status = update_retention_floor(); !status.ok()) return fail(status);
+            }
+        }
+        if (const auto status = enqueue(record_id, encoded_size, sequence, 0, msg_type,
                 now_ms, false); !status.ok()) {
             if (persist) return fail(Status{ErrorCode::protocol_error, 34});
             return status;
@@ -1336,13 +1369,13 @@ struct SessionDriver::Impl {
     [[nodiscard]] Status append_delivery(RecordId inbound_id, std::uint64_t sequence) noexcept {
         if (journal.has_delivery(inbound_id)) {
             forget_recovery(inbound_id);
-            dependent_reply_counts.erase(inbound_id);
+            clear_dependent_reply(inbound_id);
             return update_retention_floor();
         }
         const auto appended = journal.append(RecordKind::delivery, sequence, 0, inbound_id, {});
         if (!appended.ok()) return appended.status();
         forget_recovery(inbound_id);
-        dependent_reply_counts.erase(inbound_id);
+        clear_dependent_reply(inbound_id);
         return update_retention_floor();
     }
 
@@ -1627,7 +1660,38 @@ struct SessionDriver::Impl {
         return false;
     }
 
+    void increment_dependent_reply(RecordId inbound_id) noexcept {
+        if (hot_dependent_reply_id == inbound_id) {
+            ++hot_dependent_reply_count;
+            return;
+        }
+        if (hot_dependent_reply_id == 0 && dependent_reply_counts.empty()) {
+            hot_dependent_reply_id = inbound_id;
+            hot_dependent_reply_count = 1;
+            return;
+        }
+        if (hot_dependent_reply_id != 0) {
+            dependent_reply_counts[hot_dependent_reply_id] += hot_dependent_reply_count;
+            hot_dependent_reply_id = 0;
+            hot_dependent_reply_count = 0;
+        }
+        ++dependent_reply_counts[inbound_id];
+    }
+
+    void clear_dependent_reply(RecordId inbound_id) noexcept {
+        if (hot_dependent_reply_id == inbound_id) {
+            hot_dependent_reply_id = 0;
+            hot_dependent_reply_count = 0;
+            return;
+        }
+        if (!dependent_reply_counts.empty()) {
+            dependent_reply_counts.erase(inbound_id);
+        }
+    }
+
     [[nodiscard]] std::size_t dependent_application_replies(RecordId inbound_id) const noexcept {
+        if (hot_dependent_reply_id == inbound_id) return hot_dependent_reply_count;
+        if (dependent_reply_counts.empty()) return 0U;
         const auto found = dependent_reply_counts.find(inbound_id);
         return found == dependent_reply_counts.end() ? 0U : found->second;
     }
@@ -1725,22 +1789,64 @@ struct SessionDriver::Impl {
         }
         const auto sequence = core.next_outbound();
         const auto header = make_header(sequence, wall_time);
-        const auto encoded = encode_fix(message, header, encode_buffer);
-        if (!encoded.ok()) return encoded.status();
-        if (encoded.value() > config.max_frame_bytes ||
-            encoded.value() > byte_limit - business_bytes ||
-            encoded.value() > config.max_pending_bytes - pending_bytes_count ||
-            replay_reservation_bytes() > config.max_pending_bytes - pending_bytes_count - encoded.value()) {
-            capacity_blocked = true;
-            return Status{ErrorCode::queue_full};
-        }
         const auto receipt_id = next_receipt_id;
-        const auto appended = journal.append(RecordKind::outbound, sequence, receipt_id, dependency,
-            std::string_view{encode_buffer.data(), encoded.value()});
-        if (!appended.ok()) return fail(appended.status());
-        if (dependency != 0 && receipt_id != 0) ++dependent_reply_counts[dependency];
+        const auto replay_reserve = replay_reservation_bytes();
+        const std::size_t max_allowed = std::min({
+            config.max_frame_bytes,
+            byte_limit - business_bytes,
+            config.max_pending_bytes - pending_bytes_count - replay_reserve
+        });
+
+        // Tight upper-bound reserve so small segments pack densely without premature rotation.
+        std::size_t reserve_bound = 192U + message.value_byte_count + message.field_count * 40U;
+        if (message.group_count != 0 && message.groups != nullptr) {
+            for (std::size_t g = 0; g < message.group_count; ++g) {
+                const auto& grp = message.groups[g];
+                if (grp.entries != nullptr) {
+                    for (std::size_t e = 0; e < grp.entry_count; ++e) {
+                        reserve_bound += grp.entries[e].value_byte_count + grp.entries[e].field_count * 40U;
+                    }
+                }
+            }
+        }
+        reserve_bound = std::min(config.max_frame_bytes, reserve_bound);
+
+        // Zero-copy path: encode directly into pre-faulted v2 mmap Journal payload slot.
+        RecordId committed_id = 0;
+        std::size_t encoded_size = 0;
+        auto reserved = journal.reserve(RecordKind::outbound, sequence, receipt_id, dependency, reserve_bound);
+        if (reserved.ok()) {
+            const auto encoded = encode_fix(message, header, reserved.value().payload);
+            if (encoded.ok()) {
+                if (encoded.value() > max_allowed) {
+                    capacity_blocked = true;
+                    return Status{ErrorCode::queue_full};
+                }
+                const auto committed = journal.commit(reserved.value(), encoded.value());
+                if (!committed.ok()) return fail(committed.status());
+                committed_id = committed.value().id;
+                encoded_size = encoded.value();
+            } else if (encoded.status().code != ErrorCode::capacity_exceeded) {
+                return encoded.status();
+            }
+        }
+        if (committed_id == 0) {
+            // Exact-size fallback for tight/nearly-full segments or deeply nested groups.
+            const auto encoded = encode_fix(message, header, encode_buffer);
+            if (!encoded.ok()) return encoded.status();
+            if (encoded.value() > max_allowed) {
+                capacity_blocked = true;
+                return Status{ErrorCode::queue_full};
+            }
+            const auto appended = journal.append(RecordKind::outbound, sequence, receipt_id, dependency,
+                std::string_view{encode_buffer.data(), encoded.value()});
+            if (!appended.ok()) return fail(appended.status());
+            committed_id = appended.value().id;
+            encoded_size = encoded.value();
+        }
+        if (dependency != 0 && receipt_id != 0) increment_dependent_reply(dependency);
         if (const auto status = update_retention_floor(); !status.ok()) return fail(status);
-        if (const auto status = enqueue(appended.value().id, encoded.value(), sequence,
+        if (const auto status = enqueue(committed_id, encoded_size, sequence,
                 receipt_id, message.msg_type, now_ms, true); !status.ok()) {
             return fail(Status{ErrorCode::protocol_error, 34});
         }
@@ -1948,9 +2054,18 @@ struct SessionDriver::Impl {
     }
 
     [[nodiscard]] Status process_inbound(std::string_view frame_bytes, std::uint64_t now_ms,
-        std::string_view wall_time, bool recovery = false) noexcept {
+        std::string_view wall_time, bool recovery = false,
+        const FrameView* verified_frame = nullptr) noexcept {
         FlatMessageView message{};
-        if (const auto status = parse_frame(frame_bytes, message); !status.ok()) return fail(status);
+        if (verified_frame != nullptr && verified_frame->consumed == frame_bytes.size() &&
+            frame_bytes.size() <= config.max_frame_bytes) {
+            if (const auto status = parse_flat_verified(*verified_frame, parse_fields, message, callbacks.wire_hints);
+                !status.ok()) {
+                return fail(status);
+            }
+        } else {
+            if (const auto status = parse_frame(frame_bytes, message); !status.ok()) return fail(status);
+        }
         const auto tags = extract_inbound_tags(message);
         std::string_view msg_type;
         std::string_view test_id;
@@ -2438,6 +2553,19 @@ Status SessionDriver::receive(std::string_view complete_frame, std::uint64_t now
     if (const auto status = impl_->set_wall_time(wall_time); !status.ok()) return status;
     impl_->callback_now_ms = now_ms;
     return impl_->process_inbound(complete_frame, now_ms, impl_->callback_wall_time);
+}
+
+Status SessionDriver::receive_verified(FrameView verified_frame, std::uint64_t now_ms,
+    std::string_view wall_time) noexcept {
+    if (!impl_) return Status{ErrorCode::engine_stopped};
+    if (const auto status = impl_->claim_owner(); !status.ok()) return status;
+    if (impl_->fatal) return impl_->last_status.ok() ? Status{ErrorCode::engine_stopped} : impl_->last_status;
+    if (impl_->core.state() == SessionState::disconnected || impl_->core.state() == SessionState::closed ||
+        impl_->core.state() == SessionState::failed)
+        return Status{ErrorCode::not_ready};
+    if (const auto status = impl_->set_wall_time(wall_time); !status.ok()) return status;
+    impl_->callback_now_ms = now_ms;
+    return impl_->process_inbound(verified_frame.bytes, now_ms, impl_->callback_wall_time, false, &verified_frame);
 }
 
 Status SessionDriver::defer_delivery(DeliveryInfo info) noexcept {
