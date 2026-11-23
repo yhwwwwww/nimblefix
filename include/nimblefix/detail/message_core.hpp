@@ -7,10 +7,12 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <type_traits>
 #include <utility>
+#include <vector>
 
 #include <nimblefix/decimal.hpp>
 #include <nimblefix/status.hpp>
@@ -240,17 +242,27 @@ struct StorageBlock {
     std::size_t max_fields{};
     std::size_t max_value_bytes{};
 
+    [[nodiscard]] static constexpr std::size_t presence_bytes_for(std::size_t slot_cap) noexcept {
+        const std::size_t raw = (slot_cap + 7U) / 8U;
+        return (raw + alignof(SlotValue) - 1U) & ~(alignof(SlotValue) - 1U);
+    }
     [[nodiscard]] SlotValue* slots() noexcept {
         return reinterpret_cast<SlotValue*>(reinterpret_cast<std::byte*>(this) + sizeof(StorageBlock));
     }
     [[nodiscard]] const SlotValue* slots() const noexcept {
         return reinterpret_cast<const SlotValue*>(reinterpret_cast<const std::byte*>(this) + sizeof(StorageBlock));
     }
+    [[nodiscard]] std::uint8_t* presence_bits() noexcept {
+        return reinterpret_cast<std::uint8_t*>(slots() + slot_capacity);
+    }
+    [[nodiscard]] const std::uint8_t* presence_bits() const noexcept {
+        return reinterpret_cast<const std::uint8_t*>(slots() + slot_capacity);
+    }
     [[nodiscard]] char* value_bytes() noexcept {
-        return reinterpret_cast<char*>(slots() + slot_capacity);
+        return reinterpret_cast<char*>(presence_bits() + presence_bytes_for(slot_capacity));
     }
     [[nodiscard]] const char* value_bytes() const noexcept {
-        return reinterpret_cast<const char*>(slots() + slot_capacity);
+        return reinterpret_cast<const char*>(presence_bits() + presence_bytes_for(slot_capacity));
     }
 };
 static_assert(sizeof(StorageBlock) % alignof(SlotValue) == 0);
@@ -323,8 +335,10 @@ struct fixed_shape_allowed<Policy, Fields<F...>>
     constexpr auto max = std::numeric_limits<std::size_t>::max();
     if (slot_capacity > (max - sizeof(StorageBlock)) / sizeof(SlotValue)) return false;
     const auto slots_size = slot_capacity * sizeof(SlotValue);
-    if (byte_capacity > max - sizeof(StorageBlock) - slots_size) return false;
-    result = sizeof(StorageBlock) + slots_size + byte_capacity;
+    const auto pres_size = StorageBlock::presence_bytes_for(slot_capacity);
+    if (pres_size > max - sizeof(StorageBlock) - slots_size) return false;
+    if (byte_capacity > max - sizeof(StorageBlock) - slots_size - pres_size) return false;
+    result = sizeof(StorageBlock) + slots_size + pres_size + byte_capacity;
     return true;
 }
 
@@ -351,8 +365,8 @@ struct fixed_shape_allowed<Policy, Fields<F...>>
 
     const auto old_slots = block == nullptr ? 0 : block->slot_capacity;
     const auto old_bytes = block == nullptr ? 0 : block->value_byte_capacity;
-    const auto new_slots = grown_capacity(old_slots, required_fields, max_fields, 2);
-    const auto new_bytes = grown_capacity(old_bytes, required_bytes, max_bytes, 64);
+    const auto new_slots = grown_capacity(old_slots, required_fields, max_fields, 24);
+    const auto new_bytes = grown_capacity(old_bytes, required_bytes, max_bytes, 512);
     if (block != nullptr && new_slots == old_slots && new_bytes == old_bytes) return Status::success();
 
     std::size_t bytes_to_allocate{};
@@ -365,9 +379,12 @@ struct fixed_shape_allowed<Policy, Fields<F...>>
     replacement->value_byte_capacity = new_bytes;
     replacement->max_fields = max_fields;
     replacement->max_value_bytes = max_bytes;
+    const auto new_pres_bytes = StorageBlock::presence_bytes_for(new_slots);
+    std::memset(replacement->presence_bits(), 0, new_pres_bytes);
     if (block != nullptr) {
         if (block->field_count != 0) {
             std::memcpy(replacement->slots(), block->slots(), block->field_count * sizeof(SlotValue));
+            std::memcpy(replacement->presence_bits(), block->presence_bits(), (block->field_count + 7U) / 8U);
         }
         if (block->value_byte_count != 0) {
             std::memcpy(replacement->value_bytes(), block->value_bytes(), block->value_byte_count);
@@ -376,6 +393,155 @@ struct fixed_shape_allowed<Policy, Fields<F...>>
     }
     block = replacement;
     return Status::success();
+}
+
+// SSO storage for MessageBuilder: zero malloc up to 16 fields and 256 text bytes;
+// automatically spills to a bounded heap StorageBlock if either threshold is exceeded.
+struct SsoStorage {
+    static constexpr std::size_t inline_slot_cap = 16;
+    static constexpr std::size_t inline_byte_cap = 256;
+    static constexpr std::size_t inline_presence_cap = (inline_slot_cap + 7U) / 8U;
+
+    StorageBlock* heap{};
+    std::size_t field_count{};
+    std::size_t byte_count{};
+    bool has_absent{};
+    std::array<SlotValue, inline_slot_cap> inline_slots;
+    std::array<std::uint8_t, inline_presence_cap> inline_presence{};
+    std::array<char, inline_byte_cap> inline_bytes;
+
+    SsoStorage() noexcept = default;
+    SsoStorage(const SsoStorage&) = delete;
+    SsoStorage& operator=(const SsoStorage&) = delete;
+    SsoStorage(SsoStorage&& other) noexcept { move_from(other); }
+    SsoStorage& operator=(SsoStorage&& other) noexcept {
+        if (this == &other) return *this;
+        std::free(heap);
+        heap = nullptr;
+        move_from(other);
+        return *this;
+    }
+    ~SsoStorage() { std::free(heap); }
+
+    [[nodiscard]] SlotValue* slots() noexcept { return heap != nullptr ? heap->slots() : inline_slots.data(); }
+    [[nodiscard]] const SlotValue* slots() const noexcept { return heap != nullptr ? heap->slots() : inline_slots.data(); }
+    [[nodiscard]] std::uint8_t* presence_bits() noexcept {
+        return heap != nullptr ? heap->presence_bits() : inline_presence.data();
+    }
+    [[nodiscard]] const std::uint8_t* presence_bits() const noexcept {
+        return heap != nullptr ? heap->presence_bits() : inline_presence.data();
+    }
+    [[nodiscard]] char* value_bytes() noexcept { return heap != nullptr ? heap->value_bytes() : inline_bytes.data(); }
+    [[nodiscard]] const char* value_bytes() const noexcept {
+        return heap != nullptr ? heap->value_bytes() : inline_bytes.data();
+    }
+    [[nodiscard]] std::size_t value_byte_capacity() const noexcept {
+        return heap != nullptr ? heap->value_byte_capacity : inline_byte_cap;
+    }
+
+    [[nodiscard]] Status ensure_for(const MessageLimits& limits, std::size_t req_fields,
+                                    std::size_t req_bytes) noexcept {
+        const auto max_fields = limits.max_fields;
+        const auto max_bytes = clamp_value_limit(limits.max_value_bytes);
+        if (req_fields > max_fields || req_bytes > max_bytes) {
+            return Status{ErrorCode::capacity_exceeded};
+        }
+        if (heap == nullptr) {
+            if (req_fields <= inline_slot_cap && req_bytes <= inline_byte_cap) {
+                return Status::success();
+            }
+            if (const auto st = ensure_storage(heap, limits, req_fields, req_bytes); !st.ok()) return st;
+            heap->field_count = field_count;
+            heap->value_byte_count = byte_count;
+            if (field_count != 0) {
+                std::memcpy(heap->slots(), inline_slots.data(), field_count * sizeof(SlotValue));
+                std::memcpy(heap->presence_bits(), inline_presence.data(), (field_count + 7U) / 8U);
+            }
+            if (byte_count != 0) {
+                std::memcpy(heap->value_bytes(), inline_bytes.data(), byte_count);
+            }
+            return Status::success();
+        }
+        heap->field_count = field_count;
+        heap->value_byte_count = byte_count;
+        return ensure_storage(heap, limits, req_fields, req_bytes);
+    }
+
+private:
+    void move_from(SsoStorage& other) noexcept {
+        heap = std::exchange(other.heap, nullptr);
+        field_count = std::exchange(other.field_count, 0);
+        byte_count = std::exchange(other.byte_count, 0);
+        has_absent = std::exchange(other.has_absent, false);
+        if (heap == nullptr) {
+            if (field_count != 0) {
+                std::memcpy(inline_slots.data(), other.inline_slots.data(), field_count * sizeof(SlotValue));
+                inline_presence = other.inline_presence;
+            }
+            if (byte_count != 0) {
+                std::memcpy(inline_bytes.data(), other.inline_bytes.data(), byte_count);
+            }
+        }
+        other.inline_presence = {};
+    }
+};
+
+template <class T>
+struct unwrap_optional {
+    using type = T;
+    static constexpr bool value = false;
+};
+
+template <class T>
+struct unwrap_optional<std::optional<T>> {
+    using type = T;
+    static constexpr bool value = true;
+};
+
+template <class T>
+inline constexpr bool is_optional_v = unwrap_optional<std::remove_cvref_t<T>>::value;
+
+template <class T>
+using unwrap_optional_t = typename unwrap_optional<std::remove_cvref_t<T>>::type;
+
+template <class Policy, std::uint32_t Tag, FieldKind Kind, WireType Type>
+consteval PlanField make_single_plan_field() {
+    static_assert(Tag > 0 && Tag <= maximum_fix_tag, "FIX tags must be in 1..999999999");
+    static_assert(!is_managed_tag(Tag), "session and framing tags are engine managed");
+    PlanField field{};
+    field.tag = Tag;
+    field.slot_index = 0;
+    field.kind = Kind;
+    field.wire_type = Type;
+    field.group_counter = GroupCountTag<Policy, Tag>::value;
+    field.needs_policy_check = FieldNeedsPolicyCheck<Policy, Tag>::value;
+    field.pair_tag = FieldPairTag<Policy, Tag>::value;
+    std::array<char, 9> digits{};
+    std::size_t digit_count = 0;
+    auto tag = Tag;
+    do {
+        digits[digit_count++] = static_cast<char>('0' + tag % 10);
+        tag /= 10;
+    } while (tag != 0);
+    field.prefix_size = static_cast<std::uint8_t>(digit_count + 1);
+    for (std::size_t i = 0; i < digit_count; ++i) {
+        field.tag_prefix[i] = digits[digit_count - i - 1];
+    }
+    field.tag_prefix[digit_count] = '=';
+    if (field.pair_tag != 0) {
+        std::array<char, 9> pair_digits{};
+        std::size_t pair_digit_count = 0;
+        auto pair_tag = field.pair_tag;
+        do {
+            pair_digits[pair_digit_count++] = static_cast<char>('0' + pair_tag % 10);
+            pair_tag /= 10;
+        } while (pair_tag != 0);
+        field.pair_prefix_size = static_cast<std::uint8_t>(pair_digit_count + 1);
+        for (std::size_t i = 0; i < pair_digit_count; ++i)
+            field.pair_tag_prefix[i] = pair_digits[pair_digit_count - i - 1];
+        field.pair_tag_prefix[pair_digit_count] = '=';
+    }
+    return field;
 }
 
 template <class T>
@@ -1024,22 +1190,22 @@ public:
     static constexpr const auto& physical_slot_map = slot_map_;
 
     explicit MessageBuilder(MessageLimits limits = {}) noexcept : limits_(limits) {}
-    MessageBuilder(detail::StorageBlock* block, MessageLimits limits, Status status,
-        detail::AdoptStorage) noexcept : block_(block), limits_(limits), status_(status) {}
+    MessageBuilder(detail::SsoStorage&& storage, MessageLimits limits, Status status,
+        detail::AdoptStorage) noexcept
+        : storage_(std::move(storage)), limits_(limits), status_(status) {}
     MessageBuilder(const MessageBuilder&) = delete;
     MessageBuilder& operator=(const MessageBuilder&) = delete;
     MessageBuilder(MessageBuilder&& other) noexcept
-        : block_(std::exchange(other.block_, nullptr)), limits_(other.limits_),
+        : storage_(std::move(other.storage_)), limits_(other.limits_),
           status_(std::exchange(other.status_, Status{ErrorCode::invalid_value})) {}
     MessageBuilder& operator=(MessageBuilder&& other) noexcept {
         if (this == &other) return *this;
-        std::free(block_);
-        block_ = std::exchange(other.block_, nullptr);
+        storage_ = std::move(other.storage_);
         limits_ = other.limits_;
         status_ = std::exchange(other.status_, Status{ErrorCode::invalid_value});
         return *this;
     }
-    ~MessageBuilder() { std::free(block_); }
+    ~MessageBuilder() = default;
 
     [[nodiscard]] Status status() const noexcept { return view().status; }
 
@@ -1049,31 +1215,59 @@ public:
         static_assert(!detail::is_managed_tag(Tag), "session and framing tags are engine managed");
         static_assert(detail::policy_allows_tag<Policy, Tag>(), "tag is not allowed by this generated message");
         static_assert(!detail::contains_tag<Shape, Tag>::value, "a flat message shape cannot declare the same tag twice");
-        static_assert(detail::supported_value_v<V>, "unsupported static FIX field value type");
+        using ValueType = detail::unwrap_optional_t<V>;
+        static_assert(detail::supported_value_v<ValueType>, "unsupported static FIX field value type");
         constexpr auto wire_type = FieldWireType<Policy, Tag>::value;
-        static_assert(detail::wire_value_compatible_v<wire_type, V>,
+        static_assert(detail::wire_value_compatible_v<wire_type, ValueType>,
             "value type does not match the generated FIX field type");
-        using NewField = Field<Tag, detail::schema_field_kind_v<Policy, Tag, V>,
+        using NewField = Field<Tag, detail::schema_field_kind_v<Policy, Tag, ValueType>,
             WireRank<Policy, Tag>::value, wire_type>;
         using Next = typename ShapeInfo::template append_builder<Policy, NewField>;
-        if (status_.ok()) append<Tag>(std::forward<V>(value));
-        auto* block = std::exchange(block_, nullptr);
+        if (status_.ok()) {
+            if constexpr (detail::is_optional_v<V>) {
+                if (value.has_value()) {
+                    append<Tag>(*std::forward<V>(value));
+                } else {
+                    append_absent<Tag>();
+                }
+            } else {
+                append<Tag>(std::forward<V>(value));
+            }
+        }
         const auto result_status = std::exchange(status_, Status{ErrorCode::invalid_value});
-        return Next{block, limits_, result_status, detail::AdoptStorage{}};
+        return Next{std::move(storage_), limits_, result_status, detail::AdoptStorage{}};
     }
 
     [[nodiscard]] detail::MessageView view() const noexcept {
-        const auto* values = block_ == nullptr ? nullptr : block_->slots();
-        const auto* bytes = block_ == nullptr ? nullptr : block_->value_bytes();
-        const auto byte_count = block_ == nullptr ? 0 : block_->value_byte_count;
-        detail::MessageView result{values, bytes, byte_count, plan_.data(), slot_map_.data(),
-            plan_.size(), nullptr, msg_type, status_};
+        const auto* values = storage_.field_count == 0 ? nullptr : storage_.slots();
+        const auto* bytes = storage_.byte_count == 0 ? nullptr : storage_.value_bytes();
+        const auto* pres = storage_.has_absent ? storage_.presence_bits() : nullptr;
+        detail::MessageView result{values, bytes, storage_.byte_count, plan_.data(), slot_map_.data(),
+            plan_.size(), pres, msg_type, status_};
+        result.prevalidated_scalars = true;
         detail::attach_policy_validation<Policy>(result);
-        if (result.status.ok()) result.status = detail::validate_schema_presence(result);
+        if (result.status.ok()) {
+            result.status = detail::validate_schema_presence(result);
+            result.presence_validated = result.status.ok();
+        }
         return result;
     }
 
 private:
+    template <std::uint32_t Tag>
+    void append_absent() noexcept {
+        const auto next_count = storage_.field_count + 1;
+        if (const auto result = storage_.ensure_for(limits_, next_count, storage_.byte_count); !result.ok()) {
+            status_ = Status{result.code, static_cast<int>(Tag)};
+            return;
+        }
+        storage_.slots()[storage_.field_count] = detail::SlotValue{};
+        const auto idx = storage_.field_count;
+        storage_.presence_bits()[idx / 8U] &= static_cast<std::uint8_t>(~(1U << (idx % 8U)));
+        storage_.has_absent = true;
+        storage_.field_count = next_count;
+    }
+
     template <std::uint32_t Tag, class V>
     void append(V&& value) noexcept {
         std::size_t value_size = 0;
@@ -1098,13 +1292,12 @@ private:
                     return;
                 }
             }
-            if (block_ != nullptr && !text.empty()) {
+            if (storage_.byte_count != 0 && !text.empty()) {
                 const auto source = reinterpret_cast<std::uintptr_t>(text.data());
-                const auto arena = reinterpret_cast<std::uintptr_t>(block_->value_bytes());
+                const auto arena = reinterpret_cast<std::uintptr_t>(storage_.value_bytes());
                 if (source >= arena) {
                     const auto offset = source - arena;
-                    if (offset <= block_->value_byte_count &&
-                        text.size() <= block_->value_byte_count - offset) {
+                    if (offset <= storage_.byte_count && text.size() <= storage_.byte_count - offset) {
                         value_aliases_storage = true;
                         aliased_value_offset = static_cast<std::size_t>(offset);
                     }
@@ -1135,40 +1328,357 @@ private:
             }
         }
 
-        const std::size_t old_byte_count = block_ == nullptr ? 0 : block_->value_byte_count;
+        const std::size_t old_byte_count = storage_.byte_count;
         if (value_size > detail::clamp_value_limit(limits_.max_value_bytes) - old_byte_count) {
             status_ = Status{ErrorCode::capacity_exceeded, static_cast<int>(Tag)};
             return;
         }
-        const auto next_count = (block_ == nullptr ? 0 : block_->field_count) + 1;
-        if (const auto result = detail::ensure_storage(block_, limits_, next_count, old_byte_count + value_size);
+        const auto next_count = storage_.field_count + 1;
+        if (const auto result = storage_.ensure_for(limits_, next_count, old_byte_count + value_size);
             !result.ok()) {
             status_ = Status{result.code, static_cast<int>(Tag)};
             return;
         }
 
-        auto& slot = block_->slots()[block_->field_count];
-        std::size_t byte_count = block_->value_byte_count;
+        const auto idx = storage_.field_count;
+        auto& slot = storage_.slots()[idx];
+        std::size_t byte_count = storage_.byte_count;
         Status stored{};
         if constexpr (detail::is_string_v<V>) {
-            if (value_aliases_storage) text = {block_->value_bytes() + aliased_value_offset, text.size()};
+            if (value_aliases_storage) text = {storage_.value_bytes() + aliased_value_offset, text.size()};
             stored = detail::store_typed_slot_value<FieldWireType<Policy, Tag>::value>(slot,
-                block_->value_bytes(), byte_count, block_->value_byte_capacity, text);
+                storage_.value_bytes(), byte_count, storage_.value_byte_capacity(), text);
         } else {
             stored = detail::store_typed_slot_value<FieldWireType<Policy, Tag>::value>(slot,
-                block_->value_bytes(), byte_count, block_->value_byte_capacity, std::forward<V>(value));
+                storage_.value_bytes(), byte_count, storage_.value_byte_capacity(), std::forward<V>(value));
         }
         if (!stored.ok()) {
             status_ = Status{stored.code, static_cast<int>(Tag)};
             return;
         }
-        block_->value_byte_count = byte_count;
-        ++block_->field_count;
+        storage_.presence_bits()[idx / 8U] |= static_cast<std::uint8_t>(1U << (idx % 8U));
+        storage_.byte_count = byte_count;
+        storage_.field_count = next_count;
     }
 
-    detail::StorageBlock* block_{};
+    detail::SsoStorage storage_{};
     MessageLimits limits_{};
     Status status_{};
 };
+
+// Reusable zero-declaration SSO message draft (Scheme B).
+// Stack-allocated up to InlineSlots (16) fields and InlineBytes (256) text bytes with
+// zero heap allocations; automatically spills to heap if either threshold is exceeded.
+// Supports native C++ runtime `if` branches, std::optional values, field overwrite, and reset() reuse.
+template <FixedString MsgType, class Policy = FlatMessagePolicy<MsgType>,
+          std::size_t InlineSlots = 16, std::size_t InlineBytes = 256>
+class DraftMessage : public detail::policy_schema_alias<Policy> {
+public:
+    using policy_type = Policy;
+    static constexpr std::size_t attached_group_count = 0;
+    static constexpr std::string_view msg_type = MsgType.view();
+    static constexpr std::size_t inline_slot_capacity = InlineSlots;
+    static constexpr std::size_t inline_byte_capacity = InlineBytes;
+
+    explicit DraftMessage(MessageLimits limits = {}) noexcept : limits_(limits) {}
+    DraftMessage(const DraftMessage&) = delete;
+    DraftMessage& operator=(const DraftMessage&) = delete;
+    DraftMessage(DraftMessage&& other) noexcept { move_from(other); }
+    DraftMessage& operator=(DraftMessage&& other) noexcept {
+        if (this != &other) move_from(other);
+        return *this;
+    }
+
+    void reset() noexcept {
+        field_count_ = 0;
+        byte_count_ = 0;
+        status_ = Status::success();
+    }
+
+    [[nodiscard]] Status status() const noexcept { return view().status; }
+    [[nodiscard]] std::size_t field_count() const noexcept { return field_count_; }
+    [[nodiscard]] std::size_t byte_count() const noexcept { return byte_count_; }
+    [[nodiscard]] bool spilled() const noexcept { return slots_spilled_ || bytes_spilled_; }
+
+    template <std::uint32_t Tag, class V>
+    Status set(V&& value) noexcept {
+        static_assert(Tag > 0 && Tag <= detail::maximum_fix_tag, "FIX tags must be in 1..999999999");
+        static_assert(!detail::is_managed_tag(Tag), "session and framing tags are engine managed");
+        static_assert(detail::policy_allows_tag<Policy, Tag>(), "tag is not allowed by this generated message");
+        using ValueType = detail::unwrap_optional_t<V>;
+        static_assert(detail::supported_value_v<ValueType>, "unsupported static FIX field value type");
+        constexpr auto wire_type = FieldWireType<Policy, Tag>::value;
+        static_assert(detail::wire_value_compatible_v<wire_type, ValueType>,
+            "value type does not match the generated FIX field type");
+        if (!status_.ok()) return status_;
+        if constexpr (detail::is_optional_v<V>) {
+            if (!value.has_value()) return Status::success();
+            return set_present<Tag>(*std::forward<V>(value));
+        } else {
+            return set_present<Tag>(std::forward<V>(value));
+        }
+    }
+
+    [[nodiscard]] detail::MessageView view() const noexcept {
+        const auto* slots = field_count_ == 0 ? nullptr : active_slots();
+        const auto* plan = field_count_ == 0 ? nullptr : active_plan();
+        const auto* bytes = byte_count_ == 0 ? nullptr : active_bytes();
+        detail::MessageView result{slots, bytes, byte_count_, plan, nullptr,
+            field_count_, nullptr, msg_type, status_};
+        result.prevalidated_scalars = true;
+        detail::attach_policy_validation<Policy>(result);
+        if (result.status.ok()) {
+            result.status = detail::validate_schema_presence(result);
+            result.presence_validated = result.status.ok();
+        }
+        return result;
+    }
+
+private:
+    [[nodiscard]] detail::SlotValue* active_slots() noexcept {
+        return slots_spilled_ ? spill_slots_.data() : inline_slots_.data();
+    }
+    [[nodiscard]] const detail::SlotValue* active_slots() const noexcept {
+        return slots_spilled_ ? spill_slots_.data() : inline_slots_.data();
+    }
+    [[nodiscard]] detail::PlanField* active_plan() noexcept {
+        return slots_spilled_ ? spill_plan_.data() : inline_plan_.data();
+    }
+    [[nodiscard]] const detail::PlanField* active_plan() const noexcept {
+        return slots_spilled_ ? spill_plan_.data() : inline_plan_.data();
+    }
+    [[nodiscard]] std::size_t* active_ranks() noexcept {
+        return slots_spilled_ ? spill_ranks_.data() : inline_ranks_.data();
+    }
+    [[nodiscard]] char* active_bytes() noexcept {
+        return bytes_spilled_ ? spill_bytes_.data() : inline_bytes_.data();
+    }
+    [[nodiscard]] const char* active_bytes() const noexcept {
+        return bytes_spilled_ ? spill_bytes_.data() : inline_bytes_.data();
+    }
+    [[nodiscard]] std::size_t active_byte_capacity() const noexcept {
+        return bytes_spilled_ ? spill_bytes_.size() : InlineBytes;
+    }
+
+    [[nodiscard]] Status ensure_slot_capacity(std::size_t required) noexcept {
+        if (required > limits_.max_fields) return Status{ErrorCode::capacity_exceeded};
+        if (!slots_spilled_) {
+            if (required <= InlineSlots) return Status::success();
+            try {
+                const std::size_t cap = std::min(limits_.max_fields, std::max<std::size_t>(required, InlineSlots * 2));
+                spill_slots_.resize(cap);
+                spill_plan_.resize(cap);
+                spill_ranks_.resize(cap);
+                if (field_count_ != 0) {
+                    std::memcpy(spill_slots_.data(), inline_slots_.data(), field_count_ * sizeof(detail::SlotValue));
+                    std::memcpy(spill_plan_.data(), inline_plan_.data(), field_count_ * sizeof(detail::PlanField));
+                    std::memcpy(spill_ranks_.data(), inline_ranks_.data(), field_count_ * sizeof(std::size_t));
+                }
+                slots_spilled_ = true;
+                return Status::success();
+            } catch (...) {
+                return Status{ErrorCode::capacity_exceeded};
+            }
+        }
+        if (required <= spill_slots_.size()) return Status::success();
+        try {
+            const std::size_t cap = std::min(limits_.max_fields, std::max(required, spill_slots_.size() * 2));
+            spill_slots_.resize(cap);
+            spill_plan_.resize(cap);
+            spill_ranks_.resize(cap);
+            return Status::success();
+        } catch (...) {
+            return Status{ErrorCode::capacity_exceeded};
+        }
+    }
+
+    [[nodiscard]] Status ensure_byte_capacity(std::size_t required) noexcept {
+        const auto max_bytes = detail::clamp_value_limit(limits_.max_value_bytes);
+        if (required > max_bytes) return Status{ErrorCode::capacity_exceeded};
+        if (!bytes_spilled_) {
+            if (required <= InlineBytes) return Status::success();
+            try {
+                const std::size_t cap = std::min(max_bytes, std::max<std::size_t>(required, InlineBytes * 2));
+                spill_bytes_.resize(cap);
+                if (byte_count_ != 0) {
+                    std::memcpy(spill_bytes_.data(), inline_bytes_.data(), byte_count_);
+                }
+                bytes_spilled_ = true;
+                return Status::success();
+            } catch (...) {
+                return Status{ErrorCode::capacity_exceeded};
+            }
+        }
+        if (required <= spill_bytes_.size()) return Status::success();
+        try {
+            const std::size_t cap = std::min(max_bytes, std::max(required, spill_bytes_.size() * 2));
+            spill_bytes_.resize(cap);
+            return Status::success();
+        } catch (...) {
+            return Status{ErrorCode::capacity_exceeded};
+        }
+    }
+
+    template <std::uint32_t Tag, class V>
+    [[nodiscard]] Status set_present(V&& value) noexcept {
+        constexpr auto wire_type = FieldWireType<Policy, Tag>::value;
+        constexpr auto field_kind = detail::schema_field_kind_v<Policy, Tag, V>;
+        constexpr auto plan_proto = detail::make_single_plan_field<Policy, Tag, field_kind, wire_type>();
+        constexpr std::size_t declared_rank = WireRank<Policy, Tag>::value;
+
+        std::string_view text{};
+        std::size_t value_size = 0;
+        std::size_t aliased_offset = 0;
+        bool aliases_arena = false;
+        if constexpr (detail::is_string_v<V>) {
+            text = detail::as_string_view(std::forward<V>(value));
+            value_size = text.size();
+            if constexpr (wire_type != WireType::binary_data) {
+                if (!detail::is_valid_text(text)) {
+                    status_ = Status{ErrorCode::invalid_value, static_cast<int>(Tag)};
+                    return status_;
+                }
+            } else if (text.empty() || text.data() == nullptr) {
+                status_ = Status{ErrorCode::invalid_value, static_cast<int>(Tag)};
+                return status_;
+            }
+            if constexpr (wire_type == WireType::utc_timestamp) {
+                if (!detail::is_valid_utc_timestamp(text)) {
+                    status_ = Status{ErrorCode::invalid_timestamp, static_cast<int>(Tag)};
+                    return status_;
+                }
+            }
+            if (byte_count_ != 0 && !text.empty()) {
+                const auto src = reinterpret_cast<std::uintptr_t>(text.data());
+                const auto arena = reinterpret_cast<std::uintptr_t>(active_bytes());
+                if (src >= arena) {
+                    const auto off = src - arena;
+                    if (off <= byte_count_ && text.size() <= byte_count_ - off) {
+                        aliases_arena = true;
+                        aliased_offset = static_cast<std::size_t>(off);
+                    }
+                }
+            }
+        } else if constexpr (detail::is_decimal_v<V>) {
+            if (value.scale() > 18) {
+                status_ = Status{ErrorCode::invalid_decimal, static_cast<int>(Tag)};
+                return status_;
+            }
+        } else if constexpr (detail::is_character_v<V>) {
+            const auto ch = static_cast<unsigned char>(value);
+            if (ch < 0x20 || ch == 0x7f) {
+                status_ = Status{ErrorCode::invalid_value, static_cast<int>(Tag)};
+                return status_;
+            }
+        }
+
+        // Check whether Tag is already present (supports clean overwrite without duplicate tags).
+        auto* plan = active_plan();
+        std::size_t existing = field_count_;
+        for (std::size_t i = 0; i < field_count_; ++i) {
+            if (plan[i].tag == Tag) {
+                existing = i;
+                break;
+            }
+        }
+
+        if (value_size != 0) {
+            if (const auto st = ensure_byte_capacity(byte_count_ + value_size); !st.ok()) {
+                status_ = Status{st.code, static_cast<int>(Tag)};
+                return status_;
+            }
+        }
+
+        detail::SlotValue new_slot{};
+        std::size_t next_bytes = byte_count_;
+        Status stored{};
+        if constexpr (detail::is_string_v<V>) {
+            if (aliases_arena) text = {active_bytes() + aliased_offset, text.size()};
+            stored = detail::store_typed_slot_value<wire_type>(new_slot,
+                active_bytes(), next_bytes, active_byte_capacity(), text);
+        } else {
+            stored = detail::store_typed_slot_value<wire_type>(new_slot,
+                active_bytes(), next_bytes, active_byte_capacity(), std::forward<V>(value));
+        }
+        if (!stored.ok()) {
+            status_ = Status{stored.code, static_cast<int>(Tag)};
+            return status_;
+        }
+
+        if (existing < field_count_) {
+            active_slots()[existing] = new_slot;
+            byte_count_ = next_bytes;
+            return Status::success();
+        }
+
+        if (const auto st = ensure_slot_capacity(field_count_ + 1); !st.ok()) {
+            status_ = Status{st.code, static_cast<int>(Tag)};
+            return status_;
+        }
+        auto* slots = active_slots();
+        plan = active_plan();
+        auto* ranks = active_ranks();
+        const std::size_t rank = declared_rank == unranked_field_rank ? field_count_ : declared_rank;
+
+        // Maintain canonical (rank, tag) wire order via insertion sort (1 comparison in normal order).
+        std::size_t ins = field_count_;
+        while (ins > 0 && (ranks[ins - 1] > rank || (ranks[ins - 1] == rank && plan[ins - 1].tag > Tag))) {
+            slots[ins] = slots[ins - 1];
+            plan[ins] = plan[ins - 1];
+            plan[ins].slot_index = static_cast<std::uint32_t>(ins);
+            ranks[ins] = ranks[ins - 1];
+            --ins;
+        }
+        slots[ins] = new_slot;
+        plan[ins] = plan_proto;
+        plan[ins].slot_index = static_cast<std::uint32_t>(ins);
+        ranks[ins] = rank;
+        ++field_count_;
+        byte_count_ = next_bytes;
+        return Status::success();
+    }
+
+    void move_from(DraftMessage& other) noexcept {
+        limits_ = other.limits_;
+        status_ = other.status_;
+        field_count_ = std::exchange(other.field_count_, 0);
+        byte_count_ = std::exchange(other.byte_count_, 0);
+        slots_spilled_ = std::exchange(other.slots_spilled_, false);
+        bytes_spilled_ = std::exchange(other.bytes_spilled_, false);
+        if (slots_spilled_) {
+            spill_slots_ = std::move(other.spill_slots_);
+            spill_plan_ = std::move(other.spill_plan_);
+            spill_ranks_ = std::move(other.spill_ranks_);
+        } else if (field_count_ != 0) {
+            std::memcpy(inline_slots_.data(), other.inline_slots_.data(), field_count_ * sizeof(detail::SlotValue));
+            std::memcpy(inline_plan_.data(), other.inline_plan_.data(), field_count_ * sizeof(detail::PlanField));
+            std::memcpy(inline_ranks_.data(), other.inline_ranks_.data(), field_count_ * sizeof(std::size_t));
+        }
+        if (bytes_spilled_) {
+            spill_bytes_ = std::move(other.spill_bytes_);
+        } else if (byte_count_ != 0) {
+            std::memcpy(inline_bytes_.data(), other.inline_bytes_.data(), byte_count_);
+        }
+        other.status_ = Status::success();
+    }
+
+    std::array<detail::SlotValue, InlineSlots> inline_slots_;
+    std::array<detail::PlanField, InlineSlots> inline_plan_;
+    std::array<std::size_t, InlineSlots> inline_ranks_;
+    std::array<char, InlineBytes> inline_bytes_;
+    std::vector<detail::SlotValue> spill_slots_{};
+    std::vector<detail::PlanField> spill_plan_{};
+    std::vector<std::size_t> spill_ranks_{};
+    std::string spill_bytes_{};
+    std::size_t field_count_{};
+    std::size_t byte_count_{};
+    MessageLimits limits_{};
+    Status status_{};
+    bool slots_spilled_{};
+    bool bytes_spilled_{};
+};
+
+template <FixedString MsgType, std::size_t InlineSlots = 16, std::size_t InlineBytes = 256>
+using Draft = DraftMessage<MsgType, FlatMessagePolicy<MsgType>, InlineSlots, InlineBytes>;
 
 } // namespace nimblefix

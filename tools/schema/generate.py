@@ -1430,11 +1430,35 @@ def render_header(schema: Schema, namespace: str) -> str:
             ]
         lines += ["};", ""]
 
+        draft_name = f"{name}Draft"
+        lines += [
+            f"template<std::size_t InlineSlots = 16, std::size_t InlineBytes = 256>",
+            f"class {draft_name} : public ::nimblefix::DraftMessage<{_cpp_string(message.msg_type)}, {policy}, InlineSlots, InlineBytes> {{",
+            f"    using Base = ::nimblefix::DraftMessage<{_cpp_string(message.msg_type)}, {policy}, InlineSlots, InlineBytes>;",
+            "public:",
+            "    using schema_type = Schema;",
+            "    using Base::Base;",
+        ]
+        for member in direct_fields:
+            field = schema.fields_by_name[member.field_name]
+            setter = _snake_case(field.name)
+            lines += [
+                "    template<class V>",
+                f"    {draft_name}& {setter}(V&& value) noexcept {{",
+                f"        (void)this->template set<{field.number}>(std::forward<V>(value));",
+                "        return *this;",
+                "    }",
+            ]
+        lines += ["};", ""]
+
         lines += [
             f"struct {name} {{",
             "    using schema_type = Schema;",
             f"    using view_type = {name}View;",
             f"    using policy_type = {policy};",
+            f"    using Draft = {draft_name}<>;",
+            f"    template<std::size_t InlineSlots = 16, std::size_t InlineBytes = 256>",
+            f"    using DraftWith = {draft_name}<InlineSlots, InlineBytes>;",
             f"    template<class Shape, std::size_t ByteCapacity = 512>",
             f"    using fixed_type = {fixed_name}<Shape, ByteCapacity>;",
             f"    template<std::size_t ByteCapacity, class... FieldSpecs>",

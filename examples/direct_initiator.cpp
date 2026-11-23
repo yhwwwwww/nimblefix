@@ -3,6 +3,7 @@
 
 #include <cstdint>
 #include <iostream>
+#include <optional>
 #include <string>
 #include <unistd.h>
 
@@ -67,23 +68,16 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    // 零分配栈上复用消息：只需按字段名声明一次，全程无数字 tag、无堆分配。
-    using MyOrder = fix::NewOrderSingle::Fixed<128,
-        fix::field::ClOrdID,
-        fix::field::Symbol,
-        fix::field::Side,
-        fix::field::TransactTime,
-        fix::field::OrderQty,
-        fix::field::OrdType>;
-
-    MyOrder order;
-    order.reset();
-    (void)order.cl_ord_id("ORD-0001");
-    (void)order.symbol("AAPL");
-    (void)order.side('1');
-    (void)order.transact_time("20261123-00:00:00.000");
-    (void)order.order_qty(nf::Decimal{100, 0});
-    (void)order.ord_type('1');
+    // 零声明 + 0 堆分配（SSO 256B，超长自动溢到堆）+ 支持原生 if：
+    fix::NewOrderSingle::Draft order;
+    const bool is_limit = false;
+    order.cl_ord_id("ORD-0001")
+         .symbol("AAPL")
+         .side('1')
+         .transact_time("20261123-00:00:00.000")
+         .order_qty(nf::Decimal{100, 0})
+         .ord_type(is_limit ? '2' : '1');
+    if (is_limit) order.price(nf::Decimal{15025, 2});
 
     const auto seq = initiator.send(order);
     if (!seq.ok()) {

@@ -224,6 +224,69 @@ void test_fluent_limits_and_delimiters() {
         "SendingTime must be a valid UTC timestamp");
 }
 
+void test_optional_and_draft_sso() {
+    using namespace nimblefix;
+    using namespace nimblefix::literals;
+
+    // 1. Fluent SSO make() with std::optional present & absent + >256B spill.
+    const std::optional<Decimal> some_px{"123.45"_dec};
+    const std::optional<Decimal> no_px{std::nullopt};
+    const std::optional<std::string_view> no_text{std::nullopt};
+    auto m1 = message<"D">()
+        .set<11>("OPT-1")
+        .set<44>(some_px)
+        .set<58>(no_text)
+        .set<99>(no_px);
+    std::array<char, 1024> output{};
+    auto enc = encode_fix44(m1, SessionHeader{"BUY", "SELL", 1, "20261026-12:30:45"}, output);
+    check(enc.ok(), "fluent optional message encodes");
+    if (enc.ok()) {
+        const auto f = as_view(output, enc.value());
+        check(f.find("11=OPT-1\x01") != std::string_view::npos, "present field emitted");
+        check(f.find("44=123.45\x01") != std::string_view::npos, "present optional emitted");
+        check(f.find("58=") == std::string_view::npos, "absent optional string omitted");
+        check(f.find("99=") == std::string_view::npos, "absent optional decimal omitted");
+    }
+
+    // Spill > 256 bytes in SSO MessageBuilder.
+    const std::string big_text(400, 'Z');
+    auto spilled = message<"D">().set<11>("BIG-1").set<58>(big_text);
+    enc = encode_fix44(spilled, SessionHeader{"BUY", "SELL", 2, "20261026-12:30:45"}, output);
+    check(enc.ok(), "fluent SSO spill encodes without rejecting");
+    if (enc.ok()) {
+        const auto f = as_view(output, enc.value());
+        check(f.find("58=" + big_text + "\x01") != std::string_view::npos, "spilled text preserved");
+    }
+
+    // 2. Flat DraftMessage: native if, overwrite, reset, >16 fields spill, >256B spill.
+    Draft<"D", 4, 32> d;
+    check(d.set<11>("D-1").ok(), "draft set 11");
+    check(d.set<55>("AAPL").ok(), "draft set 55");
+    check(d.set<44>(no_px).ok(), "draft ignores nullopt");
+    check(d.set<55>("MSFT").ok(), "draft overwrites existing tag cleanly");
+    check(!d.spilled(), "small draft stays on stack");
+    enc = encode_fix44(d, SessionHeader{"BUY", "SELL", 3, "20261026-12:30:45"}, output);
+    check(enc.ok(), "draft encodes");
+    if (enc.ok()) {
+        const auto f = as_view(output, enc.value());
+        check(f.find("55=MSFT\x01") != std::string_view::npos, "draft overwrite takes effect");
+        check(f.find("55=AAPL") == std::string_view::npos, "draft overwrite emits no duplicate");
+        check(f.find("44=") == std::string_view::npos, "draft nullopt omitted");
+    }
+
+    // Trigger BOTH slot spill (>4 slots) and byte spill (>32 bytes) on Draft<"D", 4, 32>.
+    d.reset();
+    check(d.set<11>("SPILL-1").ok(), "draft post-reset set 11");
+    check(d.set<55>("NVDA").ok(), "draft post-reset set 55");
+    check(d.set<54>('1').ok(), "draft post-reset set 54");
+    check(d.set<38>(100).ok(), "draft post-reset set 38");
+    check(d.set<40>('2').ok(), "draft spills slots seamlessly past InlineSlots=4");
+    check(d.set<58>(std::string(64, 'A')).ok(), "draft spills bytes seamlessly past InlineBytes=32");
+    check(d.spilled(), "draft reports spilled state");
+    enc = encode_fix44(d, SessionHeader{"BUY", "SELL", 4, "20261026-12:30:45"}, output);
+    check(enc.ok(), "spilled draft encodes cleanly");
+}
+
 } // namespace
 
 int main() {
@@ -231,5 +294,6 @@ int main() {
     test_fluent_encode();
     test_fixed_shape();
     test_fluent_limits_and_delimiters();
+    test_optional_and_draft_sso();
     return failures == 0 ? 0 : 1;
 }

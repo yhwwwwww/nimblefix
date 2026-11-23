@@ -51,16 +51,18 @@ auto init = nf::DirectInitiator<fix::Schema, MyHandler>::open({
 (void)init.connect();
 while (!init.is_active()) (void)init.poll_once();
 
-// Everyday message construction (no upfront field declaration):
+// Option A: Fluent make() + std::optional (0 malloc via 16-slot / 256B SSO; spills to heap if larger):
 auto order = fix::NewOrderSingle::make()
     .cl_ord_id("ORD-001").symbol("AAPL").side('1')
     .transact_time("20261123-00:00:00.000")
-    .order_qty(nf::Decimal{100, 0}).ord_type('1');
+    .order_qty(nf::Decimal{100, 0}).ord_type('1')
+    .price(std::optional<nf::Decimal>{std::nullopt}); // absent optional skipped automatically
 
-// Or zero-alloc stack-reusable message (all named fields, no magic numbers):
-// using FastOrder = fix::NewOrderSingle::Fixed<128,
-//     fix::field::ClOrdID, fix::field::Symbol, fix::field::Side,
-//     fix::field::TransactTime, fix::field::OrderQty, fix::field::OrdType>;
+// Option B: Reusable Draft + native runtime `if` (no upfront field declaration, 0 malloc via SSO):
+// fix::NewOrderSingle::Draft order;
+// order.cl_ord_id("ORD-001").symbol("AAPL").side('1')
+//      .transact_time("20261123-00:00:00.000").order_qty(nf::Decimal{100, 0}).ord_type('2');
+// if (has_price) order.price(nf::Decimal{15025, 2});
 
 // 3 send modes on DirectInitiator:
 (void)init.send(order);               // 1) Direct immediate send (lowest single-order latency)

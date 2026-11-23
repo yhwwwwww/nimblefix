@@ -16,49 +16,43 @@ NimbleFIX 0.3 按**用多少付多少**分成三层，全部接口统一使用�
 
 初学者最容易混淆“消息的构造方式”和“网络发送方式”，其实它们完全正交、可以自由组合：
 
-### 1. 怎么构造一条消息（2 种写法，按需二选一）
+### 1. 怎么构造一条消息（2 种常用写法，全部不用提前声明字段，全部默认 0 `malloc`）
 
-| 构造方式 | 适用场景 | 需要提前声明字段吗？ | 堆分配 |
-| :--- | :--- | :---: | :---: |
-| **`NewOrderSingle::make()`**（日常推荐） | 绝大多数业务、快速开发 | **不需要**，直接链式赋值 | 可能有少量堆分配 |
-| **`NewOrderSingle::Fixed<字节容量, 字段名...>`**（零分配版） | 微秒级策略热循环，追求稳态 **0 `malloc`** | **需要提前列出字段名** | **0 堆分配**（栈上复用） |
+两种写法内部都采用 **SSO 栈缓冲（默认 16 字段 / 256B 字符串区，覆盖绝大多数订单，全程 0 `malloc`；偶发超长备注或超多字段会自动溢到堆上，绝不会粗暴拒单）**：
 
-> **为什么零分配版 `Fixed` 需要提前列出字段名？**
-> 普通 `make()` 会在你调用 `.cl_ord_id()`、`.symbol()` 时按需扩展存储；而 `Fixed` 要把整条消息直接放在**栈上定长内存**里反复 `reset()` 复用（做到 0 `malloc`），C++ 编译器必须在编译期就知道这条消息占多少个字段槽位。你只需把会用到的字段名列在模板参数里，**不需要写任何数字 tag 或字段类型**。
+| 构造方式 | 适合怎么写条件字段 | 需要提前声明字段吗？ | 正常订单堆分配 | 超长/超多字段 |
+| :--- | :--- | :---: | :---: | :---: |
+| **写法 A：`NewOrderSingle::make()`** | 链式写法 + 传 `std::optional`（`nullopt` 自动跳过） | **不需要** | **0 `malloc`** | 自动溢到堆 |
+| **写法 B：`NewOrderSingle::Draft`** | 原生 `if` 分支随便写，支持 `reset()` 复用与覆盖赋值 | **不需要** | **0 `malloc`** | 自动溢到堆 |
 
 ```cpp
 namespace nf  = nimblefix;
 namespace fix = nimblefix::fix44;
 
-// 写法 A：日常最简写法（不用提前声明任何类型）
-auto order = fix::NewOrderSingle::make()
+// 写法 A：链式 make() + std::optional（不用提前声明，0 malloc）
+std::optional<nf::Decimal> opt_price = is_limit ? std::optional{nf::Decimal{15025, 2}} : std::nullopt;
+auto order_a = fix::NewOrderSingle::make()
     .cl_ord_id("ORD-001")
     .symbol("AAPL")
     .side('1')
     .transact_time("20261123-09:30:00.000")
     .order_qty(nf::Decimal{100, 0})
-    .ord_type('1');
+    .ord_type(is_limit ? '2' : '1')
+    .price(opt_price); // 有值就编 44=...，nullopt 自动跳过
 
-// 写法 B：极限零分配写法（提前按字段名声明一次，循环里 reset() 复用）
-using FastOrder = fix::NewOrderSingle::Fixed<128,
-    fix::field::ClOrdID,
-    fix::field::Symbol,
-    fix::field::Side,
-    fix::field::TransactTime,
-    fix::field::OrderQty,
-    fix::field::OrdType>;
-
-FastOrder fast_order;
-fast_order.reset();
-(void)fast_order.cl_ord_id("ORD-001");
-(void)fast_order.symbol("AAPL");
-(void)fast_order.side('1');
-(void)fast_order.transact_time("20261123-09:30:00.000");
-(void)fast_order.order_qty(nf::Decimal{100, 0});
-(void)fast_order.ord_type('1');
+// 写法 B：Draft 草稿对象 + 原生 if（不用提前声明，可 reset() 复用，0 malloc）
+fix::NewOrderSingle::Draft order_b;
+order_b.cl_ord_id("ORD-001")
+       .symbol("AAPL")
+       .side('1')
+       .transact_time("20261123-09:30:00.000")
+       .order_qty(nf::Decimal{100, 0})
+       .ord_type(is_limit ? '2' : '1');
+if (is_limit) order_b.price(nf::Decimal{15025, 2}); // 普通运行期 if，赋了就有，没赋就跳过
+// 下一笔直接原地复用：order_b.reset();
 ```
 
-> 以上两种构造出来的 `order` 和 `fast_order`，都能直接传给下面任意一种发送方式。
+> 以上两种写法构造出来的消息，都能直接传给下面任意一种发送方式。（高级场景如需硬性禁用堆溢出并限定编译期字段集合，也保留了 `NewOrderSingle::Fixed<ByteCap, fix::field::...>`。）
 
 ---
 

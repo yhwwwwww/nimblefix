@@ -590,6 +590,77 @@ void test_named_fixed_enqueue_batch_and_spsc_queue() {
         CHECK(field(wire, 34) == std::to_string(12 + i));
         CHECK(field(wire, 55) == "MSFT");
     }
+
+    // 4. Scheme A (SSO make() + std::optional) & Scheme B (SSO Draft + native if + reset)
+    //    with hard 0-malloc / 0-mutex / 0-fsync audit AND SSO spill (>256B) verification!
+    g_malloc_calls.store(0);
+    g_mutex_calls.store(0);
+    g_fsync_calls.store(0);
+    g_audit_hot_path.store(true);
+    {
+        const std::optional<nf::Decimal> no_price = std::nullopt;
+        const std::optional<nf::Decimal> limit_price = nf::Decimal{15025, 2};
+        auto mkt = fix::NewOrderSingle::make()
+            .cl_ord_id("OPT-MKT").symbol("AAPL").side('1')
+            .transact_time(t2).order_qty(nf::Decimal{10, 0}).ord_type('1')
+            .price(no_price);
+        auto lmt = fix::NewOrderSingle::make()
+            .cl_ord_id("OPT-LMT").symbol("AAPL").side('2')
+            .transact_time(t2).order_qty(nf::Decimal{20, 0}).ord_type('2')
+            .price(limit_price);
+        CHECK(init.send(mkt, 30, t2).ok());
+        CHECK(init.send(lmt, 30, t2).ok());
+
+        fix::NewOrderSingle::Draft draft;
+        for (int k = 0; k < 2; ++k) {
+            draft.reset();
+            // Intentionally set fields out of schema order to verify canonical WireRank sorting!
+            if (k == 1) draft.price(nf::Decimal{9950, 2});
+            draft.ord_type(k == 1 ? '2' : '1')
+                 .order_qty(nf::Decimal{30, 0})
+                 .transact_time(t2)
+                 .side('1')
+                 .symbol("NVDA")
+                 .cl_ord_id(k == 0 ? "DRF-MKT" : "DRF-LMT");
+            CHECK(init.send(draft, 31, t2).ok());
+        }
+    }
+    g_audit_hot_path.store(false);
+    CHECK(g_malloc_calls.load() == 0);
+    CHECK(g_mutex_calls.load() == 0);
+    CHECK(g_fsync_calls.load() == 0);
+
+    // Verify optional absent/present & canonical ordering on the wire.
+    CHECK(init.transport().pop_sent_frame(wire));
+    CHECK(field(wire, 11) == "OPT-MKT" && field(wire, 44).empty());
+    CHECK(init.transport().pop_sent_frame(wire));
+    CHECK(field(wire, 11) == "OPT-LMT" && field(wire, 44) == "150.25");
+    CHECK(init.transport().pop_sent_frame(wire));
+    CHECK(field(wire, 11) == "DRF-MKT" && field(wire, 44).empty());
+    CHECK(init.transport().pop_sent_frame(wire));
+    CHECK(field(wire, 11) == "DRF-LMT" && field(wire, 44) == "99.50");
+    // Verify canonical schema order (11 before 55 before 54 before 44).
+    CHECK(wire.find("11=DRF-LMT") < wire.find("55=NVDA") &&
+          wire.find("55=NVDA") < wire.find("44=99.50"));
+
+    // Verify SSO spill (>256B string) does NOT reject orders in either make() or Draft!
+    const std::string long_id(320, 'X');
+    auto spilled_make = fix::NewOrderSingle::make()
+        .cl_ord_id(long_id).symbol("AAPL").side('1')
+        .transact_time(t2).order_qty(nf::Decimal{1, 0}).ord_type('1');
+    CHECK(spilled_make.status().ok());
+    CHECK(init.send(spilled_make, 32, t2).ok());
+    CHECK(init.transport().pop_sent_frame(wire));
+    CHECK(field(wire, 11) == long_id);
+
+    fix::NewOrderSingle::Draft spilled_draft;
+    spilled_draft.cl_ord_id(long_id).symbol("AAPL").side('1')
+        .transact_time(t2).order_qty(nf::Decimal{1, 0}).ord_type('1');
+    CHECK(spilled_draft.spilled());
+    CHECK(spilled_draft.status().ok());
+    CHECK(init.send(spilled_draft, 33, t2).ok());
+    CHECK(init.transport().pop_sent_frame(wire));
+    CHECK(field(wire, 11) == long_id);
 }
 
 } // namespace
