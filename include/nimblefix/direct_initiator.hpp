@@ -329,8 +329,8 @@ public:
         DirectInitiatorConfig config,
         Handler handler = {},
         Transport transport = {}) noexcept try {
-        if (config.storage_directory.empty() || config.session_key.empty() ||
-            config.session_key.size() > journal_max_session_key_bytes ||
+        if (config.storage_directory.empty() ||
+            config.local_comp_id.empty() || config.remote_comp_id.empty() ||
             !detail::is_valid_text(config.local_comp_id) ||
             !detail::is_valid_text(config.remote_comp_id) ||
             config.heartbeat_ms == 0 || config.logon_timeout_ms == 0 ||
@@ -339,6 +339,13 @@ public:
             config.journal_max_records == 0 || begin_string(config.version).empty() ||
             (config.version == FixVersion::fixt11 && !valid_appl_ver_id(config.default_appl_ver_id)) ||
             (config.request_sequence_reset && !config.allow_sequence_reset)) {
+            return Status{ErrorCode::invalid_config};
+        }
+        if (config.session_key.empty()) {
+            config.session_key = std::string{begin_string(config.version)} + "/" +
+                config.local_comp_id + "/" + config.remote_comp_id;
+        }
+        if (config.session_key.size() > journal_max_session_key_bytes) {
             return Status{ErrorCode::invalid_config};
         }
 

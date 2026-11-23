@@ -67,7 +67,9 @@ if(NIMBLEFIX_ENABLE_IO_URING)
     find_path(LIBURING_INCLUDE_DIR liburing.h REQUIRED)
     find_library(LIBURING_LIBRARY uring REQUIRED)
     target_include_directories(nimblefix PRIVATE "${LIBURING_INCLUDE_DIR}")
-    target_link_libraries(nimblefix PUBLIC "${LIBURING_LIBRARY}")
+    target_link_libraries(nimblefix PUBLIC
+        "$<BUILD_INTERFACE:${LIBURING_LIBRARY}>"
+        "$<INSTALL_INTERFACE:uring>")
     target_compile_definitions(nimblefix PRIVATE NIMBLEFIX_ENABLE_IO_URING=1)
 endif()
 add_library(NimbleFIX::nimblefix ALIAS nimblefix)

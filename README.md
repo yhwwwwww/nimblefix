@@ -36,30 +36,24 @@ struct MyHandler {
     }
 };
 
-nf::DirectInitiatorConfig cfg{};
-cfg.host = "127.0.0.1";
-cfg.port = 9876;
-cfg.storage_directory = "./state/buy";
-cfg.session_key = "FIX.4.4/BUY/SELL";
-cfg.local_comp_id = "BUY";
-cfg.remote_comp_id = "SELL";
-
-auto init = nf::DirectInitiator<fix::Schema, MyHandler>::open(std::move(cfg)).value();
+auto init = nf::DirectInitiator<fix::Schema, MyHandler>::open({
+    .host = "127.0.0.1",
+    .port = 9876,
+    .storage_directory = "./state/buy",
+    .local_comp_id = "BUY",
+    .remote_comp_id = "SELL",
+}).value();
 (void)init.connect();
 while (!init.is_active()) (void)init.poll_once();
 
-// Zero-allocation outbound send (encodes directly into mmap Journal via reserve/commit):
-using OrderShape = nf::Fields<
-    nf::Field<11, nf::FieldKind::string>, nf::Field<55, nf::FieldKind::string>,
-    nf::Field<54, nf::FieldKind::character>, nf::Field<60, nf::FieldKind::string>,
-    nf::Field<38, nf::FieldKind::decimal>, nf::Field<40, nf::FieldKind::character>>;
-fix::NewOrderSingleFixed<OrderShape, 128> order;
-(void)order.cl_ord_id("ORD-001");
-(void)order.symbol("AAPL");
-(void)order.side('1');
-(void)order.transact_time("20261123-00:00:00.000");
-(void)order.order_qty(nf::Decimal{100, 0});
-(void)order.ord_type('1');
+// Simple everyday send (or use stack-allocated NewOrderSingleFixed for 0-alloc hot loops):
+auto order = fix::NewOrderSingle::make()
+    .cl_ord_id("ORD-001")
+    .symbol("AAPL")
+    .side('1')
+    .transact_time("20261123-00:00:00.000")
+    .order_qty(nf::Decimal{100, 0})
+    .ord_type('1');
 
 (void)init.send(order);
 ```
@@ -141,9 +135,7 @@ The OS I/O multiplexing layer is cleanly decoupled from the FIX engine via `IoBa
 
 ```cpp
 nf::EngineConfig cfg{};
-cfg.io_backend.kind = nf::IoBackendKind::io_uring; // or ::epoll (default) / ::busy_poll
-cfg.io_backend.uring_queue_depth = 256;            // optional
-cfg.io_backend.uring_sqpoll = false;               // optional SQPOLL
+cfg.io_backend = nf::IoBackendConfig::io_uring(); // or ::epoll() (default) / ::busy_poll()
 ```
 
 Or in TOML under `[engine]`:

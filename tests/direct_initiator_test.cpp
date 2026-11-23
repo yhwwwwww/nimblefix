@@ -425,9 +425,23 @@ void test_sigkill_crash_recovery_redelivers_uncommitted_delivery() {
     CHECK(init.handler().last_exec_id == "E-CRASH");
 }
 
+void test_default_session_key_auto_derivation() {
+    TempDir dir;
+    nf::DirectInitiatorConfig cfg{};
+    cfg.host = "127.0.0.1";
+    cfg.port = 9876;
+    cfg.storage_directory = dir.path;
+    cfg.local_comp_id = "BUY";
+    cfg.remote_comp_id = "SELL";
+    // session_key intentionally omitted: should auto-derive as FIX.4.4/BUY/SELL.
+    auto opened = nf::DirectInitiator<fix::Schema>::open(cfg);
+    CHECK(opened.ok());
+}
+
 } // namespace
 
 int main() {
+    test_default_session_key_auto_derivation();
     test_zero_alloc_zero_lock_zero_fsync_steady_state();
     test_restart_recovery_resend_replay_and_gapfill();
     test_sigkill_crash_recovery_redelivers_uncommitted_delivery();

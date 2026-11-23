@@ -67,7 +67,11 @@ void run_backend_roundtrip(nf::IoBackendKind backend_kind, std::size_t sessions_
     acc_cfg.storage.journal_capacity_bytes = 4U * 1024U * 1024U;
     acc_cfg.storage.segment_bytes = 512U * 1024U;
     acc_cfg.storage.journal_max_records = 16'384;
-    acc_cfg.io_backend.kind = backend_kind;
+    acc_cfg.io_backend = backend_kind == nf::IoBackendKind::io_uring
+        ? nf::IoBackendConfig::io_uring()
+        : (backend_kind == nf::IoBackendKind::busy_poll
+            ? nf::IoBackendConfig::busy_poll()
+            : nf::IoBackendConfig::epoll());
     acc_cfg.heartbeat_ms = 30'000;
 
     auto acc_res = nf::Engine<fix::Schema, Policy>::create(acc_cfg);
@@ -207,7 +211,11 @@ void test_abrupt_disconnect_and_reconnect(nf::IoBackendKind backend_kind) {
     acc_cfg.storage.journal_capacity_bytes = 2U * 1024U * 1024U;
     acc_cfg.storage.segment_bytes = 256U * 1024U;
     acc_cfg.storage.journal_max_records = 4096;
-    acc_cfg.io_backend.kind = backend_kind;
+    acc_cfg.io_backend = backend_kind == nf::IoBackendKind::io_uring
+        ? nf::IoBackendConfig::io_uring()
+        : (backend_kind == nf::IoBackendKind::busy_poll
+            ? nf::IoBackendConfig::busy_poll()
+            : nf::IoBackendConfig::epoll());
     acc_cfg.reconnect_delay_ms = 20;
 
     auto acc_res = nf::Engine<fix::Schema, nf::Inline>::create(acc_cfg);

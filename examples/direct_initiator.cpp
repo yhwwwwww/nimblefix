@@ -48,7 +48,6 @@ int main(int argc, char** argv) {
     cfg.host = host;
     cfg.port = port;
     cfg.storage_directory = store_dir;
-    cfg.session_key = "FIX.4.4/BUY/SELL";
     cfg.local_comp_id = "BUY";
     cfg.remote_comp_id = "SELL";
     cfg.heartbeat_ms = 30'000;

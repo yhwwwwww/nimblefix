@@ -1,59 +1,197 @@
-# NimbleFIX 0.3 入门
+# NimbleFIX 0.3 快速入门
 
-NimbleFIX 0.3 采用“按需付费（Pay Only For What You Need）”的三层 C++20 架构：
-- **Layer 0 (`nimblefix_core`)**：面向极速单连接交易客户端的零开销 **`DirectInitiator<Schema, Handler, Transport>`**（稳态热路径 0 malloc / 0 mutex / 0 fsync，具备完整重启恢复、序列号持久化、ResendRequest / GapFill / 业务 Replay 及 `SIGKILL` 崩溃重传），搭配单遍回填编码器、纯 v2 分段 mmap Journal（硬件 SSE4.2 CRC32C）与支持 `--messages` 子集裁剪的代码生成器。
-- **Layer 0 + TLS (`nimblefix_core_tls`)**：可选非阻塞 OpenSSL 3 **`DirectTlsTransport`**（支持 TLS 1.2/1.3、CA/主机名/IP 校验、mTLS 双向认证与断线重连复用 `TlsContext`），无需引入 Acceptor/Engine。
-- **Layer 1 / 2 (`nimblefix`)**：完整多会话服务端/客户端运行时（Linux `epoll` Reactor、Acceptor、`Inline`/`Queued` 分发、MPSC `Sender`、SPSC `ProducerLane`、可选运行时 libxml2 XML 与 TOML CLI）。
+NimbleFIX 0.3 是一个追求**极低延迟、崩溃可恢复、接口克制**的 C++20 FIX 引擎，按**用多少付多少**分成三层：
 
-[支持表](session-support.md)说明具体协议和资源边界。
+| 你的场景 | 选哪一层 | 链接目标 (CMake / xmake) | 额外依赖 |
+| :--- | :--- | :--- | :--- |
+| **极速单连接交易客户端**（策略 / 报单直连） | **Layer 0 `DirectInitiator`** | `NimbleFIX::nimblefix_core` / `nimblefix-core` | 仅 C++20 + `pthread` |
+| **极速单连接 + TLS / mTLS** | **Layer 0 + TLS** | `NimbleFIX::nimblefix_core_tls` / `nimblefix-core-tls` | 系统 OpenSSL 3 |
+| **多会话服务端（Acceptor）/ 网关 / CLI** | **Layer 1/2 `Engine`** | `NimbleFIX::nimblefix` / `nimblefix` | 可选 `liburing`、`libxml2` |
 
-## 极速 Initiator 快速上手 (`DirectInitiator`)
+> 想了解协议支持边界与资源上限，可查阅 [session-support.md](session-support.md)。
 
-直接查看 [examples/direct_initiator.cpp](../examples/direct_initiator.cpp)，只需链接 `nimblefix-core`（如需 TLS 则链接 `nimblefix-core-tls` 并传入 `DirectTlsTransport`）：
+---
 
-```sh
-xmake f -m release --tls=y
-xmake build direct-initiator-example direct-initiator-bench
-# 运行同口径 Pre-TCP + 真实 TCP 环回延迟基准（完整 912 字段 FIX 4.4 + v2 mmap Journal）
-./build/linux/x86_64/release/direct-initiator-bench 5000 30000
+## 一、5 分钟跑通极速 Initiator（`DirectInitiator`）
+
+`DirectInitiator` 是单线程、非阻塞、**热路径 0 堆分配 / 0 锁 / 0 fsync** 的轻量客户端，内置 v2 分段 mmap Journal，自动负责断线重连后的序列号恢复、`ResendRequest`、`GapFill` 与业务重放。
+
+### 1. 最小可用代码（只要 5 个必填字段）
+
+```cpp
+#include <nimblefix/direct_initiator.hpp>
+#include <nimblefix/fix44.hpp>
+
+namespace nf = nimblefix;
+namespace fix = nimblefix::fix44;
+
+// 1) 定义回调处理器（无需继承，无需 std::function）
+struct MyHandler {
+    nf::Status on_message(const nf::FlatMessageView& msg,
+                          const nf::DeliveryInfo& info) noexcept {
+        // info.is_recovery == true 表示这是进程重启后恢复重投的消息
+        if (auto mt = msg.find_unique(35); mt.ok() && mt.value().value == "8") {
+            // 收到 ExecutionReport
+        }
+        return nf::Status::success();
+    }
+};
+
+int main() {
+    // 2) 打开会话（session_key 省略时会自动按 FIX.4.4/BUY/SELL 生成）
+    auto init = nf::DirectInitiator<fix::Schema, MyHandler>::open({
+        .host = "127.0.0.1",
+        .port = 9876,
+        .storage_directory = "./state/buy",
+        .local_comp_id = "BUY",
+        .remote_comp_id = "SELL",
+    }).value();
+
+    (void)init.connect();
+    while (!init.is_active()) (void)init.poll_once();
+
+    // 3) 发单（日常写法：简洁易读；极速零分配写法见下方）
+    auto order = fix::NewOrderSingle::make()
+        .cl_ord_id("ORD-001")
+        .symbol("AAPL")
+        .side('1')
+        .transact_time("20261123-09:30:00.000")
+        .order_qty(nf::Decimal{100, 0})
+        .ord_type('1');
+
+    auto seq = init.send(order); // 直接写入 mmap Journal 并发送
+
+    // 4) 持续推进收发与心跳
+    while (init.valid_transport()) (void)init.poll_once();
+}
 ```
 
-如需精简生成的 Schema 头文件，可通过 `--messages` 只生成需要的业务消息（管理消息与依赖组自动保留）：
+### 2. 开启 TLS / mTLS（仅换一个模板参数）
 
-```sh
-python3 tools/schema/generate.py --output generated/venue.hpp --namespace venue \
-  --messages NewOrderSingle,OrderCancelRequest,ExecutionReport schemas/standard/FIX44.xml
+链接 `NimbleFIX::nimblefix_core_tls`（xmake 下为 `nimblefix-core-tls`），无需改任何业务代码：
+
+```cpp
+#include <nimblefix/direct_initiator.hpp>
+#include <nimblefix/direct_tls_transport.hpp>
+
+nf::TlsConfig tls{};
+tls.enabled = true;
+tls.ca_file = "/path/to/ca.pem";
+tls.server_name = "fix.venue.example";
+// 如需双向 mTLS，再补两行：
+// tls.certificate_file = "/path/to/client.pem";
+// tls.private_key_file = "/path/to/client.key";
+
+auto transport = nf::DirectTlsTransport::create(std::move(tls)).value();
+auto init = nf::DirectInitiator<fix::Schema, MyHandler, nf::DirectTlsTransport>::open(
+    std::move(cfg), MyHandler{}, std::move(transport)).value();
 ```
 
-生成消息的 `make()` 使用可增长的自有存储，添加字段时可能分配内存。
-需要零分配复用存储时，使用声明字段 shape、字节容量和生成消息 `policy_type` 的
-`FixedMessage`（及支持 `reset()` 复用的 `GroupBuilder`）；slot 和文本 arena 内嵌于消息实例，
-且全链路原生支持 `1..999,999,999` 任意超大自定义 tag 编号，无 1024-bit 上限或内存膨胀。
+### 3. 追求极致零分配发单（`FixedMessage`）
 
-## 第一次成功收发
+上面的 `make()` 上手最简单；如果要在微秒级策略循环里做到**全程 0 `malloc`**，把复用对象换成栈上的 `FixedMessage`（见完整示例 [examples/direct_initiator.cpp](../examples/direct_initiator.cpp)）：
 
-先读 [initiator.cpp](../examples/initiator.cpp) 和
-[acceptor.cpp](../examples/acceptor.cpp)：主文件直接展示 typed FIX44 接入流程。
-flat 版本单独放在 `flat_initiator.cpp`、`flat_acceptor.cpp`，仅核心库构建选择这些源码。
+```cpp
+using OrderShape = nf::Fields<
+    nf::Field<11, nf::FieldKind::string>,    // ClOrdID
+    nf::Field<55, nf::FieldKind::string>,    // Symbol
+    nf::Field<54, nf::FieldKind::character>, // Side
+    nf::Field<60, nf::FieldKind::string>,    // TransactTime
+    nf::Field<38, nf::FieldKind::decimal>,   // OrderQty
+    nf::Field<40, nf::FieldKind::character>  // OrdType
+>;
 
-```sh
-xmake f -m release
-xmake build acceptor-example initiator-example
+fix::NewOrderSingleFixed<OrderShape, 128> order; // 栈上复用，零堆分配
+order.reset();
+(void)order.cl_ord_id("ORD-001");
+(void)order.symbol("AAPL");
+(void)order.side('1');
+(void)order.transact_time("20261123-09:30:00.000");
+(void)order.order_qty(nf::Decimal{100, 0});
+(void)order.ord_type('1');
+(void)init.send(order);
 ```
 
-先启动模拟对手方，再在另一个终端启动订单输入程序：
+---
+
+## 二、多会话服务端（Acceptor）与可插拔 `IoBackend`
+
+需要监听端口、管理多个会话、从业务线程并发下单，或者使用 `Queued` 异步业务线程池时，使用 `Engine<Schema, Policy>`：
+
+```cpp
+#include <nimblefix/engine.hpp>
+#include <nimblefix/fix44.hpp>
+
+namespace nf = nimblefix;
+namespace fix = nimblefix::fix44;
+
+int main() {
+    nf::EngineConfig cfg{};
+    cfg.storage.directory = "./state/sell";
+    // 一行切换 I/O 后端：epoll()（默认）| busy_poll() | io_uring()
+    cfg.io_backend = nf::IoBackendConfig::epoll();
+
+    // Policy: nf::Inline（默认，最低延迟）或 nf::Queued（业务回调隔离到线程池）
+    auto engine = nf::Engine<fix::Schema, nf::Inline>::create(cfg).value();
+
+    (void)engine.on<fix::NewOrderSingle>(
+        [](nf::SessionContext& ctx, const fix::NewOrderSingleView& req) {
+            auto er = fix::ExecutionReport::make()
+                .order_id("ORD-1").exec_id("EX-1")
+                .cl_ord_id(req.cl_ord_id().value())
+                .exec_type('0').ord_status('0')
+                .symbol(req.symbol().value()).side(req.side().value())
+                .leaves_qty(req.order_qty().value())
+                .cum_qty(nf::Decimal{0, 0}).avg_px(nf::Decimal{0, 0});
+            return ctx.send(er).status();
+        });
+
+    (void)engine.add_listener({.name = "main", .endpoint = {"127.0.0.1", 9876}});
+    (void)engine.add_acceptor({.name = "client-1", .listener = "main",
+                               .local_comp_id = "SELL", .remote_comp_id = "BUY"});
+
+    (void)engine.run(); // 在当前线程运行事件循环；其他线程可调用 engine.request_stop()
+}
+```
+
+### `IoBackend` 怎么选？
+
+| 后端 | C++ 配置 | TOML 配置 (`[engine]`) | 适用场景 |
+| :--- | :--- | :--- | :--- |
+| **`epoll`**（默认） | `IoBackendConfig::epoll()` | `io_backend = "epoll"` | 通用默认，零额外依赖 |
+| **`busy_poll`** | `IoBackendConfig::busy_poll()` | `io_backend = "busy_poll"` | 极少连接 + 独占隔离核，追求最低单连接延迟 |
+| **`io_uring`** | `IoBackendConfig::io_uring()` | `io_backend = "io_uring"` | 多连接高并发（Proactor 批处理 + 空闲休眠，吞吐最高、p99 最稳；需开启 `--io_uring=y` / `-DNIMBLEFIX_ENABLE_IO_URING=ON`） |
+
+> 未开启 `io_uring` 编译选项时，`nf::io_uring_available()` 返回 `false`，请求 `io_uring` 会安全返回 `ErrorCode::unsupported`。
+
+### 跨线程发单与线程规则（只需记住 3 条）
+
+1. **会话归属**：`engine.run()` 所在线程拥有所有协议状态；若需嵌入外部事件循环，改用 `engine.start()` + 同线程循环调用 `engine.poll_once(max_wait_ms)`。
+2. **其他线程发单**：启动前通过 `auto sender = handle.sender<fix::Schema>();` 取出 `Sender`，可在任意业务线程安全并发 `sender.send(msg)`（极致单生产者场景可用 `handle.producer_lane<fix::Schema>()`）。
+3. **回调生命周期**：回调里的 `View` 和 `SessionContext` 仅在当次回调内有效，不要把它们保存到其他线程使用。
+
+---
+
+## 三、动手运行自带示例与 CLI
+
+### 1. 本机双端订单演示（[acceptor.cpp](../examples/acceptor.cpp) + [initiator.cpp](../examples/initiator.cpp)）
 
 ```sh
+xmake f -m release --tls=y --xml=y --io_uring=y
+xmake build acceptor-example initiator-example direct-initiator-example
+```
+
+分别在两个终端启动：
+
+```sh
+# 终端 1（服务端）
 xmake run acceptor-example --state ./state/sell --port 9876
-```
 
-另一个终端：
-
-```sh
+# 终端 2（客户端，看到 SESSION_ACTIVE 后即可输入命令）
 xmake run initiator-example --state ./state/buy --port 9876
 ```
 
-看到 `SESSION_ACTIVE` 后，在订单输入程序中输入业务命令：
+在客户端输入：
 
 ```text
 order ORDER-001 AAPL buy 100 150.25
@@ -62,56 +200,36 @@ status
 quit
 ```
 
-协议 owner 在线程内运行，主线程读取业务命令，通过提前取得的 `Sender` 发送。
-登录成功和重连都不会生成新订单，收到一笔回报后程序继续运行。
-每笔订单由命令提供 ClOrdID、标的、方向、数量和限价或市价指令；发送时才生成 TransactTime。
-本地 receipt 的 accepted/appended/written 与对手方的 ExecutionReport 分开显示。
-`status` 查询连接是否可发及各请求的 receipt；不为终端演示实现后台轮询状态机。
-`quit` 或标准输入 EOF 停止接收新命令，限时等待已接受请求的发送和回报，再 Logout。
-示例每个进程最多跟踪 256 个已接受的请求 ID；拒绝重复 ID，不自动重试或补单。
-
-默认构建使用完整 FIX44 typed 绑定；仅核心库构建使用相同命令流程的 flat 入口。
-终端示例明确选择 Queued，让回报输出在业务 worker 内执行；库的默认策略仍为 Inline。
-保留两端各自的协议状态目录；新业务请求使用新的 ClOrdID。应用重启后的订单身份与幂等
-由业务系统持久化管理。acceptor 只模拟订单 New 确认，不包含撮合、风控或完整订单管理。
-
-自动化协议／重启自测位于 `tests/hello_fix.cpp`，单独运行：
-
-```sh
-xmake build hello-fix
-xmake run hello-fix --self-test --typed --restart
-```
-
-## 使用配置文件
+### 2. 零代码用 TOML + CLI 跑通会话
 
 ```sh
 xmake build nimblefix-cli
-xmake run nimblefix-cli init --directory ./demo
+xmake run nimblefix-cli doctor --json                       # 查看当前构建已启用的能力
+xmake run nimblefix-cli init --directory ./demo             # 生成可运行的 acceptor/initiator.toml
 xmake run nimblefix-cli validate --config ./demo/acceptor.toml --json
-xmake run nimblefix-cli run --config ./demo/acceptor.toml --json
-# 另一个终端：
-xmake run nimblefix-cli run --config ./demo/initiator.toml --json
+xmake run nimblefix-cli run --config ./demo/acceptor.toml   # 终端 1
+xmake run nimblefix-cli run --config ./demo/initiator.toml  # 终端 2
 ```
 
-CLI 接收并统计业务消息。要发订单／回复成交报告，运行前面的业务示例或嵌入库。
-配置 `version = 1`；相对路径基于配置文件所在目录；未知键、非法值和不支持的组件均报错。
-`validate` 只读配置、字典和证书，不监听、不连接、不打开 journal。SIGINT/SIGTERM 触发
-有期限的 Logout，退出码保留 `128 + signal`。
+精简 TOML 配置示例：
 
 ```toml
 version = 1
+
 [engine]
-dispatch = "queued" # 或 inline
-schema = "fix44"   # none 用于显式 flat 路径
+dispatch = "inline"     # "inline"（默认）| "queued"
+io_backend = "epoll"    # "epoll"（默认）| "busy_poll" | "io_uring"
+schema = "fix44"        # 或 "none" 走无字典 flat 模式
+
 [engine.storage]
 directory = "./state/sell"
-confirmation = "appended"
 segment_bytes = 1048576
 capacity_bytes = 16777216
-retain_outbound_messages = 8192
+
 [[listeners]]
 name = "main"
 endpoint = "127.0.0.1:9876"
+
 [[sessions]]
 name = "buy-side"
 role = "acceptor"
@@ -121,100 +239,53 @@ local_comp_id = "SELL"
 remote_comp_id = "BUY"
 ```
 
-`init` 生成一对可运行文件；不覆盖已有文件，除非明确传 `--force`。
-可用 `doctor --json` 检查构建能力，`inspect frame --path file --json` 检查帧，
-`inspect journal --path journal --session-key 'FIX.4.4|4:SELL|3:BUY' --json`
-只读检查存储，不修复或抢占 writer。Logon 敏感字段不会出现在 inspect 输出或 journal payload。
+> TLS 与认证同样可在 TOML 中通过 `[listeners.tls]`、`[sessions.tls]`、`[sessions.authentication]`（`password_env` 引用环境变量，绝不把密码写入日志或 Journal）配置。
 
-## TLS 与认证
+---
 
-```sh
-xmake f -m release --tls=y --xml=y
-xmake build nimblefix-cli
-```
+## 四、自定义字典、超大 Tag 与子集代码生成
 
-TLS 使用本机 OpenSSL 3；XML 使用本机 libxml2。构建不会下载依赖。
-在 acceptor 的 `[[listeners]]` 后、`[[sessions]]` 前添加：
+- **子集裁剪（大幅加速编译、缩小体积）**：用 `--messages` 只生成你实际交易的业务消息（管理消息与依赖的嵌套重复组会自动保留）：
 
-```toml
-[listeners.tls]
-enabled = true
-certificate_file = "./certs/server.pem"
-private_key_file = "./certs/server-key.pem"
-ca_file = "./certs/ca.pem"
-require_client_certificate = true
-```
+  ```sh
+  python3 tools/schema/generate.py --output generated/venue.hpp --namespace venue \
+    --messages NewOrderSingle,OrderCancelRequest,ExecutionReport schemas/standard/FIX44.xml
+  ```
 
-initiator 使用 `[sessions.tls]`，设置 `enabled = true`、`ca_file`、客户端证书和私钥，
-以及匹配服务器 SAN 的 `server_name`。服务器身份验证失败会关闭连接，不降级明文。
-私钥必须能非交互读取；不在 owner 上提示输入口令。
+- **任意自定义 Tag 编号**：无论是 `8899` 还是 `900001`，全链路原生支持 `1..999,999,999` 整个 FIX Tag 范围，内部全部按紧凑成员下标索引，**不存在 1024-bit 上限或内存膨胀**。
+- **运行期未知 Tag**：如需按字符串动态拼接运行期才确定的 Tag，使用 `DynamicMessage` 即可。
 
-acceptor 使用显式环境变量作为密码来源：
+---
 
-```toml
-[sessions.authentication]
-method = "credentials"
-username = "demo"
-password_env = "VENUE_PASSWORD"
-require_tls = true
-```
+## 五、持久化、恢复与基准测试
 
-initiator 对应 `[sessions.logon]` 的 `username` 和 `password_env`。
-其他 Logon 字段可用 `[[sessions.logon.fields]]` 的 `tag`、`value` 或 `value_env`、`sensitive`。
-没有全局环境变量替换。C++ 还支持认证回调，运行在会话接入边界，必须有界。
-认证先于 acceptor journal 创建。
-
-## 业务代码与线程
-
-默认 `Engine<>` 是 flat + Inline；`Engine<fix44::Schema>` 使用完整 typed FIX44。
-生成消息支持具名 setter、`set<Tag>()`、具名 getter、`get<Tag>()` 和 group。
-运行期 tag 使用 `DynamicMessage`，不会让静态 builder 偷偷改变形状。
-
-`Engine<Schema, Queued>` 将业务回调放到有限 worker pool。同一 session 串行投递；
-依赖回复被 owner append 后才提交 delivery-complete。普通 `SessionHandle::sender<Schema>()`
-可供多个线程使用；显式 producer lane 用于高级单生产者场景，跨线程误用报 `wrong_thread`。
-
-Inline 的 `context.send` 成功为 appended；Queued／Sender 首先为 accepted，必须查询 receipt
-观察 appended/written/failed/expired。失败不消费 builder，也不推进 FIX 序号。
-written 是 transport 接受字节，不等于对手收到或业务接受。
-
-回调的 view 和 SessionContext 只在该回调中有效；需要保留数据时深拷贝。
-不能保存 context 跨线程发送。`run()` 在调用线程拥有协议状态；嵌入外部事件循环时使用
-`start()` 加同线程 `poll_once(max_wait_ms)`，直到 `running()` 为 false。
-其他线程可 `request_stop()`、查询 snapshot；错误 observer 在单独有界诊断通道执行。
-
-## 恢复与资源
-
-journal 使用 appended mmap queue，input 先入日志再投递；未完成输入在重启后以
-`is_recovery()` 再次投递。依赖回复必须按原顺序重建相同内容，已提交输出可安全复用。
-这覆盖 OS／文件系统仍工作的同机进程死亡，不承诺断电落盘；没有逐消息 fsync/msync。
-
-分段、索引和 checkpoint 有显式格式与 CRC。清理同时服从 peer replay 进度、完成投递和 reader／lease。
-空间不足报 `storage_full`，不覆盖仍需恢复的数据。journal 失败使相应 session 停止；不会删库或从 1 偷偷重来。
-显式 `allow_sequence_reset` 加 Logon `reset_sequence` 才能开启新 epoch；设置为 true
-表示每次新连接请求 reset，必须与对手约定。定时开关 session 不自动 reset。
-
-时间窗口为 UTC，`[sessions.schedule]` 可设置 `weekdays = [1,2,3,4,5]`、
-`start_utc = "09:00:00"`、`end_utc = "17:00:00"`；跨午夜窗口归起始日。
-流量限制通过 `[sessions.flow_control]` 显式设置消息数、字节数、投递年龄、暂停和写停滞期限。
-回调必须返回，框架不会抢占任意 C++ 用户代码。
-
-## 自定义 XML 与安装
+- **统一 v2 分段 mmap Journal**：全引擎（含 `DirectInitiator` 和 `Engine`）统一使用带硬件 SSE4.2 CRC32C 校验的分段 mmap Journal；入站先落盘再投递，出站先落盘再写 socket。
+- **崩溃恢复承诺**：进程异常退出或 `SIGKILL` 后重启，自动恢复序列号、重投未完成的入站消息（`is_recovery == true`），并完整服务对手方的 `ResendRequest` / `GapFill` / `Replay`。热路径不做逐消息 `fsync`/`msync`（保障同机进程崩溃恢复，不承诺整机断电落盘）。
+- **构建、测试与基准**：
 
 ```sh
-xmake run nimblefix-cli schema generate --xml venue.xml --namespace venue --output venue.hpp
-xmake run nimblefix-cli schema summary --xml venue.xml --json
+# 运行全量测试
+xmake f -m release --tls=y --xml=y --benchmarks=y -y
 xmake check
-python3 tests/install_test.py --features --examples
-python3 tests/xmake_schema_test.py
+
+# 运行 Initiator 基准（Pre-TCP + 真实 TCP 环回）
+xmake build direct-initiator-bench
+./build/linux/x86_64/release/direct-initiator-bench 5000 30000
+
+# 运行 Acceptor + 三大 IoBackend 对比基准（epoll / busy_poll / io_uring）
+xmake f -m release --tls=y --xml=y --io_uring=y --benchmarks=y -y
+xmake build acceptor-bench
+./build/linux/x86_64/release/acceptor-bench 2000 20000 8 all
 ```
 
-标准字典包含 FIX42、FIX43、FIX44、FIXT11 和 FIX50SP2。运行时 XML 使用独立可选组件；
-若同时选择生成 binding 和 XML，自动核对 fingerprint。修改 XML 后由构建 helper 增量生成，
-无需手动维护 hash。CMake 使用 `nimblefix_generate_schema`，xmake 使用安装的
-`share/nimblefix/xmake/nimblefix-schema.lua` 规则。
+- **外部 CMake 项目接入**：
 
-同一 CompID／transport 的本地 qualifier 可区分持久化身份；acceptor 需要独立 listener 来消除入站路由歧义。
-
-0.2.x 冻结公开 source API；升级后重编应用，不承诺 C++ ABI。普通 Engine 默认 v2 分段格式；
-底层 Journal 的 `segment_bytes = 0` 保留 v1 行为，不做隐式文件迁移。
+```cmake
+find_package(NimbleFIX 0.3 CONFIG REQUIRED COMPONENTS core)
+# 只要极速 Initiator：
+target_link_libraries(my_trader PRIVATE NimbleFIX::nimblefix_core)
+# 极速 Initiator + TLS：
+# target_link_libraries(my_trader PRIVATE NimbleFIX::nimblefix_core_tls)
+# 完整多会话 Engine / Acceptor：
+# target_link_libraries(my_gateway PRIVATE NimbleFIX::nimblefix)
+```
