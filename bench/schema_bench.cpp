@@ -257,15 +257,16 @@ private:
     return true;
 }
 
-template <std::size_t... Index>
-struct SyntheticShapeImpl {
-    using type = nf::Fields<nf::Field<1000 + Index, nf::FieldKind::string>...>;
+template <class Seq>
+struct SyntheticShapeFromSeq;
+
+template <std::size_t... I>
+struct SyntheticShapeFromSeq<std::index_sequence<I...>> {
+    using type = nf::Fields<nf::Field<1000 + I, nf::FieldKind::string>...>;
 };
 
 template <std::size_t S>
-using SyntheticShape = typename decltype([]<std::size_t... I>(std::index_sequence<I...>) {
-    return std::type_identity<typename SyntheticShapeImpl<I...>::type>{};
-}(std::make_index_sequence<S>{}))::type;
+using SyntheticShape = typename SyntheticShapeFromSeq<std::make_index_sequence<S>>::type;
 
 struct RefSlot {
     std::uint32_t tag{};
