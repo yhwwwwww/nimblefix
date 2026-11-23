@@ -13,6 +13,7 @@
 
 #include <nimblefix/codec.hpp>
 #include <nimblefix/execution.hpp>
+#include <nimblefix/io_backend.hpp>
 #include <nimblefix/schema.hpp>
 #include <nimblefix/sender.hpp>
 #include <nimblefix/session.hpp>
@@ -60,6 +61,7 @@ struct EngineConfig {
     // Zero disables the explicit SPSC path; nonzero values are capped at 64.
     std::size_t max_producer_lanes_per_session{8};
     QueuedConfig queued{};
+    IoBackendConfig io_backend{};
     std::size_t diagnostic_capacity{256};
     WireHints wire_hints{};
     std::function<Status(const FlatMessageView&)> message_validator{};

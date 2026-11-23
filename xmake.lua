@@ -40,6 +40,12 @@ option("tls")
     set_description("Enable OpenSSL nonblocking TLS (system OpenSSL, no downloads)")
 option_end()
 
+option("io_uring")
+    set_default(false)
+    set_showmenu(true)
+    set_description("Enable optional Linux io_uring Proactor I/O backend (system liburing)")
+option_end()
+
 option("xml")
     set_default(false)
     set_showmenu(true)
@@ -105,6 +111,10 @@ target("nimblefix")
     add_files("src/session/driver.cpp", "src/runtime/*.cpp")
     if has_config("tls") then
         add_defines("NIMBLEFIX_ENABLE_TLS=1")
+    end
+    if has_config("io_uring") then
+        add_defines("NIMBLEFIX_ENABLE_IO_URING=1")
+        add_syslinks("uring", {public = true})
     end
 target_end()
 
@@ -232,12 +242,12 @@ if has_config("tests") then
         add_files("tests/initiator_probe.cpp")
         add_deps("nimblefix")
     target_end()
-    for _, name in ipairs({"parser", "message", "generated", "contract", "journal", "session", "session_boundary", "session_limits", "network", "settings", "journal_reader", "journal_rotation", "protocol_core", "protocol_session", "protocol_security", "queued_runtime", "sender_schema", "schema_codec", "dynamic_message", "engine_features", "producer_lane", "queued_shutdown", "sender_expiry"}) do
+    for _, name in ipairs({"parser", "message", "generated", "contract", "journal", "session", "session_boundary", "session_limits", "network", "settings", "journal_reader", "journal_rotation", "protocol_core", "protocol_session", "protocol_security", "queued_runtime", "sender_schema", "schema_codec", "dynamic_message", "engine_features", "producer_lane", "queued_shutdown", "sender_expiry", "io_backend"}) do
         target(name .. "-test")
             set_kind("binary")
             add_files("tests/" .. name .. "_test.cpp")
             add_deps("nimblefix")
-            if name == "generated" or name == "contract" or name == "sender_schema" then
+            if name == "generated" or name == "contract" or name == "sender_schema" or name == "io_backend" then
                 add_deps("fix44-sample")
                 add_includedirs(generated_dir)
             end

@@ -405,12 +405,25 @@ class Loader {
                   "max_pending_bytes",
                   "max_pending_inbound_messages",
                   "max_pending_inbound_bytes", "max_pending_sender_messages", "max_pending_sender_bytes",
-                  "sender_receipt_capacity", "max_producer_lanes_per_session", "diagnostic_capacity", "queued"});
+                  "sender_receipt_capacity", "max_producer_lanes_per_session", "diagnostic_capacity", "queued",
+                  "io_backend"});
             const auto dispatch = string(*engine, "dispatch", "engine", "inline");
             if (dispatch == "queued")
                 document.dispatch = ConfigDispatch::queued_callbacks;
             else if (dispatch != "inline")
                 error(engine->get("dispatch"), "engine.dispatch", "inline or queued");
+            const auto backend = string(*engine, "io_backend", "engine", "epoll");
+            if (backend == "epoll")
+                document.engine.io_backend.kind = IoBackendKind::epoll;
+            else if (backend == "busy_poll")
+                document.engine.io_backend.kind = IoBackendKind::busy_poll;
+            else if (backend == "io_uring") {
+                if (!io_uring_available())
+                    error(engine->get("io_backend"), "engine.io_backend", "io_uring support was not enabled at build time");
+                document.engine.io_backend.kind = IoBackendKind::io_uring;
+            } else {
+                error(engine->get("io_backend"), "engine.io_backend", "epoll, busy_poll or io_uring");
+            }
             document.schema = string(*engine, "schema", "engine", "none");
             if (document.schema != "none" && document.schema != "fix44")
                 error(engine->get("schema"), "engine.schema", "none or fix44");

@@ -500,7 +500,8 @@ bool run_tcp_client_session(std::uint16_t port, std::string sender_comp, std::si
 }
 
 bool run_engine_acceptor_tcp(std::size_t session_count, std::size_t warmup, std::size_t samples,
-                             std::string_view label, LatencyStats& stats_out, double& agg_rate_out) {
+                             nf::IoBackendKind backend_kind, std::string_view label,
+                             LatencyStats& stats_out, double& agg_rate_out) {
     char pat[] = "/tmp/nimblefix-acceptor-tcp-XXXXXX";
     char* dir_raw = ::mkdtemp(pat);
     if (!dir_raw) return false;
@@ -516,6 +517,7 @@ bool run_engine_acceptor_tcp(std::size_t session_count, std::size_t warmup, std:
     cfg.storage.journal_max_records = 131'072;
     cfg.heartbeat_ms = 60'000;
     cfg.max_sessions = std::max<std::size_t>(16, session_count + 4);
+    cfg.io_backend.kind = backend_kind;
 
     auto created = nf::Engine<fix::Schema, nf::Inline>::create(cfg);
     if (!created.ok()) {
@@ -613,7 +615,7 @@ bool run_engine_acceptor_tcp(std::size_t session_count, std::size_t warmup, std:
               << "  p99  = " << stats_out.p99_ns / 1000.0 << " us\n"
               << "  p99.9= " << stats_out.p999_ns / 1000.0 << " us\n"
               << "  max  = " << stats_out.max_ns / 1000.0 << " us\n"
-              << "  agg  = " << static_cast<std::uint64_t>(agg_rate_out) << " orders/sec (1 epoll thread)\n";
+              << "  agg  = " << static_cast<std::uint64_t>(agg_rate_out) << " orders/sec (1 engine thread)\n";
     return true;
 }
 
@@ -623,30 +625,44 @@ int main(int argc, char** argv) {
     const std::size_t warmup = argc > 1 ? std::stoull(argv[1]) : 2'000;
     const std::size_t samples = argc > 2 ? std::stoull(argv[2]) : 20'000;
     const std::size_t multi_sessions = argc > 3 ? std::stoull(argv[3]) : 8;
+    const std::string_view backend_arg = argc > 4 ? std::string_view{argv[4]} : std::string_view{"all"};
 
     LatencyStats pre_tcp{};
     if (!run_pre_tcp_acceptor(warmup, samples, pre_tcp)) return 1;
 
-    LatencyStats tcp_1{};
-    double rate_1 = 0.0;
-    if (!run_engine_acceptor_tcp(1, warmup, samples,
-            "Tier 2: Engine<fix44::Schema, Inline> Acceptor Single-Session TCP Loopback",
-            tcp_1, rate_1)) return 2;
-
-    LatencyStats tcp_multi{};
-    double rate_multi = 0.0;
     const std::size_t multi_samples = std::max<std::size_t>(2'000, samples / 2);
-    if (!run_engine_acceptor_tcp(multi_sessions, std::min<std::size_t>(warmup, 1'000), multi_samples,
-            "Tier 3: Engine<fix44::Schema, Inline> Acceptor Multi-Session Concurrent TCP",
-            tcp_multi, rate_multi)) return 3;
+    auto run_for = [&](nf::IoBackendKind kind, std::string_view name) -> bool {
+        LatencyStats tcp_1{};
+        double rate_1 = 0.0;
+        const std::string l1 = "Tier 2 [" + std::string{name} + "]: Engine<fix44::Schema, Inline> Single-Session TCP";
+        if (!run_engine_acceptor_tcp(1, warmup, samples, kind, l1, tcp_1, rate_1)) return false;
 
-    const double fix_share_pct = tcp_1.p50_ns > 0.0 ? (pre_tcp.p50_ns * 100.0 / tcp_1.p50_ns) : 0.0;
-    std::cout << "\n=== Single-Session Breakdown (p50) ===\n"
-              << std::fixed << std::setprecision(3)
-              << "  Pure Acceptor FIX engine (pre-TCP) : " << pre_tcp.p50_ns / 1000.0 << " us ("
-              << std::setprecision(1) << pre_tcp.p50_ns << " ns, " << fix_share_pct << "% of TCP RTT)\n"
-              << std::setprecision(3)
-              << "  epoll + Kernel TCP + Client        : " << (tcp_1.p50_ns - pre_tcp.p50_ns) / 1000.0 << " us ("
-              << std::setprecision(1) << (100.0 - fix_share_pct) << "% of TCP RTT)\n";
+        LatencyStats tcp_multi{};
+        double rate_multi = 0.0;
+        const std::string l3 = "Tier 3 [" + std::string{name} + "]: Engine<fix44::Schema, Inline> Multi-Session TCP";
+        if (!run_engine_acceptor_tcp(multi_sessions, std::min<std::size_t>(warmup, 1'000), multi_samples,
+                kind, l3, tcp_multi, rate_multi)) return false;
+
+        const double fix_share_pct = tcp_1.p50_ns > 0.0 ? (pre_tcp.p50_ns * 100.0 / tcp_1.p50_ns) : 0.0;
+        std::cout << "  -> [" << name << "] 1-sess p50=" << std::fixed << std::setprecision(3)
+                  << tcp_1.p50_ns / 1000.0 << " us (FIX " << std::setprecision(1) << fix_share_pct << "%), "
+                  << multi_sessions << "-sess p50=" << std::setprecision(3) << tcp_multi.p50_ns / 1000.0
+                  << " us, agg=" << static_cast<std::uint64_t>(rate_multi) << " orders/sec\n";
+        return true;
+    };
+
+    if (backend_arg == "epoll" || backend_arg == "all") {
+        if (!run_for(nf::IoBackendKind::epoll, "epoll")) return 2;
+    }
+    if (backend_arg == "busy_poll" || backend_arg == "all") {
+        if (!run_for(nf::IoBackendKind::busy_poll, "busy_poll")) return 3;
+    }
+    if (backend_arg == "io_uring" || (backend_arg == "all" && nf::io_uring_available())) {
+        if (!nf::io_uring_available()) {
+            std::cerr << "io_uring backend not enabled in this build\n";
+            return 4;
+        }
+        if (!run_for(nf::IoBackendKind::io_uring, "io_uring")) return 5;
+    }
     return 0;
 }

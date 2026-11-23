@@ -751,13 +751,16 @@ int doctor(const Arguments &args) {
     if (args.json)
         std::cout << "{\"version\":" << quote(version)
                   << ",\"tls\":" << (nf::tls_available() ? "true" : "false")
+                  << ",\"io_uring\":" << (nf::io_uring_available() ? "true" : "false")
                   << ",\"xml\":" << (xml ? "true" : "false") << ",\"fix44\":" << (fix44 ? "true" : "false")
                   << ",\"benchmarks\":" << (bench ? "true" : "false")
-                  << ",\"journal_format\":2,\"configuration_version\":1,\"source_api\":\"0.2.x\""
-                  << ",\"confirmation\":\"appended\",\"dispatch\":[\"inline\",\"queued\"],\"platform\":"
-                     "\"Linux\"}\n";
+                  << ",\"journal_format\":2,\"configuration_version\":1,\"source_api\":\"0.3.x\""
+                  << ",\"confirmation\":\"appended\",\"dispatch\":[\"inline\",\"queued\"],\"io_backends\":[\"epoll\",\"busy_poll\""
+                  << (nf::io_uring_available() ? ",\"io_uring\"" : "")
+                  << "],\"platform\":\"Linux\"}\n";
     else
         std::cout << "NimbleFIX " << version << "\nTLS: " << (nf::tls_available() ? "OpenSSL" : "not built")
+                  << "\nio_uring: " << (nf::io_uring_available() ? "liburing" : "not built")
                   << "\nXML: " << (xml ? "libxml2" : "not built") << "\nFIX44: " << (fix44 ? "complete" : "not built")
                   << "\nBenchmarks: " << (bench ? "built" : "not built") << "\nDispatch: inline, queued\nStore: mmap appended, v2\n";
     return 0;
