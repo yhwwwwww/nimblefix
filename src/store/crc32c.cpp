@@ -62,8 +62,8 @@ alignas(64) constexpr auto slicing_tables = make_slicing_tables();
 }
 
 #if (defined(__x86_64__) || defined(_M_X64)) && (defined(__GNUC__) || defined(__clang__))
-__attribute__((target("sse4.2")))
-[[nodiscard]] std::uint32_t crc32c_sse42(std::uint32_t crc,
+[[nodiscard]] __attribute__((target("sse4.2")))
+std::uint32_t crc32c_sse42(std::uint32_t crc,
                                          const unsigned char* data,
                                          std::size_t size) noexcept {
     std::uint64_t state = crc;

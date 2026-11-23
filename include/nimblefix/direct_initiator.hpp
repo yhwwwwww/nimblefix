@@ -1303,7 +1303,7 @@ private:
                 break;
             }
             case detail::CoreActionKind::send_test_request: {
-                std::array<detail::DirectAdminField, 1> f{{112, FieldKind::string, 0, a.text}};
+                std::array<detail::DirectAdminField, 1> f{{{112, FieldKind::string, 0, a.text}}};
                 if (const auto st = send_admin("1", f, now_ms, inbound_id); !st.ok()) return fail(st);
                 break;
             }

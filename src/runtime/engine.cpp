@@ -2726,6 +2726,7 @@ struct EngineRuntime::Impl {
                 if (peer.session) peer.session->state.store(SessionState::failed, std::memory_order_release);
                 return opened;
             }
+            now = monotonic_ms();
         }
         bool in_progress = false;
         auto connected = TcpStream::connect(peer.endpoint.host, peer.endpoint.port, in_progress);
@@ -2959,6 +2960,7 @@ struct EngineRuntime::Impl {
             peer->receive_buffer.reserve(config.max_frame_bytes + read_chunk_size);
             auto opened = open_driver(*peer, SessionRole::acceptor);
             if (!opened.ok()) return opened;
+            now = monotonic_ms();
             peers.push_back(std::move(peer));
             auto& stored = *peers.back();
             driver_registered = true;
@@ -2971,7 +2973,12 @@ struct EngineRuntime::Impl {
                 drop_peer(stored, received, now, false);
                 return received;
             }
-            return process_peer_buffer(stored, now);
+            const auto processed = process_peer_buffer(stored, now);
+            if (!processed.ok() || stored.closed) return processed;
+            if (stored.driver && stored.driver->needs_write()) {
+                (void)write_peer(stored, now);
+            }
+            return Status::success();
         }();
         } catch (...) {
             frame_status = {ErrorCode::capacity_exceeded};
