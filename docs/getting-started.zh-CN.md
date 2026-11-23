@@ -8,7 +8,7 @@ NimbleFIX 0.3 按**用多少付多少**分成三层，全部接口统一使用�
 | **极速单连接 + TLS / mTLS** | **Layer 0 + TLS** | `NimbleFIX::nimblefix_core_tls` / `nimblefix-core-tls` | 系统 OpenSSL 3 |
 | **多会话服务端（Acceptor）/ 网关 / CLI** | **Layer 1/2 `Engine`** | `NimbleFIX::nimblefix` / `nimblefix` | 可选 `liburing`、`libxml2` |
 
-> 协议细节与资源边界见 [session-support.md](session-support.md)。
+> 架构设计见 [architecture.md](architecture.md) · 协议细节与资源边界见 [session-support.md](session-support.md) · 完整实测基准见 [benchmarks.md](benchmarks.md)。
 
 ---
 
@@ -73,6 +73,17 @@ if (is_limit) order_b.price(nf::Decimal{15025, 2}); // 原生 if，随便写
 | **② 同线程攒批发送** | `init.enqueue(order)` + `init.flush()` | 同线程密集连发（Burst，如一次扫多档发 10 笔） | 多笔订单先写入 Journal，最后 `flush()` 自动用 **1 次 `sendmsg/writev`** 整批发出 |
 | **③ 双线程无锁 SPSC 队列** | `DirectSendQueue`: 策略线程 `queue.try_push(order)` + I/O 线程 `init.drain(queue)` | 策略计算重 + 密集发单，需要策略核与网络核并行流水线 | 0 锁 0 `malloc`；策略线程把字段编码进无锁环，I/O 线程批量取单、编序列号落盘并 **1 次 `sendmsg/writev`** 发出 |
 
+#### 实测速查：不同场景下 4 种发单方式怎么选？（Release, FIX 4.4 + mmap Journal, 0 `malloc`）
+
+| 发送模式 | Ping-Pong 单笔单向 p50 | 纯密集连发 (32 笔×0 µs) CO-Free p50 / 吞吐 | 策略计算+连发 (32 笔×2 µs) CO-Free p50 / p99 |
+| :--- | ---: | ---: | ---: |
+| **① `DirectInitiator::send()`** | **4.97 µs** | 57.04 µs / 292k ord/s | 100.50 µs / 198.74 µs |
+| **② `DirectInitiator enqueue+flush`** | 5.01 µs | 22.73 µs / 946k ord/s | 95.40 µs / 130.63 µs |
+| **③ `DirectInitiator + DirectSendQueue`** | 5.13 µs | **18.14 µs** / **1.02M ord/s** | **48.52 µs** / **88.70 µs** |
+| **④ `Engine(busy_poll) + ProducerLane`** | 7.89 µs | 76.31 µs / 249k ord/s | 79.85 µs / 152.32 µs |
+
+> `CO-Free` = `对端收到时间 - Burst 开始时间`（无 Coordinated Omission 的真实延迟）。完整数据与构造方法（`make()` 340 ns / `Draft` 321 ns / `Fixed` 221 ns，均 0 分配）见 [benchmarks.md](benchmarks.md)。
+
 ---
 
 ## 二、5 分钟跑通极速 Initiator（`DirectInitiator`）
@@ -114,7 +125,7 @@ int main() {
     (void)init.connect();
     while (!init.is_active()) (void)init.poll_once();
 
-    // 构造消息（用日常 make() 或零分配 Fixed 都可以）
+    // 构造消息（用写法 A 的 make() 或写法 B 的 Draft 都可以，默认 SSO 0 分配）
     auto order = fix::NewOrderSingle::make()
         .cl_ord_id("ORD-001").symbol("AAPL").side('1')
         .transact_time("20261123-09:30:00.000")

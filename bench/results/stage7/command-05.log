@@ -1,9 +1,0 @@
-inline/callback: RTT p50=593420ns p99=1157873ns; ingress-delay p50=38982ns; CSV=/home/lordw/codes/nimblefix/build/release-stage7-final/runtime/inline/callback/run-1/samples.csv
-inline/mpsc: RTT p50=118159ns p99=199755ns; ingress-delay p50=32371ns; CSV=/home/lordw/codes/nimblefix/build/release-stage7-final/runtime/inline/mpsc/run-1/samples.csv
-inline/lane: RTT p50=128070ns p99=183636ns; ingress-delay p50=32851ns; CSV=/home/lordw/codes/nimblefix/build/release-stage7-final/runtime/inline/lane/run-1/samples.csv
-queued-journal/callback: RTT p50=610473ns p99=1177526ns; ingress-delay p50=62887ns; CSV=/home/lordw/codes/nimblefix/build/release-stage7-final/runtime/queued-journal/callback/run-1/samples.csv
-queued-journal/mpsc: RTT p50=120344ns p99=194430ns; ingress-delay p50=40365ns; CSV=/home/lordw/codes/nimblefix/build/release-stage7-final/runtime/queued-journal/mpsc/run-1/samples.csv
-queued-journal/lane: RTT p50=118231ns p99=188534ns; ingress-delay p50=40776ns; CSV=/home/lordw/codes/nimblefix/build/release-stage7-final/runtime/queued-journal/lane/run-1/samples.csv
-queued-ring/callback: RTT p50=599828ns p99=1162365ns; ingress-delay p50=62807ns; CSV=/home/lordw/codes/nimblefix/build/release-stage7-final/runtime/queued-ring/callback/run-1/samples.csv
-queued-ring/mpsc: RTT p50=129420ns p99=200315ns; ingress-delay p50=40876ns; CSV=/home/lordw/codes/nimblefix/build/release-stage7-final/runtime/queued-ring/mpsc/run-1/samples.csv
-queued-ring/lane: RTT p50=158778ns p99=213962ns; ingress-delay p50=43972ns; CSV=/home/lordw/codes/nimblefix/build/release-stage7-final/runtime/queued-ring/lane/run-1/samples.csv

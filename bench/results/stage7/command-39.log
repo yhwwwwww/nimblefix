@@ -1,1 +1,0 @@
-queued-ring/callback: RTT p50=670611ns p99=1472070ns; ingress-delay p50=46287ns; CSV=/home/lordw/codes/nimblefix/build/release-stage7-final/rotation-long/queued-ring/callback/run-1/samples.csv

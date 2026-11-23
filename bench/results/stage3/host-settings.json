@@ -1,6 +1,0 @@
-{
-  "governor": "performance",
-  "boost": "1",
-  "smt": "1",
-  "journal_mount": "/home/lordw/codes/nimblefix/build/bench-state"
-}

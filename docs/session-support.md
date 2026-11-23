@@ -1,53 +1,47 @@
-# NimbleFIX 0.2 support matrix
+# NimbleFIX 0.3 Support Matrix
 
-The source API is frozen for 0.2.x. This is the implemented boundary of
-[design §16](rewrite-design.md); [release evidence](release-0.2.md) records
-functional, deployment and measurement checks.
+This document defines the supported protocol, runtime, storage, and deployment boundary of NimbleFIX 0.3. See [architecture.md](architecture.md) for system design and [benchmarks.md](benchmarks.md) for measured performance boundaries.
 
-| Area | Supported behavior | Explicit boundary |
-| --- | --- | --- |
-| Transport versions | FIX.4.2, FIX.4.3, FIX.4.4, FIXT.1.1; FIXT Logon checks configured DefaultApplVerID | Numeric IPv4/IPv6. Application dialect/schema must match the configured session. FIXT is session transport; FIX50SP2 supplies its application dictionary. |
-| Standard schemas | Full FIX42, FIX43, FIX44, FIXT11 and FIX50SP2 dictionary generation; scalar types, enums, components, nested groups, binary DATA length pairs | Metadata validates dictionary rules; business conditions expressed only in prose still belong to the application. Generated standard headers are optional. |
-| Builders/views | Static tags, fixed shapes, generated named/tag setters/getters; bounded groups; explicit DynamicMessage | Views and SessionContext are borrowed for one callback. Keep owned values for later use. Managed header tags cannot be set by applications. |
-| Validation | Structure, required, strict; dictionary enums, scalar representations and group boundaries | Raw flat mode uses explicit application validation; selecting typed Engine or runtime XML adds dictionary checks. Unknown/unhandled typed messages are rejected before business code. |
-| Logon/authentication | Initiator/acceptor, configured CompIDs/version, positive HeartBtInt, EncryptMethod=0, credentials/custom fields, callback authentication | Acceptor authenticates before opening a journal. Credentials require TLS by default; explicit require_tls=false is available. Non-recovery Logon content is removed from persisted payloads. |
-| Heartbeat/TestRequest | Timer Heartbeat, matching TestReqID and finite liveness/write deadlines | Inline callbacks must finish promptly. User C++ callbacks cannot be forcibly preempted. |
-| SendingTime | UTC calendar/precision checks; default Engine skew tolerance 120 seconds; Reject then Logout on excessive skew | Low-level Driver with absent SessionSettings retains legacy deterministic test behavior. Clock synchronization is an operator responsibility. |
-| Gaps/replay | ResendRequest, GapFill, forward SequenceReset reset mode, original-sequence application replay with PossDup/OrigSendingTime | Replay cannot bypass a partially written frame. Required history that has been pruned causes history_unavailable, never a fabricated business GapFill. |
-| Sequence epochs | Explicit allowed Logon reset, new audited epoch, sequence one only by policy | Default is no automatic reset. Setting logon.request_sequence_reset=true requests a reset on each new connection. Pending input/read leases prevent unsafe reset. |
-| FIX 369 | Emit highest contiguous business-complete input; validate peer progress; combine peer acknowledgement and retention window | Accepted or merely appended input is not acknowledged as processed while its callback/replies remain unfinished. No acknowledgement means conservative retention. |
-| Logout/rejects | Local/peer/simultaneous Logout, write-before-close, finite shutdown; structured Session Reject for schema/type failures; peer Reject observation | Full counterparty certification is outside the test suite. BusinessMessageReject/business-specific rejection rules remain application policy. |
-| Inline/Queued | One protocol owner for either policy; Queued uses a bounded worker pool and one in-flight callback per session | Queued completion follows dependent reply append, not just worker return. Slow-session queues pause reads with bounded age/timeout. Inline callback work affects its owner. |
-| Sender/lane | Ordinary Sender accepts multiple producer threads; advanced lane explicitly uses a bounded SPSC channel | Same-producer order only; no cross-session or cross-producer total order. Cross-thread lane misuse reports wrong_thread. |
-| Receipts | accepted, appended, written, failed, expired with bounded retention | accepted owns a command; appended commits the frame; written means transport accepted bytes. Peer receipt and business acceptance require separate evidence. |
-| Journal | Versioned segmented mmap queue, CRC/commit boundaries, index/checkpoint rebuild, rotation, independent readers and leases | v1 is retained explicitly with segment_bytes=0. No implicit migration or memory store. Segment indexes/RecordIds are never reused in a store. |
-| Retention | Peer replay floor, configured outbound window, contiguous completed input, reader cursor/lag and mapping/TX leases | May retain conservative sequence-anchor segments. Full storage fails closed; it cannot overwrite required history. There are finite segment-index and epoch-audit limits. |
-| Recovery | Append before TX/callback, local unfinished redelivery, dependent reply reuse by record/ordinal/content | At-least-once business invocation. Applications must make external side effects idempotent and reproduce replies in the same order/content. |
-| Confirmation | appended under same-host process death while OS/filesystem remain operating | No per-message fsync/msync or power-loss guarantee. Index/audit/rotation are included in storage budgets. |
-| TLS | Optional OpenSSL 3, TLS 1.2/1.3, SAN verification, optional mTLS, nonblocking WANT_READ/WANT_WRITE, finite handshake/record retry memory | Encrypted private keys requiring an interactive password are not supported. Verification failure closes the stream; no plaintext fallback. |
-| Identity | Transport version, oriented CompIDs and a length-delimited local qualifier | Coexisting qualified acceptors with the same wire identity use distinct listeners; ambiguous routing on one listener is rejected offline. |
-| Scheduling | Explicit UTC weekday/time windows including overnight windows; bounded Logout at close and reconnect at opening | No timezone/DST interpretation or automatic epoch reset. |
-| Configuration/CLI | Fixed TOML v1 parser, aggregate typed diagnostics, relative paths, explicit secret environment references; init/validate/run/schema/inspect/doctor/optional bench | Offline validation does not bind or acquire a store writer. CLI run observes business input; applications/examples supply business replies. |
-| Diagnostics | Bounded off-owner error channel, dropped-event counter and thread-safe session snapshots | Snapshot counters are independently sampled; a snapshot is not a transactional view across sessions. Observer exceptions stop the Engine. |
-| Manual lifecycle | start/poll_once on one caller-owned thread, same driver/transport/recovery as run; thread-safe request_stop | One run per Engine. Continue polling through bounded shutdown; recreate with the same storage directory for a new run. Queued/diagnostic threads remain explicit components. |
-| Installation | Relocatable CMake targets, CLI, headers, dictionaries/licenses, CMake and xmake XML helpers; optional capabilities declared as package components | Rebuild dependent binaries when upgrading; no C++ ABI guarantee. Core-only configure/build needs no XML/OpenSSL/Python. |
-| Independent checks | QuickFIX 1.16.0 in both roles, real file stores/restarts; independent raw peers for every transport in both roles and policies | These validate the stated matrix, not universal vendor certification. Performance comparisons need identical boundaries/settings. |
+## Capability & Boundary Matrix
 
-Engine defaults are 30 s heartbeat, 10 s connect/Logon/TLS handshake, 250 ms
-reconnect, 30 s write stall/pending age/read pause/delivery age, 5 s Logout;
-64 sessions, 32 pending sockets, 256 TX messages/4 MiB, 128 pending input
-messages/4 MiB, 256 ordinary Sender commands/4 MiB, 1,024 receipts,
-2 Queued workers and 128 callbacks/4 MiB. Maximum frame is 64 KiB. Eight TX
-slots and two maximum-frame byte capacities reserve administration capacity.
-Age expiry can explicitly be disabled for outbound messages with
-max_pending_age_ms=0. Administrative traffic follows TCP order and cannot
-jump over earlier blocked bytes.
+| Area | Supported Behavior (0.3) | Explicit Boundary |
+| :--- | :--- | :--- |
+| **3-Layer Packaging** | `NimbleFIX::nimblefix_core` (Layer 0 `DirectInitiator` + `DirectSendQueue`), `NimbleFIX::nimblefix_core_tls` (Layer 0 + OpenSSL 3 `DirectTlsTransport`), `NimbleFIX::nimblefix` (Layer 1/2 `Engine`, `IoBackend`, Acceptor, CLI) | Rebuild dependent binaries when upgrading; no C++ ABI guarantee. Core-only build requires only C++20 + `pthread` (no OpenSSL, libxml2, liburing, or Python). |
+| **Transport Versions** | `FIX.4.2`, `FIX.4.3`, `FIX.4.4`, `FIXT.1.1` (FIXT Logon validates configured `DefaultApplVerID`) | Numeric IPv4/IPv6 endpoints. Application schema must match configured session. `FIXT.1.1` is session transport; `FIX50SP2` supplies its application dictionary. |
+| **Standard & Custom Schemas** | Full `FIX42`, `FIX43`, `FIX44`, `FIXT11`, `FIX50SP2` XML codegen; `--messages` subset pruning; scalar types, enums, components, nested repeating groups, binary `DATA` length pairs; arbitrary custom tags across `1..999,999,999` | Metadata validates dictionary structure and types; prose-only venue business rules belong to the application. Generated standard headers are optional. |
+| **Message Builders & Views** | **Scheme A**: one-shot fluent `make()` / `make<Slots, Bytes>()` with `std::optional` (default `<16, 256>` SSO + heap spill); **Scheme B**: mutable reusable `Draft` / `DraftWith<Slots, Bytes>` with native `if`, overwrite & `reset()` (same SSO); **Strict**: `Fixed<ByteCap, fix::field::...>`; runtime `DynamicMessage`; zero-copy `FlatMessageView::is<M>()/as<M>()` | Views and `SessionContext` are borrowed for one callback only — copy values if retaining beyond the callback. Managed header/trailer tags cannot be set by application code. |
+| **Validation** | Structure, required fields, strict mode; dictionary enums, exact `Decimal` / integer / UTC timestamp representations, repeating group boundaries | Raw flat mode (`FlatSchema`) performs framing/checksum checks and leaves business validation to the application; typed `Schema` or runtime XML enables full dictionary validation. |
+| **Layer 0 `DirectInitiator`** | Zero-overhead single-session initiator (`send()`, same-thread `enqueue()+flush()` via `sendmsg`/`write_batch`, 2-thread lock-free SPSC `DirectSendQueue` + `drain()`); full FIX session state machine, segmented mmap Journal, restart recovery & GapFill/Replay; optional `DirectTlsTransport` | Single initiator session per instance; caller drives `poll_once()` / `drain()` on the I/O owner thread (no hidden background threads). |
+| **Layer 1/2 `Engine` & `IoBackend`** | Multi-session initiator/acceptor runtime with pluggable `IoBackend`: `epoll` (default), `busy_poll` (zero-sleep spin), optional Linux `io_uring` Proactor (`IORING_OP_RECV`/`IORING_OP_SEND` via `liburing`); `Inline` and `Queued` dispatch policies | Single protocol I/O owner thread per `Engine` instance (strict single-writer per session, zero mutex on protocol state). `io_uring` is opt-in (`--io_uring=y` / `-DNIMBLEFIX_ENABLE_IO_URING=ON`); requesting it when disabled returns `ErrorCode::unsupported`. |
+| **Cross-Thread Sending** | Layer 0: bounded lock-free SPSC `DirectSendQueue`. Layer 1/2: multi-producer MPSC `Sender` and bounded lock-free SPSC `ProducerLane` | Same-producer ordering only; no global total order across independent producer threads or sessions. Cross-thread misuse of SPSC `ProducerLane` reports `wrong_thread`. |
+| **Logon & Authentication** | Initiator/acceptor, configured CompIDs/version, positive `HeartBtInt`, `EncryptMethod=0`, credentials/custom fields, callback authentication | Acceptor authenticates before opening a session journal. Credentials require TLS by default unless explicitly opted out (`require_tls=false`). Non-recovery Logon secrets are scrubbed from persisted payloads. |
+| **Heartbeat & TestRequest** | Timer Heartbeat, matching `TestReqID`, finite liveness and write-stall deadlines | `Inline` callbacks must finish promptly; user C++ code cannot be forcibly preempted. |
+| **SendingTime** | UTC calendar and millisecond precision validation; default `Engine` skew tolerance 120 s; Session Reject then Logout on excessive skew | Host clock synchronization (NTP/PTP) is an operator responsibility. |
+| **Gaps & Replay** | `ResendRequest`, `GapFill`, forward `SequenceReset` reset mode, original-sequence business replay with `PossDupFlag=Y` and `OrigSendingTime` | Replay never splits a partially written frame. Required history pruned beyond retention returns `history_unavailable` instead of fabricating a business `GapFill`. |
+| **Sequence Epochs** | Explicit allowed Logon reset (`141=Y`), audited epoch record, sequence reset to 1 only by policy | Default preserves sequence state across reconnects. Pending input/read leases prevent unsafe reset. |
+| **FIX 369 (`LastMsgSeqNumProcessed`)** | Emits highest contiguous business-completed inbound sequence; validates peer progress; feeds retention floor | Appended-but-unfinished inbound messages are never acknowledged via tag 369 until their callback and dependent replies commit. |
+| **Logout & Rejects** | Local, peer, and simultaneous Logout with write-before-close and finite shutdown deadline; structured Session Reject (`35=3`) for schema/type errors | Counterparty-specific `BusinessMessageReject` (`35=j`) rules remain application policy. |
+| **Segmented mmap Journal** | Pre-allocated segmented `MAP_SHARED` mmap journal with hardware SSE4.2 CRC32C, zero-copy `reserve()`/`commit()`, atomic `.tmp` + `rename` segment creation, index/checkpoint rebuild, rotation, off-hot-path `poll_maintenance()`, independent readers & leases | No in-memory-only store mode. Segment indexes and `RecordId`s are monotonic and never reused within a store. Full storage fails closed rather than overwriting required replay history. |
+| **Recovery & Confirmation** | Append-before-TX and append-before-callback; crash recovery re-delivers unfinished inbound records (`is_recovery == true`) and reuses previously committed dependent replies by ordinal/content | Confirmation level `appended` covers same-host process crashes (`SIGKILL`/abort) while OS/filesystem remain healthy. No per-message `fsync`/`msync` or power-loss guarantee. At-least-once delivery requires idempotent external side effects. |
+| **Receipts (`Engine`)** | `accepted`, `appended`, `written`, `failed`, `expired` with bounded circular retention | `written` means the local socket/TLS transport accepted bytes; counterparty receipt requires application-level confirmation (e.g. `ExecutionReport`). |
+| **TLS** | Optional OpenSSL 3 (`DirectTlsTransport` & `Engine`), TLS 1.2/1.3, CA + SAN hostname/IP verification, optional mTLS, nonblocking `WANT_READ`/`WANT_WRITE`, `TlsContext` reuse on reconnect | Interactive passphrase-encrypted private keys are not supported. Verification failures close immediately with no plaintext fallback. |
+| **Identity & Scheduling** | Persistent store identity = transport version + oriented CompIDs + optional qualifier; explicit UTC weekday/time session windows including overnight spans | Session display names and socket ports are not part of persistent identity. No DST/timezone translation or automatic epoch reset on schedule boundaries. |
+| **TOML Configuration & CLI** | TOML v1 parser, typed offline diagnostics, environment-variable secret indirection; `nimblefix-cli` commands: `init`, `validate`, `run`, `schema`, `inspect`, `doctor` | Offline `validate` neither binds sockets nor acquires store writer locks. |
+| **Manual Event Loop** | `Engine::start()` + `poll_once(max_wait_ms)` on a caller-owned thread; `DirectInitiator::poll_once()` / `drain()` on caller thread; thread-safe `request_stop()` | Single lifecycle per `Engine` instance; recreate with the same storage directory for a subsequent run. |
 
-A normal Engine defaults to 16 MiB total journal budget and 1 MiB segments,
-65,536 indexed records and 8,192 retained outbound messages per session.
-The v2 epoch audit reserves 1 MiB when the budget supports it. Both byte and
-record limits apply. Readers default to 16 slots and 65,536-record maximum lag.
-A v2 store supports at most 65,535 segment indexes and 1,024 audited resets;
-exhaustion is a visible bounded failure. Provision capacity for unacknowledged
-history and slow readers, and rotate operational identities only by an
-explicit bilateral session procedure.
+---
+
+## Default Resource & Storage Limits
+
+| Parameter | Default | Notes |
+| :--- | ---: | :--- |
+| Heartbeat interval | 30 s | Configurable per session |
+| Connect / Logon / TLS handshake timeout | 10 s | Bounded failure on stall |
+| Reconnect backoff | 250 ms | Automatic reconnect on initiator |
+| Write stall / pending age / read pause / delivery age | 30 s | `max_pending_age_ms=0` disables outbound age expiry |
+| Logout completion deadline | 5 s | Bounded shutdown |
+| Maximum FIX frame size | 64 KiB | Admin traffic reserves 8 TX slots + 2 max-frame byte budgets |
+| `Engine` capacity | 64 sessions, 32 pending sockets | 256 TX msgs / 4 MiB, 128 pending input msgs / 4 MiB |
+| `Engine` Sender / Receipts / Queued workers | 256 Sender cmds / 4 MiB, 1,024 receipts, 2 workers (128 callbacks / 4 MiB) | Configurable in `EngineConfig` |
+| Journal budget (per session) | 16 MiB total, 1 MiB segments, 65,536 indexed records, 8,192 retained outbound msgs | Epoch audit reserves 1 MiB when budget allows; up to 65,535 segments and 1,024 audited resets per store |
+| Independent journal readers | 16 reader slots, 65,536-record max lag | Lease-protected against premature segment pruning |
