@@ -125,9 +125,9 @@ Full methodology, boundary disclosures, and reproducible commands are in [docs/b
 
 | Message API | p50 | p99 | Heap Allocs |
 | :--- | ---: | ---: | :---: |
-| **Scheme A**: `NewOrderSingle::make()` + `std::optional` (SSO `<16, 256>`) | **340.0 ns** | 390.0 ns | **0** |
-| **Scheme B**: `NewOrderSingle::Draft` + native `if` + `reset()` (SSO `<16, 256>`) | **321.0 ns** | 411.0 ns | **0** |
-| **Strict**: `NewOrderSingle::Fixed<128, fix::field::...>` | **221.0 ns** | 341.0 ns | **0** |
+| **Scheme A**: `NewOrderSingle::make()` + `std::optional` (SSO `<16, 256>`) | **411.0 ns** | 561.0 ns | **0** |
+| **Scheme B**: `NewOrderSingle::Draft` + native `if` + `reset()` (SSO `<16, 256>`) | **401.0 ns** | 521.0 ns | **0** |
+| **Strict**: `NewOrderSingle::Fixed<128, fix::field::...>` | **261.0 ns** | 350.0 ns | **0** |
 
 ### 2. Initiator Send Modes: Ping-Pong vs Open-Loop Dense Burst (`initiator-burst-bench`, real loopback TCP + FIX 4.4 + Journal)
 
@@ -135,20 +135,20 @@ CO-Free = `t_recv - t_burst_start` (Coordinated-Omission-Free one-way latency fr
 
 | Initiator Send Mode | Ping-Pong 1-Way p50 (RTT p50) | Burst 32×0 µs CO-Free p50 / p99 (Rate) | Burst 32×2 µs Compute CO-Free p50 / p99 (Rate) |
 | :--- | ---: | ---: | ---: |
-| **1. `DirectInitiator::send()`** (1-thr, no queue) | **4.97 µs** (9.62 µs) | 57.04 µs / 113.00 µs (292k ord/s) | 100.50 µs / 198.74 µs (166k ord/s) |
-| **2. `DirectInitiator::enqueue()+flush()`** (1-thr `sendmsg`) | 5.01 µs (9.67 µs) | 22.73 µs / **30.50 µs** (946k ord/s) | 95.40 µs / 130.63 µs (283k ord/s) |
-| **3. `DirectInitiator + DirectSendQueue`** (2-thr SPSC + `sendmsg`) | 5.13 µs (**9.33 µs**) | **18.14 µs** / 41.65 µs (**1.02M ord/s**) | **48.52 µs** / **88.70 µs** (**368k ord/s**) |
-| **4. `Engine(busy_poll) + ProducerLane`** (2-thr SPSC) | 7.89 µs (13.11 µs) | 76.31 µs / 155.31 µs (249k ord/s) | 79.85 µs / 152.32 µs (231k ord/s) |
+| **1. `DirectInitiator::send()`** (1-thr, no queue) | **5.83 µs** (11.30 µs) | 64.92 µs / 126.33 µs (258k ord/s) | 92.27 µs / 175.52 µs (183k ord/s) |
+| **2. `DirectInitiator::enqueue()+flush()`** (1-thr `sendmsg`) | 5.84 µs (11.16 µs) | 22.64 µs / **28.07 µs** (1.02M ord/s) | 89.46 µs / **95.76 µs** (321k ord/s) |
+| **3. `DirectInitiator + DirectSendQueue`** (2-thr SPSC + `sendmsg`) | 6.00 µs (**10.98 µs**) | **16.54 µs** / 28.35 µs (**1.20M ord/s**) | **49.00 µs** / 224.30 µs (**338k ord/s**) |
+| **4. `Engine(busy_poll) + ProducerLane`** (2-thr SPSC) | 9.25 µs (15.29 µs) | 61.34 µs / 106.52 µs (307k ord/s) | 67.22 µs / 118.48 µs (273k ord/s) |
 
 ### 3. `DirectInitiator` Layered Breakdown (`direct-initiator-bench`, full 912-field FIX 4.4 + `NoPartyIDs[3]` + mmap Journal)
 
 | Workload Boundary | p50 | p95 | p99 | Throughput | Heap Allocs |
 | :--- | ---: | ---: | ---: | ---: | :---: |
-| **User Encode** (in-loop fill + single-pass `encode_fix44`) | **291.0 ns** | 311.0 ns | 390.0 ns | 3,345,749 msgs/s | **0** |
-| **Pre-TCP Session Outbound** (in-loop fill + `DirectInitiator::send` + mmap Journal) | **521.0 ns** | 621.0 ns | 832.0 ns | 1,849,466 msgs/s | **0** |
-| **Pre-TCP Session Inbound** (frame + parse + 912-field Schema + dual Journal records + callback) | **1,002.0 ns** | 1,102.0 ns | 1,393.0 ns | 973,061 msgs/s | **0** |
-| **Pre-TCP Combined** (total pure FIX engine round-trip budget) | **1.52 µs** | 1.69 µs | 2.37 µs | 637,600 rt/s | **0** |
-| **Real TCP Loopback RTT** (kernel TCP + full FIX 4.4 + mmap Journal) | **9.25 µs** | 11.26 µs | 16.93 µs | 103,134 rt/s | **0** |
+| **User Encode** (in-loop fill + single-pass `encode_fix44`) | **300.0 ns** | 461.0 ns | 491.0 ns | 3,123,417 msgs/s | **0** |
+| **Pre-TCP Session Outbound** (in-loop fill + `DirectInitiator::send` + mmap Journal) | **531.0 ns** | 651.0 ns | 831.0 ns | 1,810,647 msgs/s | **0** |
+| **Pre-TCP Session Inbound** (frame + parse + 912-field Schema + dual Journal records + callback) | **861.0 ns** | 972.0 ns | 1,313.0 ns | 1,128,150 msgs/s | **0** |
+| **Pre-TCP Combined** (total pure FIX engine round-trip budget) | **1.39 µs** | 1.59 µs | 2.14 µs | 695,074 rt/s | **0** |
+| **Real TCP Loopback RTT** (kernel TCP + full FIX 4.4 + mmap Journal) | **9.34 µs** | 11.51 µs | 14.10 µs | 99,914 rt/s | **0** |
 
 Binary footprint (Release): `direct-initiator-example` is **336 KB** (`libnimblefix-core.a`: 409 KB) vs full multi-session `initiator-example` at **1.2 MB**.
 
@@ -156,11 +156,11 @@ Binary footprint (Release): `direct-initiator-example` is **336 KB** (`libnimble
 
 | `IoBackend` (`acceptor-bench 2000 20000 8 all`) | 1-Session p50 | 1-Session p99 | 1-Session Rate | 8-Session p50 | 8-Session p99 | 8-Session Aggregate |
 | :--- | ---: | ---: | ---: | ---: | ---: | ---: |
-| **`epoll`** (default, zero extra deps) | 29.92 µs | 48.59 µs | 31,272 ord/s | 87.24 µs | 224.62 µs | 82,728 ord/s |
-| **`busy_poll`** (zero-sleep nonblocking poll) | **13.02 µs** | **33.64 µs** | **64,758 ord/s** | **50.21 µs** | 133.65 µs | 121,751 ord/s |
-| **`io_uring`** (Proactor `RECV`/`SEND`, sleeping) | **15.16 µs** | 43.70 µs | 55,969 ord/s | **52.40 µs** | **95.58 µs** | **137,321 ord/s** (+66%) |
+| **`epoll`** (default, zero extra deps) | 14.68 µs | 32.07 µs | 62,553 ord/s | **44.56 µs** | 114.46 µs | 133,972 ord/s |
+| **`busy_poll`** (zero-sleep nonblocking poll) | **12.45 µs** | 23.38 µs | **73,464 ord/s** | 45.38 µs | 118.44 µs | 129,649 ord/s |
+| **`io_uring`** (Proactor `RECV`/`SEND`, sleeping) | 14.58 µs | **19.56 µs** | 66,515 ord/s | 49.10 µs | **97.90 µs** | **146,037 ord/s** (+9%) |
 
-*(Pre-TCP Acceptor `SessionDriver` wire-in -> 912-field Schema -> in-handler ER -> Journal -> flush: **p50 = 1.53 µs**, **p99 = 2.18 µs**, **621,161 ord/s**.)*
+*(Pre-TCP Acceptor `SessionDriver` wire-in -> 912-field Schema -> in-handler ER -> Journal -> flush: **p50 = 1.71 µs**, **p99 = 3.03 µs**, **581,156 ord/s**.)*
 
 ### 5. NimbleFIX 0.3 vs QuickFIX 1.16.0 (`quickfix-parity-bench`, Strictly Same-Methodology)
 

@@ -31,11 +31,11 @@ xmake build initiator-burst-bench
 
 | Message API | p50 | p99 | Heap Allocs (`__wrap_malloc`) |
 | :--- | ---: | ---: | :---: |
-| **Scheme A**: `NewOrderSingle::make()` + `std::optional` (SSO `<16, 256>`) | **340.0 ns** | **390.0 ns** | **0** |
-| **Scheme B**: `NewOrderSingle::Draft` + native `if` + `reset()` (SSO `<16, 256>`) | **321.0 ns** | **411.0 ns** | **0** |
-| **Strict**: `NewOrderSingle::Fixed<128, fix::field::...>` | **221.0 ns** | **341.0 ns** | **0** |
+| **Scheme A**: `NewOrderSingle::make()` + `std::optional` (SSO `<16, 256>`) | **411.0 ns** | **561.0 ns** | **0** |
+| **Scheme B**: `NewOrderSingle::Draft` + native `if` + `reset()` (SSO `<16, 256>`) | **401.0 ns** | **521.0 ns** | **0** |
+| **Strict**: `NewOrderSingle::Fixed<128, fix::field::...>` | **261.0 ns** | **350.0 ns** | **0** |
 
-**Takeaway**: Both user-friendly SSO APIs (`make()` and `Draft`) achieve **0 heap allocations** and sit within ~100–120 ns of the compile-time fixed-shape `Fixed<128, ...>` layout (~320–340 ns vs ~221 ns total including FIX 4.4 framing, `BodyLength` backpatch, and `CheckSum`).
+**Takeaway**: Both user-friendly SSO APIs (`make()` and `Draft`) achieve **0 heap allocations** and sit within ~140–150 ns of the compile-time fixed-shape `Fixed<128, ...>` layout (~401–411 ns vs ~261 ns total including FIX 4.4 framing, `BodyLength` backpatch, and `CheckSum`).
 
 ### Part 1–3: Initiator Send Mode Comparison (Real Loopback TCP + FIX 4.4 + mmap Journal)
 
@@ -47,35 +47,35 @@ Each order embeds `<t_burst_ns>-<t_send_ns>` in `ClOrdID (11)`. The receiving pe
 
 | Mode | 1-Way p50 | 1-Way p99 | RTT p50 | Throughput |
 | :--- | ---: | ---: | ---: | ---: |
-| **1. `DirectInitiator::send()`** (1-thread, no queue) | **4.97 µs** | 9.34 µs | 9.62 µs | 97,276 rt/s |
-| **2. `DirectInitiator::enqueue()+flush()`** (1-thread `sendmsg`) | 5.01 µs | **8.46 µs** | 9.67 µs | 97,474 rt/s |
-| **3. `DirectInitiator + DirectSendQueue`** (2-thread SPSC) | 5.13 µs | 9.60 µs | **9.33 µs** | **97,996 rt/s** |
-| **4. `Engine(busy_poll) + ProducerLane`** (2-thread SPSC) | 7.89 µs | 15.61 µs | 13.11 µs | 67,229 rt/s |
+| **1. `DirectInitiator::send()`** (1-thread, no queue) | **5.83 µs** | 9.14 µs | 11.30 µs | 84,151 rt/s |
+| **2. `DirectInitiator::enqueue()+flush()`** (1-thread `sendmsg`) | 5.84 µs | **8.89 µs** | 11.16 µs | **87,069 rt/s** |
+| **3. `DirectInitiator + DirectSendQueue`** (2-thread SPSC) | 6.00 µs | 9.95 µs | **10.98 µs** | 85,610 rt/s |
+| **4. `Engine(busy_poll) + ProducerLane`** (2-thread SPSC) | 9.25 µs | 15.06 µs | 15.29 µs | 62,524 rt/s |
 
 #### Workload 2: Dense Burst — 0 µs Strategy Compute (200 bursts × 32 orders, 20 warmup bursts)
 
 | Mode | CO-Free p50 | CO-Free p99 | Enq->Recv p50 | Throughput |
 | :--- | ---: | ---: | ---: | ---: |
-| **1. `DirectInitiator::send()`** (1-thread, no queue) | 57.04 µs | 113.00 µs | 5.37 µs | 291,964 ord/s |
-| **2. `DirectInitiator::enqueue()+flush()`** (1-thread `sendmsg`) | 22.73 µs | **30.50 µs** | 15.38 µs | 945,924 ord/s |
-| **3. `DirectInitiator + DirectSendQueue`** (2-thread SPSC + `sendmsg`) | **18.14 µs** | 41.65 µs | 14.51 µs | **1,018,595 ord/s** |
-| **4. `Engine(busy_poll) + ProducerLane`** (2-thread SPSC) | 76.31 µs | 155.31 µs | 58.94 µs | 248,563 ord/s |
+| **1. `DirectInitiator::send()`** (1-thread, no queue) | 64.92 µs | 126.33 µs | 6.05 µs | 258,455 ord/s |
+| **2. `DirectInitiator::enqueue()+flush()`** (1-thread `sendmsg`) | 22.64 µs | **28.07 µs** | 14.73 µs | 1,020,858 ord/s |
+| **3. `DirectInitiator + DirectSendQueue`** (2-thread SPSC + `sendmsg`) | **16.54 µs** | 28.35 µs | 12.31 µs | **1,201,151 ord/s** |
+| **4. `Engine(busy_poll) + ProducerLane`** (2-thread SPSC) | 61.34 µs | 106.52 µs | 47.55 µs | 307,150 ord/s |
 
 #### Workload 3: Dense Burst + 2 µs Strategy Compute per Order (200 bursts × 32 orders)
 
 | Mode | CO-Free p50 | CO-Free p99 | Enq->Recv p50 | Throughput |
 | :--- | ---: | ---: | ---: | ---: |
-| **1. `DirectInitiator::send()`** (1-thread, no queue) | 100.50 µs | 198.74 µs | 6.75 µs | 165,840 ord/s |
-| **2. `DirectInitiator::enqueue()+flush()`** (1-thread `sendmsg`) | 95.40 µs | 130.63 µs | 55.64 µs | 282,802 ord/s |
-| **3. `DirectInitiator + DirectSendQueue`** (2-thread SPSC + `sendmsg`) | **48.52 µs** | **88.70 µs** | 8.19 µs | **367,878 ord/s** |
-| **4. `Engine(busy_poll) + ProducerLane`** (2-thread SPSC) | 79.85 µs | 152.32 µs | 23.56 µs | 231,432 ord/s |
+| **1. `DirectInitiator::send()`** (1-thread, no queue) | 92.27 µs | 175.52 µs | 5.86 µs | 183,422 ord/s |
+| **2. `DirectInitiator::enqueue()+flush()`** (1-thread `sendmsg`) | 89.46 µs | **95.76 µs** | 47.54 µs | 321,230 ord/s |
+| **3. `DirectInitiator + DirectSendQueue`** (2-thread SPSC + `sendmsg`) | **49.00 µs** | 224.30 µs | 8.19 µs | **337,887 ord/s** |
+| **4. `Engine(busy_poll) + ProducerLane`** (2-thread SPSC) | 67.22 µs | 118.48 µs | 18.20 µs | 273,032 ord/s |
 
 ### Engineering Interpretation
 
-1. **Single-order / Ping-Pong**: `DirectInitiator::send()` wins single-order 1-way p50 (**4.97 µs**) with zero cross-thread handoff; `DirectSendQueue` adds only ~160 ns to 1-way p50 (**5.13 µs**) and is **2.76 µs faster** than full multi-session `Engine + ProducerLane` (7.89 µs).
-2. **Why `Enq->Recv` alone is misleading (Coordinated Omission)**: In Workload 3, Mode 1 (`DirectInitiator::send()`) shows `Enq->Recv p50 = 6.75 µs`, yet its true `CO-Free p50` is **100.50 µs** (`p99 = 198.74 µs`) because every synchronous `::send()` stalls the strategy thread before it can compute order `i+1`.
-3. **Burst without strategy compute (Workload 2)**: Coalescing 32 orders into 1 `sendmsg()` (`enqueue()+flush()`) cuts `CO-Free p50` from **57.04 µs -> 22.73 µs (2.5×)** and triples throughput (**292k -> 946k ord/s**); adding the 2-thread SPSC `DirectSendQueue` pushes throughput past **1.02M ord/s** and `CO-Free p50` down to **18.14 µs**.
-4. **Burst with strategy compute (Workload 3)**: With 32 × 2 µs = 64 µs of strategy compute per burst, 2-thread SPSC pipelining (`DirectSendQueue`) overlaps strategy computation with journal + TCP I/O on a second core, cutting `CO-Free p50` in half (**100.50 µs -> 48.52 µs**) and `p99` by **2.24×** (**198.74 µs -> 88.70 µs**). Even Layer 1/2 `Engine + ProducerLane` (79.85 µs) beats both single-thread modes under compute-heavy bursts for the same pipelining reason.
+1. **Single-order / Ping-Pong**: `DirectInitiator::send()` wins single-order 1-way p50 (**5.83 µs**) with zero cross-thread handoff; `DirectSendQueue` adds only ~170 ns to 1-way p50 (**6.00 µs**) and is **3.25 µs faster** than full multi-session `Engine + ProducerLane` (9.25 µs).
+2. **Why `Enq->Recv` alone is misleading (Coordinated Omission)**: In Workload 3, Mode 1 (`DirectInitiator::send()`) shows `Enq->Recv p50 = 5.86 µs`, yet its true `CO-Free p50` is **92.27 µs** (`p99 = 175.52 µs`) because every synchronous `::send()` stalls the strategy thread before it can compute order `i+1`.
+3. **Burst without strategy compute (Workload 2)**: Coalescing 32 orders into 1 `sendmsg()` (`enqueue()+flush()`) cuts `CO-Free p50` from **64.92 µs -> 22.64 µs (2.87×)** and pushes throughput past **1.02M ord/s**; adding the 2-thread SPSC `DirectSendQueue` pushes throughput to **1.20M ord/s** and `CO-Free p50` down to **16.54 µs**.
+4. **Burst with strategy compute (Workload 3)**: With 32 × 2 µs = 64 µs of strategy compute per burst, 2-thread SPSC pipelining (`DirectSendQueue`) overlaps strategy computation with journal + TCP I/O on a second core, cutting `CO-Free p50` nearly in half (**92.27 µs -> 49.00 µs**). Even Layer 1/2 `Engine + ProducerLane` (67.22 µs) beats both single-thread modes under compute-heavy bursts for the same pipelining reason.
 
 ---
 
@@ -91,11 +91,11 @@ Workload: Full 912-field FIX 4.4 `NewOrderSingle` (7 scalars including `Price` +
 
 | Boundary | p50 | p95 | p99 | Throughput | Heap Allocs |
 | :--- | ---: | ---: | ---: | ---: | :---: |
-| **User Encode** (in-loop fill + single-pass `encode_fix44`) | **291.0 ns** | 311.0 ns | 390.0 ns | 3,345,749 msgs/s | **0** |
-| **Pre-TCP Outbound** (in-loop fill + `DirectInitiator::send` + mmap Journal) | **521.0 ns** | 621.0 ns | 832.0 ns | 1,849,466 msgs/s | **0** |
-| **Pre-TCP Inbound** (frame + parse + 912-field Schema + dual Journal records + callback) | **1,002.0 ns** | 1,102.0 ns | 1,393.0 ns | 973,061 msgs/s | **0** |
-| **Pre-TCP Combined** (total pure FIX engine round-trip budget) | **1.52 µs** | 1.69 µs | 2.37 µs | 637,600 rt/s | **0** |
-| **Real TCP Loopback RTT** (kernel TCP + full FIX 4.4 + mmap Journal) | **9.25 µs** | 11.26 µs | 16.93 µs | 103,134 rt/s | **0** |
+| **User Encode** (in-loop fill + single-pass `encode_fix44`) | **300.0 ns** | 461.0 ns | 491.0 ns | 3,123,417 msgs/s | **0** |
+| **Pre-TCP Outbound** (in-loop fill + `DirectInitiator::send` + mmap Journal) | **531.0 ns** | 651.0 ns | 831.0 ns | 1,810,647 msgs/s | **0** |
+| **Pre-TCP Inbound** (frame + parse + 912-field Schema + dual Journal records + callback) | **861.0 ns** | 972.0 ns | 1,313.0 ns | 1,128,150 msgs/s | **0** |
+| **Pre-TCP Combined** (total pure FIX engine round-trip budget) | **1.39 µs** | 1.59 µs | 2.14 µs | 695,074 rt/s | **0** |
+| **Real TCP Loopback RTT** (kernel TCP + full FIX 4.4 + mmap Journal) | **9.34 µs** | 11.51 µs | 14.10 µs | 99,914 rt/s | **0** |
 
 ---
 
@@ -111,23 +111,23 @@ xmake build acceptor-bench
 ### Acceptor Tiers (`epoll`)
 | Tier | p50 | p95 | p99 | Throughput |
 | :--- | ---: | ---: | ---: | ---: |
-| **Tier 1: Pre-TCP Acceptor** (`SessionDriver` wire-in -> 912-field Schema -> in-handler ER -> mmap Journal -> flush) | **1.53 µs** | 1.72 µs | 2.18 µs | **621,161 ord/s** |
-| **Tier 2: 1-Session TCP** (`Engine<fix44::Schema, Inline>`, 1 `epoll` thread) | **11.68 µs** | 15.04 µs | 19.47 µs | **77,334 ord/s** |
-| **Tier 3: 8 Concurrent Sessions TCP** (`Engine<fix44::Schema, Inline>`, 1 `epoll` thread) | **36.68 µs** | 80.39 µs | 100.80 µs | **157,998 ord/s** |
+| **Tier 1: Pre-TCP Acceptor** (`SessionDriver` wire-in -> 912-field Schema -> in-handler ER -> mmap Journal -> flush) | **1.71 µs** | 1.83 µs | 3.03 µs | **581,156 ord/s** |
+| **Tier 2: 1-Session TCP** (`Engine<fix44::Schema, Inline>`, 1 `epoll` thread) | **14.68 µs** | 18.59 µs | 32.07 µs | **62,553 ord/s** |
+| **Tier 3: 8 Concurrent Sessions TCP** (`Engine<fix44::Schema, Inline>`, 1 `epoll` thread) | **44.56 µs** | 94.84 µs | 114.46 µs | **133,972 ord/s** |
 
 ### Same-Run `IoBackend` Head-to-Head (`acceptor-bench 2000 20000 8 all`)
 *(Executed back-to-back in a single process under identical clock/thermal state.)*
 
 | `IoBackend` | 1-Session p50 | 1-Session p99 | 1-Session Rate | 8-Session p50 | 8-Session p99 | 8-Session Aggregate |
 | :--- | ---: | ---: | ---: | ---: | ---: | ---: |
-| **`epoll`** (default) | 29.92 µs | 48.59 µs | 31,272 ord/s | 87.24 µs | 224.62 µs | 82,728 ord/s |
-| **`busy_poll`** (zero-sleep spin) | **13.02 µs** | **33.64 µs** | **64,758 ord/s** | **50.21 µs** | 133.65 µs | 121,751 ord/s |
-| **`io_uring`** (Proactor `RECV`/`SEND`, sleeping) | **15.16 µs** | 43.70 µs | 55,969 ord/s | **52.40 µs** | **95.58 µs** | **137,321 ord/s** (+66%) |
+| **`epoll`** (default) | 14.68 µs | 32.07 µs | 62,553 ord/s | **44.56 µs** | 114.46 µs | 133,972 ord/s |
+| **`busy_poll`** (zero-sleep spin) | **12.45 µs** | 23.38 µs | **73,464 ord/s** | 45.38 µs | 118.44 µs | 129,649 ord/s |
+| **`io_uring`** (Proactor `RECV`/`SEND`, sleeping) | 14.58 µs | **19.56 µs** | 66,515 ord/s | 49.10 µs | **97.90 µs** | **146,037 ord/s** (+9%) |
 
 **Selection Guide**:
 - **`epoll`**: Default zero-dependency choice for moderate session counts and low idle CPU.
-- **`busy_poll`**: Dedicated isolated core with few sessions needing minimum 1-session p50/p99.
-- **`io_uring`**: Multi-session gateways where Proactor batching cuts syscall count, delivering **+66% aggregate throughput** and **2.35× lower p99** than `epoll` without burning 100% CPU when idle.
+- **`busy_poll`**: Dedicated isolated core with few sessions needing minimum 1-session p50 (`12.45 µs`, `73.5k ord/s`).
+- **`io_uring`**: Multi-session gateways where Proactor batching cuts syscall count, delivering the highest 8-session aggregate throughput (**146,037 ord/s**) and lowest p99 on both 1-session (**19.56 µs**, 1.64× lower than `epoll`) and 8-session (**97.90 µs**) without burning 100% CPU when idle.
 
 ---
 
