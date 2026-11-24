@@ -105,14 +105,17 @@ jobs:
         run: |
           set -euo pipefail
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git config --global --add safe.directory '*'
           mkdir -p /tmp/xmake-src
           curl -fsSL https://github.com/xmake-io/xmake/releases/download/v2.9.8/xmake-v2.9.8.tar.gz \
             | tar -xz -C /tmp/xmake-src
-          cd /tmp/xmake-src
-          if [ -d xmake-2.9.8 ]; then cd xmake-2.9.8; fi
-          ./configure
-          make -j"$(nproc)"
-          make install PREFIX=/usr/local
+          (
+            cd /tmp/xmake-src
+            if [ -d xmake-2.9.8 ]; then cd xmake-2.9.8; fi
+            ./configure
+            make -j"$(nproc)"
+            make install PREFIX=/usr/local
+          )
           rm -rf /tmp/xmake-src
           xmake --version
           "$CXX" --version
