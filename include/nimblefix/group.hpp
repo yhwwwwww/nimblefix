@@ -126,6 +126,9 @@ struct is_group_entry_helper<T, std::void_t<decltype(std::remove_cvref_t<T>::is_
 template <class T>
 inline constexpr bool is_group_entry_v = is_group_entry_helper<std::remove_cvref_t<T>>::value;
 
+template <class T>
+concept viewable_group_entry = requires(const T& entry) { entry.view(); };
+
 } // namespace detail
 
 struct OwnedGroupLimits {
@@ -289,7 +292,7 @@ template <std::uint32_t CountTag, std::uint32_t DelimiterTag, class... Entries>
 class StaticGroup {
     static_assert(CountTag > 0 && DelimiterTag > 0 && CountTag != DelimiterTag);
     static_assert(sizeof...(Entries) > 0);
-    static_assert((requires(const Entries& entry) { entry.view(); } && ...));
+    static_assert((detail::viewable_group_entry<Entries> && ...));
 
 public:
     static constexpr std::uint32_t count_tag = CountTag;

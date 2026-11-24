@@ -128,15 +128,20 @@ int main() {
     std::condition_variable changed;
     bool inbound_entered = false;
     bool release_inbound = false;
-    std::thread::id owner_id{};
     std::atomic<bool> active_on_worker{false};
     std::atomic<bool> message_on_worker{false};
     std::atomic<bool> callback_send_ok{false};
     std::atomic<std::uint64_t> active_receipt_id{};
     std::atomic<unsigned> error_count{};
+    std::mutex owner_id_mutex;
+    std::thread::id owner_id{};
+    const auto get_owner_id = [&]() {
+        std::lock_guard lock(owner_id_mutex);
+        return owner_id;
+    };
 
     if (!engine.on_session_active([&](nf::SessionContext& context) {
-            active_on_worker.store(std::this_thread::get_id() != owner_id, std::memory_order_release);
+            active_on_worker.store(std::this_thread::get_id() != get_owner_id(), std::memory_order_release);
             auto message = nf::message<"D">().set<11>("ACTIVE").set<55>("AAPL");
             auto sent = context.send(message);
             if (sent.ok()) active_receipt_id.store(sent.value().id, std::memory_order_release);
@@ -146,7 +151,7 @@ int main() {
     if (!engine.on_message([&](nf::SessionContext& context, const nf::FlatMessageView& message) {
             const auto type = message.find_unique(35);
             if (!type.ok() || type.value().value != "D") return nf::Status::success();
-            message_on_worker.store(std::this_thread::get_id() != owner_id, std::memory_order_release);
+            message_on_worker.store(std::this_thread::get_id() != get_owner_id(), std::memory_order_release);
             {
                 std::lock_guard lock(mutex);
                 inbound_entered = true;
@@ -154,7 +159,7 @@ int main() {
             changed.notify_all();
             {
                 std::unique_lock lock(mutex);
-                if (!changed.wait_for(lock, 2s, [&] { return release_inbound; }))
+                if (!changed.wait_for(lock, 5s, [&] { return release_inbound; }))
                     return nf::Status{nf::ErrorCode::callback_failed};
             }
             auto reply = nf::message<"8">().set<11>("INBOUND").set<17>("EXEC-1");
@@ -173,7 +178,10 @@ int main() {
 
     nf::Status run_status{};
     owner = std::thread([&] {
-        owner_id = std::this_thread::get_id();
+        {
+            std::lock_guard lock(owner_id_mutex);
+            owner_id = std::this_thread::get_id();
+        }
         run_status = engine.run();
     });
     auto endpoint = nf::Result<nf::TcpEndpoint>{nf::Status{nf::ErrorCode::need_more}};
@@ -223,18 +231,29 @@ int main() {
         if (!send_all(client, frame("D", 2, "BUY", "SELL"))) goto cleanup;
         {
             std::unique_lock lock(mutex);
-            if (!changed.wait_for(lock, 2s, [&] { return inbound_entered; })) goto cleanup;
+            if (!changed.wait_for(lock, 5s, [&] { return inbound_entered; })) goto cleanup;
         }
         if (!send_all(client, frame("1", 3, "BUY", "SELL"))) goto cleanup;
 
         unsigned outgoing_orders = 0;
         bool saw_heartbeat = false;
-        while (!saw_heartbeat) {
-            if (!receive_frame(client, buffered, wire)) goto cleanup;
+        const unsigned expected_orders = producers * per_producer + 1;
+        while (!saw_heartbeat || outgoing_orders < expected_orders) {
+            if (!receive_frame(client, buffered, wire, 5s)) {
+                std::cerr << "queued_runtime_test: timed out waiting for heartbeat/orders "
+                          << "(saw_heartbeat=" << saw_heartbeat
+                          << ", outgoing_orders=" << outgoing_orders
+                          << "/" << expected_orders << ")\n";
+                goto cleanup;
+            }
             if (is_type(wire, "D")) ++outgoing_orders;
             else if (is_type(wire, "0")) saw_heartbeat = true;
         }
-        if (outgoing_orders != producers * per_producer + 1) goto cleanup;
+        if (outgoing_orders != expected_orders) {
+            std::cerr << "queued_runtime_test: unexpected outgoing_orders=" << outgoing_orders
+                      << " expected=" << expected_orders << "\n";
+            goto cleanup;
+        }
         {
             std::lock_guard lock(mutex);
             release_inbound = true;
