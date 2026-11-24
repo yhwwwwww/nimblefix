@@ -17,6 +17,8 @@ jobs:
       CXX: ${{ matrix.cxx }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          submodules: true
       - uses: xmake-io/github-action-setup-xmake@v1
         with:
           xmake-version: '2.9.8'
@@ -34,11 +36,14 @@ jobs:
           python3 bench/session_run.py --binary build/linux/x86_64/release/session-bench --samples 100 --runs 1 --output /tmp/session-smoke
           python3 bench/tcp_run.py --binary build/linux/x86_64/release/tcp-bench-server --samples 100 --rate 1000 --output /tmp/tcp-smoke
           python3 bench/tcp_run.py --binary build/linux/x86_64/release/null-tcp-server --echo --samples 100 --rate 1000 --output /tmp/echo-smoke
+          ./build/linux/x86_64/release/quickfix-parity-bench 50 200 schemas/standard/FIX44.xml
 
   sanitizer:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          submodules: true
       - uses: xmake-io/github-action-setup-xmake@v1
         with:
           xmake-version: '2.9.8'
@@ -46,3 +51,85 @@ jobs:
       - run: xmake check
       - name: Parser fuzz smoke
         run: xmake run parser-fuzz -runs=10000 -max_len=1024
+
+  rhel:
+    name: rhel (${{ matrix.label }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: rhel8-gcc12
+            image: almalinux:8
+            toolset: gcc-toolset-12
+            python_pkg: python3.11
+            python_bin: python3.11
+          - label: rhel8-gcc14
+            image: almalinux:8
+            toolset: gcc-toolset-14
+            python_pkg: python3.11
+            python_bin: python3.11
+          - label: rhel9-gcc14
+            image: almalinux:9
+            toolset: gcc-toolset-14
+            python_pkg: python3
+            python_bin: python3
+    container:
+      image: ${{ matrix.image }}
+    env:
+      XMAKE_ROOT: y
+      LANG: C.UTF-8
+      LC_ALL: C.UTF-8
+      PYTHONUTF8: '1'
+    steps:
+      - name: Install RHEL toolchain and dependencies
+        run: |
+          set -euo pipefail
+          dnf install -y --setopt=install_weak_deps=False \
+            ${{ matrix.toolset }}-gcc-c++ \
+            cmake make git tar gzip which util-linux \
+            openssl openssl-devel libxml2-devel pkgconf-pkg-config \
+            ${{ matrix.python_pkg }}
+          if [ "${{ matrix.python_bin }}" != "python3" ]; then
+            ln -sf "/usr/bin/${{ matrix.python_bin }}" /usr/local/bin/python3
+          fi
+          echo "/opt/rh/${{ matrix.toolset }}/root/usr/bin" >> "$GITHUB_PATH"
+          echo "/usr/local/bin" >> "$GITHUB_PATH"
+          echo "CC=/opt/rh/${{ matrix.toolset }}/root/usr/bin/gcc" >> "$GITHUB_ENV"
+          echo "CXX=/opt/rh/${{ matrix.toolset }}/root/usr/bin/g++" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=/opt/rh/${{ matrix.toolset }}/root/usr/lib64:/opt/rh/${{ matrix.toolset }}/root/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          submodules: true
+      - name: Build xmake 2.9.8 from source
+        run: |
+          set -euo pipefail
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          mkdir -p /tmp/xmake-src
+          curl -fsSL https://github.com/xmake-io/xmake/releases/download/v2.9.8/xmake-v2.9.8.tar.gz \
+            | tar -xz -C /tmp/xmake-src
+          cd /tmp/xmake-src
+          if [ -d xmake-2.9.8 ]; then cd xmake-2.9.8; fi
+          ./configure
+          make -j"$(nproc)"
+          make install PREFIX=/usr/local
+          rm -rf /tmp/xmake-src
+          xmake --version
+          "$CXX" --version
+          cmake --version
+          python3 --version
+      - name: Configure
+        run: xmake f -y -m release --toolchain=gcc --cc="$CC" --cxx="$CXX" --ld="$CXX" --benchmarks=y --tls=y --xml=y
+      - name: Build and test
+        run: xmake check
+      - name: Installed consumers
+        run: |
+          python3 tests/install_test.py --examples --features
+          python3 tests/install_test.py --core-only
+      - name: Benchmark smoke
+        run: |
+          python3 bench/run.py --binary build/linux/x86_64/release/codec-bench --compiler "$CXX" --samples 100 --runs 1 --output /tmp/codec-smoke
+          python3 bench/session_run.py --binary build/linux/x86_64/release/session-bench --samples 100 --runs 1 --output /tmp/session-smoke
+          python3 bench/tcp_run.py --binary build/linux/x86_64/release/tcp-bench-server --samples 100 --rate 1000 --output /tmp/tcp-smoke
+          python3 bench/tcp_run.py --binary build/linux/x86_64/release/null-tcp-server --echo --samples 100 --rate 1000 --output /tmp/echo-smoke
+          ./build/linux/x86_64/release/quickfix-parity-bench 50 200 schemas/standard/FIX44.xml

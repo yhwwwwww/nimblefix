@@ -1,5 +1,6 @@
 #include "../src/transport/tls.hpp"
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstdlib>

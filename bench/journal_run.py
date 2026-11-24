@@ -83,7 +83,7 @@ def main():
     parser.add_argument("--state-parent", type=Path, default=ROOT / "build/bench-state")
     parser.add_argument("--require-filesystem",
         help="optional filesystem gate, for example btrfs")
-    parser.add_argument("--compiler", default="g++")
+    parser.add_argument("--compiler", default=os.environ.get("CXX", "g++"))
     parser.add_argument("--flags", default="g++ -std=c++20 -O3 -DNDEBUG -Iinclude -pthread; v2 appended mmap Journal")
     parser.add_argument("--timeout", type=float, default=180.0)
     args = parser.parse_args()

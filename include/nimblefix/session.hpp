@@ -8,6 +8,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 
 #include <nimblefix/codec.hpp>
 #include <nimblefix/journal.hpp>

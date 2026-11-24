@@ -659,8 +659,11 @@ def percentile(values, quantile):
 
 def mount_details(path):
     filesystem = subprocess.check_output(["stat", "-f", "-c", "%T", str(path)], text=True).strip()
-    mount = subprocess.run(["findmnt", "-J", "-T", str(path)], capture_output=True, text=True)
-    details = json.loads(mount.stdout) if mount.returncode == 0 else {}
+    try:
+        mount = subprocess.run(["findmnt", "-J", "-T", str(path)], capture_output=True, text=True)
+        details = json.loads(mount.stdout) if mount.returncode == 0 else {}
+    except (OSError, json.JSONDecodeError):
+        details = {}
     return filesystem, details
 
 
@@ -723,7 +726,7 @@ def main():
     parser.add_argument("--retain-outbound-messages", type=int, default=8192)
     parser.add_argument("--require-filesystem", help="optional explicit filesystem gate for dedicated measurements, e.g. btrfs")
     parser.add_argument("--cpu-set", help="optional Linux CPU list, for example 2 or 2-3")
-    parser.add_argument("--compiler", default="g++")
+    parser.add_argument("--compiler", default=os.environ.get("CXX", "g++"))
     parser.add_argument("--build-flags", default="C++20 -O3; static nimblefix; linker --wrap instrumentation")
     args = parser.parse_args()
     if not 1 <= args.samples <= 100000 or not 0 <= args.warmup <= 10000 or \

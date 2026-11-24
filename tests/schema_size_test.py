@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import time
 
@@ -36,7 +37,7 @@ def main():
                            f'<messages><message name="Sample" msgtype="Z" msgcat="app">{members}</message></messages></fix>')
             header = base / "sample.hpp"
             start = time.monotonic()
-            run(["python3", str(ROOT / "tools/schema/generate.py"), "--namespace", "sample", "--output", str(header), str(xml)])
+            run([sys.executable, str(ROOT / "tools/schema/generate.py"), "--namespace", "sample", "--output", str(header), str(xml)])
             generated_seconds = time.monotonic() - start
             source = base / "main.cpp"
             source.write_text('''#include <iostream>

@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -30,9 +31,17 @@ def main():
         base = Path(temporary)
         source, build, prefix = base / "source", base / "build", base / "prefix"
         source.mkdir()
-        for directory in ("include", "src", "cmake", "tools/schema", "tools/nimblefix", "schemas", "examples", "third_party", "xmake"):
+        for directory in ("include", "src", "cmake", "tools/schema", "tools/nimblefix", "schemas", "examples", "xmake"):
             shutil.copytree(ROOT / directory, source / directory)
-        for filename in ("CMakeLists.txt", "LICENSE"):
+        (source / "third_party/tomlplusplus").mkdir(parents=True)
+        for filename in (
+            "CMakeLists.txt",
+            "LICENSE",
+            "third_party/README.md",
+            "third_party/quickfix-LICENSE",
+            "third_party/tomlplusplus/LICENSE",
+            "third_party/tomlplusplus/toml.hpp",
+        ):
             shutil.copyfile(ROOT / filename, source / filename)
         if args.examples:
             (source / "tests").mkdir()
@@ -88,7 +97,7 @@ def main():
                 run(str(relocated / "bin/hello-fix"), "--self-test", "--restart", cwd=base)
                 if not args.core_only:
                     run(str(relocated / "bin/hello-fix"), "--self-test", "--typed", "--restart", cwd=base)
-                run("python3", str(ROOT / "tests/endpoint_test.py"),
+                run(sys.executable, str(ROOT / "tests/endpoint_test.py"),
                     "--acceptor", str(relocated / "bin/acceptor-example"),
                     "--initiator", str(relocated / "bin/initiator-example"), cwd=base)
             if not args.core_only:
@@ -126,7 +135,7 @@ def main():
                         raise RuntimeError("installed CLI schema generator did not produce the requested header")
                     # The installed xmake helper must find its sibling generator
                     # after relocation, with both the copied source and build hidden.
-                    run("python3", str(ROOT / "tests/xmake_schema_test.py"),
+                    run(sys.executable, str(ROOT / "tests/xmake_schema_test.py"),
                         "--rule", str(relocated / "share/nimblefix/xmake/nimblefix-schema.lua"),
                         "--generator", str(relocated / "share/nimblefix/schema/generate.py"),
                         "--include-dir", str(relocated / "include"), cwd=base)
@@ -134,7 +143,8 @@ def main():
             cmakelists = consumer / "CMakeLists.txt"
             cmakelists.write_text(cmakelists.read_text().replace("COMPONENTS core", "COMPONENTS nonexistent"))
             failed = subprocess.run(["cmake", "-S", str(consumer), "-B", str(base / "unknown-component"),
-                f"-DCMAKE_PREFIX_PATH={relocated}", f"-DCONSUMER_FEATURES={'ON' if args.features else 'OFF'}"],
+                f"-DCMAKE_PREFIX_PATH={relocated}", f"-DCMAKE_CXX_COMPILER={args.cxx}",
+                f"-DCONSUMER_FEATURES={'ON' if args.features else 'OFF'}"],
                 text=True, capture_output=True)
             failure_text = failed.stdout + failed.stderr
             if failed.returncode == 0 or "NimbleFIX" not in failure_text:

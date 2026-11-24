@@ -128,3 +128,80 @@ xmake build acceptor-bench
 - **`epoll`**: Default zero-dependency choice for moderate session counts and low idle CPU.
 - **`busy_poll`**: Dedicated isolated core with few sessions needing minimum 1-session p50/p99.
 - **`io_uring`**: Multi-session gateways where Proactor batching cuts syscall count, delivering **+66% aggregate throughput** and **2.35× lower p99** than `epoll` without burning 100% CPU when idle.
+
+---
+
+## 4. NimbleFIX 0.3 vs QuickFIX 1.16.0 — Same-Methodology Benchmark (`quickfix-parity-bench`)
+
+QuickFIX `v1.16.0` is vendored as a git submodule at `third_party/quickfix` (built out-of-source as a static library so the submodule tree stays clean).
+
+Reproduce (xmake):
+```sh
+git submodule update --init --recursive
+xmake f -m release --tls=y --xml=y --benchmarks=y --quickfix=y -y
+xmake build quickfix-parity-bench
+./build/linux/x86_64/release/quickfix-parity-bench 1000 5000 schemas/standard/FIX44.xml
+```
+
+Reproduce (CMake):
+```sh
+cmake -S . -B build-cmake -DCMAKE_BUILD_TYPE=Release \
+  -DNIMBLEFIX_BUILD_BENCHMARKS=ON -DNIMBLEFIX_ENABLE_QUICKFIX=ON
+cmake --build build-cmake --target quickfix-parity-bench -j
+./build-cmake/quickfix-parity-bench 1000 5000 schemas/standard/FIX44.xml
+```
+
+### Parity Disclosure (Apples-to-Apples Controls)
+
+| Dimension | NimbleFIX 0.3 | QuickFIX 1.16.0 |
+| :--- | :--- | :--- |
+| **Binary / Compiler** | Single benchmark binary, GCC 16.2.1 `-O3` (`-std=c++20`) | Same binary, GCC 16.2.1 `-O3` (`-std=c++17`, `quickfix-bundled`) |
+| **Clock & Allocator Hook** | `CLOCK_MONOTONIC` + unified `-Wl,--wrap=malloc` & global `operator new/delete` | Identical clock & allocator hook |
+| **FIX Dictionary** | Full 912-field `schemas/standard/FIX44.xml`, `ValidationLevel::strict` + 120 s `SendingTime` check | Same `schemas/standard/FIX44.xml`, `UseDataDictionary=Y`, `ValidateFieldsOutOfOrder/HaveValues/UserDefinedFields=Y`, `CheckLatency=Y`, `MaxLatency=120` |
+| **Order & Ack Payload** | `NewOrderSingle` (7 scalars + `NoPartyIDs[1]`: `448`/`447`/`452`, dynamic `ClOrdID`) & 11-field `ExecutionReport` populated in callback; cross-validated by QuickFIX before timing | Identical fields and repeating group; cross-validated by NimbleFIX before timing |
+| **Persistence Tier** | Real segmented `MAP_SHARED` mmap Journal + hardware SSE4.2 CRC32C (OS page-cache, no `fsync`) | Real `FIX::FileStore` (`PersistMessages=Y`, OS page-cache, no `fsync`) |
+| **Logging** | Disabled | Disabled (no `FileLog` / `ScreenLog`) |
+| **TCP Peer** | Identical neutral raw-TCP loopback peer (`127.0.0.1`, `TCP_NODELAY=1`) | Same peer |
+
+### Measured Results (`quickfix-parity-bench 1000 5000 schemas/standard/FIX44.xml`)
+
+#### Suite 1: Codec Encode (`NewOrderSingle` + `NoPartyIDs[1]` + Session Header & `CheckSum`, 5,000 samples)
+| Engine / API | p50 | p99 | Rate | Heap Allocs / op | Speedup (p50) |
+| :--- | ---: | ---: | ---: | ---: | ---: |
+| **NimbleFIX `Fixed` + `PartyGroup` (0-alloc)** | **371.0 ns** | **411.0 ns** | **2,733,537/s** | **0.00** | **4.46×** |
+| **NimbleFIX `make()` + direct entry (`StaticGroup`)** | **611.0 ns** | **641.0 ns** | **1,606,102/s** | **0.00** | **2.71×** |
+| **NimbleFIX `make()` + `NoPartyIDs<>` (dynamic arena)** | **681.0 ns** | **721.0 ns** | **1,463,412/s** | **0.00** | **2.43×** |
+| **QuickFIX `FIX44::NewOrderSingle::toString`** | 1,653.0 ns | 1,703.0 ns | 601,914/s | 19.00 | 1.00× |
+
+#### Suite 2: Parse + Full `FIX44.xml` Strict Validation + Typed Field & Group Read (5,000 samples)
+| Engine | p50 | p99 | Rate | Heap Allocs / op | Speedup (p50) |
+| :--- | ---: | ---: | ---: | ---: | ---: |
+| **NimbleFIX `parse` + `FIX44` strict + typed view** | **1,323.0 ns** | **1,663.0 ns** | **720,830/s** | **0.00** | **2.10×** |
+| **QuickFIX `setString` + `FIX44` validate + `get`** | 2,775.0 ns | 2,816.0 ns | 359,028/s | 15.00 | 1.00× |
+
+#### Suite 3: Real Loopback TCP Initiator Ping-Pong RTT (5,000 orders, 1,000 warmup)
+| Engine / Mode | p50 | p99 | Throughput | Heap Allocs / op | Speedup (p50) |
+| :--- | ---: | ---: | ---: | ---: | ---: |
+| **NimbleFIX `DirectInitiator` (Layer 0)** | **9.79 µs** | 29.39 µs | **86,979 rt/s** | **0.00** | **2.29×** |
+| **NimbleFIX `Engine` (`busy_poll`)** | 14.83 µs | **20.80 µs** | 65,576 rt/s | **0.00** | 1.51× |
+| **NimbleFIX `Engine` (`epoll`)** | 18.55 µs | 27.15 µs | 49,909 rt/s | **0.00** | 1.21× |
+| **QuickFIX `SocketInitiator` (`FileStore`)** | 22.43 µs | 32.64 µs | 41,989 rt/s | 35.06 | 1.00× |
+
+#### Suite 4: Real Loopback TCP Acceptor Turnaround RTT (5,000 orders, 1,000 warmup)
+| Engine / Mode | p50 | p99 | Throughput | Heap Allocs / op | Speedup (p50) |
+| :--- | ---: | ---: | ---: | ---: | ---: |
+| **NimbleFIX `Engine` Acceptor (`busy_poll`)** | **10.98 µs** | **14.70 µs** | **85,970 ord/s** | **0.00** | **2.17×** |
+| **NimbleFIX `Engine` Acceptor (`epoll`)** | 13.29 µs | 16.59 µs | 74,672 ord/s | **0.00** | 1.79× |
+| **QuickFIX `SocketAcceptor` (`FileStore`)** | 23.82 µs | 32.48 µs | 41,038 ord/s | 36.99 | 1.00× |
+
+#### Suite 5: Open-Loop Dense Burst (156 bursts × 32 orders, CO-Free 1-Way Latency & Throughput)
+| Engine / Mode | CO-Free 1-Way p50 | CO-Free 1-Way p99 | Throughput | Heap Allocs / op | Speedup (p50) |
+| :--- | ---: | ---: | ---: | ---: | ---: |
+| **NimbleFIX `DirectInitiator::send()`** | 64.28 µs | 125.10 µs | 259,121 ord/s | **0.00** | 3.13× |
+| **NimbleFIX `DirectInitiator` batch `sendmsg`** | **26.61 µs** | **36.21 µs** | **826,995 ord/s** | **0.00** | **7.55×** |
+| **QuickFIX `SocketInitiator::sendToTarget`** | 200.92 µs | 403.16 µs | 79,136 ord/s | 28.06 | 1.00× |
+
+### Key Takeaways
+1. **Zero steady-state heap traffic across ALL APIs**: Both idiomatic fluent repeating groups (direct `.no_party_i_ds(entry1, ...)` `StaticGroup` and dynamic `NoPartyIDsGroup<>` 1 KB inline arena) and `Fixed` record **0.00 heap allocations/op** across all 5 suites (including full 912-field `FIX44.xml` validation and mmap journaling), whereas QuickFIX performs **15–37 heap allocations/op** (`std::map`/`std::string`/group nodes).
+2. **Same OS sleep/wake model still wins cleanly**: Comparing sleeping `epoll` vs QuickFIX's `select`/`poll` loop directly, NimbleFIX `Engine(epoll)` is **1.21× faster** on Initiator RTT (18.55 µs vs 22.43 µs) and **1.79× faster** on Acceptor turnaround (13.29 µs vs 23.82 µs, **1.96× lower p99**).
+3. **Architecture scales when latency matters most**: Switching to single-threaded Layer 0 `DirectInitiator` cuts Initiator ping-pong RTT to **9.79 µs (2.29× faster than QuickFIX)** and `Engine(busy_poll)` Acceptor to **10.98 µs (2.17× faster)**; under 32-order bursts, `enqueue()+flush()` (`sendmsg` batching) achieves **26.61 µs CO-Free p50 (7.55× lower)**, **36.21 µs p99 (11.1× lower)**, and **827k ord/s (10.5× higher throughput)**.

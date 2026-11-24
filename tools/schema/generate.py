@@ -1049,10 +1049,12 @@ def render_header(schema: Schema, namespace: str) -> str:
         lines.append(f"using {ident} = ::nimblefix::Field<{field.number}u, ::nimblefix::FieldKind::{kind}>;")
     lines += ["} // namespace field", ""]
 
-    def emit_members(name: str, members: tuple[MemberDef, ...], emit_required: bool = False) -> None:
+    def emit_members(name: str, members: tuple[MemberDef, ...], emit_required: bool = False) -> tuple[bool, int]:
         lines.append(f"inline constexpr std::array<MessageMemberDescriptor, {len(members)}> {name}{{{{")
         indexed_tags: list[tuple[int, int]] = []
         required_indices: list[int] = []
+        group_tags: list[int] = []
+        group_bloom = 0
         for idx, member in enumerate(members):
             tag_num = schema.fields_by_name[member.field_name].number
             indexed_tags.append((tag_num, idx))
@@ -1062,6 +1064,8 @@ def render_header(schema: Schema, namespace: str) -> str:
                 lines.append(f"    {{::nimblefix::MemberKind::field, {field_indexes[member.field_name]}u, 0u, {'true' if member.required else 'false'}}},")
             else:
                 group_index = group_indexes[group_key(member)]
+                group_tags.append(tag_num)
+                group_bloom |= 1 << (tag_num & 63)
                 lines.append(f"    {{::nimblefix::MemberKind::group, 0u, {group_index}u, {'true' if member.required else 'false'}}},")
         lines.extend(["}};", ""])
         indexed_tags.sort(key=lambda item: item[0])
@@ -1074,13 +1078,22 @@ def render_header(schema: Schema, namespace: str) -> str:
             for idx in required_indices:
                 lines.append(f"    {idx}u,")
             lines.extend(["}};", ""])
+        if group_tags:
+            lines.append(f"inline constexpr std::array<std::uint32_t, {len(group_tags)}> {name}_group_tags{{{{")
+            for tag_num in group_tags:
+                lines.append(f"    {tag_num}u,")
+            lines.extend(["}};", ""])
+        return (bool(group_tags), group_bloom)
 
+    group_meta: list[tuple[bool, int]] = []
     for index, key in enumerate(group_keys):
-        emit_members(f"group_{index}_members", group_by_key[key].members, emit_required=True)
+        group_meta.append(emit_members(f"group_{index}_members", group_by_key[key].members, emit_required=True))
+    component_meta: list[tuple[bool, int]] = []
     for index, component in enumerate(components):
-        emit_members(f"component_{index}_members", expanded_components[component.name], emit_required=False)
+        component_meta.append(emit_members(f"component_{index}_members", expanded_components[component.name], emit_required=False))
+    message_meta: list[tuple[bool, int]] = []
     for index, message in enumerate(messages):
-        emit_members(f"message_{index}_members", expanded_messages[message.name], emit_required=True)
+        message_meta.append(emit_members(f"message_{index}_members", expanded_messages[message.name], emit_required=True))
 
     lines.append(f"inline constexpr std::array<GroupDescriptor, {len(group_keys)}> groups{{{{")
     for index, key in enumerate(group_keys):
@@ -1088,23 +1101,32 @@ def render_header(schema: Schema, namespace: str) -> str:
         counter = schema.fields_by_name[group.field_name].number
         first = group.members[0]
         delimiter = schema.fields_by_name[first.field_name].number
+        has_gt, bloom = group_meta[index]
+        gt_expr = f"std::span<const std::uint32_t>{{group_{index}_members_group_tags}}" if has_gt else "std::span<const std::uint32_t>{}"
         lines.append(
             f"    {{{_cpp_string(group.field_name)}, {counter}u, {delimiter}u, "
             f"std::span<const MessageMemberDescriptor>{{group_{index}_members}}, "
             f"std::span<const ::nimblefix::MemberTagEntry>{{group_{index}_members_by_tag}}, "
-            f"std::span<const std::uint32_t>{{group_{index}_members_required}}}},")
+            f"std::span<const std::uint32_t>{{group_{index}_members_required}}, "
+            f"{gt_expr}, 0x{bloom:x}ULL, true}},")
     lines += ["}};", "", f"inline constexpr std::array<ComponentDescriptor, {len(components)}> components{{{{"]
     for index, component in enumerate(components):
+        has_gt, bloom = component_meta[index]
+        gt_expr = f"std::span<const std::uint32_t>{{component_{index}_members_group_tags}}" if has_gt else "std::span<const std::uint32_t>{}"
         lines.append(
             f"    {{{_cpp_string(component.name)}, std::span<const MessageMemberDescriptor>{{component_{index}_members}}, "
-            f"std::span<const ::nimblefix::MemberTagEntry>{{component_{index}_members_by_tag}}}},")
+            f"std::span<const ::nimblefix::MemberTagEntry>{{component_{index}_members_by_tag}}, "
+            f"{gt_expr}, 0x{bloom:x}ULL, true}},")
     lines += ["}};", "", f"inline constexpr std::array<MessageDescriptor, {len(messages)}> messages{{{{"]
     for index, message in enumerate(messages):
+        has_gt, bloom = message_meta[index]
+        gt_expr = f"std::span<const std::uint32_t>{{message_{index}_members_group_tags}}" if has_gt else "std::span<const std::uint32_t>{}"
         lines.append(
             f"    {{{_cpp_string(message.name)}, {_cpp_string(message.msg_type)}, {_cpp_string(message.category)}, "
             f"std::span<const MessageMemberDescriptor>{{message_{index}_members}}, "
             f"std::span<const ::nimblefix::MemberTagEntry>{{message_{index}_members_by_tag}}, "
-            f"std::span<const std::uint32_t>{{message_{index}_members_required}}}},")
+            f"std::span<const std::uint32_t>{{message_{index}_members_required}}, "
+            f"{gt_expr}, 0x{bloom:x}ULL, true}},")
     header_comp_idx = next((i for i, c in enumerate(components) if c.name == "Header"), -1)
     trailer_comp_idx = next((i for i, c in enumerate(components) if c.name == "Trailer"), -1)
     single_char_msg = [-1] * 128
@@ -1321,12 +1343,26 @@ def render_header(schema: Schema, namespace: str) -> str:
                 ]
             else:
                 child = schema.fields_by_name[member.field_name]
+                child_group_idx = group_indexes[group_key(member)]
+                child_group = group_by_key[group_keys[child_group_idx]]
+                child_delim = schema.fields_by_name[child_group.members[0].field_name].number
+                child_policy = group_symbol(child_group_idx, "EntryPolicy")
                 group_setter = _snake_case(child.name)
                 lines += [
                     "    template<class G>",
+                    "        requires requires { std::remove_cvref_t<G>::count_tag; }",
                     f"    auto {group_setter}(G&& group) && {{",
                     f"        static_assert(std::remove_cvref_t<G>::count_tag == {child.number}u, \"wrong nested repeating group type\");",
                     "        return ::nimblefix::attach_group(std::move(static_cast<Derived&>(*this)), std::forward<G>(group));",
+                    "    }",
+                    "    template<class FirstEntry, class... RestEntries>",
+                    "        requires (::nimblefix::detail::is_group_entry_v<FirstEntry> && (::nimblefix::detail::is_group_entry_v<RestEntries> && ...))",
+                    f"    auto {group_setter}(FirstEntry&& first, RestEntries&&... rest) && {{",
+                    f"        static_assert(std::is_same_v<typename std::remove_cvref_t<FirstEntry>::policy_type, {child_policy}> &&",
+                    f"                      (std::is_same_v<typename std::remove_cvref_t<RestEntries>::policy_type, {child_policy}> && ...),",
+                    "                      \"wrong nested repeating group entry type\");",
+                    f"        return ::nimblefix::attach_group(std::move(static_cast<Derived&>(*this)),",
+                    f"            ::nimblefix::make_static_group<{child.number}u, {child_delim}u>(std::forward<FirstEntry>(first), std::forward<RestEntries>(rest)...));",
                     "    }",
                 ]
         lines += [
@@ -1346,8 +1382,8 @@ def render_header(schema: Schema, namespace: str) -> str:
             "    using Base::Base;",
             "};",
             f"inline auto {entry_name}::make(::nimblefix::MessageLimits limits) {{ return {builder}<>{{limits}}; }}",
-            f"template<std::size_t Capacity = 16>",
-            f"using {symbol} = ::nimblefix::OwnedGroupBuilder<{count_tag}u, {delimiter_tag}u, Capacity, {'true' if group.required else 'false'}>;",
+            f"template<std::size_t Capacity = 16, std::size_t InlineBytes = 1024>",
+            f"using {symbol} = ::nimblefix::OwnedGroupBuilder<{count_tag}u, {delimiter_tag}u, Capacity, {'true' if group.required else 'false'}, InlineBytes>;",
             "",
         ]
 
@@ -1405,15 +1441,29 @@ def render_header(schema: Schema, namespace: str) -> str:
                 continue
             counter = schema.fields_by_name[member.field_name]
             setter = _snake_case(counter.name)
-            group_type = f"{group_symbol(group_indexes[group_key(member)], '')}<>"
+            g_idx = group_indexes[group_key(member)]
+            g_def = group_by_key[group_keys[g_idx]]
+            g_delim = schema.fields_by_name[g_def.members[0].field_name].number
+            g_policy = group_symbol(g_idx, "EntryPolicy")
+            group_type = f"{group_symbol(g_idx, '')}<>"
             lines += [
                 "    template<class G>",
+                "        requires requires { std::remove_cvref_t<G>::count_tag; }",
                 f"    auto {setter}(G&& group) && {{",
                 f"        static_assert(std::remove_cvref_t<G>::count_tag == {counter.number}u, \"wrong repeating group type\");",
                 "        return ::nimblefix::attach_group(std::move(static_cast<Derived&>(*this)), std::forward<G>(group));",
                 "    }",
                 f"    auto {setter}({group_type}&& group) && {{",
                 "        return ::nimblefix::attach_group(std::move(static_cast<Derived&>(*this)), std::move(group));",
+                "    }",
+                "    template<class FirstEntry, class... RestEntries>",
+                "        requires (::nimblefix::detail::is_group_entry_v<FirstEntry> && (::nimblefix::detail::is_group_entry_v<RestEntries> && ...))",
+                f"    auto {setter}(FirstEntry&& first, RestEntries&&... rest) && {{",
+                f"        static_assert(std::is_same_v<typename std::remove_cvref_t<FirstEntry>::policy_type, {g_policy}> &&",
+                f"                      (std::is_same_v<typename std::remove_cvref_t<RestEntries>::policy_type, {g_policy}> && ...),",
+                "                      \"wrong repeating group entry type\");",
+                f"        return ::nimblefix::attach_group(std::move(static_cast<Derived&>(*this)),",
+                f"            ::nimblefix::make_static_group<{counter.number}u, {g_delim}u>(std::forward<FirstEntry>(first), std::forward<RestEntries>(rest)...));",
                 "    }",
             ]
         lines += ["};", ""]

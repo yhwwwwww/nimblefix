@@ -21,7 +21,13 @@ def invoke(command, cwd, env):
 
 
 def build_project(xmake, project, output, env):
-    invoke([xmake, "f", "-P", str(project), "-o", str(output), "-m", "release", "-y"], project, env)
+    configure = [xmake, "f", "-P", str(project), "-o", str(output), "-m", "release", "-y"]
+    if env.get("CC"):
+        configure.append(f"--cc={env['CC']}")
+    if env.get("CXX"):
+        configure.append(f"--cxx={env['CXX']}")
+        configure.append(f"--ld={env['CXX']}")
+    invoke(configure, project, env)
     invoke([xmake, "-P", str(project), "-j", "1"], project, env)
 
 

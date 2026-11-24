@@ -3,6 +3,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <memory>
 #include <new>
 #include <string>
@@ -282,32 +283,178 @@ inline detail::MessageView OwnedMessage::view() const noexcept {
     return result;
 }
 
+// Compile-time fixed-count repeating group holder: stores entries directly in a
+// std::tuple with zero copying, zero heap allocations, and zero arena overflow.
+template <std::uint32_t CountTag, std::uint32_t DelimiterTag, class... Entries>
+class StaticGroup {
+    static_assert(CountTag > 0 && DelimiterTag > 0 && CountTag != DelimiterTag);
+    static_assert(sizeof...(Entries) > 0);
+    static_assert((requires(const Entries& entry) { entry.view(); } && ...));
+
+public:
+    static constexpr std::uint32_t count_tag = CountTag;
+    static constexpr std::uint32_t delimiter_tag = DelimiterTag;
+    static constexpr std::size_t entry_count = sizeof...(Entries);
+
+    explicit StaticGroup(Entries&&... entries) noexcept
+        : entries_(std::move(entries)...) {}
+    StaticGroup(const StaticGroup&) = delete;
+    StaticGroup& operator=(const StaticGroup&) = delete;
+    StaticGroup(StaticGroup&& other) noexcept : entries_(std::move(other.entries_)) {}
+    StaticGroup& operator=(StaticGroup&& other) noexcept {
+        if (this != &other) entries_ = std::move(other.entries_);
+        return *this;
+    }
+
+    [[nodiscard]] constexpr std::size_t size() const noexcept { return entry_count; }
+    [[nodiscard]] constexpr bool empty() const noexcept { return false; }
+
+    [[nodiscard]] Status status() const noexcept {
+        Status out = Status::success();
+        validate_entries(out, std::make_index_sequence<entry_count>{});
+        return out;
+    }
+
+    [[nodiscard]] detail::RepeatingGroupView view() const noexcept {
+        populate_views(std::make_index_sequence<entry_count>{});
+        return {CountTag, DelimiterTag, entry_views_.data(), entry_count};
+    }
+
+private:
+    template <std::size_t... I>
+    void validate_entries(Status& out, std::index_sequence<I...>) const noexcept {
+        const auto check_one = [&](const auto& entry) noexcept -> bool {
+            const auto v = entry.view();
+            if (!v.status.ok()) {
+                out = v.status;
+                return false;
+            }
+            if (v.field_count == 0 || v.plan == nullptr || v.plan[0].tag != DelimiterTag ||
+                !detail::is_present(v, v.plan[0].slot_index)) {
+                out = Status{ErrorCode::required_field_missing, static_cast<int>(DelimiterTag)};
+                return false;
+            }
+            return true;
+        };
+        (void)(check_one(std::get<I>(entries_)) && ...);
+    }
+
+    template <std::size_t... I>
+    void populate_views(std::index_sequence<I...>) const noexcept {
+        ((entry_views_[I] = std::get<I>(entries_).view()), ...);
+    }
+
+    std::tuple<Entries...> entries_;
+    mutable std::array<detail::MessageView, entry_count> entry_views_{};
+};
+
+template <std::uint32_t CountTag, std::uint32_t DelimiterTag, class... Entries>
+[[nodiscard]] auto make_static_group(Entries&&... entries) noexcept {
+    static_assert((!std::is_lvalue_reference_v<Entries> && ...),
+        "pass repeating group entries by value or std::move(entry)");
+    return StaticGroup<CountTag, DelimiterTag, std::remove_cvref_t<Entries>...>{
+        std::move(entries)...};
+}
+
 // Runtime-shaped, bounded owner used by generated group aliases. Entries may
-// use different compile-time shapes; each payload keeps only its actual slots,
-// used bytes, and nested groups.
+// use different compile-time shapes; typical flat entries pack into one shared
+// inline stack arena (0 heap allocations) using byte offsets (move-safe), and
+// seamlessly spill to OwnedMessage heap storage when InlineBytes is exceeded or
+// when entries contain nested repeating groups.
 template <std::uint32_t CountTag, std::uint32_t DelimiterTag, std::size_t MaxEntries = 16,
-    bool Required = false>
+    bool Required = false, std::size_t InlineBytes = 1024>
 class OwnedGroupBuilder {
     static_assert(CountTag > 0 && DelimiterTag > 0 && CountTag != DelimiterTag);
     static_assert(MaxEntries > 0);
+
+    struct EntryRecord {
+        std::uint32_t slots_offset{};
+        std::uint32_t value_bytes_offset{};
+        std::uint32_t presence_offset{};
+        std::uint32_t plan_offset{};
+        std::uint32_t slot_map_offset{};
+        std::uint32_t required_tags_offset{};
+        std::uint32_t msg_type_offset{};
+        std::uint32_t field_count{};
+        std::uint32_t value_byte_count{};
+        std::uint32_t required_tag_count{};
+        std::uint32_t msg_type_size{};
+        std::uint32_t heap_index{};
+        const detail::PlanField* static_plan_ptr{};
+        const std::uint32_t* static_slot_map_ptr{};
+        const std::uint32_t* static_required_tags_ptr{};
+        std::string_view static_msg_type{};
+        detail::EnumValueValidator enum_value_allowed{};
+        Status status{};
+        bool in_heap{};
+        bool has_presence{};
+        bool has_slot_map{};
+        bool has_static_plan{};
+        bool prevalidated_scalars{};
+        bool presence_validated{};
+    };
+
+    [[nodiscard]] static constexpr std::size_t align_up(std::size_t offset, std::size_t align) noexcept {
+        return (offset + align - 1U) & ~(align - 1U);
+    }
 
 public:
     static constexpr std::uint32_t count_tag = CountTag;
     static constexpr std::uint32_t delimiter_tag = DelimiterTag;
     static constexpr std::size_t max_entries = MaxEntries;
     static constexpr bool required = Required;
+    static constexpr std::size_t inline_bytes = InlineBytes;
 
     explicit OwnedGroupBuilder(OwnedGroupLimits limits = {}) noexcept : limits_(limits) {}
     OwnedGroupBuilder(const OwnedGroupBuilder&) = delete;
     OwnedGroupBuilder& operator=(const OwnedGroupBuilder&) = delete;
-    OwnedGroupBuilder(OwnedGroupBuilder&&) noexcept = default;
-    OwnedGroupBuilder& operator=(OwnedGroupBuilder&&) noexcept = default;
+    OwnedGroupBuilder(OwnedGroupBuilder&& other) noexcept
+        : limits_(other.limits_),
+          arena_used_(other.arena_used_),
+          heap_entries_(std::move(other.heap_entries_)),
+          usage_(other.usage_),
+          entry_count_(other.entry_count_),
+          status_(other.status_),
+          touched_(other.touched_) {
+        if (arena_used_ != 0) std::memcpy(arena_, other.arena_, arena_used_);
+        for (std::size_t i = 0; i < entry_count_; ++i) records_[i] = other.records_[i];
+        other.arena_used_ = 0;
+        other.entry_count_ = 0;
+        other.usage_ = {};
+        other.touched_ = false;
+    }
+    OwnedGroupBuilder& operator=(OwnedGroupBuilder&& other) noexcept {
+        if (this == &other) return *this;
+        limits_ = other.limits_;
+        arena_used_ = other.arena_used_;
+        if (arena_used_ != 0) std::memcpy(arena_, other.arena_, arena_used_);
+        for (std::size_t i = 0; i < other.entry_count_; ++i) records_[i] = other.records_[i];
+        heap_entries_ = std::move(other.heap_entries_);
+        usage_ = other.usage_;
+        entry_count_ = other.entry_count_;
+        status_ = other.status_;
+        touched_ = other.touched_;
+        other.arena_used_ = 0;
+        other.entry_count_ = 0;
+        other.usage_ = {};
+        other.touched_ = false;
+        return *this;
+    }
 
     [[nodiscard]] std::size_t size() const noexcept { return entry_count_; }
     [[nodiscard]] bool empty() const noexcept { return entry_count_ == 0; }
     [[nodiscard]] bool touched() const noexcept { return touched_; }
     [[nodiscard]] Status status() const noexcept { return status_; }
     void set_empty() noexcept { touched_ = true; }
+
+    void reset() noexcept {
+        arena_used_ = 0;
+        entry_count_ = 0;
+        usage_ = {};
+        status_ = Status::success();
+        touched_ = false;
+        heap_entries_.clear();
+    }
 
     template <class Entry>
         requires requires(const Entry& entry) { entry.view(); }
@@ -333,8 +480,29 @@ public:
             status_ = {ErrorCode::capacity_exceeded, static_cast<int>(CountTag), entry_count_};
             return status_;
         }
-        if (const auto copied = entries_[entry_count_].copy_from(view, limits_, usage); !copied.ok()) {
+
+        // Fast path: flat entry fits into shared inline arena (0 heap allocations).
+        if (view.group_count == 0 && try_store_inline(view, usage)) {
+            usage_ = usage;
+            ++entry_count_;
+            touched_ = true;
+            return Status::success();
+        }
+
+        // Fallback path: arena overflow or nested repeating groups -> OwnedMessage on heap.
+        OwnedMessage owned;
+        if (const auto copied = owned.copy_from(view, limits_, usage); !copied.ok()) {
             status_ = copied;
+            return status_;
+        }
+        try {
+            EntryRecord rec{};
+            rec.in_heap = true;
+            rec.heap_index = static_cast<std::uint32_t>(heap_entries_.size());
+            heap_entries_.push_back(std::move(owned));
+            records_[entry_count_] = rec;
+        } catch (...) {
+            status_ = {ErrorCode::capacity_exceeded};
             return status_;
         }
         usage_ = usage;
@@ -344,13 +512,162 @@ public:
     }
 
     [[nodiscard]] detail::RepeatingGroupView view() const noexcept {
-        for (std::size_t i = 0; i < entry_count_; ++i) entry_views_[i] = entries_[i].view();
+        for (std::size_t i = 0; i < entry_count_; ++i) {
+            entry_views_[i] = make_entry_view(records_[i]);
+        }
         return {CountTag, DelimiterTag, entry_views_.data(), entry_count_};
     }
 
 private:
+    [[nodiscard]] bool try_store_inline(const detail::MessageView& source,
+                                        GroupPayloadUsage& usage) noexcept {
+        if ((source.field_count != 0 && (source.plan == nullptr || source.slots == nullptr)) ||
+            (source.value_byte_count != 0 && source.value_bytes == nullptr) ||
+            source.msg_type.empty() ||
+            source.field_count > limits_.max_fields_per_message ||
+            source.value_byte_count > limits_.max_value_bytes_per_message ||
+            (source.required_tag_count != 0 && source.required_tags == nullptr)) {
+            return false;
+        }
+        if (usage.fields > limits_.max_total_fields ||
+            source.field_count > limits_.max_total_fields - usage.fields ||
+            usage.value_bytes > limits_.max_total_value_bytes ||
+            source.value_byte_count > limits_.max_total_value_bytes - usage.value_bytes) {
+            return false;
+        }
+
+        const bool copy_plan = !source.static_plan;
+        const std::size_t slots_bytes = source.field_count * sizeof(detail::SlotValue);
+        const std::size_t presence_bytes =
+            source.presence_bits != nullptr ? (source.field_count + 7U) / 8U : 0U;
+        const std::size_t plan_bytes =
+            copy_plan ? source.field_count * sizeof(detail::PlanField) : 0U;
+        const std::size_t slot_map_bytes =
+            (copy_plan && source.slot_map != nullptr) ? source.field_count * sizeof(std::uint32_t) : 0U;
+        const std::size_t req_bytes =
+            copy_plan ? source.required_tag_count * sizeof(std::uint32_t) : 0U;
+        const std::size_t msg_type_bytes = copy_plan ? source.msg_type.size() : 0U;
+
+        std::size_t pos = arena_used_;
+        std::size_t slots_off = 0, plan_off = 0, slot_map_off = 0, req_off = 0;
+        std::size_t val_off = 0, pres_off = 0, mt_off = 0;
+
+        if (slots_bytes != 0) {
+            pos = align_up(pos, alignof(detail::SlotValue));
+            slots_off = pos;
+            pos += slots_bytes;
+        }
+        if (plan_bytes != 0) {
+            pos = align_up(pos, alignof(detail::PlanField));
+            plan_off = pos;
+            pos += plan_bytes;
+        }
+        if (slot_map_bytes != 0) {
+            pos = align_up(pos, alignof(std::uint32_t));
+            slot_map_off = pos;
+            pos += slot_map_bytes;
+        }
+        if (req_bytes != 0) {
+            pos = align_up(pos, alignof(std::uint32_t));
+            req_off = pos;
+            pos += req_bytes;
+        }
+        if (source.value_byte_count != 0) {
+            val_off = pos;
+            pos += source.value_byte_count;
+        }
+        if (presence_bytes != 0) {
+            pres_off = pos;
+            pos += presence_bytes;
+        }
+        if (msg_type_bytes != 0) {
+            mt_off = pos;
+            pos += msg_type_bytes;
+        }
+        if (pos > InlineBytes) return false;
+
+        if (slots_bytes != 0) std::memcpy(arena_ + slots_off, source.slots, slots_bytes);
+        if (plan_bytes != 0) std::memcpy(arena_ + plan_off, source.plan, plan_bytes);
+        if (slot_map_bytes != 0) std::memcpy(arena_ + slot_map_off, source.slot_map, slot_map_bytes);
+        if (req_bytes != 0) std::memcpy(arena_ + req_off, source.required_tags, req_bytes);
+        if (source.value_byte_count != 0) {
+            std::memcpy(arena_ + val_off, source.value_bytes, source.value_byte_count);
+        }
+        if (presence_bytes != 0) std::memcpy(arena_ + pres_off, source.presence_bits, presence_bytes);
+        if (msg_type_bytes != 0) std::memcpy(arena_ + mt_off, source.msg_type.data(), msg_type_bytes);
+
+        EntryRecord rec{};
+        rec.slots_offset = static_cast<std::uint32_t>(slots_off);
+        rec.value_bytes_offset = static_cast<std::uint32_t>(val_off);
+        rec.presence_offset = static_cast<std::uint32_t>(pres_off);
+        rec.plan_offset = static_cast<std::uint32_t>(plan_off);
+        rec.slot_map_offset = static_cast<std::uint32_t>(slot_map_off);
+        rec.required_tags_offset = static_cast<std::uint32_t>(req_off);
+        rec.msg_type_offset = static_cast<std::uint32_t>(mt_off);
+        rec.field_count = static_cast<std::uint32_t>(source.field_count);
+        rec.value_byte_count = static_cast<std::uint32_t>(source.value_byte_count);
+        rec.required_tag_count = static_cast<std::uint32_t>(source.required_tag_count);
+        rec.msg_type_size = static_cast<std::uint32_t>(source.msg_type.size());
+        rec.has_presence = presence_bytes != 0;
+        rec.has_slot_map = source.slot_map != nullptr && source.field_count != 0;
+        rec.has_static_plan = source.static_plan;
+        rec.prevalidated_scalars = source.prevalidated_scalars;
+        rec.presence_validated = source.presence_validated;
+        if (source.static_plan) {
+            rec.static_plan_ptr = source.plan;
+            rec.static_slot_map_ptr = source.slot_map;
+            rec.static_required_tags_ptr = source.required_tags;
+            rec.static_msg_type = source.msg_type;
+        }
+        rec.enum_value_allowed = source.enum_value_allowed;
+        rec.status = source.status;
+
+        records_[entry_count_] = rec;
+        arena_used_ = pos;
+        usage.fields += source.field_count;
+        usage.value_bytes += source.value_byte_count;
+        return true;
+    }
+
+    [[nodiscard]] detail::MessageView make_entry_view(const EntryRecord& rec) const noexcept {
+        if (rec.in_heap) return heap_entries_[rec.heap_index].view();
+        detail::MessageView result{};
+        result.slots = rec.field_count != 0
+            ? reinterpret_cast<const detail::SlotValue*>(arena_ + rec.slots_offset) : nullptr;
+        result.value_bytes = rec.value_byte_count != 0
+            ? reinterpret_cast<const char*>(arena_ + rec.value_bytes_offset) : nullptr;
+        result.value_byte_count = rec.value_byte_count;
+        if (rec.has_static_plan) {
+            result.plan = rec.static_plan_ptr;
+            result.slot_map = rec.static_slot_map_ptr;
+            result.required_tags = rec.static_required_tags_ptr;
+            result.msg_type = rec.static_msg_type;
+            result.static_plan = true;
+        } else {
+            result.plan = rec.field_count != 0
+                ? reinterpret_cast<const detail::PlanField*>(arena_ + rec.plan_offset) : nullptr;
+            result.slot_map = rec.has_slot_map
+                ? reinterpret_cast<const std::uint32_t*>(arena_ + rec.slot_map_offset) : nullptr;
+            result.required_tags = rec.required_tag_count != 0
+                ? reinterpret_cast<const std::uint32_t*>(arena_ + rec.required_tags_offset) : nullptr;
+            result.msg_type = {reinterpret_cast<const char*>(arena_ + rec.msg_type_offset), rec.msg_type_size};
+        }
+        result.field_count = rec.field_count;
+        result.presence_bits = rec.has_presence
+            ? reinterpret_cast<const std::uint8_t*>(arena_ + rec.presence_offset) : nullptr;
+        result.status = rec.status;
+        result.required_tag_count = rec.required_tag_count;
+        result.enum_value_allowed = rec.enum_value_allowed;
+        result.prevalidated_scalars = rec.prevalidated_scalars;
+        result.presence_validated = rec.presence_validated;
+        return result;
+    }
+
     OwnedGroupLimits limits_{};
-    std::array<OwnedMessage, MaxEntries> entries_{};
+    alignas(detail::SlotValue) std::byte arena_[InlineBytes > 0 ? InlineBytes : 1];
+    std::size_t arena_used_{};
+    std::array<EntryRecord, MaxEntries> records_{};
+    std::vector<OwnedMessage> heap_entries_{};
     mutable std::array<detail::MessageView, MaxEntries> entry_views_{};
     GroupPayloadUsage usage_{};
     std::size_t entry_count_{};

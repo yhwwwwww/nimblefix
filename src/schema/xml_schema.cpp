@@ -31,14 +31,18 @@ struct XmlSchema::Storage {
     std::vector<std::vector<MessageMemberDescriptor>> group_members{};
     std::vector<std::vector<MemberTagEntry>> group_members_by_tag{};
     std::vector<std::vector<std::uint32_t>> group_required_members{};
+    std::vector<std::vector<std::uint32_t>> group_group_tags{};
     std::vector<std::vector<MessageMemberDescriptor>> component_members{};
     std::vector<std::vector<MemberTagEntry>> component_members_by_tag{};
+    std::vector<std::vector<std::uint32_t>> component_group_tags{};
     std::vector<std::vector<MessageMemberDescriptor>> message_members{};
     std::vector<std::vector<MemberTagEntry>> message_members_by_tag{};
     std::vector<std::vector<std::uint32_t>> message_required_members{};
+    std::vector<std::vector<std::uint32_t>> message_group_tags{};
     std::vector<GroupDescriptor> groups{};
     std::vector<ComponentDescriptor> components{};
     std::vector<MessageDescriptor> messages{};
+    std::array<std::int16_t, 128> single_char_message_index{};
     std::vector<LengthDataPair> pairs{};
     SchemaDescriptor descriptor{};
 
@@ -931,14 +935,36 @@ std::string FingerprintBuilder::finish() { return sha256(bytes_); }
         }
         return required;
     };
+    std::vector<std::uint32_t> group_count_tag_by_index;
+    group_count_tag_by_index.reserve(group_keys.size());
+    for (const auto& key : group_keys) {
+        group_count_tag_by_index.push_back(schema.fields.at(group_definitions.at(key).name).tag);
+    }
+    const auto make_group_tags = [&](const std::vector<MessageMemberDescriptor>& members) {
+        std::vector<std::uint32_t> tags;
+        std::uint64_t bloom = 0;
+        for (const auto& member : members) {
+            if (member.kind != MemberKind::group) continue;
+            const auto tag = group_count_tag_by_index[member.group_index];
+            tags.push_back(tag);
+            bloom |= detail::group_tag_bloom_bit(tag);
+        }
+        return std::pair<std::vector<std::uint32_t>, std::uint64_t>{std::move(tags), bloom};
+    };
 
     storage->group_members.reserve(group_keys.size());
     storage->group_members_by_tag.reserve(group_keys.size());
     storage->group_required_members.reserve(group_keys.size());
+    storage->group_group_tags.reserve(group_keys.size());
+    std::vector<std::uint64_t> group_blooms;
+    group_blooms.reserve(group_keys.size());
     for (const auto& key : group_keys) {
         auto members = make_members(group_definitions.at(key).members, make_members);
         storage->group_members_by_tag.push_back(make_tag_index(members));
         storage->group_required_members.push_back(make_required(members));
+        auto [gtags, gbloom] = make_group_tags(members);
+        storage->group_group_tags.push_back(std::move(gtags));
+        group_blooms.push_back(gbloom);
         storage->group_members.push_back(std::move(members));
     }
     storage->groups.reserve(group_keys.size());
@@ -952,38 +978,68 @@ std::string FingerprintBuilder::finish() { return sha256(bytes_); }
         storage->groups.push_back({storage->keep(group.name), counter, delimiter,
             std::span<const MessageMemberDescriptor>{storage->group_members[i]},
             std::span<const MemberTagEntry>{storage->group_members_by_tag[i]},
-            std::span<const std::uint32_t>{storage->group_required_members[i]}});
+            std::span<const std::uint32_t>{storage->group_required_members[i]},
+            std::span<const std::uint32_t>{storage->group_group_tags[i]},
+            group_blooms[i], true});
     }
 
     storage->component_members.reserve(schema.sorted_components.size());
     storage->component_members_by_tag.reserve(schema.sorted_components.size());
+    storage->component_group_tags.reserve(schema.sorted_components.size());
+    std::vector<std::uint64_t> component_blooms;
+    component_blooms.reserve(schema.sorted_components.size());
     for (const auto& component : schema.sorted_components) {
         auto members = make_members(schema.expanded_components.at(component.name), make_members);
         storage->component_members_by_tag.push_back(make_tag_index(members));
+        auto [gtags, gbloom] = make_group_tags(members);
+        storage->component_group_tags.push_back(std::move(gtags));
+        component_blooms.push_back(gbloom);
         storage->component_members.push_back(std::move(members));
     }
     storage->components.reserve(schema.sorted_components.size());
-    for (std::size_t i = 0; i < schema.sorted_components.size(); ++i)
+    std::int32_t header_comp_idx = -1;
+    std::int32_t trailer_comp_idx = -1;
+    for (std::size_t i = 0; i < schema.sorted_components.size(); ++i) {
+        if (schema.sorted_components[i].name == "Header") header_comp_idx = static_cast<std::int32_t>(i);
+        if (schema.sorted_components[i].name == "Trailer") trailer_comp_idx = static_cast<std::int32_t>(i);
         storage->components.push_back({storage->keep(schema.sorted_components[i].name),
             std::span<const MessageMemberDescriptor>{storage->component_members[i]},
-            std::span<const MemberTagEntry>{storage->component_members_by_tag[i]}});
+            std::span<const MemberTagEntry>{storage->component_members_by_tag[i]},
+            std::span<const std::uint32_t>{storage->component_group_tags[i]},
+            component_blooms[i], true});
+    }
 
     storage->message_members.reserve(schema.sorted_messages.size());
     storage->message_members_by_tag.reserve(schema.sorted_messages.size());
     storage->message_required_members.reserve(schema.sorted_messages.size());
+    storage->message_group_tags.reserve(schema.sorted_messages.size());
+    std::vector<std::uint64_t> message_blooms;
+    message_blooms.reserve(schema.sorted_messages.size());
     for (const auto& message : schema.sorted_messages) {
         auto members = make_members(schema.expanded_messages.at(message.name), make_members);
         storage->message_members_by_tag.push_back(make_tag_index(members));
         storage->message_required_members.push_back(make_required(members));
+        auto [gtags, gbloom] = make_group_tags(members);
+        storage->message_group_tags.push_back(std::move(gtags));
+        message_blooms.push_back(gbloom);
         storage->message_members.push_back(std::move(members));
     }
     storage->messages.reserve(schema.sorted_messages.size());
+    storage->single_char_message_index.fill(-1);
     for (std::size_t i = 0; i < schema.sorted_messages.size(); ++i) {
         const auto& message = schema.sorted_messages[i];
+        if (message.msg_type.size() == 1) {
+            const auto code = static_cast<unsigned char>(message.msg_type[0]);
+            if (code < 128 && storage->single_char_message_index[code] == -1) {
+                storage->single_char_message_index[code] = static_cast<std::int16_t>(i);
+            }
+        }
         storage->messages.push_back({storage->keep(message.name), storage->keep(message.msg_type),
             storage->keep(message.category), std::span<const MessageMemberDescriptor>{storage->message_members[i]},
             std::span<const MemberTagEntry>{storage->message_members_by_tag[i]},
-            std::span<const std::uint32_t>{storage->message_required_members[i]}});
+            std::span<const std::uint32_t>{storage->message_required_members[i]},
+            std::span<const std::uint32_t>{storage->message_group_tags[i]},
+            message_blooms[i], true});
     }
 
     for (const auto& field : schema.sorted_fields) {
@@ -1001,7 +1057,8 @@ std::string FingerprintBuilder::finish() { return sha256(bytes_); }
     }
     storage->descriptor = {storage->keep(type), storage->keep(version), fingerprint_view,
         std::span<const FieldDescriptor>{storage->fields}, std::span<const GroupDescriptor>{storage->groups},
-        std::span<const ComponentDescriptor>{storage->components}, std::span<const MessageDescriptor>{storage->messages}};
+        std::span<const ComponentDescriptor>{storage->components}, std::span<const MessageDescriptor>{storage->messages},
+        header_comp_idx, trailer_comp_idx, std::span<const std::int16_t>{storage->single_char_message_index}};
     return storage;
 }
 

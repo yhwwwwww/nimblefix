@@ -29,7 +29,10 @@ from run import source_digest as project_source_digest
 
 
 def command_output(*command):
-    result = subprocess.run(command, cwd=ROOT, text=True, capture_output=True)
+    try:
+        result = subprocess.run(command, cwd=ROOT, text=True, capture_output=True)
+    except OSError:
+        return "unavailable"
     return result.stdout.strip() if result.returncode == 0 else "unavailable"
 
 

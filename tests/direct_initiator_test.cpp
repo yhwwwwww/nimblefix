@@ -2,6 +2,7 @@
 #include <nimblefix/fix44_sample.hpp>
 #include <nimblefix/message.hpp>
 
+#include <algorithm>
 #include <atomic>
 #include <cstdint>
 #include <cstring>

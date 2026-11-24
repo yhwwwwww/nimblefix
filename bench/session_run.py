@@ -26,9 +26,9 @@ def main():
     args.output.mkdir(parents=True,exist_ok=True);args.state_parent.mkdir(parents=True,exist_ok=True)
     binary=args.binary.resolve()
     report={"boundary":"L2 two real SessionDrivers + appended mmap journals + inline callbacks + fake transport round trip",
-        "revision":subprocess.check_output(["git","rev-parse","HEAD"],text=True).strip(),
+        "revision":output("git","rev-parse","HEAD"),
         "binary_sha256":hashlib.sha256(binary.read_bytes()).hexdigest(),
-        "source_sha256":source_digest(),"compiler":output("g++","--version").splitlines()[0],
+        "source_sha256":source_digest(),"compiler":output(os.environ.get("CXX","g++"),"--version").splitlines()[0],
         "build_flags":"xmake mode.release (-O3), C++20; wrapped malloc, fsync, fdatasync, msync",
         "cpu":output("lscpu"),
         "kernel":platform.platform(),"cpu_affinity":sorted(os.sched_getaffinity(0)),

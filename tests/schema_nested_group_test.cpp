@@ -7,6 +7,7 @@
 #include <array>
 #include <atomic>
 #include <cstdint>
+#include <cstdio>
 #include <filesystem>
 #include <iostream>
 #include <string>
@@ -200,11 +201,139 @@ void test_sender_owned_message_repeating_group_relocation() {
     std::filesystem::remove_all(dir);
 }
 
+void test_direct_static_group_and_inline_arena_overflow() {
+    std::array<char, 2048> wire{};
+    std::array<nf::FieldView, 64> scratch{};
+
+    // 1. Direct single & multi heterogeneous entries (compile-time StaticGroup, no container)
+    {
+        auto order = fix44::NewOrderSingle::make()
+            .cl_ord_id("STATIC-1")
+            .symbol("AAPL")
+            .side('1')
+            .transact_time(t0)
+            .ord_type('1')
+            .no_party_i_ds(
+                fix44::NoPartyIDsGroupEntry::make()
+                    .party_id("CLIENT1").party_id_source('D').party_role(1),
+                fix44::NoPartyIDsGroupEntry::make()
+                    .party_id("BROKER2").party_id_source('D').party_role(17)
+                    .no_party_sub_i_ds(
+                        fix44::NoPartySubIDsGroupEntry::make()
+                            .party_sub_id("DESK-A").party_sub_id_type(1),
+                        fix44::NoPartySubIDsGroupEntry::make()
+                            .party_sub_id("TRADER-B").party_sub_id_type(3)
+                    )
+            );
+        const auto enc = nf::encode_fix44(order, nf::SessionHeader{"BUY", "SELL", 2, t0}, wire);
+        CHECK(enc.ok());
+        if (enc.ok()) {
+            nf::FrameView frame{};
+            CHECK(nf::inspect_frame({wire.data(), enc.value()}, frame, fix44::Schema::wire_hints()).ok());
+            nf::FlatMessageView msg{};
+            CHECK(nf::parse_flat_verified(frame, scratch, msg, fix44::Schema::wire_hints()).ok());
+            CHECK(nf::validate_schema_message(fix44::Schema::descriptor(), msg, nf::ValidationLevel::strict).ok());
+            const auto nos = msg.as<fix44::NewOrderSingle>();
+            const auto parties = nos.no_party_i_ds();
+            CHECK(parties.ok());
+            if (parties.ok()) {
+                CHECK(parties.value().size() == 2);
+                CHECK(parties.value().at(0).get<448>().value() == "CLIENT1");
+                const auto p1 = parties.value().at(1);
+                CHECK(p1.get<448>().value() == "BROKER2");
+                const auto subs = p1.group<802>();
+                CHECK(subs.ok());
+                if (subs.ok()) {
+                    CHECK(subs.value().size() == 2);
+                    CHECK(subs.value().at(0).get<523>().value() == "DESK-A");
+                    CHECK(subs.value().at(1).get<523>().value() == "TRADER-B");
+                }
+            }
+        }
+    }
+
+    // 2. StaticGroup missing delimiter rejection
+    {
+        auto bad = fix44::NewOrderSingle::make()
+            .cl_ord_id("STATIC-BAD")
+            .symbol("AAPL")
+            .side('1')
+            .transact_time(t0)
+            .ord_type('1')
+            .no_party_i_ds(
+                fix44::NoPartyIDsGroupEntry::make().party_id_source('D').party_role(1)
+            );
+        const auto enc = nf::encode_fix44(bad, nf::SessionHeader{"BUY", "SELL", 3, t0}, wire);
+        CHECK(!enc.ok());
+        CHECK(enc.status().code == nf::ErrorCode::required_field_missing);
+    }
+
+    // 3. OwnedGroupBuilder tiny 64B inline arena forcing seamless heap spill + reset() reuse
+    {
+        fix44::NoPartyIDsGroup<6, 64> parties;
+        for (int i = 0; i < 4; ++i) {
+            const std::string id = "PARTY-LONG-ID-" + std::to_string(i);
+            CHECK(parties.add(fix44::NoPartyIDsGroupEntry::make()
+                .party_id(id).party_id_source('D').party_role(i + 1)).ok());
+        }
+        auto moved_parties = std::move(parties);
+        auto order = fix44::NewOrderSingle::make()
+            .cl_ord_id("SPILL-1")
+            .symbol("AAPL")
+            .side('1')
+            .transact_time(t0)
+            .ord_type('1')
+            .no_party_i_ds(std::move(moved_parties));
+        const auto enc = nf::encode_fix44(order, nf::SessionHeader{"BUY", "SELL", 4, t0}, wire);
+        CHECK(enc.ok());
+        if (enc.ok()) {
+            nf::FrameView frame{};
+            CHECK(nf::inspect_frame({wire.data(), enc.value()}, frame, fix44::Schema::wire_hints()).ok());
+            nf::FlatMessageView msg{};
+            CHECK(nf::parse_flat_verified(frame, scratch, msg, fix44::Schema::wire_hints()).ok());
+            CHECK(nf::validate_schema_message(fix44::Schema::descriptor(), msg, nf::ValidationLevel::strict).ok());
+            const auto parsed_parties = msg.as<fix44::NewOrderSingle>().no_party_i_ds();
+            CHECK(parsed_parties.ok());
+            if (parsed_parties.ok()) {
+                CHECK(parsed_parties.value().size() == 4);
+                CHECK(parsed_parties.value().at(0).get<448>().value() == "PARTY-LONG-ID-0");
+                CHECK(parsed_parties.value().at(3).get<448>().value() == "PARTY-LONG-ID-3");
+            }
+        }
+
+        // Reuse via reset()
+        fix44::NoPartyIDsGroup<4> reusable;
+        CHECK(reusable.add(fix44::NoPartyIDsGroupEntry::make()
+            .party_id("FIRST").party_id_source('D').party_role(1)).ok());
+        CHECK(reusable.size() == 1);
+        reusable.reset();
+        CHECK(reusable.empty());
+        CHECK(reusable.add(fix44::NoPartyIDsGroupEntry::make()
+            .party_id("SECOND").party_id_source('D').party_role(3)).ok());
+        CHECK(reusable.size() == 1);
+        auto order2 = fix44::NewOrderSingle::make()
+            .cl_ord_id("REUSE-1").symbol("AAPL").side('1').transact_time(t0).ord_type('1')
+            .no_party_i_ds(std::move(reusable));
+        const auto enc2 = nf::encode_fix44(order2, nf::SessionHeader{"BUY", "SELL", 5, t0}, wire);
+        CHECK(enc2.ok());
+        if (enc2.ok()) {
+            nf::FrameView frame{};
+            CHECK(nf::inspect_frame({wire.data(), enc2.value()}, frame, fix44::Schema::wire_hints()).ok());
+            nf::FlatMessageView msg{};
+            CHECK(nf::parse_flat_verified(frame, scratch, msg, fix44::Schema::wire_hints()).ok());
+            CHECK(nf::validate_schema_message(fix44::Schema::descriptor(), msg, nf::ValidationLevel::strict).ok());
+            const auto p = msg.as<fix44::NewOrderSingle>().no_party_i_ds();
+            CHECK(p.ok() && p.value().size() == 1 && p.value().at(0).get<448>().value() == "SECOND");
+        }
+    }
+}
+
 } // namespace
 
 int main() {
     test_two_level_nested_repeating_group_parsing_and_validation();
     test_sender_owned_message_repeating_group_relocation();
+    test_direct_static_group_and_inline_arena_overflow();
     if (failures != 0) {
         std::cerr << failures << " nested group test(s) failed\n";
         return 1;

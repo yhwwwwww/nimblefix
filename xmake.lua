@@ -16,6 +16,12 @@ option("quickfix_dir")
     set_description("Optional installed QuickFIX prefix for independent oracle tests")
 option_end()
 
+option("quickfix")
+    set_default(false)
+    set_showmenu(true)
+    set_description("Build bundled third_party/quickfix submodule for oracle tests and parity benchmarks")
+option_end()
+
 option("fuzzers")
     set_default(false)
     set_showmenu(true)
@@ -310,35 +316,144 @@ if has_config("tests") then
     target_end()
 end
 
-if has_config("quickfix_dir") then
+local use_submodule_quickfix = not has_config("quickfix_dir")
+    and (has_config("quickfix") or has_config("benchmarks"))
+    and os.isfile("third_party/quickfix/src/C++/Session.cpp")
+local quickfix_incdir = path.join(get_config("builddir") or get_config("buildir") or "build", "quickfix-include")
+
+if use_submodule_quickfix then
+    target("quickfix-headers")
+        set_kind("phony")
+        set_policy("build.fence", true)
+        set_default(false)
+        on_build(function ()
+            os.mkdir(quickfix_incdir)
+            local alloc_hdr = path.join(quickfix_incdir, "Allocator.h")
+            if not os.isfile(alloc_hdr) then
+                io.writefile(alloc_hdr, "/* Generated out-of-source for bundled QuickFIX */\n")
+            end
+            local link_path = path.join(quickfix_incdir, "quickfix")
+            local target_dir = path.absolute("third_party/quickfix/src/C++")
+            if not os.isdir(link_path) then
+                os.ln(target_dir, link_path)
+            end
+        end)
+    target_end()
+
+    target("quickfix-bundled")
+        set_kind("static")
+        set_default(false)
+        set_languages("cxx17")
+        set_warnings("none")
+        add_deps("quickfix-headers")
+        add_defines("_FILE_OFFSET_BITS=64", "GETHOSTBYNAME_R_INPUTS_RESULT=1", "HAVE_CXX17")
+        add_includedirs(quickfix_incdir, "third_party/quickfix/src/C++")
+        add_sysincludedirs(quickfix_incdir, {public = true})
+        add_syslinks("pthread", {public = true})
+        add_files(
+            "third_party/quickfix/src/C++/Acceptor.cpp",
+            "third_party/quickfix/src/C++/DataDictionary.cpp",
+            "third_party/quickfix/src/C++/DataDictionaryProvider.cpp",
+            "third_party/quickfix/src/C++/Dictionary.cpp",
+            "third_party/quickfix/src/C++/FieldConvertors.cpp",
+            "third_party/quickfix/src/C++/FieldMap.cpp",
+            "third_party/quickfix/src/C++/FieldTypes.cpp",
+            "third_party/quickfix/src/C++/FileLog.cpp",
+            "third_party/quickfix/src/C++/FileStore.cpp",
+            "third_party/quickfix/src/C++/Group.cpp",
+            "third_party/quickfix/src/C++/HostDetailsProvider.cpp",
+            "third_party/quickfix/src/C++/HttpConnection.cpp",
+            "third_party/quickfix/src/C++/HttpMessage.cpp",
+            "third_party/quickfix/src/C++/HttpParser.cpp",
+            "third_party/quickfix/src/C++/HttpServer.cpp",
+            "third_party/quickfix/src/C++/Initiator.cpp",
+            "third_party/quickfix/src/C++/Log.cpp",
+            "third_party/quickfix/src/C++/Message.cpp",
+            "third_party/quickfix/src/C++/MessageSorters.cpp",
+            "third_party/quickfix/src/C++/MessageStore.cpp",
+            "third_party/quickfix/src/C++/NullStore.cpp",
+            "third_party/quickfix/src/C++/Parser.cpp",
+            "third_party/quickfix/src/C++/pugixml.cpp",
+            "third_party/quickfix/src/C++/PUGIXML_DOMDocument.cpp",
+            "third_party/quickfix/src/C++/Session.cpp",
+            "third_party/quickfix/src/C++/SessionFactory.cpp",
+            "third_party/quickfix/src/C++/SessionSettings.cpp",
+            "third_party/quickfix/src/C++/Settings.cpp",
+            "third_party/quickfix/src/C++/SocketAcceptor.cpp",
+            "third_party/quickfix/src/C++/SocketConnection.cpp",
+            "third_party/quickfix/src/C++/SocketConnector.cpp",
+            "third_party/quickfix/src/C++/SocketInitiator.cpp",
+            "third_party/quickfix/src/C++/SocketMonitor_UNIX.cpp",
+            "third_party/quickfix/src/C++/SocketServer.cpp",
+            "third_party/quickfix/src/C++/stdafx.cpp",
+            "third_party/quickfix/src/C++/ThreadedSocketAcceptor.cpp",
+            "third_party/quickfix/src/C++/ThreadedSocketConnection.cpp",
+            "third_party/quickfix/src/C++/ThreadedSocketInitiator.cpp",
+            "third_party/quickfix/src/C++/TimeRange.cpp",
+            "third_party/quickfix/src/C++/Utility.cpp"
+        )
+    target_end()
+end
+
+if has_config("quickfix_dir") or (has_config("quickfix") and use_submodule_quickfix) then
     for _, quickfix_name in ipairs({"quickfix", "quickfix_network", "quickfix_dual_role"}) do
     target(quickfix_name .. "-test")
         set_kind("binary")
+        set_rundir("$(projectdir)")
         add_files("tests/" .. quickfix_name .. "_test.cpp")
         add_deps("nimblefix")
-        add_sysincludedirs(path.join(get_config("quickfix_dir"), "include"))
-        add_linkdirs(path.join(get_config("quickfix_dir"), "lib"))
-        add_links("quickfix")
-        add_syslinks("pthread", "ssl", "crypto")
+        if has_config("quickfix_dir") then
+            add_sysincludedirs(path.join(get_config("quickfix_dir"), "include"))
+            add_linkdirs(path.join(get_config("quickfix_dir"), "lib"))
+            add_links("quickfix")
+            add_syslinks("pthread", "ssl", "crypto")
+        else
+            add_deps("quickfix-bundled")
+        end
         if quickfix_name == "quickfix_dual_role" then
             add_deps("fix44-schema")
             add_includedirs(generated_dir)
         end
-        add_tests("oracle", {runargs = {path.join(get_config("quickfix_dir"), "share", "quickfix", "FIX44.xml")}})
+        local dict_path = has_config("quickfix_dir")
+            and path.join(get_config("quickfix_dir"), "share", "quickfix", "FIX44.xml")
+            or path.join(os.projectdir(), "schemas/standard/FIX44.xml")
+        add_tests("oracle", {runargs = {dict_path}, run_timeout = 30000})
     target_end()
     end
 end
 
 if has_config("benchmarks") then
-    if has_config("quickfix_dir") then
+    if has_config("quickfix_dir") or use_submodule_quickfix then
         target("quickfix-tcp-server")
             set_kind("binary")
             add_files("bench/quickfix_tcp_server.cpp")
-            add_sysincludedirs(path.join(get_config("quickfix_dir"), "include"))
-            add_linkdirs(path.join(get_config("quickfix_dir"), "lib"))
-            add_links("quickfix")
-            add_syslinks("pthread", "ssl", "crypto", "z")
+            if has_config("quickfix_dir") then
+                add_sysincludedirs(path.join(get_config("quickfix_dir"), "include"))
+                add_linkdirs(path.join(get_config("quickfix_dir"), "lib"))
+                add_links("quickfix")
+                add_syslinks("pthread", "ssl", "crypto", "z")
+            else
+                add_deps("quickfix-bundled")
+            end
         target_end()
+        if has_config("standard_schemas") then
+            target("quickfix-parity-bench")
+                set_kind("binary")
+                set_rundir("$(projectdir)")
+                add_files("bench/quickfix_parity_bench.cpp")
+                add_deps("nimblefix", "fix44-schema")
+                add_includedirs(generated_dir)
+                if has_config("quickfix_dir") then
+                    add_sysincludedirs(path.join(get_config("quickfix_dir"), "include"))
+                    add_linkdirs(path.join(get_config("quickfix_dir"), "lib"))
+                    add_links("quickfix")
+                    add_syslinks("pthread", "ssl", "crypto", "z")
+                else
+                    add_deps("quickfix-bundled")
+                end
+                add_ldflags("-Wl,--wrap=malloc", {force = true})
+            target_end()
+        end
     end
     target("runtime-bench")
         set_kind("binary")

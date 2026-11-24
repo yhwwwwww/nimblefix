@@ -58,6 +58,15 @@ auto order = fix::NewOrderSingle::make()
     .order_qty(nf::Decimal{100, 0}).ord_type('1')
     .price(std::optional<nf::Decimal>{std::nullopt}); // absent optional skipped automatically
 
+// Repeating groups (same setter name for both fixed-count and dynamic-count, both 0-alloc!):
+//   Fixed count (pass entries directly — compile-time tuple, 0 copy / 0 alloc / 0 overflow):
+//     .no_party_i_ds(
+//         fix::NoPartyIDsGroupEntry::make().party_id("CLIENT1").party_id_source('D').party_role(1))
+//   Dynamic count (loop -> shared 1 KB inline arena, auto heap spill on overflow):
+//     fix::NoPartyIDsGroup<> parties;
+//     for (const auto& p : list) (void)parties.add(fix::NoPartyIDsGroupEntry::make().party_id(p.id)...);
+//     ...no_party_i_ds(std::move(parties));
+
 // Option B: Mutable reusable Draft / DraftWith<Slots, Bytes> (statement-by-statement mutation,
 //           native runtime `if`, field overwrite, and reset() reuse; same 16-slot / 256B SSO):
 // fix::NewOrderSingle::Draft order;
@@ -153,6 +162,18 @@ Binary footprint (Release): `direct-initiator-example` is **336 KB** (`libnimble
 
 *(Pre-TCP Acceptor `SessionDriver` wire-in -> 912-field Schema -> in-handler ER -> Journal -> flush: **p50 = 1.53 µs**, **p99 = 2.18 µs**, **621,161 ord/s**.)*
 
+### 5. NimbleFIX 0.3 vs QuickFIX 1.16.0 (`quickfix-parity-bench`, Strictly Same-Methodology)
+
+Both engines run in the same `-O3` binary against the same full 912-field `schemas/standard/FIX44.xml` (strict validation + 120 s `SendingTime` check ON), identical `NewOrderSingle` + `NoPartyIDs[1]` and 11-field `ExecutionReport` payloads, real on-disk persistence (v2 mmap Journal vs `FIX::FileStore`, OS page-cache, no `fsync`), logging disabled, and an identical neutral loopback TCP peer. Full breakdown in [docs/benchmarks.md](docs/benchmarks.md#4-nimblefix-03-vs-quickfix-1160--same-methodology-benchmark-quickfix-parity-bench).
+
+| Suite (`1000` warmup / `5000` samples) | NimbleFIX 0.3 (p50 / p99 / alloc) | QuickFIX 1.16.0 (p50 / p99 / alloc) | Speedup (p50) |
+| :--- | :--- | :--- | ---: |
+| **Codec Encode** (`Fixed` / `make()` direct / `NoPartyIDs<>`) | **371 ns** / **611 ns** / **681 ns** (**0.00** alloc) | 1,653 ns / 1,703 ns / 19.00 | **4.46×** / **2.71×** / **2.43×** |
+| **Parse + Full `FIX44.xml` Strict + Read** | **1,323 ns** / **1,663 ns** / **0.00** | 2,775 ns / 2,816 ns / 15.00 | **2.10×** |
+| **TCP Initiator RTT** (`DirectInitiator` / `Engine busy_poll` / `epoll`) | **9.79 µs** / **14.83 µs** / **18.55 µs** (**0.00** alloc) | 22.43 µs / p99 32.64 µs / 35.06 | **2.29×** / 1.51× / 1.21× |
+| **TCP Acceptor RTT** (`Engine busy_poll` / `epoll`) | **10.98 µs** / **13.29 µs** (p99 **14.70 µs**, **0.00** alloc) | 23.82 µs / p99 32.48 µs / 36.99 | **2.17×** / 1.79× |
+| **TCP Dense Burst 32×** (`batch sendmsg`, CO-Free 1-way) | **26.61 µs** / **36.21 µs** / **0.00** (**827k/s**) | 200.92 µs / 403.16 µs / 28.06 (79k/s) | **7.55×** (**10.5×** rate) |
+
 ---
 
 ## Layer 1 / 2: Multi-Session Engine, Pluggable `IoBackend`, Acceptor & CLI
@@ -212,20 +233,30 @@ xmake run nimblefix-cli run --config ./demo/acceptor.toml
 
 ## Build, Test & Install
 
+Clone with submodules (`third_party/tomlplusplus` and `third_party/quickfix` are tracked as git submodules — no separate third-party downloads required):
+
+```sh
+git clone --recurse-submodules <repo-url>
+# Or in an existing clone:
+git submodule update --init --recursive
+```
+
 ```sh
 # Full xmake build & verification suite (Debug or Release)
-xmake f -m release --tls=y --xml=y --benchmarks=y -y
+xmake f -m release --tls=y --xml=y --benchmarks=y --quickfix=y -y
 xmake check
 
-# Run the benchmarks
-xmake build initiator-burst-bench direct-initiator-bench acceptor-bench
+# Run the benchmarks (including same-methodology QuickFIX 1.16.0 comparison)
+xmake build initiator-burst-bench direct-initiator-bench acceptor-bench quickfix-parity-bench
 ./build/linux/x86_64/release/initiator-burst-bench
 ./build/linux/x86_64/release/direct-initiator-bench 5000 30000
 ./build/linux/x86_64/release/acceptor-bench 2000 20000 8 all
+./build/linux/x86_64/release/quickfix-parity-bench 1000 5000 schemas/standard/FIX44.xml
 
 # CMake build and relocatable install verification
 cmake -S . -B build-cmake -DCMAKE_BUILD_TYPE=Release \
-  -DNIMBLEFIX_ENABLE_TLS=ON -DNIMBLEFIX_ENABLE_XML=ON
+  -DNIMBLEFIX_ENABLE_TLS=ON -DNIMBLEFIX_ENABLE_XML=ON \
+  -DNIMBLEFIX_BUILD_BENCHMARKS=ON -DNIMBLEFIX_ENABLE_QUICKFIX=ON
 cmake --build build-cmake -j
 ctest --test-dir build-cmake --output-on-failure
 python3 tests/install_test.py --features --examples

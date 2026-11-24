@@ -131,10 +131,10 @@ def main():
                 "limitations":"development host; Python framing and scheduling included; no wire timestamps"}
             report.update({"state_filesystem":filesystem,"kernel":platform.platform(),
                 "cpu_affinity":sorted(os.sched_getaffinity(0)),"cpu_pinned":len(os.sched_getaffinity(0))==1,
-                "code_revision":subprocess.check_output(["git","rev-parse","HEAD"],text=True).strip(),
+                "code_revision":output("git","rev-parse","HEAD"),
                 "binary_sha256":hashlib.sha256(args.binary.read_bytes()).hexdigest(),
                 "source_sha256":source_digest(),"cpu":output("lscpu"),
-                "compiler":output("g++","--version").splitlines()[0],
+                "compiler":output(os.environ.get("CXX","g++"),"--version").splitlines()[0],
                 "build_flags":"xmake mode.release (-O3), C++20",
                 "tcp_nodelay":True,"clock":"Python monotonic_ns; scheduled arrival to complete parsed reply"})
         finally:

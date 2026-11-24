@@ -13,11 +13,13 @@
 #include <ctime>
 #include <filesystem>
 #include <iostream>
+#include <mutex>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
-#include <syncstream>
 #include <thread>
+#include <utility>
 
 #include <nimblefix/engine.hpp>
 
@@ -32,15 +34,23 @@ inline void install_signals() {
     std::signal(SIGTERM, interrupt);
 }
 
+inline std::mutex& output_mutex() {
+    static std::mutex mutex;
+    return mutex;
+}
 template<class... Values> void print(Values&&... values) {
-    std::osyncstream out(std::cout);
-    (out << ... << values);
-    out << std::endl;
+    std::ostringstream buffer;
+    (buffer << ... << values);
+    buffer << '\n';
+    std::lock_guard<std::mutex> lock(output_mutex());
+    std::cout << buffer.str() << std::flush;
 }
 template<class... Values> void error(Values&&... values) {
-    std::osyncstream out(std::cerr);
-    (out << ... << values);
-    out << std::endl;
+    std::ostringstream buffer;
+    (buffer << ... << values);
+    buffer << '\n';
+    std::lock_guard<std::mutex> lock(output_mutex());
+    std::cerr << buffer.str() << std::flush;
 }
 inline void check(nf::Status status) {
     if (!status.ok()) throw std::runtime_error(std::string(status.message()));

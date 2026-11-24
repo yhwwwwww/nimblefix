@@ -18,7 +18,10 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def output(*command):
-    result = subprocess.run(command, cwd=ROOT, text=True, capture_output=True)
+    try:
+        result = subprocess.run(command, cwd=ROOT, text=True, capture_output=True)
+    except OSError:
+        return "unavailable"
     return result.stdout.strip() if result.returncode == 0 else "unavailable"
 
 
@@ -43,7 +46,7 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--samples", type=int, default=10000)
     parser.add_argument("--runs", type=int, default=3)
-    parser.add_argument("--compiler", default="g++")
+    parser.add_argument("--compiler", default=os.environ.get("CXX", "g++"))
     parser.add_argument("--flags", default="xmake mode.release (-O3); C++20; --wrap=malloc")
     args = parser.parse_args()
     if not 100 <= args.samples <= 1000000 or not 1 <= args.runs <= 20:

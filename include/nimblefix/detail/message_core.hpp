@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <bit>
 #include <cstddef>
@@ -221,6 +222,7 @@ struct MessageView {
     std::size_t group_count{};
     bool prevalidated_scalars{};
     bool presence_validated{};
+    bool static_plan{};
 };
 
 [[nodiscard]] constexpr bool is_present(const MessageView& message, std::size_t slot) noexcept {
@@ -648,49 +650,9 @@ consteval auto make_plan(FieldList<FieldTypes...>) {
     constexpr std::size_t count = sizeof...(FieldTypes);
     static_assert(count <= std::numeric_limits<std::uint32_t>::max());
     constexpr auto slot_map = make_slot_map(FieldList<FieldTypes...>{});
-    std::array<PlanField, count> physical_fields{};
-    if constexpr (count != 0) {
-        std::size_t physical_index = 0;
-        const auto add = [&]<class F>() consteval {
-            static_assert(F::tag > 0 && F::tag <= maximum_fix_tag, "FIX tags must be in 1..999999999");
-            static_assert(!is_managed_tag(F::tag), "session and framing tags are engine managed");
-            PlanField field{};
-            field.tag = F::tag;
-            field.slot_index = static_cast<std::uint32_t>(physical_index);
-            field.kind = F::kind;
-            field.wire_type = F::wire_type;
-            field.group_counter = GroupCountTag<Policy, F::tag>::value;
-            field.needs_policy_check = FieldNeedsPolicyCheck<Policy, F::tag>::value;
-            field.pair_tag = FieldPairTag<Policy, F::tag>::value;
-            std::array<char, 9> digits{};
-            std::size_t digit_count = 0;
-            auto tag = F::tag;
-            do {
-                digits[digit_count++] = static_cast<char>('0' + tag % 10);
-                tag /= 10;
-            } while (tag != 0);
-            field.prefix_size = static_cast<std::uint8_t>(digit_count + 1);
-            for (std::size_t i = 0; i < digit_count; ++i) {
-                field.tag_prefix[i] = digits[digit_count - i - 1];
-            }
-            field.tag_prefix[digit_count] = '=';
-            if (field.pair_tag != 0) {
-                std::array<char, 9> pair_digits{};
-                std::size_t pair_digit_count = 0;
-                auto pair_tag = field.pair_tag;
-                do {
-                    pair_digits[pair_digit_count++] = static_cast<char>('0' + pair_tag % 10);
-                    pair_tag /= 10;
-                } while (pair_tag != 0);
-                field.pair_prefix_size = static_cast<std::uint8_t>(pair_digit_count + 1);
-                for (std::size_t i = 0; i < pair_digit_count; ++i)
-                    field.pair_tag_prefix[i] = pair_digits[pair_digit_count - i - 1];
-                field.pair_tag_prefix[pair_digit_count] = '=';
-            }
-            physical_fields[physical_index++] = field;
-        };
-        (add.template operator()<FieldTypes>(), ...);
-    }
+    std::array<PlanField, count> physical_fields{
+        make_single_plan_field<Policy, FieldTypes::tag, FieldTypes::kind, FieldTypes::wire_type>()...
+    };
 
     std::array<PlanField, count> result{};
     for (std::size_t canonical_index = 0; canonical_index < count; ++canonical_index) {
@@ -698,6 +660,13 @@ consteval auto make_plan(FieldList<FieldTypes...>) {
         result[canonical_index].slot_index = static_cast<std::uint32_t>(canonical_index);
     }
     return result;
+}
+
+template <std::size_t N>
+consteval std::array<std::uint32_t, N> make_wire_order(const std::array<PlanField, N>& plan) {
+    std::array<std::uint32_t, N> order{};
+    for (std::size_t i = 0; i < N; ++i) order[i] = plan[i].tag;
+    return order;
 }
 
 template <class Left, class Right>
@@ -1125,6 +1094,7 @@ public:
         detail::MessageView result{slots_.data(), bytes_.data(), byte_count_, plan_.data(), slot_map_.data(),
             plan_.size(), presence_.data(), msg_type, status_};
         result.prevalidated_scalars = true;
+        result.static_plan = true;
         detail::attach_policy_validation<Policy>(result);
         if (result.status.ok()) {
             if (result.required_tag_count != 0) {
@@ -1172,8 +1142,6 @@ using FixedMessage = FixedShapeMessage<MsgType, Shape, ByteCapacity, Policy>;
 template <class Policy, FixedString MsgType, class Shape,
           std::size_t InlineSlots, std::size_t InlineBytes>
 class MessageBuilder {
-    template <class P, FixedString M, class S, std::size_t IS, std::size_t IB>
-    friend class MessageBuilder;
     using StorageType = detail::SsoStorage<InlineSlots, InlineBytes>;
     using ShapeInfo = detail::FieldListTraits<Shape>;
     using CanonicalShape = typename detail::canonical_shape<Policy, Shape>::type;
@@ -1193,11 +1161,7 @@ public:
     static constexpr std::size_t slot_storage_bytes = field_count_ * sizeof(detail::SlotValue);
     static constexpr std::size_t inline_slot_capacity = InlineSlots;
     static constexpr std::size_t inline_byte_capacity = InlineBytes;
-    static constexpr auto wire_order = []() consteval {
-        std::array<std::uint32_t, field_count_> order{};
-        for (std::size_t i = 0; i < field_count_; ++i) order[i] = plan_[i].tag;
-        return order;
-    }();
+    static constexpr auto wire_order = detail::make_wire_order(Plan::fields);
     static constexpr const auto& encoding_plan = Plan::fields;
     static constexpr const auto& physical_slot_map = slot_map_;
 
@@ -1257,6 +1221,7 @@ public:
         detail::MessageView result{values, bytes, storage_.byte_count, plan_.data(), slot_map_.data(),
             plan_.size(), pres, msg_type, status_};
         result.prevalidated_scalars = true;
+        result.static_plan = true;
         detail::attach_policy_validation<Policy>(result);
         if (result.status.ok()) {
             result.status = detail::validate_schema_presence(result);

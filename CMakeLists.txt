@@ -43,7 +43,7 @@ add_library(nimblefix_core_tls STATIC
     src/transport/direct_tls.cpp)
 target_link_libraries(nimblefix_core_tls PUBLIC nimblefix_core)
 if(NIMBLEFIX_ENABLE_TLS)
-    find_package(OpenSSL 3.0 REQUIRED)
+    find_package(OpenSSL 1.1.1 REQUIRED)
     target_link_libraries(nimblefix_core_tls PUBLIC OpenSSL::SSL OpenSSL::Crypto)
     target_compile_definitions(nimblefix_core_tls PRIVATE NIMBLEFIX_ENABLE_TLS=1)
 endif()
@@ -177,7 +177,7 @@ endif()
 
 if(NIMBLEFIX_BUILD_TESTS)
     enable_testing()
-    find_package(Python3 3.10 REQUIRED COMPONENTS Interpreter)
+    find_package(Python3 3.9 REQUIRED COMPONENTS Interpreter)
     add_executable(initiator-probe tests/initiator_probe.cpp)
     target_link_libraries(initiator-probe PRIVATE nimblefix)
     add_test(NAME initiator-reconnect COMMAND "${Python3_EXECUTABLE}"
@@ -278,21 +278,94 @@ if(NIMBLEFIX_BUILD_TESTS)
 endif()
 
 set(NIMBLEFIX_QUICKFIX_DIR "" CACHE PATH "Optional installed QuickFIX prefix for independent interoperability")
-if(NIMBLEFIX_QUICKFIX_DIR AND NIMBLEFIX_BUILD_TESTS)
+option(NIMBLEFIX_ENABLE_QUICKFIX "Build bundled third_party/quickfix submodule for oracle tests and parity benchmarks" OFF)
+
+set(NIMBLEFIX_HAVE_QUICKFIX OFF)
+if(NIMBLEFIX_QUICKFIX_DIR)
     find_path(QUICKFIX_INCLUDE_DIR quickfix/Application.h PATHS "${NIMBLEFIX_QUICKFIX_DIR}/include" NO_DEFAULT_PATH REQUIRED)
     find_library(QUICKFIX_LIBRARY quickfix PATHS "${NIMBLEFIX_QUICKFIX_DIR}/lib" NO_DEFAULT_PATH REQUIRED)
     find_package(OpenSSL REQUIRED)
+    add_library(nimblefix_quickfix INTERFACE)
+    target_include_directories(nimblefix_quickfix SYSTEM INTERFACE "${QUICKFIX_INCLUDE_DIR}")
+    target_link_libraries(nimblefix_quickfix INTERFACE "${QUICKFIX_LIBRARY}" OpenSSL::SSL OpenSSL::Crypto Threads::Threads)
+    set(NIMBLEFIX_QUICKFIX_FIX44_XML "${NIMBLEFIX_QUICKFIX_DIR}/share/quickfix/FIX44.xml")
+    set(NIMBLEFIX_HAVE_QUICKFIX ON)
+elseif((NIMBLEFIX_ENABLE_QUICKFIX OR NIMBLEFIX_BUILD_BENCHMARKS) AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/quickfix/src/C++/Session.cpp")
+    set(QUICKFIX_GEN_INCLUDE "${CMAKE_CURRENT_BINARY_DIR}/quickfix-include")
+    file(MAKE_DIRECTORY "${QUICKFIX_GEN_INCLUDE}")
+    if(NOT EXISTS "${QUICKFIX_GEN_INCLUDE}/Allocator.h")
+        file(WRITE "${QUICKFIX_GEN_INCLUDE}/Allocator.h" "/* Generated out-of-source for bundled QuickFIX */\n")
+    endif()
+    if(NOT EXISTS "${QUICKFIX_GEN_INCLUDE}/quickfix")
+        file(CREATE_LINK "${CMAKE_CURRENT_SOURCE_DIR}/third_party/quickfix/src/C++"
+            "${QUICKFIX_GEN_INCLUDE}/quickfix" SYMBOLIC)
+    endif()
+    set(QUICKFIX_SUBMODULE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/quickfix/src/C++")
+    add_library(nimblefix_quickfix STATIC
+        "${QUICKFIX_SUBMODULE_DIR}/Acceptor.cpp"
+        "${QUICKFIX_SUBMODULE_DIR}/DataDictionary.cpp"
+        "${QUICKFIX_SUBMODULE_DIR}/DataDictionaryProvider.cpp"
+        "${QUICKFIX_SUBMODULE_DIR}/Dictionary.cpp"
+        "${QUICKFIX_SUBMODULE_DIR}/FieldConvertors.cpp"
+        "${QUICKFIX_SUBMODULE_DIR}/FieldMap.cpp"
+        "${QUICKFIX_SUBMODULE_DIR}/FieldTypes.cpp"
+        "${QUICKFIX_SUBMODULE_DIR}/FileLog.cpp"
+        "${QUICKFIX_SUBMODULE_DIR}/FileStore.cpp"
+        "${QUICKFIX_SUBMODULE_DIR}/Group.cpp"
+        "${QUICKFIX_SUBMODULE_DIR}/HostDetailsProvider.cpp"
+        "${QUICKFIX_SUBMODULE_DIR}/HttpConnection.cpp"
+        "${QUICKFIX_SUBMODULE_DIR}/HttpMessage.cpp"
+        "${QUICKFIX_SUBMODULE_DIR}/HttpParser.cpp"
+        "${QUICKFIX_SUBMODULE_DIR}/HttpServer.cpp"
+        "${QUICKFIX_SUBMODULE_DIR}/Initiator.cpp"
+        "${QUICKFIX_SUBMODULE_DIR}/Log.cpp"
+        "${QUICKFIX_SUBMODULE_DIR}/Message.cpp"
+        "${QUICKFIX_SUBMODULE_DIR}/MessageSorters.cpp"
+        "${QUICKFIX_SUBMODULE_DIR}/MessageStore.cpp"
+        "${QUICKFIX_SUBMODULE_DIR}/NullStore.cpp"
+        "${QUICKFIX_SUBMODULE_DIR}/Parser.cpp"
+        "${QUICKFIX_SUBMODULE_DIR}/pugixml.cpp"
+        "${QUICKFIX_SUBMODULE_DIR}/PUGIXML_DOMDocument.cpp"
+        "${QUICKFIX_SUBMODULE_DIR}/Session.cpp"
+        "${QUICKFIX_SUBMODULE_DIR}/SessionFactory.cpp"
+        "${QUICKFIX_SUBMODULE_DIR}/SessionSettings.cpp"
+        "${QUICKFIX_SUBMODULE_DIR}/Settings.cpp"
+        "${QUICKFIX_SUBMODULE_DIR}/SocketAcceptor.cpp"
+        "${QUICKFIX_SUBMODULE_DIR}/SocketConnection.cpp"
+        "${QUICKFIX_SUBMODULE_DIR}/SocketConnector.cpp"
+        "${QUICKFIX_SUBMODULE_DIR}/SocketInitiator.cpp"
+        "${QUICKFIX_SUBMODULE_DIR}/SocketMonitor_UNIX.cpp"
+        "${QUICKFIX_SUBMODULE_DIR}/SocketServer.cpp"
+        "${QUICKFIX_SUBMODULE_DIR}/stdafx.cpp"
+        "${QUICKFIX_SUBMODULE_DIR}/ThreadedSocketAcceptor.cpp"
+        "${QUICKFIX_SUBMODULE_DIR}/ThreadedSocketConnection.cpp"
+        "${QUICKFIX_SUBMODULE_DIR}/ThreadedSocketInitiator.cpp"
+        "${QUICKFIX_SUBMODULE_DIR}/TimeRange.cpp"
+        "${QUICKFIX_SUBMODULE_DIR}/Utility.cpp")
+    target_compile_features(nimblefix_quickfix PRIVATE cxx_std_17)
+    target_compile_definitions(nimblefix_quickfix PRIVATE
+        _FILE_OFFSET_BITS=64 GETHOSTBYNAME_R_INPUTS_RESULT=1 HAVE_CXX17)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        target_compile_options(nimblefix_quickfix PRIVATE -w)
+    endif()
+    target_include_directories(nimblefix_quickfix PRIVATE "${QUICKFIX_GEN_INCLUDE}" "${QUICKFIX_SUBMODULE_DIR}")
+    target_include_directories(nimblefix_quickfix SYSTEM INTERFACE "${QUICKFIX_GEN_INCLUDE}")
+    target_link_libraries(nimblefix_quickfix PUBLIC Threads::Threads)
+    set(NIMBLEFIX_QUICKFIX_FIX44_XML "${CMAKE_CURRENT_SOURCE_DIR}/schemas/standard/FIX44.xml")
+    set(NIMBLEFIX_HAVE_QUICKFIX ON)
+endif()
+
+if(NIMBLEFIX_HAVE_QUICKFIX AND NIMBLEFIX_BUILD_TESTS AND (NIMBLEFIX_QUICKFIX_DIR OR NIMBLEFIX_ENABLE_QUICKFIX))
     foreach(oracle quickfix quickfix_network quickfix_dual_role)
         if(oracle STREQUAL "quickfix_dual_role" AND NOT NIMBLEFIX_BUILD_STANDARD_SCHEMAS)
             continue()
         endif()
         add_executable(${oracle}-test tests/${oracle}_test.cpp)
-        target_include_directories(${oracle}-test SYSTEM PRIVATE "${QUICKFIX_INCLUDE_DIR}")
-        target_link_libraries(${oracle}-test PRIVATE nimblefix "${QUICKFIX_LIBRARY}" OpenSSL::SSL OpenSSL::Crypto)
+        target_link_libraries(${oracle}-test PRIVATE nimblefix nimblefix_quickfix)
         if(oracle STREQUAL "quickfix_dual_role")
             target_link_libraries(${oracle}-test PRIVATE fix44)
         endif()
-        add_test(NAME ${oracle} COMMAND ${oracle}-test "${NIMBLEFIX_QUICKFIX_DIR}/share/quickfix/FIX44.xml")
+        add_test(NAME ${oracle} COMMAND ${oracle}-test "${NIMBLEFIX_QUICKFIX_FIX44_XML}")
         set_tests_properties(${oracle} PROPERTIES TIMEOUT 90)
     endforeach()
 endif()
@@ -301,15 +374,22 @@ if(NIMBLEFIX_BUILD_BENCHMARKS)
     if(NOT NIMBLEFIX_BUILD_SAMPLE_SCHEMA)
         message(FATAL_ERROR "The comparison benchmark requires NIMBLEFIX_BUILD_SAMPLE_SCHEMA=ON")
     endif()
-    if(NIMBLEFIX_QUICKFIX_DIR)
-        find_path(QUICKFIX_INCLUDE_DIR quickfix/Application.h PATHS "${NIMBLEFIX_QUICKFIX_DIR}/include" NO_DEFAULT_PATH REQUIRED)
-        find_library(QUICKFIX_LIBRARY quickfix PATHS "${NIMBLEFIX_QUICKFIX_DIR}/lib" NO_DEFAULT_PATH REQUIRED)
-        find_package(OpenSSL REQUIRED)
-        find_package(ZLIB REQUIRED)
+    if(NIMBLEFIX_HAVE_QUICKFIX)
         add_executable(quickfix-tcp-server bench/quickfix_tcp_server.cpp)
         target_compile_features(quickfix-tcp-server PRIVATE cxx_std_20)
-        target_include_directories(quickfix-tcp-server SYSTEM PRIVATE "${QUICKFIX_INCLUDE_DIR}")
-        target_link_libraries(quickfix-tcp-server PRIVATE "${QUICKFIX_LIBRARY}" OpenSSL::SSL OpenSSL::Crypto ZLIB::ZLIB Threads::Threads)
+        target_link_libraries(quickfix-tcp-server PRIVATE nimblefix_quickfix)
+        if(NIMBLEFIX_QUICKFIX_DIR)
+            find_package(ZLIB REQUIRED)
+            target_link_libraries(quickfix-tcp-server PRIVATE ZLIB::ZLIB)
+        endif()
+        if(NIMBLEFIX_BUILD_STANDARD_SCHEMAS)
+            add_executable(quickfix-parity-bench bench/quickfix_parity_bench.cpp)
+            target_link_libraries(quickfix-parity-bench PRIVATE nimblefix fix44 nimblefix_quickfix)
+            target_link_options(quickfix-parity-bench PRIVATE -Wl,--wrap=malloc)
+            if(NIMBLEFIX_QUICKFIX_DIR)
+                target_link_libraries(quickfix-parity-bench PRIVATE ZLIB::ZLIB)
+            endif()
+        endif()
     endif()
     if(NIMBLEFIX_BUILD_STANDARD_SCHEMAS)
         add_executable(schema-bench bench/schema_bench.cpp)

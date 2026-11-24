@@ -73,12 +73,18 @@ struct GroupDescriptor {
     std::span<const MessageMemberDescriptor> members{};
     std::span<const MemberTagEntry> members_by_tag{};
     std::span<const std::uint32_t> required_members{};
+    std::span<const std::uint32_t> group_count_tags{};
+    std::uint64_t group_count_tag_bloom{};
+    bool has_group_index{};
 };
 
 struct ComponentDescriptor {
     std::string_view name{};
     std::span<const MessageMemberDescriptor> members{};
     std::span<const MemberTagEntry> members_by_tag{};
+    std::span<const std::uint32_t> group_count_tags{};
+    std::uint64_t group_count_tag_bloom{};
+    bool has_group_index{};
 };
 
 struct MessageDescriptor {
@@ -88,6 +94,9 @@ struct MessageDescriptor {
     std::span<const MessageMemberDescriptor> members{};
     std::span<const MemberTagEntry> members_by_tag{};
     std::span<const std::uint32_t> required_members{};
+    std::span<const std::uint32_t> group_count_tags{};
+    std::uint64_t group_count_tag_bloom{};
+    bool has_group_index{};
 
     [[nodiscard]] constexpr std::uint32_t member_tag(
         const MessageMemberDescriptor& member,
@@ -533,8 +542,13 @@ struct LevelLookup {
     bool found{};
 };
 
-// Most levels contain only a few groups. Discover those once rather than
-// searching every scalar member for every wire field and requested tag.
+[[nodiscard]] constexpr std::uint64_t group_tag_bloom_bit(std::uint32_t tag) noexcept {
+    return std::uint64_t{1} << (tag & 63U);
+}
+
+// Most levels contain only a few groups. Prefer precomputed group_count_tags +
+// 64-bit bloom filter (O(1) construction, 1-instruction scalar rejection) and
+// fall back to scanning members only for hand-crafted descriptors without an index.
 class LevelGroupLookup {
 public:
     LevelGroupLookup(const SchemaDescriptor& schema,
@@ -545,7 +559,35 @@ public:
         if (header != nullptr) add_groups(header->members);
     }
 
+    LevelGroupLookup(const SchemaDescriptor& schema,
+        std::span<const MessageMemberDescriptor> members,
+        std::span<const std::uint32_t> level_group_tags,
+        std::uint64_t level_group_bloom,
+        bool has_level_group_index,
+        const ComponentDescriptor* header = nullptr) noexcept
+        : schema_(schema), members_(members), header_(header) {
+        if (has_level_group_index && (header == nullptr || header->has_group_index)) {
+            indexed_ = true;
+            level_tags_ = level_group_tags;
+            header_tags_ = header != nullptr ? header->group_count_tags : std::span<const std::uint32_t>{};
+            bloom_ = level_group_bloom | (header != nullptr ? header->group_count_tag_bloom : 0ULL);
+            return;
+        }
+        add_groups(members);
+        if (header != nullptr) add_groups(header->members);
+    }
+
     [[nodiscard]] bool contains(std::uint32_t tag) const noexcept {
+        if (indexed_) {
+            if ((bloom_ & group_tag_bloom_bit(tag)) == 0) return false;
+            for (const auto group_tag : level_tags_) {
+                if (group_tag == tag) return true;
+            }
+            for (const auto group_tag : header_tags_) {
+                if (group_tag == tag) return true;
+            }
+            return false;
+        }
         if (overflow_) {
             const auto has_in = [this, tag](std::span<const MessageMemberDescriptor> list) noexcept {
                 return std::any_of(list.begin(), list.end(), [&](const auto& member) {
@@ -555,6 +597,7 @@ public:
             };
             return has_in(members_) || (header_ != nullptr && has_in(header_->members));
         }
+        if ((bloom_ & group_tag_bloom_bit(tag)) == 0) return false;
         for (std::size_t i = 0; i < count_; ++i)
             if (groups_[i]->count_tag == tag) return true;
         return false;
@@ -565,6 +608,7 @@ private:
         for (const auto& member : list) {
             const auto* group = descriptor_group(schema_, member);
             if (group == nullptr) continue;
+            bloom_ |= group_tag_bloom_bit(group->count_tag);
             if (count_ == groups_.size()) {
                 overflow_ = true;
                 return;
@@ -576,7 +620,11 @@ private:
     const SchemaDescriptor& schema_;
     std::span<const MessageMemberDescriptor> members_;
     const ComponentDescriptor* header_{};
-    std::array<const GroupDescriptor*, 16> groups_;
+    std::span<const std::uint32_t> level_tags_{};
+    std::span<const std::uint32_t> header_tags_{};
+    std::uint64_t bloom_{};
+    bool indexed_{};
+    std::array<const GroupDescriptor*, 16> groups_{};
     std::size_t count_{};
     bool overflow_{};
 };
@@ -618,12 +666,16 @@ private:
     std::span<const MessageMemberDescriptor> members, std::span<const FieldView> fields,
     std::uint32_t tag, std::span<const MemberTagEntry> members_by_tag = {},
     const AncestorStack* existing_ancestors = nullptr,
-    const ComponentDescriptor* header = nullptr) noexcept {
+    const ComponentDescriptor* header = nullptr,
+    std::span<const std::uint32_t> level_group_tags = {},
+    std::uint64_t level_group_bloom = 0,
+    bool has_level_group_index = false) noexcept {
     const MemberLevel level{members, members_by_tag};
-    const LevelGroupLookup groups{schema, members, header};
+    const LevelGroupLookup groups{schema, members, level_group_tags, level_group_bloom,
+        has_level_group_index, header};
     AncestorStack default_ancestors{};
     if (existing_ancestors == nullptr) {
-        default_ancestors.trailer = find_component(schema, "Trailer");
+        default_ancestors.trailer = find_trailer_component(schema);
     }
     return find_level_field(schema, level, fields, tag, groups,
         existing_ancestors != nullptr ? *existing_ancestors : default_ancestors, header);
@@ -633,9 +685,10 @@ private:
     const SchemaDescriptor& schema, const MessageDescriptor& message,
     const FlatMessageView& flat, std::uint32_t tag, Status& status) noexcept {
     const auto fields = flat.fields();
-    const auto* header = find_component(schema, "Header");
+    const auto* header = find_header_component(schema);
     const auto result = find_level_field(schema, message.members, fields, tag,
-        message.members_by_tag, nullptr, header);
+        message.members_by_tag, nullptr, header,
+        message.group_count_tags, message.group_count_tag_bloom, message.has_group_index);
     status = result.status;
     return result.found ? &fields[result.index] : nullptr;
 }
@@ -989,7 +1042,10 @@ public:
         std::span<const MessageMemberDescriptor> parent_members,
         std::span<const FieldView> fields, std::uint32_t count_tag,
         std::span<const MemberTagEntry> parent_by_tag = {},
-        const detail::AncestorStack* existing_ancestors = nullptr) noexcept {
+        const detail::AncestorStack* existing_ancestors = nullptr,
+        std::span<const std::uint32_t> parent_group_tags = {},
+        std::uint64_t parent_group_bloom = 0,
+        bool has_parent_group_index = false) noexcept {
         const detail::MemberLevel parent_level{parent_members, parent_by_tag};
         const auto* descriptor = detail::find_group_descriptor(schema, parent_level, count_tag);
         if (descriptor == nullptr) return Status{ErrorCode::unsupported, static_cast<int>(count_tag)};
@@ -1000,7 +1056,8 @@ public:
             ancestors.trailer = detail::find_trailer_component(schema);
         }
         const auto lookup = detail::find_level_field(schema, parent_members, fields, count_tag,
-            parent_by_tag, &ancestors);
+            parent_by_tag, &ancestors, nullptr,
+            parent_group_tags, parent_group_bloom, has_parent_group_index);
         if (!lookup.status.ok()) return lookup.status;
         std::uint64_t count{};
         if (!detail::parse_unsigned(fields[lookup.index].value, count) || count > fields.size() - lookup.index - 1)
@@ -1040,7 +1097,8 @@ public:
     [[nodiscard]] Result<FieldValueType<Schema, Tag>> get() const noexcept {
         if (!status_.ok()) return status_;
         const auto lookup = detail::find_level_field(*schema_, descriptor_->members, fields_, Tag,
-            descriptor_->members_by_tag, &ancestors_);
+            descriptor_->members_by_tag, &ancestors_, nullptr,
+            descriptor_->group_count_tags, descriptor_->group_count_tag_bloom, descriptor_->has_group_index);
         if (!lookup.status.ok()) return lookup.status;
         using Value = FieldValueType<Schema, Tag>;
         return detail::parse_field_value<Value>(fields_[lookup.index].value, Tag);
@@ -1050,7 +1108,8 @@ public:
     [[nodiscard]] Result<GroupView<Schema>> group() const noexcept {
         if (!status_.ok()) return status_;
         return GroupView<Schema>::find(*schema_, descriptor_->members, fields_, CountTag,
-            descriptor_->members_by_tag, &ancestors_);
+            descriptor_->members_by_tag, &ancestors_,
+            descriptor_->group_count_tags, descriptor_->group_count_tag_bloom, descriptor_->has_group_index);
     }
 
 private:
@@ -1106,7 +1165,8 @@ public:
     template <std::uint32_t CountTag>
     [[nodiscard]] Result<GroupView<Schema>> group() const noexcept {
         return GroupView<Schema>::find(Schema::descriptor(), descriptor_->members, flat_.fields(), CountTag,
-            descriptor_->members_by_tag);
+            descriptor_->members_by_tag, nullptr,
+            descriptor_->group_count_tags, descriptor_->group_count_tag_bloom, descriptor_->has_group_index);
     }
 
     template <std::uint32_t Tag>
