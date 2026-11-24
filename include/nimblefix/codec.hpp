@@ -69,7 +69,8 @@ public:
         return msg_type() == Message::msg_type;
     }
     template <class Message>
-        requires requires(const FlatMessageView& v) { typename Message::view_type(v); }
+        requires requires { typename Message::view_type; } &&
+            std::constructible_from<typename Message::view_type, const FlatMessageView&>
     [[nodiscard]] typename Message::view_type as() const noexcept {
         return typename Message::view_type{*this};
     }
