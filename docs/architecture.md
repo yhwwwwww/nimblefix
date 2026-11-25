@@ -17,7 +17,7 @@ NimbleFIX 0.3 is structured as a **3-layer, pay-only-for-what-you-need** C++20 F
 | Layer 0 + TLS: DirectTlsTransport (OpenSSL 3, TLS 1.2/1.3, SAN, mTLS)       |
 |                (NimbleFIX::nimblefix_core_tls)                              |
 +-----------------------------------------------------------------------------+
-| Layer 0 Core: Codec (SSO make() / Draft / Fixed), Generated Schemas,        |
+| Layer 0 Core: Codec (Streaming StreamWriter / Fixed), Generated Schemas,      |
 |               Segmented mmap Journal (SSE4.2 CRC32C), SessionCore,          |
 |               TcpTransport (write_batch/sendmsg), DirectInitiator,          |
 |               DirectSendQueue (lock-free SPSC)                              |
@@ -33,21 +33,17 @@ NimbleFIX 0.3 is structured as a **3-layer, pay-only-for-what-you-need** C++20 F
 
 ## 2. Codec & Message Construction
 
-### Unified Single-Pass Backpatch Encoder
-All message builders (`make()`, `Draft`, `Fixed`, `DynamicMessage`) feed the same single-pass encoder:
-1. Reserves fixed-width placeholders for `8=FIX...`, `9=000000`, and session header fields (`35`, `49`, `56`, `34`, `52`).
-2. Writes body fields directly into the output span (in `DirectInitiator` and `Engine`, directly into the **zero-copy mmap Journal `reserve()` slot**).
-3. Backpatches exact `BodyLength` (tag 9) and computes `CheckSum` (tag 10) in a single pass with zero intermediate string copies.
+### Zero-Intermediate-Copy Streaming Encoder (`StreamWriter`)
+The primary generated outbound API streams typed FIX fields directly into the destination wire buffer (in `DirectInitiator`, directly into the **zero-copy mmap Journal `reserve()` slot**) with zero intermediate `SlotValue`/`PlanField` structures and zero heap allocations:
+1. **Static Session Identity vs Dynamic Standard Header**: Only session-immutable fields (`8=<BeginString>\x019=` and `49=<SenderCompID>\x0156=<TargetCompID>\x01`) are cached in `StaticSessionPrefix`. Per-message dynamic standard header fields (`50=SenderSubID`, `57=TargetSubID`, `142=SenderLocationID`, `115/116=OnBehalfOf*`, `128/129=DeliverTo*`, etc.) remain dynamically writable per message via `w.header()` before body fields.
+2. **Inline Validation & Formatting**: Every setter writes its compile-time tag prefix (`"11="`, `"44="`, ...) and formatted value (`write_u64_fast`, single-pass `write_decimal_fast`), validates enums/timestamps/text inline, tracks required fields via a compact bitmask, and supports native `if`/`for`, `std::optional<T>`, auto-length `DATA`/`LENGTH` pairs, and nested repeating groups (`w.no_party_i_ds(n, [&](auto& g) { g.entry()...; })`).
+3. **Single-Pass `BodyLength` & Auto-Vectorizable `CheckSum`**: Backpatches exact `BodyLength` (tag 9, zero `memmove` for 100–999 B frames) and computes `CheckSum` (tag 10) in one contiguous SIMD-friendly loop.
 
-### Small-Buffer-Optimized (SSO) Message APIs
-Both primary message APIs embed **16 field slots + 256 bytes of inline string storage** on the stack by default (customizable via `<Slots, Bytes>`), giving **0 `malloc`** for typical orders while automatically spilling to heap if an outlier order carries extra fields or long strings (never rejecting valid orders):
-
-| API | Mutability | Conditional Fields | Reuse | Wire Order |
+| API | Mutability / Control Flow | Allocation | Reuse | Primary Use |
 | :--- | :--- | :--- | :--- | :--- |
-| **Scheme A**: `NewOrderSingle::make()` / `make<S, B>()` | Immutable fluent chain (rvalue-consumed) | `std::optional<T>` (`nullopt` skipped) | One-shot | Compile-time canonical order (no runtime sort) |
-| **Scheme B**: `NewOrderSingle::Draft` / `DraftWith<S, B>` | Mutable object (statement-by-statement, overwrite) | Native `if (...)` or `std::optional<T>` | `reset()` in-place reuse | Canonical `WireRank` order |
-| **Strict**: `NewOrderSingle::Fixed<ByteCap, fix::field::...>` | Fixed declared field set, no heap fallback | Presence bitmap (`if (...)`) | `reset()` in-place reuse | Compile-time canonical order |
-| **Runtime**: `DynamicMessage` | Arbitrary runtime `(tag, value)` pairs | Native `if (...)` | Mutable | Insertion order |
+| **Streaming (Default)**: `send_stream<Msg>(fn)` / `encode_fix44_stream<Msg>` | Native `if`/`for`, `std::optional<T>`, nested groups, `w.header()` | **0 heap alloc** (streams straight to wire/Journal) | Stateless lambda | Fastest & most flexible production API (**130–140 ns**, **6.9M msgs/s**) |
+| **Strict Fixed**: `NewOrderSingle::Fixed<ByteCap, fix::field::...>` | Fixed declared field set, presence bitmap (`if (...)`) | **0 heap alloc** (bounded stack buffer) | `reset()` in-place reuse | Reusable pre-populated message templates |
+| **Untyped / Runtime**: `nf::message<"D">()` / `DynamicMessage` | Arbitrary runtime `(tag, value)` pairs | SSO / heap | Mutable | Low-level admin frames & dynamic venue tags |
 
 ### Compact Member Indexing & Subset Codegen
 - `tools/schema/generate.py` compiles standard or custom FIX XML dictionaries into compact constexpr tables.

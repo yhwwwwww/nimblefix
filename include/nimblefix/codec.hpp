@@ -173,3 +173,5 @@ template <class Message>
 }
 
 } // namespace nimblefix
+
+#include <nimblefix/stream_encoder.hpp>

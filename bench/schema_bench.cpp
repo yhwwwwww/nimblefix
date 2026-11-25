@@ -104,22 +104,22 @@ void measure(std::string_view name, std::size_t iterations, CaseMeta meta, Funct
               << ",\"major_faults\":" << after.ru_majflt - before.ru_majflt << "}\n";
 }
 
-[[nodiscard]] auto make_order(std::string_view cl_ord_id, std::int64_t quantity = 100,
-    char side_value = '1') {
-    return nf::fix44::NewOrderSingle::make()
-        .cl_ord_id(cl_ord_id)
-        .handl_inst('1')
-        .symbol(symbol)
-        .side(side_value)
-        .transact_time(sending_time)
-        .order_qty(quantity)
-        .ord_type('1');
+[[nodiscard]] nf::Result<std::size_t> encode_order_result(std::string_view cl_ord_id,
+    std::int64_t quantity, char side_value, std::span<char> output) noexcept {
+    return nf::encode_fix44_stream<nf::fix44::NewOrderSingle>(header, output, [&](auto& w) {
+        w.cl_ord_id(cl_ord_id)
+         .handl_inst('1')
+         .symbol(symbol)
+         .side(side_value)
+         .transact_time(sending_time)
+         .order_qty(quantity)
+         .ord_type('1');
+    });
 }
 
 [[nodiscard]] std::size_t encode_order(std::string_view cl_ord_id, std::int64_t quantity,
     std::span<char> output) {
-    auto message = make_order(cl_ord_id, quantity);
-    const auto encoded = nf::encode_fix44(message, header, output);
+    const auto encoded = encode_order_result(cl_ord_id, quantity, '1', output);
     require(encoded.ok(), "generated FIX44 NewOrderSingle failed to encode");
     return encoded.value();
 }
@@ -145,19 +145,18 @@ void measure(std::string_view name, std::size_t iterations, CaseMeta meta, Funct
 
 void verify_error_boundaries(std::string_view valid_wire) {
     std::array<char, 8> short_output{};
-    auto valid = make_order(hot_cl_ord_id);
-    const auto too_small = nf::encode_fix44(valid, header, short_output);
+    const auto too_small = encode_order_result(hot_cl_ord_id, 100, '1', short_output);
     require(!too_small.ok() && too_small.status().code == nf::ErrorCode::capacity_exceeded,
         "real encoder did not reject a short output span");
 
-    auto missing = nf::fix44::NewOrderSingle::make().cl_ord_id("MISSING");
     std::array<char, 1024> output{};
-    const auto missing_result = nf::encode_fix44(missing, header, output);
+    const auto missing_result = nf::encode_fix44_stream<nf::fix44::NewOrderSingle>(header, output, [](auto& w) {
+        w.cl_ord_id("MISSING");
+    });
     require(!missing_result.ok() && missing_result.status().code == nf::ErrorCode::required_field_missing,
         "real encoder did not enforce required FIX44 fields");
 
-    auto bad_enum = make_order(hot_cl_ord_id, 100, 'X');
-    const auto enum_result = nf::encode_fix44(bad_enum, header, output);
+    const auto enum_result = encode_order_result(hot_cl_ord_id, 100, 'X', output);
     require(!enum_result.ok(), "real encoder accepted an invalid FIX44 enum value");
 
     std::array<char, max_frame_bytes> corrupted{};
@@ -598,26 +597,25 @@ void verify_order(std::string_view wire, std::string_view expected_id) {
 }
 
 void verify_group_roundtrip(std::span<char> output, std::size_t& wire_size) {
-    nf::fix44::NoPartyIDsGroup<4> parties;
-    for (std::size_t index = 0; index < 3; ++index) {
-        char id[7] = {'P', 'A', 'R', 'T', 'Y', static_cast<char>('0' + index), '\0'};
-        auto entry = nf::fix44::NoPartyIDsGroupEntry::make()
-            .party_id(std::string_view{id, 6})
-            .party_id_source('D')
-            .party_role(static_cast<std::int64_t>(index + 1));
-        require(parties.add(std::move(entry)).ok(), "cannot add FIX44 PartyIDs group entry");
-    }
-    auto report = nf::fix44::ExecutionReport::make()
-        .order_id("ORDER-1")
-        .exec_id("EXEC-1")
-        .exec_type('0')
-        .ord_status('0')
-        .side('1')
-        .leaves_qty(100)
-        .cum_qty(0)
-        .avg_px(0)
-        .no_party_i_ds(std::move(parties));
-    const auto encoded = nf::encode_fix44(report, header, output);
+    const auto encoded = nf::encode_fix44_stream<nf::fix44::ExecutionReport>(header, output, [](auto& w) {
+        w.order_id("ORDER-1")
+         .exec_id("EXEC-1")
+         .exec_type('0')
+         .ord_status('0')
+         .side('1')
+         .leaves_qty(100)
+         .cum_qty(0)
+         .avg_px(0)
+         .no_party_i_ds(3, [](auto& g) {
+             for (std::size_t index = 0; index < 3; ++index) {
+                 char id[7] = {'P', 'A', 'R', 'T', 'Y', static_cast<char>('0' + index), '\0'};
+                 g.entry()
+                     .party_id(std::string_view{id, 6})
+                     .party_id_source('D')
+                     .party_role(static_cast<std::int64_t>(index + 1));
+             }
+         });
+    });
     require(encoded.ok(), "FIX44 ExecutionReport with PartyIDs failed to encode");
     wire_size = encoded.value();
 
@@ -711,7 +709,7 @@ int main(int argc, char** argv) {
     std::cout << "case,iteration,elapsed_ns,allocation_calls,allocation_bytes,wire_bytes,instance_bytes,"
                  "initialization_bytes,visited_slots,active_indices,sort_comparisons\n";
     const auto workset = make_workset(workset_size);
-    const CaseMeta generated_meta{encoded_size, sizeof(nf::fix44::NewOrderSingle::make()), 0, 7, 0, 0};
+    const CaseMeta generated_meta{encoded_size, sizeof(nf::fix44::NewOrderSingle::Writer), 0, 7, 0, 0};
     measure("fix44_generated_build_encode_hot", iterations, generated_meta, [&](std::size_t) {
         const auto size = encode_order(hot_cl_ord_id, 100, buffer);
         consume(size + static_cast<unsigned char>(buffer[size - 1]));
@@ -788,8 +786,7 @@ int main(int argc, char** argv) {
     std::size_t group_wire_size = 0;
     verify_group_roundtrip(buffer, group_wire_size);
     measure("fix44_group_build_encode_parse_validate_project", iterations,
-        {group_wire_size, sizeof(decltype(nf::fix44::ExecutionReport::make())) +
-            sizeof(nf::fix44::NoPartyIDsGroup<4>), 0, 17, 3, 0}, [&](std::size_t) {
+        {group_wire_size, sizeof(nf::fix44::ExecutionReport::Writer), 0, 17, 3, 0}, [&](std::size_t) {
         std::size_t size = 0;
         verify_group_roundtrip(buffer, size);
         consume(size + 3);

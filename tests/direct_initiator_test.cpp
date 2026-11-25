@@ -160,6 +160,17 @@ std::string make_frame(const Message& msg, std::string_view sender, std::string_
     return n.ok() ? std::string{buf.data(), n.value()} : std::string{};
 }
 
+template <class Message, class Fn>
+std::string make_stream_frame(Fn&& fn, std::string_view sender, std::string_view target,
+                              std::uint64_t seq, std::string_view wt, bool poss_dup = false,
+                              std::string_view orig_time = {}) {
+    std::array<char, 4096> buf{};
+    nf::SessionHeader h{sender, target, seq, wt, poss_dup, orig_time};
+    const auto n = nf::encode_stream<Message>(h, buf, std::forward<Fn>(fn));
+    CHECK(n.ok());
+    return n.ok() ? std::string{buf.data(), n.value()} : std::string{};
+}
+
 std::string field(std::string_view frame, std::uint32_t tag) {
     std::array<nf::FieldView, 256> scratch{};
     nf::FrameView fv{};
@@ -236,13 +247,13 @@ void test_zero_alloc_zero_lock_zero_fsync_steady_state() {
     std::vector<std::string> peer_reports;
     peer_reports.reserve(200);
     for (std::uint64_t i = 0; i < 200; ++i) {
-        auto er = fix::ExecutionReport::make()
-            .order_id("O1").exec_id("E1").cl_ord_id("ORD-HOT").exec_type('0')
-            .ord_status('0').symbol("AAPL").side('1')
-            .leaves_qty(nf::Decimal{100, 0})
-            .cum_qty(nf::Decimal{0, 0})
-            .avg_px(nf::Decimal{0, 0});
-        peer_reports.push_back(make_frame(er, "SELL", "BUY", 2 + i, t1));
+        peer_reports.push_back(make_stream_frame<fix::ExecutionReport>([](auto& w) {
+            w.order_id("O1").exec_id("E1").cl_ord_id("ORD-HOT").exec_type('0')
+             .ord_status('0').symbol("AAPL").side('1')
+             .leaves_qty(nf::Decimal{100, 0})
+             .cum_qty(nf::Decimal{0, 0})
+             .avg_px(nf::Decimal{0, 0});
+        }, "SELL", "BUY", 2 + i, t1));
     }
 
     using OrderShape = nf::Fields<
@@ -318,12 +329,12 @@ void test_restart_recovery_resend_replay_and_gapfill() {
         CHECK(o1.ord_type('1').ok());
         CHECK(init.send(o1, 3, t1).value() == 3);
 
-        auto er = fix::ExecutionReport::make()
-            .order_id("O1").exec_id("E1").cl_ord_id("ORD-1").exec_type('0')
-            .ord_status('0').symbol("AAPL").side('1')
-            .leaves_qty(nf::Decimal{10, 0}).cum_qty(nf::Decimal{0, 0})
-            .avg_px(nf::Decimal{0, 0});
-        init.transport().push_from_peer(make_frame(er, "SELL", "BUY", 2, t1));
+        init.transport().push_from_peer(make_stream_frame<fix::ExecutionReport>([](auto& w) {
+            w.order_id("O1").exec_id("E1").cl_ord_id("ORD-1").exec_type('0')
+             .ord_status('0').symbol("AAPL").side('1')
+             .leaves_qty(nf::Decimal{10, 0}).cum_qty(nf::Decimal{0, 0})
+             .avg_px(nf::Decimal{0, 0});
+        }, "SELL", "BUY", 2, t1));
         CHECK(init.poll_once(4, t1).ok());
         CHECK(init.handler().msg_count == 1);
         CHECK(init.next_outbound_seq() == 4);
@@ -358,12 +369,12 @@ void test_restart_recovery_resend_replay_and_gapfill() {
         CHECK(field(rr_out, 35) == "2" && field(rr_out, 7) == "3" && field(rr_out, 16) == "4");
 
         // Peer replays seq 3 (business ExecReport with PossDup=Y) and seq 4 (GapFill 123=Y, 36=5).
-        auto er3 = fix::ExecutionReport::make()
-            .order_id("O2").exec_id("E-GAP").cl_ord_id("ORD-2").exec_type('0')
-            .ord_status('0').symbol("MSFT").side('2')
-            .leaves_qty(nf::Decimal{20, 0}).cum_qty(nf::Decimal{0, 0})
-            .avg_px(nf::Decimal{0, 0});
-        init.transport().push_from_peer(make_frame(er3, "SELL", "BUY", 3, t2, true, t1));
+        init.transport().push_from_peer(make_stream_frame<fix::ExecutionReport>([](auto& w) {
+            w.order_id("O2").exec_id("E-GAP").cl_ord_id("ORD-2").exec_type('0')
+             .ord_status('0').symbol("MSFT").side('2')
+             .leaves_qty(nf::Decimal{20, 0}).cum_qty(nf::Decimal{0, 0})
+             .avg_px(nf::Decimal{0, 0});
+        }, "SELL", "BUY", 3, t2, true, t1));
         init.transport().push_from_peer(make_frame(nf::message<"4">().set<123>('Y').set<36>(5), "SELL", "BUY", 4, t2, true, t1));
         CHECK(init.poll_once(12, t2).ok());
         CHECK(init.is_active());
@@ -410,12 +421,12 @@ void test_sigkill_crash_recovery_redelivers_uncommitted_delivery() {
         if (!init.poll_once(1, t0).ok()) ::_exit(12);
         // Arm SIGKILL right after inbound seq 2 is committed (before delivery record!).
         kctx.armed = true;
-        auto er = fix::ExecutionReport::make()
-            .order_id("O-CRASH").exec_id("E-CRASH").cl_ord_id("ORD-C").exec_type('0')
-            .ord_status('0').symbol("NVDA").side('1')
-            .leaves_qty(nf::Decimal{50, 0}).cum_qty(nf::Decimal{0, 0})
-            .avg_px(nf::Decimal{0, 0});
-        init.transport().push_from_peer(make_frame(er, "SELL", "BUY", 2, t1));
+        init.transport().push_from_peer(make_stream_frame<fix::ExecutionReport>([](auto& w) {
+            w.order_id("O-CRASH").exec_id("E-CRASH").cl_ord_id("ORD-C").exec_type('0')
+             .ord_status('0').symbol("NVDA").side('1')
+             .leaves_qty(nf::Decimal{50, 0}).cum_qty(nf::Decimal{0, 0})
+             .avg_px(nf::Decimal{0, 0});
+        }, "SELL", "BUY", 2, t1));
         (void)init.poll_once(2, t1);
         ::_exit(13);
     }
@@ -533,11 +544,11 @@ void test_named_fixed_enqueue_batch_and_spsc_queue() {
     }
 
     // 2. Verify msg.is<ExecutionReport>() / msg.as<ExecutionReport>() typed handler dispatch.
-    auto er = fix::ExecutionReport::make()
-        .order_id("O1").exec_id("EX-TYPED-1").cl_ord_id("BATCH-00")
-        .exec_type('0').ord_status('0').symbol("AAPL").side('1')
-        .leaves_qty(nf::Decimal{100, 0}).cum_qty(nf::Decimal{0, 0}).avg_px(nf::Decimal{0, 0});
-    init.transport().push_from_peer(make_frame(er, "SELL", "BUY", 2, t1));
+    init.transport().push_from_peer(make_stream_frame<fix::ExecutionReport>([](auto& w) {
+        w.order_id("O1").exec_id("EX-TYPED-1").cl_ord_id("BATCH-00")
+         .exec_type('0').ord_status('0').symbol("AAPL").side('1')
+         .leaves_qty(nf::Decimal{100, 0}).cum_qty(nf::Decimal{0, 0}).avg_px(nf::Decimal{0, 0});
+    }, "SELL", "BUY", 2, t1));
     CHECK(init.poll_once(11, t1).ok());
     CHECK(init.handler().er_count == 1);
     CHECK(init.handler().last_exec_id == "EX-TYPED-1");
@@ -592,8 +603,9 @@ void test_named_fixed_enqueue_batch_and_spsc_queue() {
         CHECK(field(wire, 55) == "MSFT");
     }
 
-    // 4. Scheme A (SSO make() + std::optional) & Scheme B (SSO Draft + native if + reset)
-    //    with hard 0-malloc / 0-mutex / 0-fsync audit AND SSO spill (>256B) verification!
+    // 4. Zero-intermediate-copy StreamWriter (send_stream / enqueue_stream / try_push_stream)
+    //    with hard 0-malloc / 0-mutex / 0-fsync audit, std::optional, dynamic w.header(), and >320B fields!
+    const std::string long_id(320, 'X');
     g_malloc_calls.store(0);
     g_mutex_calls.store(0);
     g_fsync_calls.store(0);
@@ -601,86 +613,64 @@ void test_named_fixed_enqueue_batch_and_spsc_queue() {
     {
         const std::optional<nf::Decimal> no_price = std::nullopt;
         const std::optional<nf::Decimal> limit_price = nf::Decimal{15025, 2};
-        auto mkt = fix::NewOrderSingle::make()
-            .cl_ord_id("OPT-MKT").symbol("AAPL").side('1')
-            .transact_time(t2).order_qty(nf::Decimal{10, 0}).ord_type('1')
-            .price(no_price);
-        auto lmt = fix::NewOrderSingle::make()
-            .cl_ord_id("OPT-LMT").symbol("AAPL").side('2')
-            .transact_time(t2).order_qty(nf::Decimal{20, 0}).ord_type('2')
-            .price(limit_price);
-        CHECK(init.send(mkt, 30, t2).ok());
-        CHECK(init.send(lmt, 30, t2).ok());
+        CHECK(init.send_stream<fix::NewOrderSingle>([&](auto& w) {
+            w.cl_ord_id("OPT-MKT").symbol("AAPL").side('1')
+             .transact_time(t2).order_qty(nf::Decimal{10, 0}).ord_type('1')
+             .price(no_price);
+        }, 30, t2).ok());
+        CHECK(init.send_stream<fix::NewOrderSingle>([&](auto& w) {
+            w.header().sender_sub_id("DESK-A").target_sub_id("EXCH-1");
+            w.cl_ord_id("OPT-LMT").symbol("AAPL").side('2')
+             .transact_time(t2).order_qty(nf::Decimal{20, 0}).ord_type('2')
+             .price(limit_price);
+        }, 30, t2).ok());
 
-        fix::NewOrderSingle::Draft draft;
         for (int k = 0; k < 2; ++k) {
-            draft.reset();
-            // Intentionally set fields out of schema order to verify canonical WireRank sorting!
-            if (k == 1) draft.price(nf::Decimal{9950, 2});
-            draft.ord_type(k == 1 ? '2' : '1')
-                 .order_qty(nf::Decimal{30, 0})
-                 .transact_time(t2)
-                 .side('1')
+            CHECK(init.enqueue_stream<fix::NewOrderSingle>([&](auto& w) {
+                w.cl_ord_id(k == 0 ? "STR-MKT" : "STR-LMT")
                  .symbol("NVDA")
-                 .cl_ord_id(k == 0 ? "DRF-MKT" : "DRF-LMT");
-            CHECK(init.send(draft, 31, t2).ok());
+                 .side('1')
+                 .transact_time(t2)
+                 .order_qty(nf::Decimal{30, 0})
+                 .ord_type(k == 1 ? '2' : '1');
+                if (k == 1) w.price(nf::Decimal{9950, 2});
+            }, 31, t2).ok());
         }
+        CHECK(init.flush(31).ok());
+
+        // Large >320B string streams straight into mmap Journal with 0 mallocs!
+        CHECK(init.send_stream<fix::NewOrderSingle>([&](auto& w) {
+            w.cl_ord_id(long_id).symbol("AAPL").side('1')
+             .transact_time(t2).order_qty(nf::Decimal{1, 0}).ord_type('1');
+        }, 32, t2).ok());
+
+        // DirectSendQueue::try_push_stream + drain: 0 mallocs!
+        CHECK(queue.try_push_stream<fix::NewOrderSingle>([&](auto& w) {
+            w.cl_ord_id("Q-STREAM").symbol("MSFT").side('1')
+             .transact_time(t2).order_qty(nf::Decimal{5, 0}).ord_type('1');
+        }).ok());
+        const auto drained_one = init.drain(queue, 8, 33, t2);
+        CHECK(drained_one.ok() && drained_one.value() == 1);
     }
     g_audit_hot_path.store(false);
     CHECK(g_malloc_calls.load() == 0);
     CHECK(g_mutex_calls.load() == 0);
     CHECK(g_fsync_calls.load() == 0);
 
-    // Verify optional absent/present & canonical ordering on the wire.
+    // Verify optional absent/present, dynamic header (50/57), and large field on the wire.
     CHECK(init.transport().pop_sent_frame(wire));
     CHECK(field(wire, 11) == "OPT-MKT" && field(wire, 44).empty());
     CHECK(init.transport().pop_sent_frame(wire));
-    CHECK(field(wire, 11) == "OPT-LMT" && field(wire, 44) == "150.25");
+    CHECK(field(wire, 11) == "OPT-LMT" && field(wire, 44) == "150.25" &&
+          field(wire, 50) == "DESK-A" && field(wire, 57) == "EXCH-1");
     CHECK(init.transport().pop_sent_frame(wire));
-    CHECK(field(wire, 11) == "DRF-MKT" && field(wire, 44).empty());
+    CHECK(field(wire, 11) == "STR-MKT" && field(wire, 44).empty());
     CHECK(init.transport().pop_sent_frame(wire));
-    CHECK(field(wire, 11) == "DRF-LMT" && field(wire, 44) == "99.50");
-    // Verify canonical schema order (11 before 55 before 54 before 44).
-    CHECK(wire.find("11=DRF-LMT") < wire.find("55=NVDA") &&
-          wire.find("55=NVDA") < wire.find("44=99.50"));
-
-    // Verify SSO spill (>256B string) does NOT reject orders in either make() or Draft!
-    const std::string long_id(320, 'X');
-    auto spilled_make = fix::NewOrderSingle::make()
-        .cl_ord_id(long_id).symbol("AAPL").side('1')
-        .transact_time(t2).order_qty(nf::Decimal{1, 0}).ord_type('1');
-    CHECK(spilled_make.status().ok());
-    CHECK(init.send(spilled_make, 32, t2).ok());
-    CHECK(init.transport().pop_sent_frame(wire));
-    CHECK(field(wire, 11) == long_id);
-
-    fix::NewOrderSingle::Draft spilled_draft;
-    spilled_draft.cl_ord_id(long_id).symbol("AAPL").side('1')
-        .transact_time(t2).order_qty(nf::Decimal{1, 0}).ord_type('1');
-    CHECK(spilled_draft.spilled());
-    CHECK(spilled_draft.status().ok());
-    CHECK(init.send(spilled_draft, 33, t2).ok());
-    // Verify custom SSO capacities: make<24, 512>() and DraftWith<24, 512> stay 0-malloc even for 320B string!
-    g_malloc_calls.store(0);
-    g_audit_hot_path.store(true);
-    {
-        auto big_make = fix::NewOrderSingle::make<24, 512>()
-            .cl_ord_id(long_id).symbol("AAPL").side('1')
-            .transact_time(t2).order_qty(nf::Decimal{1, 0}).ord_type('1');
-        CHECK(init.send(big_make, 34, t2).ok());
-
-        fix::NewOrderSingle::DraftWith<24, 512> big_draft;
-        big_draft.cl_ord_id(long_id).symbol("AAPL").side('1')
-            .transact_time(t2).order_qty(nf::Decimal{1, 0}).ord_type('1');
-        CHECK(!big_draft.spilled());
-        CHECK(init.send(big_draft, 35, t2).ok());
-    }
-    g_audit_hot_path.store(false);
-    CHECK(g_malloc_calls.load() == 0);
+    CHECK(field(wire, 11) == "STR-LMT" && field(wire, 44) == "99.50");
     CHECK(init.transport().pop_sent_frame(wire));
     CHECK(field(wire, 11) == long_id);
     CHECK(init.transport().pop_sent_frame(wire));
-    CHECK(field(wire, 11) == long_id);
+    CHECK(field(wire, 11) == "Q-STREAM" && field(wire, 55) == "MSFT");
 }
 
 } // namespace

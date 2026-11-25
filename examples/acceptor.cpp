@@ -18,13 +18,13 @@ int main(int argc, char** argv) try {
             // A simulated broker acknowledges the request. IDs and payload are
             // deterministic so interrupted callback delivery can recover.
             const auto record = std::to_string(context.inbound_record_id());
-            auto report = nf::fix44::ExecutionReport::make()
-                .order_id("ORD-" + record).exec_id("EXEC-" + record).cl_ord_id(id)
-                .exec_type(accepted ? '0' : '8').ord_status(accepted ? '0' : '8')
-                .symbol(example::take(order.symbol())).side(example::take(order.side()))
-                .leaves_qty(accepted ? quantity : "0"_dec).cum_qty("0"_dec).avg_px("0"_dec)
-                .transact_time(example::take(order.transact_time()));
-            return context.send(report).status();
+            return context.send_stream<nf::fix44::ExecutionReport>([&](auto& w) {
+                w.order_id("ORD-" + record).exec_id("EXEC-" + record).cl_ord_id(id)
+                 .exec_type(accepted ? '0' : '8').ord_status(accepted ? '0' : '8')
+                 .symbol(example::take(order.symbol())).side(example::take(order.side()))
+                 .leaves_qty(accepted ? quantity : "0"_dec).cum_qty("0"_dec).avg_px("0"_dec)
+                 .transact_time(example::take(order.transact_time()));
+            }).status();
         }));
     example::check(engine.on_error([](const nf::ErrorEvent& event) {
         example::error("ERROR ", event.format());

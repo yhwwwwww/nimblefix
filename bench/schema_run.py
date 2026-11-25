@@ -169,16 +169,20 @@ def run_standard_matrix(compiler, timeout_seconds):
 
             source = base / f"{short_name}.cpp"
             if xml.stem == "FIXT11":
-                usage = f'auto message={namespace}::Logon::make().encrypt_method(0).heart_bt_int(30).default_appl_ver_id("9");'
+                usage = (f'std::array<char, 256> buf{{}}; '
+                         f'auto r = nimblefix::encode_body_stream<{namespace}::Logon>(buf, [](auto& w) {{ '
+                         f'w.encrypt_method(0).heart_bt_int(30).default_appl_ver_id("9"); }}); (void)r;')
             else:
-                usage = f"""auto message={namespace}::NewOrderSingle::make().cl_ord_id("STANDARD")
-                    .handl_inst('1').symbol("AAPL").side('1').transact_time("20261031-12:00:00")
-                    .order_qty(100).ord_type('1');
+                usage = f"""std::array<char, 256> buf{{}};
+                    auto r = nimblefix::encode_body_stream<{namespace}::NewOrderSingle>(buf, [](auto& w) {{
+                        w.cl_ord_id("STANDARD").handl_inst('1').symbol("AAPL").side('1')
+                         .transact_time("20261031-12:00:00").order_qty(100).ord_type('1');
+                    }}); (void)r;
                     {namespace}::NewOrderSingleView view{{nimblefix::FlatMessageView{{}}}};
                     (void)view.get<11>(); (void)view.get<38>();"""
             source.write_text(
-                f'#include "{header}"\n'
-                f'int main() {{ {usage} (void)message.view(); return {namespace}::Schema::field_count == 0 ? 1 : 0; }}\n',
+                f'#include <array>\n#include "{header}"\n'
+                f'int main() {{ {usage} return {namespace}::Schema::field_count == 0 ? 1 : 0; }}\n',
                 encoding="utf-8")
             start = time.perf_counter()
             subprocess.run([compiler, "-std=c++20", "-I", str(ROOT / "include"),
@@ -275,12 +279,12 @@ def run_clang_template_proxy(clang, generated_header):
             "#include <nimblefix/codec.hpp>\n"
             f'#include "{generated_header}"\n'
             "int consume_generated_fix44() {\n"
-            "  auto order = nimblefix::fix44::NewOrderSingle::make()\n"
-            "      .cl_ord_id(\"TRACE-1\").handl_inst('1').symbol(\"AAPL\").side('1')\n"
-            "      .transact_time(\"20261031-12:00:00.000\").order_qty(10).ord_type('1');\n"
             "  constexpr nimblefix::SessionHeader header{\"BUY\", \"SELL\", 1, \"20261031-12:00:00.000\"};\n"
             "  std::array<char, 512> bytes{};\n"
-            "  return nimblefix::encode_fix44(order, header, bytes).ok() ? 0 : 1;\n"
+            "  return nimblefix::encode_fix44_stream<nimblefix::fix44::NewOrderSingle>(header, bytes, [](auto& w) {\n"
+            "      w.cl_ord_id(\"TRACE-1\").handl_inst('1').symbol(\"AAPL\").side('1')\n"
+            "       .transact_time(\"20261031-12:00:00.000\").order_qty(10).ord_type('1');\n"
+            "  }).ok() ? 0 : 1;\n"
             "}\n", encoding="utf-8")
         command = [compiler, "-std=c++20", "-O2", "-ftime-trace",
             "-ftime-trace-granularity=0", "-I", str(ROOT / "include"),

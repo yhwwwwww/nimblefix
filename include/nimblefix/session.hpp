@@ -136,6 +136,13 @@ public:
         return send(message.view());
     }
 
+    template <class Message, class Fn>
+        requires detail::streamable_message<Message>
+    [[nodiscard]] Result<SendReceipt> send_stream(Fn&& fn) noexcept {
+        return detail::stream_body_and_invoke<Message>(std::forward<Fn>(fn),
+            [this](detail::MessageView view) noexcept { return send(view); });
+    }
+
     // Session logout may be requested from the active callback. Message
     // delivery callbacks use send() for durable replies; logout there would
     // be replayed as a new session action after an interrupted callback.
@@ -258,6 +265,16 @@ public:
         static_assert(!requires { requires std::remove_cvref_t<Message>::is_group_entry; },
             "repeating group entries cannot be sent as standalone FIX messages");
         return send(message.view(), now_ms, wall_time);
+    }
+
+    template <class Message, class Fn>
+        requires detail::streamable_message<Message>
+    [[nodiscard]] Result<SendReceipt> send_stream(Fn&& fn,
+        std::uint64_t now_ms, std::string_view wall_time) noexcept {
+        return detail::stream_body_and_invoke<Message>(std::forward<Fn>(fn),
+            [this, now_ms, wall_time](detail::MessageView view) noexcept {
+                return send(view, now_ms, wall_time);
+            });
     }
 
     // Performs at most byte_budget bytes of transport work. Short writes retain

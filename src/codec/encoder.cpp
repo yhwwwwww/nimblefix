@@ -468,7 +468,11 @@ void append_body_fields(const detail::MessageView& message, Writer& writer) noex
         (header.poss_dup && !add_header_field(header.orig_sending_time.size(), 5))) {
         return Status{ErrorCode::too_large};
     }
-    if (const auto status = measure_body_fields(message, body_length, 0); !status.ok()) return status;
+    if (message.prebuilt_body) {
+        if (!add_size(message.value_byte_count)) return Status{ErrorCode::too_large};
+    } else {
+        if (const auto status = measure_body_fields(message, body_length, 0); !status.ok()) return status;
+    }
 
     const auto body_length_digits = decimal_digits(body_length);
     constexpr std::size_t body_length_prefix_size = 2;
@@ -743,6 +747,12 @@ Result<std::size_t> measure_fix(detail::MessageView message, SessionHeader heade
 
 Result<std::size_t> encode_fix(detail::MessageView message, SessionHeader header,
     std::span<char> output) noexcept {
+    if (message.prebuilt_body) {
+        if (!message.status.ok()) return message.status;
+        return encode_fix_from_body(message.msg_type,
+            std::string_view{message.value_bytes == nullptr ? "" : message.value_bytes, message.value_byte_count},
+            header, output);
+    }
     const auto begin = begin_string(header.version);
     if (begin.empty()) return Status{ErrorCode::invalid_header, 8};
 
@@ -904,6 +914,13 @@ Result<std::size_t> encode_fix44(detail::MessageView message, SessionHeader head
 Result<std::size_t> encode_fix_body(detail::MessageView message,
     std::span<char> output) noexcept {
     if (!message.status.ok()) return message.status;
+    if (message.prebuilt_body) {
+        if (output.size() < message.value_byte_count) return Status{ErrorCode::capacity_exceeded};
+        if (message.value_byte_count != 0) {
+            std::memcpy(output.data(), message.value_bytes, message.value_byte_count);
+        }
+        return message.value_byte_count;
+    }
     if (!message.presence_validated) {
         if (const auto schema_status = detail::validate_schema_presence(message); !schema_status.ok())
             return schema_status;

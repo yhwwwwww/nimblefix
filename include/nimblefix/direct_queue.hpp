@@ -47,6 +47,39 @@ public:
         return try_push_view(message.view());
     }
 
+    // Zero-intermediate-copy streaming producer: writes typed body fields directly into the
+    // SPSC ring slot without constructing an intermediate message object.
+    template <class Message, class Fn>
+        requires detail::streamable_message<Message>
+    [[nodiscard]] Status try_push_stream(Fn&& fn) noexcept {
+        static_assert(!requires { requires Message::is_group_entry; },
+            "repeating group entries cannot be pushed as standalone FIX messages");
+        constexpr std::string_view msg_type = Message::msg_type;
+        if (msg_type.empty() || msg_type.size() > max_msg_type_bytes)
+            return Status{ErrorCode::invalid_value, 35};
+
+        const std::size_t tail = tail_.load(std::memory_order_relaxed);
+        if (tail - cached_head_ >= capacity_) {
+            cached_head_ = head_.load(std::memory_order_acquire);
+            if (tail - cached_head_ >= capacity_) return Status{ErrorCode::queue_full};
+        }
+
+        char* raw = storage_.data() + (tail & mask_) * slot_stride_;
+        auto* hdr = reinterpret_cast<SlotHeader*>(raw);
+        char* body_dst = raw + sizeof(SlotHeader);
+
+        const auto encoded = encode_body_stream<Message>(
+            std::span<char>{body_dst, max_body_bytes_}, std::forward<Fn>(fn));
+        if (!encoded.ok()) return encoded.status();
+
+        hdr->msg_type_size = static_cast<std::uint8_t>(msg_type.size());
+        std::memcpy(hdr->msg_type.data(), msg_type.data(), msg_type.size());
+        hdr->body_size = static_cast<std::uint32_t>(encoded.value());
+
+        tail_.store(tail + 1, std::memory_order_release);
+        return Status::success();
+    }
+
     [[nodiscard]] Status try_push_view(detail::MessageView view) noexcept {
         if (!view.status.ok()) return view.status;
         if (view.msg_type.empty() || view.msg_type.size() > max_msg_type_bytes)

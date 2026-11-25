@@ -60,9 +60,10 @@ target_end()
     path.joinpath("fields.xml").write_text(fields, encoding="utf-8")
     path.joinpath("messages.xml").write_text(message, encoding="utf-8")
     path.joinpath("main.cpp").write_text(
-        f'#include "{header}"\n'
-        'int main() { auto order = external::venue::CustomOrder::make().cl_ord_id("ID-1"); '
-        '(void)order; return 0; }\n', encoding="utf-8")
+        f'#include <array>\n#include "{header}"\n'
+        'int main() { std::array<char, 128> buf{}; '
+        'auto r = nimblefix::encode_body_stream<external::venue::CustomOrder>(buf, [](auto& w) { w.cl_ord_id("EXTERNAL"); }); '
+        'return r.ok() ? 0 : 1; }\n', encoding="utf-8")
 
 
 def fingerprint(header):
@@ -124,7 +125,7 @@ def main():
         original_bytes = output.read_bytes()
         original_fingerprint = fingerprint(output)
         text = output.read_text(encoding="utf-8")
-        if "CustomOrderBuilder" not in text or "FieldWireType" not in text:
+        if "CustomOrderStreamWriter" not in text or "FieldWireType" not in text:
             raise RuntimeError("generated header is missing typed schema metadata")
 
         # Wrap the same generator only to count invocations. This lets the
@@ -174,9 +175,10 @@ def main():
             namespace="external::renamed", generator=wrapper, reverse=True)
         source = project / "main.cpp"
         source.write_text(
-            '#include "order.hpp"\n'
-            'int main() { auto order = external::renamed::CustomOrder::make().cl_ord_id("ID-1"); '
-            '(void)order; return 0; }\n', encoding="utf-8")
+            '#include <array>\n#include "order.hpp"\n'
+            'int main() { std::array<char, 128> buf{}; '
+            'auto r = nimblefix::encode_body_stream<external::renamed::CustomOrder>(buf, [](auto& w) { w.cl_ord_id("EXTERNAL"); }); '
+            'return r.ok() ? 0 : 1; }\n', encoding="utf-8")
         build_project(args.xmake, project, build_dir, environment)
         if "namespace external::renamed" not in output.read_text(encoding="utf-8"):
             raise RuntimeError("namespace change was not reflected in the generated header")
@@ -184,9 +186,10 @@ def main():
         write_project(project, rule, include_dir, fields_xml, message_xml,
             namespace="external::renamed", header="renamed.hpp", generator=wrapper, reverse=True)
         source.write_text(
-            '#include "renamed.hpp"\n'
-            'int main() { auto order = external::renamed::CustomOrder::make().cl_ord_id("ID-1"); '
-            '(void)order; return 0; }\n', encoding="utf-8")
+            '#include <array>\n#include "renamed.hpp"\n'
+            'int main() { std::array<char, 128> buf{}; '
+            'auto r = nimblefix::encode_body_stream<external::renamed::CustomOrder>(buf, [](auto& w) { w.cl_ord_id("EXTERNAL"); }); '
+            'return r.ok() ? 0 : 1; }\n', encoding="utf-8")
         build_project(args.xmake, project, build_dir, environment)
         renamed = list(build_dir.rglob("renamed.hpp"))
         if len(renamed) != 1 or "namespace external::renamed" not in renamed[0].read_text(encoding="utf-8"):

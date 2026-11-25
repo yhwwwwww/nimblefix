@@ -68,18 +68,17 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    // 零声明 + 0 堆分配（SSO 256B，超长自动溢到堆）+ 支持原生 if：
-    fix::NewOrderSingle::Draft order;
+    // 零中间对象、零堆分配、支持原生 if/for，直接流式写入 mmap Journal：
     const bool is_limit = false;
-    order.cl_ord_id("ORD-0001")
+    const auto seq = initiator.send_stream<fix::NewOrderSingle>([&](auto& w) {
+        w.cl_ord_id("ORD-0001")
          .symbol("AAPL")
          .side('1')
          .transact_time("20261123-00:00:00.000")
          .order_qty(nf::Decimal{100, 0})
          .ord_type(is_limit ? '2' : '1');
-    if (is_limit) order.price(nf::Decimal{15025, 2});
-
-    const auto seq = initiator.send(order);
+        if (is_limit) w.price(nf::Decimal{15025, 2});
+    });
     if (!seq.ok()) {
         std::cerr << "send failed: " << seq.status().message() << '\n';
         return 1;

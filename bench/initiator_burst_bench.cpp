@@ -168,35 +168,34 @@ void run_message_construction_bench(std::size_t warmup, std::size_t samples) {
                   << " | allocs=" << g_malloc_calls.load() << '\n';
     };
 
-    std::cout << "=== Part 0: Message Construction + FIX 4.4 Single-Pass Encode (" << samples
+    std::cout << "=== Part 0: Message Construction + FIX 4.4 Encode (" << samples
               << " samples, warmup " << warmup << ", alternating market/limit) ===\n";
 
-    // Scheme A: SSO make() + std::optional
-    bench_fn("Scheme A: make() + std::optional (SSO)", [&](std::size_t i) -> std::size_t {
+    // StreamWriter: zero-intermediate-copy streaming + native if
+    bench_fn("Stream:   encode_fix44_stream + native if", [&](std::size_t i) -> std::size_t {
+        const bool is_limit = (i & 1U) != 0;
+        char id_buf[32];
+        const auto cid = format_cl_ord_id(id_buf, sizeof(id_buf), 1000, i);
+        const auto enc = nf::encode_fix44_stream<fix::NewOrderSingle>(hdr, wire, [&](auto& w) {
+            w.cl_ord_id(cid).handl_inst('1').symbol("AAPL").side('1')
+             .transact_time(utc).order_qty(nf::Decimal{100, 0})
+             .ord_type(is_limit ? '2' : '1');
+            if (is_limit) w.price(nf::Decimal{15025, 2});
+        });
+        return enc.ok() ? enc.value() : 0;
+    });
+
+    // StreamWriter with std::optional
+    bench_fn("Stream:   encode_fix44_stream + optional", [&](std::size_t i) -> std::size_t {
         const bool is_limit = (i & 1U) != 0;
         const std::optional<nf::Decimal> opt_px = is_limit ? std::optional{nf::Decimal{15025, 2}} : std::nullopt;
         char id_buf[32];
         const auto cid = format_cl_ord_id(id_buf, sizeof(id_buf), 1000, i);
-        auto order = fix::NewOrderSingle::make()
-            .cl_ord_id(cid).handl_inst('1').symbol("AAPL").side('1')
-            .transact_time(utc).order_qty(nf::Decimal{100, 0})
-            .ord_type(is_limit ? '2' : '1').price(opt_px);
-        const auto enc = nf::encode_fix44(order, hdr, wire);
-        return enc.ok() ? enc.value() : 0;
-    });
-
-    // Scheme B: SSO Draft + native if + reset()
-    fix::NewOrderSingle::Draft draft;
-    bench_fn("Scheme B: Draft + native if + reset (SSO)", [&](std::size_t i) -> std::size_t {
-        const bool is_limit = (i & 1U) != 0;
-        char id_buf[32];
-        const auto cid = format_cl_ord_id(id_buf, sizeof(id_buf), 1000, i);
-        draft.reset();
-        draft.cl_ord_id(cid).handl_inst('1').symbol("AAPL").side('1')
+        const auto enc = nf::encode_fix44_stream<fix::NewOrderSingle>(hdr, wire, [&](auto& w) {
+            w.cl_ord_id(cid).handl_inst('1').symbol("AAPL").side('1')
              .transact_time(utc).order_qty(nf::Decimal{100, 0})
-             .ord_type(is_limit ? '2' : '1');
-        if (is_limit) draft.price(nf::Decimal{15025, 2});
-        const auto enc = nf::encode_fix44(draft, hdr, wire);
+             .ord_type(is_limit ? '2' : '1').price(opt_px);
+        });
         return enc.ok() ? enc.value() : 0;
     });
 
@@ -365,11 +364,12 @@ private:
 
                     if (echo_er_) {
                         const auto cid = f11.ok() ? f11.value().value : std::string_view{"0-0"};
-                        auto er = fix::ExecutionReport::make()
-                            .order_id("ORD-1").exec_id("EX-1").cl_ord_id(cid)
-                            .exec_type('0').ord_status('0').symbol("AAPL").side('1')
-                            .leaves_qty(nf::Decimal{100, 0}).cum_qty(nf::Decimal{0, 0}).avg_px(nf::Decimal{0, 0});
-                        const auto enc = nf::encode_fix44(er, nf::SessionHeader{"SELL", "BUY", out_seq++, utc}, tx_buf);
+                        const auto enc = nf::encode_fix44_stream<fix::ExecutionReport>(
+                            nf::SessionHeader{"SELL", "BUY", out_seq++, utc}, tx_buf, [&](auto& w) {
+                                w.order_id("ORD-1").exec_id("EX-1").cl_ord_id(cid)
+                                 .exec_type('0').ord_status('0').symbol("AAPL").side('1')
+                                 .leaves_qty(nf::Decimal{100, 0}).cum_qty(nf::Decimal{0, 0}).avg_px(nf::Decimal{0, 0});
+                            });
                         if (enc.ok()) (void)send_all(fd, {tx_buf.data(), enc.value()});
                     }
                 }
@@ -475,7 +475,6 @@ bool run_workload_for_mode(SendMode mode, bool ping_pong, std::size_t warmup_bur
             std::this_thread::yield();
         }
 
-        fix::NewOrderSingle::Draft order;
         auto run_bursts = [&](std::size_t n_bursts, bool record_rtt) {
             std::uint64_t sent_so_far = peer.received_orders();
             for (std::size_t b = 0; b < n_bursts; ++b) {
@@ -485,20 +484,21 @@ bool run_workload_for_mode(SendMode mode, bool ping_pong, std::size_t warmup_bur
                     const std::uint64_t t_send = now_ns();
                     char cid_buf[48];
                     const auto cid = format_cl_ord_id(cid_buf, sizeof(cid_buf), t_burst, t_send);
-                    order.reset();
-                    order.cl_ord_id(cid).handl_inst('1').symbol("AAPL").side('1')
+                    auto write_order = [&](auto& w) {
+                        w.cl_ord_id(cid).handl_inst('1').symbol("AAPL").side('1')
                          .transact_time(utc).order_qty(nf::Decimal{100, 0}).ord_type('2')
                          .price(nf::Decimal{15025, 2});
+                    };
                     const std::uint64_t expect_er = er_count.load(std::memory_order_relaxed) + 1;
                     if (mode == SendMode::direct_send) {
                         while (true) {
-                            const auto r = init.send(order);
+                            const auto r = init.send_stream<fix::NewOrderSingle>(write_order);
                             if (r.ok()) break;
                             (void)init.poll_once();
                         }
                     } else {
                         while (true) {
-                            const auto r = init.enqueue(order);
+                            const auto r = init.enqueue_stream<fix::NewOrderSingle>(write_order);
                             if (r.ok()) break;
                             (void)init.flush();
                             (void)init.poll_once();
@@ -570,7 +570,6 @@ bool run_workload_for_mode(SendMode mode, bool ping_pong, std::size_t warmup_bur
             }
         });
 
-        fix::NewOrderSingle::Draft order;
         auto run_bursts = [&](std::size_t n_bursts, bool record_rtt) {
             std::uint64_t sent_so_far = peer.received_orders();
             for (std::size_t b = 0; b < n_bursts; ++b) {
@@ -580,12 +579,13 @@ bool run_workload_for_mode(SendMode mode, bool ping_pong, std::size_t warmup_bur
                     const std::uint64_t t_send = now_ns();
                     char cid_buf[48];
                     const auto cid = format_cl_ord_id(cid_buf, sizeof(cid_buf), t_burst, t_send);
-                    order.reset();
-                    order.cl_ord_id(cid).handl_inst('1').symbol("AAPL").side('1')
+                    auto write_order = [&](auto& w) {
+                        w.cl_ord_id(cid).handl_inst('1').symbol("AAPL").side('1')
                          .transact_time(utc).order_qty(nf::Decimal{100, 0}).ord_type('2')
                          .price(nf::Decimal{15025, 2});
+                    };
                     const std::uint64_t expect_er = er_count.load(std::memory_order_relaxed) + 1;
-                    while (!queue.try_push(order).ok()) {
+                    while (!queue.try_push_stream<fix::NewOrderSingle>(write_order).ok()) {
 #if defined(__x86_64__) || defined(__i386__)
                         __builtin_ia32_pause();
 #endif
@@ -650,7 +650,6 @@ bool run_workload_for_mode(SendMode mode, bool ping_pong, std::size_t warmup_bur
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
 
-        fix::NewOrderSingle::Draft order;
         auto run_bursts = [&](std::size_t n_bursts, bool record_rtt) {
             std::uint64_t sent_so_far = peer.received_orders();
             for (std::size_t b = 0; b < n_bursts; ++b) {
@@ -660,12 +659,13 @@ bool run_workload_for_mode(SendMode mode, bool ping_pong, std::size_t warmup_bur
                     const std::uint64_t t_send = now_ns();
                     char cid_buf[48];
                     const auto cid = format_cl_ord_id(cid_buf, sizeof(cid_buf), t_burst, t_send);
-                    order.reset();
-                    order.cl_ord_id(cid).handl_inst('1').symbol("AAPL").side('1')
+                    auto write_order = [&](auto& w) {
+                        w.cl_ord_id(cid).handl_inst('1').symbol("AAPL").side('1')
                          .transact_time(utc).order_qty(nf::Decimal{100, 0}).ord_type('2')
                          .price(nf::Decimal{15025, 2});
+                    };
                     const std::uint64_t expect_er = er_count.load(std::memory_order_relaxed) + 1;
-                    while (!lane.send(order).ok()) {
+                    while (!lane.send_stream<fix::NewOrderSingle>(write_order).ok()) {
 #if defined(__x86_64__) || defined(__i386__)
                         __builtin_ia32_pause();
 #endif

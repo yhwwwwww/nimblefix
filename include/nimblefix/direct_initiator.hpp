@@ -540,6 +540,52 @@ public:
         return send_view(message.view(), now_ms, wall_time, false);
     }
 
+    // Zero-intermediate-copy streaming send: writes FIX wire bytes directly into the
+    // pre-faulted v2 mmap Journal segment via reserve()/commit(), then writes to TCP.
+    // Only session-immutable 8/9 and 49/56 are cached statically; dynamic standard header
+    // fields (50/57/142/115/128/...) can be written per message via w.header().
+    template <class Message, class Fn>
+        requires detail::streamable_message<Message>
+    [[nodiscard]] Result<std::uint64_t> send_stream(Fn&& fn) noexcept {
+        return send_stream<Message>(std::forward<Fn>(fn), clock_.now_ms(), clock_.wall_time());
+    }
+
+    template <class Message, class Fn>
+        requires detail::streamable_message<Message>
+    [[nodiscard]] Result<std::uint64_t> send_stream(Fn&& fn,
+                                                    std::uint64_t now_ms,
+                                                    std::string_view wall_time) noexcept {
+        static_assert(!requires { requires Message::is_group_entry; },
+            "repeating group entries cannot be sent as standalone FIX messages");
+        if constexpr (!std::is_same_v<Schema, FlatSchema>) {
+            static_assert(std::is_same_v<Schema, typename Message::schema_type>,
+                "message type does not belong to this DirectInitiator's Schema");
+        }
+        return send_stream_impl<Message>(std::forward<Fn>(fn), now_ms, wall_time, true);
+    }
+
+    // Same-thread batched streaming enqueue: streams directly into mmap Journal and pushes
+    // into tx_ring_ without issuing a socket syscall yet. Call flush() to writev/sendmsg.
+    template <class Message, class Fn>
+        requires detail::streamable_message<Message>
+    [[nodiscard]] Result<std::uint64_t> enqueue_stream(Fn&& fn) noexcept {
+        return enqueue_stream<Message>(std::forward<Fn>(fn), clock_.now_ms(), clock_.wall_time());
+    }
+
+    template <class Message, class Fn>
+        requires detail::streamable_message<Message>
+    [[nodiscard]] Result<std::uint64_t> enqueue_stream(Fn&& fn,
+                                                       std::uint64_t now_ms,
+                                                       std::string_view wall_time) noexcept {
+        static_assert(!requires { requires Message::is_group_entry; },
+            "repeating group entries cannot be sent as standalone FIX messages");
+        if constexpr (!std::is_same_v<Schema, FlatSchema>) {
+            static_assert(std::is_same_v<Schema, typename Message::schema_type>,
+                "message type does not belong to this DirectInitiator's Schema");
+        }
+        return send_stream_impl<Message>(std::forward<Fn>(fn), now_ms, wall_time, false);
+    }
+
     // Flush all queued outbound / replay frames to transport (coalesces via writev/sendmsg when available).
     [[nodiscard]] Status flush() noexcept {
         return flush(clock_.now_ms());
@@ -698,6 +744,7 @@ private:
           tx_ring_(config_.max_pending_messages),
           replay_ring_(config_.max_pending_messages),
           recovery_ids_() {
+        (void)session_prefix_.init(config_.version, config_.local_comp_id, config_.remote_comp_id);
         const auto retained_floor = journal_.lowest_retained_outbound_seq();
         const auto current_epoch = journal_.checkpoint().epoch;
         const auto max_out = journal_.next_outbound_seq() == 0 ? 0 : journal_.next_outbound_seq() - 1;
@@ -963,6 +1010,104 @@ private:
         }
 
         if (const auto st = enqueue_tx(committed_rec.id, payload.size(), seq, msg.msg_type); !st.ok())
+            return fail(st);
+        return seq;
+    }
+
+    template <class Message, class Fn>
+    [[nodiscard]] Result<std::uint64_t> send_stream_impl(Fn&& fn,
+                                                         std::uint64_t now_ms,
+                                                         std::string_view wt,
+                                                         bool immediate_write) noexcept {
+        constexpr std::string_view msg_type = Message::msg_type;
+        if (fatal_) return last_status_.ok() ? Status{ErrorCode::engine_stopped} : last_status_;
+        if (!is_active()) return Status{ErrorCode::not_ready};
+        if (msg_type.empty() || detail::direct_is_admin(msg_type))
+            return Status{ErrorCode::managed_field, 35};
+        if (tx_count_ >= tx_ring_.size() - 2) return Status{ErrorCode::queue_full};
+        if (const auto ts = set_wall_time(wt); !ts.ok()) return ts;
+        now_ms_ = now_ms;
+
+        const auto seq = core_.next_outbound();
+        std::optional<std::uint64_t> last_processed{};
+        if (config_.emit_last_processed_seq) {
+            const auto completed = journal_.completed_inbound_seq();
+            if (completed != 0) last_processed = completed;
+        }
+
+        auto stream_into = [&](std::span<char> target) noexcept -> Result<std::size_t> {
+            detail::StreamBuffer buf = session_prefix_.valid
+                ? detail::StreamBuffer::begin_session_frame(
+                    target, msg_type, session_prefix_, seq, wall_time_, last_processed)
+                : detail::StreamBuffer::begin_frame(target, msg_type, make_header(seq, wall_time_));
+            if (!buf.ok()) return buf.status();
+            typename Message::stream_writer_type writer{buf};
+            fn(writer);
+            if (const auto req = writer.validate_required(); !req.ok()) return req;
+            return buf.finish_frame();
+        };
+
+        const std::size_t seg_hint = config_.journal_segment_bytes != 0
+            ? std::max<std::size_t>(512U, std::min<std::size_t>(config_.journal_segment_bytes / 2U, 4096U))
+            : std::size_t{4096U};
+        const std::size_t reserve_bound = std::min(config_.max_frame_bytes, seg_hint);
+
+        JournalRecord committed_rec{};
+        bool committed_ok = false;
+        auto reserved = journal_.reserve(RecordKind::outbound, seq, seq, 0, reserve_bound);
+        if (reserved.ok()) {
+            const auto encoded = stream_into(reserved.value().payload);
+            if (encoded.ok()) {
+                const auto committed = journal_.commit(reserved.value(), encoded.value());
+                if (!committed.ok()) return fail(committed.status());
+                committed_rec = committed.value();
+                committed_ok = true;
+            } else if (encoded.status().code != ErrorCode::capacity_exceeded) {
+                return encoded.status();
+            }
+        }
+        if (!committed_ok) {
+            const auto encoded = stream_into(encode_buf_);
+            if (!encoded.ok()) return encoded.status();
+            const auto appended = journal_.append(RecordKind::outbound, seq, seq, 0,
+                std::string_view{encode_buf_.data(), encoded.value()});
+            if (!appended.ok()) return fail(appended.status());
+            committed_rec = appended.value();
+        }
+
+        detail::CoreEvent app{};
+        app.kind = detail::CoreEventKind::outbound_appended;
+        app.now_ms = now_ms;
+        app.sequence = seq;
+        app.msg_type = msg_type;
+        const auto aout = core_.process(app);
+        if (!aout.status.ok()) return fail(aout.status);
+
+        const auto payload = committed_rec.payload;
+        if (immediate_write && tx_count_ == 0 && !replay_active_ && replay_count_ == 0 &&
+            transport_.valid() && !transport_.is_connecting()) {
+            const auto io = transport_.write(std::span<const char>{payload.data(), payload.size()});
+            if (io.bytes == payload.size() && io.status.ok()) {
+                detail::CoreEvent wr{};
+                wr.kind = detail::CoreEventKind::outbound_written;
+                wr.now_ms = now_ms;
+                wr.sequence = seq;
+                wr.msg_type = msg_type;
+                const auto wout = core_.process(wr);
+                if (!wout.status.ok()) return fail(wout.status);
+                return seq;
+            }
+            if (!io.status.ok()) {
+                handle_disconnect(io.status, now_ms);
+                return seq;
+            }
+            if (const auto st = enqueue_tx(committed_rec.id, payload.size(), seq, msg_type); !st.ok())
+                return fail(st);
+            tx_ring_[(tx_head_ + tx_count_ - 1) % tx_ring_.size()].offset = io.bytes;
+            return seq;
+        }
+
+        if (const auto st = enqueue_tx(committed_rec.id, payload.size(), seq, msg_type); !st.ok())
             return fail(st);
         return seq;
     }
@@ -1769,6 +1914,7 @@ private:
     Journal journal_;
     detail::SessionCore core_;
     detail::FastUtcClock clock_{};
+    detail::StaticSessionPrefix session_prefix_{};
 
     std::vector<char> rx_buf_;
     std::size_t rx_head_{};

@@ -109,9 +109,11 @@ bool exchange(const std::filesystem::path& root, const std::string& dictionary, 
     }
     const std::string timestamp{timestamp_storage.data()};
     if (!engine.on_session_active([&](nf::SessionContext& context) {
-        auto order = nf::fix44::NewOrderSingle::make().cl_ord_id(identifier).handl_inst('1')
-            .symbol("AAPL").side('1').transact_time(timestamp).order_qty(100).ord_type('2').price(nf::Decimal{15025,2});
-        return context.send(order).status();
+        return context.send_stream<nf::fix44::NewOrderSingle>([&](auto& w) {
+            w.cl_ord_id(identifier).handl_inst('1')
+             .symbol("AAPL").side('1').transact_time(timestamp).order_qty(100)
+             .ord_type('2').price(nf::Decimal{15025, 2});
+        }).status();
     }).ok() || !engine.on_error([&](const auto& error) {
         ++errors; std::cerr << error.format() << '\n';
     }).ok() || !engine.add_initiator({.name="quickfix",.sender_comp_id="BUY",.target_comp_id="SELL",

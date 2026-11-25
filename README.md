@@ -2,7 +2,7 @@
 
 A C++20 FIX engine designed around **pay only for what you need**: start with a zero-overhead Layer 0 **DirectInitiator** (`NimbleFIX::nimblefix_core`, 0 malloc / 0 mutex / 0 fsync steady state, full restart recovery & GapFill/Replay), opt into Layer 0 OpenSSL 3 TLS (`NimbleFIX::nimblefix_core_tls`), or scale up to the full Layer 1/2 multi-session **Engine** (`NimbleFIX::nimblefix`) with pluggable **`IoBackend`** (`epoll`, `busy_poll`, optional Linux `io_uring` Proactor), Acceptor, `Inline`/`Queued` dispatch, MPSC/SPSC senders, runtime XML, and TOML CLI.
 
-[中文入门](docs/getting-started.zh-CN.md) · [Architecture](docs/architecture.md) · [Support Matrix](docs/session-support.md) · [Benchmarks](docs/benchmarks.md)
+[中文入门](docs/getting-started.zh-CN.md) · [Architecture](docs/architecture.md) · [Support Matrix](docs/session-support.md) · [Benchmarks](docs/benchmarks.md) · [Roadmap](docs/roadmap.md)
 
 ---
 
@@ -10,7 +10,7 @@ A C++20 FIX engine designed around **pay only for what you need**: start with a 
 
 | Layer | CMake Target / xmake Target | Included Capabilities | Extra Dependencies |
 | :--- | :--- | :--- | :--- |
-| **Layer 0 (Core)** | `NimbleFIX::nimblefix_core` / `nimblefix-core` | Single-pass backpatch Codec, SSO `make()` & mutable `Draft`, strict `Fixed<...>`, generated Schemas (`--messages` subset codegen), segmented mmap Journal (hardware SSE4.2 CRC32C, `reserve()`/`commit()`), `SessionCore`, nonblocking `TcpTransport` (`write_batch`/`sendmsg`), **`DirectInitiator`**, lock-free SPSC **`DirectSendQueue`** | C++20 + `pthread` only |
+| **Layer 0 (Core)** | `NimbleFIX::nimblefix_core` / `nimblefix-core` | Zero-intermediate-copy **Streaming Encoder (`StreamWriter`)**, `Fixed<...>`, generated Schemas (`--messages` subset codegen), segmented mmap Journal (hardware SSE4.2 CRC32C, `reserve()`/`commit()`), `SessionCore`, nonblocking `TcpTransport` (`write_batch`/`sendmsg`), **`DirectInitiator`**, lock-free SPSC **`DirectSendQueue`** | C++20 + `pthread` only |
 | **Layer 0 + TLS** | `NimbleFIX::nimblefix_core_tls` / `nimblefix-core-tls` | Everything in Layer 0 + nonblocking OpenSSL 3 **`DirectTlsTransport`** (TLS 1.2/1.3, CA/hostname/IP verification, mTLS, `TlsContext` reuse on reconnect) | OpenSSL 3+ (optional) |
 | **Layer 1 / 2 (Full)** | `NimbleFIX::nimblefix` / `nimblefix` | Everything above + `SessionDriver`, pluggable `IoBackend` (`epoll` / `busy_poll` / optional `io_uring` Proactor), multi-session `Engine<Schema, Inline\|Queued>`, Acceptor, MPSC `Sender`, SPSC `ProducerLane`, optional runtime libxml2 XML & TOML CLI | Optional `liburing`, `libxml2` |
 
@@ -18,7 +18,7 @@ A C++20 FIX engine designed around **pay only for what you need**: start with a 
 
 ## Quickstart: Layer 0 `DirectInitiator` (Zero-Overhead Initiator)
 
-See [examples/direct_initiator.cpp](examples/direct_initiator.cpp) for a complete runnable initiator with zero-allocation SSO builders, segmented mmap Journal persistence, automatic restart recovery, and GapFill/Replay:
+See [examples/direct_initiator.cpp](examples/direct_initiator.cpp) for a complete runnable initiator with zero-intermediate-copy streaming encoding, segmented mmap Journal persistence, automatic restart recovery, and GapFill/Replay:
 
 ```cpp
 #include <nimblefix/direct_initiator.hpp>
@@ -50,36 +50,31 @@ auto init = nf::DirectInitiator<fix::Schema, MyHandler>::open({
 (void)init.connect();
 while (!init.is_active()) (void)init.poll_once();
 
-// Option A: One-shot fluent chain make() / make<Slots, Bytes>() (compile-time wire order,
-//           conditional fields via std::optional, default 16-slot / 256B SSO with heap spill):
-auto order = fix::NewOrderSingle::make()
-    .cl_ord_id("ORD-001").symbol("AAPL").side('1')
-    .transact_time("20261123-00:00:00.000")
-    .order_qty(nf::Decimal{100, 0}).ord_type('1')
-    .price(std::optional<nf::Decimal>{std::nullopt}); // absent optional skipped automatically
-
-// Repeating groups (same setter name for both fixed-count and dynamic-count, both 0-alloc!):
-//   Fixed count (pass entries directly — compile-time tuple, 0 copy / 0 alloc / 0 overflow):
-//     .no_party_i_ds(
-//         fix::NoPartyIDsGroupEntry::make().party_id("CLIENT1").party_id_source('D').party_role(1))
-//   Dynamic count (loop -> shared 1 KB inline arena, auto heap spill on overflow):
-//     fix::NoPartyIDsGroup<> parties;
-//     for (const auto& p : list) (void)parties.add(fix::NoPartyIDsGroupEntry::make().party_id(p.id)...);
-//     ...no_party_i_ds(std::move(parties));
-
-// Option B: Mutable reusable Draft / DraftWith<Slots, Bytes> (statement-by-statement mutation,
-//           native runtime `if`, field overwrite, and reset() reuse; same 16-slot / 256B SSO):
-// fix::NewOrderSingle::Draft order;
-// order.cl_ord_id("ORD-001");
-// order.symbol("AAPL");
-// if (has_price) order.price(nf::Decimal{15025, 2});
+// Zero-intermediate-copy streaming directly into the mmap Journal (0 heap allocs, native if/for,
+// std::optional support, dynamic per-message standard header via w.header(), nested repeating groups):
+const bool is_limit = true;
+const std::optional<nf::Decimal> opt_px = nf::Decimal{15025, 2};
+auto write_order = [&](auto& w) {
+    // Optional per-message dynamic standard header fields (must precede body fields):
+    // w.header().sender_sub_id("DESK-A").target_sub_id("EXCH-1");
+    w.cl_ord_id("ORD-001").symbol("AAPL").side('1')
+     .transact_time("20261123-00:00:00.000")
+     .order_qty(nf::Decimal{100, 0})
+     .ord_type(is_limit ? '2' : '1')
+     .price(opt_px); // std::nullopt skipped automatically
+    // Repeating groups (supports nested groups and dynamic runtime loops, 0 alloc):
+    // w.no_party_i_ds(1, [](auto& g) {
+    //     g.entry().party_id("CLIENT1").party_id_source('D').party_role(1);
+    // });
+};
 
 // 3 send modes on DirectInitiator:
-(void)init.send(order);               // 1) Direct immediate send (lowest single-order latency)
-// (void)init.enqueue(order);         // 2) Same-thread burst batching -> 1 writev/sendmsg
+(void)init.send_stream<fix::NewOrderSingle>(write_order);    // 1) Direct immediate send (lowest single-order latency)
+// (void)init.enqueue_stream<fix::NewOrderSingle>(write_order); // 2) Same-thread burst batching -> 1 writev/sendmsg
 // (void)init.flush();
-// nf::DirectSendQueue q{256, 512};   // 3) 2-thread lock-free SPSC: strategy q.try_push(order),
-// (void)init.drain(q);               //    I/O thread init.drain(q) -> Journal + 1 writev/sendmsg
+// nf::DirectSendQueue q{256, 512};                          // 3) 2-thread lock-free SPSC:
+// (void)q.try_push_stream<fix::NewOrderSingle>(write_order);//    strategy streams body into SPSC slot,
+// (void)init.drain(q);                                      //    I/O thread stamps seq/time -> Journal + 1 sendmsg
 ```
 
 ### Enabling FIX over TLS (`DirectTlsTransport`)
@@ -125,9 +120,9 @@ Full methodology, boundary disclosures, and reproducible commands are in [docs/b
 
 | Message API | p50 | p99 | Heap Allocs |
 | :--- | ---: | ---: | :---: |
-| **Scheme A**: `NewOrderSingle::make()` + `std::optional` (SSO `<16, 256>`) | **411.0 ns** | 561.0 ns | **0** |
-| **Scheme B**: `NewOrderSingle::Draft` + native `if` + `reset()` (SSO `<16, 256>`) | **401.0 ns** | 521.0 ns | **0** |
-| **Strict**: `NewOrderSingle::Fixed<128, fix::field::...>` | **261.0 ns** | 350.0 ns | **0** |
+| **Streaming**: `encode_fix44_stream<NewOrderSingle>` + native `if` | **130.0 ns** | **170.0 ns** | **0** |
+| **Streaming**: `encode_fix44_stream<NewOrderSingle>` + `std::optional` | **130.0 ns** | **180.0 ns** | **0** |
+| **Strict**: `NewOrderSingle::Fixed<128, fix::field::...>` | **220.0 ns** | 391.0 ns | **0** |
 
 ### 2. Initiator Send Modes: Ping-Pong vs Open-Loop Dense Burst (`initiator-burst-bench`, real loopback TCP + FIX 4.4 + Journal)
 
@@ -135,20 +130,21 @@ CO-Free = `t_recv - t_burst_start` (Coordinated-Omission-Free one-way latency fr
 
 | Initiator Send Mode | Ping-Pong 1-Way p50 (RTT p50) | Burst 32×0 µs CO-Free p50 / p99 (Rate) | Burst 32×2 µs Compute CO-Free p50 / p99 (Rate) |
 | :--- | ---: | ---: | ---: |
-| **1. `DirectInitiator::send()`** (1-thr, no queue) | **5.83 µs** (11.30 µs) | 64.92 µs / 126.33 µs (258k ord/s) | 92.27 µs / 175.52 µs (183k ord/s) |
-| **2. `DirectInitiator::enqueue()+flush()`** (1-thr `sendmsg`) | 5.84 µs (11.16 µs) | 22.64 µs / **28.07 µs** (1.02M ord/s) | 89.46 µs / **95.76 µs** (321k ord/s) |
-| **3. `DirectInitiator + DirectSendQueue`** (2-thr SPSC + `sendmsg`) | 6.00 µs (**10.98 µs**) | **16.54 µs** / 28.35 µs (**1.20M ord/s**) | **49.00 µs** / 224.30 µs (**338k ord/s**) |
-| **4. `Engine(busy_poll) + ProducerLane`** (2-thr SPSC) | 9.25 µs (15.29 µs) | 61.34 µs / 106.52 µs (307k ord/s) | 67.22 µs / 118.48 µs (273k ord/s) |
+| **1. `DirectInitiator::send_stream()`** (1-thr, no queue) | **4.69 µs** (**8.86 µs**) | 49.93 µs / 98.19 µs (335k ord/s) | 86.87 µs / 228.77 µs (179k ord/s) |
+| **2. `DirectInitiator::enqueue_stream()+flush()`** (1-thr `sendmsg`) | 5.42 µs (10.39 µs) | 14.58 µs / **19.83 µs** (1.27M ord/s) | 80.85 µs / 217.01 µs (320k ord/s) |
+| **3. `DirectInitiator + DirectSendQueue::try_push_stream()`** (2-thr SPSC) | 5.27 µs (9.09 µs) | **12.86 µs** / 22.64 µs (**1.43M ord/s**) | **42.62 µs** / **76.08 µs** (**422k ord/s**) |
+| **4. `Engine(busy_poll) + ProducerLane::send_stream()`** (2-thr SPSC) | 7.69 µs (12.27 µs) | 67.28 µs / 117.28 µs (278k ord/s) | 64.77 µs / 118.97 µs (280k ord/s) |
 
 ### 3. `DirectInitiator` Layered Breakdown (`direct-initiator-bench`, full 912-field FIX 4.4 + `NoPartyIDs[3]` + mmap Journal)
 
 | Workload Boundary | p50 | p95 | p99 | Throughput | Heap Allocs |
 | :--- | ---: | ---: | ---: | ---: | :---: |
-| **User Encode** (in-loop fill + single-pass `encode_fix44`) | **300.0 ns** | 461.0 ns | 491.0 ns | 3,123,417 msgs/s | **0** |
-| **Pre-TCP Session Outbound** (in-loop fill + `DirectInitiator::send` + mmap Journal) | **531.0 ns** | 651.0 ns | 831.0 ns | 1,810,647 msgs/s | **0** |
-| **Pre-TCP Session Inbound** (frame + parse + 912-field Schema + dual Journal records + callback) | **861.0 ns** | 972.0 ns | 1,313.0 ns | 1,128,150 msgs/s | **0** |
-| **Pre-TCP Combined** (total pure FIX engine round-trip budget) | **1.39 µs** | 1.59 µs | 2.14 µs | 695,074 rt/s | **0** |
-| **Real TCP Loopback RTT** (kernel TCP + full FIX 4.4 + mmap Journal) | **9.34 µs** | 11.51 µs | 14.10 µs | 99,914 rt/s | **0** |
+| **User Encode (`StreamWriter`)** (`encode_fix44_stream`) | **140.0 ns** | 171.0 ns | **171.0 ns** | **6,936,597 msgs/s** | **0** |
+| **User Encode (`Fixed`)** (in-loop fill + `encode_fix44`) | 351.0 ns | 501.0 ns | 2,915.0 ns | 2,269,455 msgs/s | **0** |
+| **Pre-TCP Session Outbound** (`DirectInitiator::send_stream` + mmap Journal) | **281.0 ns** | 340.0 ns | **481.0 ns** | **3,466,060 msgs/s** | **0** |
+| **Pre-TCP Session Inbound** (frame + parse + 912-field Schema + dual Journal records + callback) | **972.0 ns** | 1,042.0 ns | 1,162.0 ns | 1,035,217 msgs/s | **0** |
+| **Pre-TCP Combined** (total pure FIX engine round-trip budget) | **1.26 µs** | 1.37 µs | **1.55 µs** | **797,135 rt/s** | **0** |
+| **Real TCP Loopback RTT** (kernel TCP + full FIX 4.4 + mmap Journal) | **10.32 µs** | 12.03 µs | 14.59 µs | 93,417 rt/s | **0** |
 
 Binary footprint (Release): `direct-initiator-example` is **336 KB** (`libnimblefix-core.a`: 409 KB) vs full multi-session `initiator-example` at **1.2 MB**.
 
@@ -168,11 +164,11 @@ Both engines run in the same `-O3` binary against the same full 912-field `schem
 
 | Suite (`1000` warmup / `5000` samples) | NimbleFIX 0.3 (p50 / p99 / alloc) | QuickFIX 1.16.0 (p50 / p99 / alloc) | Speedup (p50) |
 | :--- | :--- | :--- | ---: |
-| **Codec Encode** (`Fixed` / `make()` direct / `NoPartyIDs<>`) | **371 ns** / **611 ns** / **681 ns** (**0.00** alloc) | 1,653 ns / 1,703 ns / 19.00 | **4.46×** / **2.71×** / **2.43×** |
-| **Parse + Full `FIX44.xml` Strict + Read** | **1,323 ns** / **1,663 ns** / **0.00** | 2,775 ns / 2,816 ns / 15.00 | **2.10×** |
-| **TCP Initiator RTT** (`DirectInitiator` / `Engine busy_poll` / `epoll`) | **9.79 µs** / **14.83 µs** / **18.55 µs** (**0.00** alloc) | 22.43 µs / p99 32.64 µs / 35.06 | **2.29×** / 1.51× / 1.21× |
-| **TCP Acceptor RTT** (`Engine busy_poll` / `epoll`) | **10.98 µs** / **13.29 µs** (p99 **14.70 µs**, **0.00** alloc) | 23.82 µs / p99 32.48 µs / 36.99 | **2.17×** / 1.79× |
-| **TCP Dense Burst 32×** (`batch sendmsg`, CO-Free 1-way) | **26.61 µs** / **36.21 µs** / **0.00** (**827k/s**) | 200.92 µs / 403.16 µs / 28.06 (79k/s) | **7.55×** (**10.5×** rate) |
+| **Codec Encode** (`StreamWriter` / `Fixed`) | **211 ns** / **381 ns** (**0.00** alloc) | 1,663 ns / 2,635 ns / 19.00 | **7.88×** / **4.36×** |
+| **Parse + Full `FIX44.xml` Strict + Read** | **1,323 ns** / **1,383 ns** / **0.00** | 2,826 ns / 2,895 ns / 15.00 | **2.14×** |
+| **TCP Initiator RTT** (`DirectInitiator` / `Engine busy_poll` / `epoll`) | **10.78 µs** / **14.92 µs** / **20.89 µs** (**0.00** alloc) | 21.03 µs / p99 32.79 µs / 35.06 | **1.95×** / 1.41× / 1.01× |
+| **TCP Acceptor RTT** (`Engine busy_poll` / `epoll`) | **9.96 µs** / **11.85 µs** (p99 **14.42 µs**, **0.00** alloc) | 20.41 µs / p99 26.49 µs / 37.04 | **2.05×** / 1.72× |
+| **TCP Dense Burst 32×** (`enqueue_stream` + `sendmsg`, CO-Free 1-way) | **14.38 µs** / **18.90 µs** / **0.00** (**1.33M/s**) | 182.43 µs / 348.31 µs / 28.06 (92k/s) | **12.69×** (**14.4×** rate) |
 
 ---
 

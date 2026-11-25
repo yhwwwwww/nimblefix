@@ -43,10 +43,11 @@ def main():
             source.write_text('''#include <iostream>
 #include "sample.hpp"
 int main() {
-  using Message = decltype(sample::Sample::make().cl_ord_id("x").custom_value("y"));
-  static_assert(Message::slot_count == 2);
-  static_assert(Message::slot_storage_bytes == 32);
-  std::cout << sizeof(Message) << " " << Message::slot_storage_bytes;
+  using Writer = sample::Sample::Writer;
+  using Fixed = sample::Sample::Fixed<64, sample::field::ClOrdID, sample::field::CustomValue>;
+  static_assert(Fixed::slot_count == 2);
+  static_assert(Fixed::slot_storage_bytes == 32);
+  std::cout << sizeof(Writer) << " " << Fixed::slot_storage_bytes;
 }
 ''')
             binary = base / "probe"

@@ -96,6 +96,9 @@ _BUILDER_RESERVED_SETTERS = frozenset(
         "status",
         "view",
         "reset",
+        "header",
+        "validate_required",
+        "entry",
         "msg_type",
         "slot_count",
         "slot_storage_bytes",
@@ -999,6 +1002,7 @@ def render_header(schema: Schema, namespace: str) -> str:
         "#include <nimblefix/message.hpp>",
         "#include <nimblefix/group.hpp>",
         "#include <nimblefix/schema.hpp>",
+        "#include <nimblefix/stream_encoder.hpp>",
         "",
         f"namespace {ns} {{",
         "",
@@ -1204,27 +1208,124 @@ def render_header(schema: Schema, namespace: str) -> str:
     def field_needs_policy_check(field: FieldDef) -> bool:
         return bool(field.enum_values) or field.field_type in _NEEDS_ENUM_OR_FORMAT_CHECK
 
-    # Group policies and their trait specializations are emitted before the
-    # entry wrappers instantiate FixedShapeMessage. This keeps group entry
-    # plans identical to the normal static tag / generated message plan.
+    # Emit one shared inline stream-validation namespace for the entire schema so
+    # generated StreamWriters avoid duplicating enum/format checks across messages.
+    lines += ["namespace detail_stream {"]
+    for field in fields:
+        fc = FIX_FIELD_CLASSES[field.field_type]
+        wt = FIX_WIRE_TYPES[field.field_type]
+        enums = [ev[0] for ev in field.enum_values]
+        if not field_needs_policy_check(field):
+            continue
+        if wt == "character":
+            if fc == "boolean":
+                lines.append(
+                    f"[[nodiscard]] inline bool valid_{field.number}(char c) noexcept {{ return c == 'Y' || c == 'N'; }}"
+                )
+            elif enums:
+                case_parts = []
+                for e in enums:
+                    if len(e) == 1:
+                        ch = e[0]
+                        if ch in ("'", "\\"):
+                            case_parts.append(f"case '\\{ch}':")
+                        else:
+                            case_parts.append(f"case '{ch}':")
+                lines.append(
+                    f"[[nodiscard]] inline bool valid_{field.number}(char c) noexcept {{ switch (c) {{ {' '.join(case_parts)} return true; default: return false; }} }}"
+                )
+        elif wt == "integer":
+            conds = []
+            if fc in ("unsigned_integer", "day_of_month", "tag_number"):
+                conds.append("v >= 0")
+            if fc == "day_of_month":
+                conds.append("v >= 1 && v <= 31")
+            elif fc == "tag_number":
+                conds.append("v >= 1 && v <= static_cast<std::int64_t>(::nimblefix::detail::maximum_fix_tag)")
+            if enums:
+                int_vals = [e for e in enums if e.lstrip("-").isdigit()]
+                if int_vals:
+                    cases = " ".join(f"case {e}LL:" for e in int_vals)
+                    pre = ("if (!(" + " && ".join(conds) + ")) return false; ") if conds else ""
+                    lines.append(
+                        f"[[nodiscard]] inline bool valid_{field.number}(std::int64_t v) noexcept {{ {pre}switch (v) {{ {cases} return true; default: return false; }} }}"
+                    )
+                    continue
+            expr = " && ".join(conds) if conds else "true"
+            lines.append(
+                f"[[nodiscard]] inline bool valid_{field.number}(std::int64_t v) noexcept {{ (void)v; return {expr}; }}"
+            )
+        elif wt == "string":
+            if fc in ("utc_date", "local_market_date"):
+                lines.append(
+                    f"[[nodiscard]] inline bool valid_{field.number}(std::string_view v) noexcept {{ return ::nimblefix::detail::stream::is_valid_ymd8(v); }}"
+                )
+            elif fc == "utc_time":
+                lines.append(
+                    f"[[nodiscard]] inline bool valid_{field.number}(std::string_view v) noexcept {{ return ::nimblefix::detail::stream::is_valid_utc_time(v); }}"
+                )
+            elif fc == "month_year":
+                lines.append(
+                    f"[[nodiscard]] inline bool valid_{field.number}(std::string_view v) noexcept {{ return ::nimblefix::detail::stream::is_valid_month_year(v); }}"
+                )
+            elif fc in ("multiple_value_string", "multiple_char_value", "multiple_string_value"):
+                single_ch = "true" if fc == "multiple_char_value" else "false"
+                if enums:
+                    if all(len(e) == 1 for e in enums):
+                        case_parts = []
+                        for e in enums:
+                            ch = e[0]
+                            case_parts.append(f"case '\\{ch}':" if ch in ("'", "\\") else f"case '{ch}':")
+                        lines += [
+                            f"[[nodiscard]] inline bool valid_{field.number}(std::string_view v) noexcept {{",
+                            f"    if (!::nimblefix::detail::stream::is_valid_mvs_syntax(v, {single_ch})) return false;",
+                            "    for (std::size_t pos = 0; pos < v.size();) {",
+                            "        const auto sp = v.find(' ', pos);",
+                            "        const auto end = sp == std::string_view::npos ? v.size() : sp;",
+                            "        if (end - pos != 1) return false;",
+                            f"        switch (v[pos]) {{ {' '.join(case_parts)} break; default: return false; }}",
+                            "        if (sp == std::string_view::npos) break;",
+                            "        pos = sp + 1;",
+                            "    }",
+                            "    return true;",
+                            "}",
+                        ]
+                    else:
+                        tok_cond = " || ".join(f"tok == {_cpp_string(e)}" for e in enums)
+                        lines += [
+                            f"[[nodiscard]] inline bool valid_{field.number}(std::string_view v) noexcept {{",
+                            f"    if (!::nimblefix::detail::stream::is_valid_mvs_syntax(v, {single_ch})) return false;",
+                            "    for (std::size_t pos = 0; pos < v.size();) {",
+                            "        const auto sp = v.find(' ', pos);",
+                            "        const auto end = sp == std::string_view::npos ? v.size() : sp;",
+                            "        const auto tok = v.substr(pos, end - pos);",
+                            f"        if (!({tok_cond})) return false;",
+                            "        if (sp == std::string_view::npos) break;",
+                            "        pos = sp + 1;",
+                            "    }",
+                            "    return true;",
+                            "}",
+                        ]
+                else:
+                    lines.append(
+                        f"[[nodiscard]] inline bool valid_{field.number}(std::string_view v) noexcept {{ return ::nimblefix::detail::stream::is_valid_mvs_syntax(v, {single_ch}); }}"
+                    )
+            elif enums:
+                cond = " || ".join(f"v == {_cpp_string(e)}" for e in enums)
+                lines.append(
+                    f"[[nodiscard]] inline bool valid_{field.number}(std::string_view v) noexcept {{ return {cond}; }}"
+                )
+    lines += ["} // namespace detail_stream", ""]
+
+    # Group policies (kept for FixedShapeMessage + GroupBuilder and StreamWriter traits).
     for group_index in range(len(group_keys)):
         group = group_by_key[group_keys[group_index]]
         policy = group_symbol(group_index, "EntryPolicy")
-        builder = group_symbol(group_index, "EntryBuilder")
-        setters_mixin = group_symbol(group_index, "EntrySetters")
         members = group.members
         allowed = [tag for tag, _required, _member in immediate_tags(members)]
         required = [tag for tag, is_required, _member in immediate_tags(members) if is_required]
         lines += [
-            f"template<class... Slots> class {builder};",
-            f"template<class Derived> struct {setters_mixin};",
             f"struct {policy} {{",
-            "    template<class... Slots>",
-            f"    using rebind = {builder}<Slots...>;",
-            "    template<std::size_t InlineSlots, std::size_t InlineBytes, class... Slots>",
-            f"    using rebind_sso = {builder}<Slots...>;",
-            "    template<class Derived>",
-            f"    using named_setters = {setters_mixin}<Derived>;",
             "    static constexpr bool is_group_entry = true;",
             "    static constexpr bool has_field_policy_check_traits = true;",
             "    static constexpr std::string_view msg_type = \"__entry__\";",
@@ -1247,26 +1348,14 @@ def render_header(schema: Schema, namespace: str) -> str:
     for index, message in enumerate(messages):
         name = message.name
         policy = f"{name}Policy"
-        builder = f"{name}Builder"
-        setters_mixin = f"{name}Setters"
         members = expanded_messages[name]
         allowed_tags = [tag for tag, _required, _member in immediate_tags(members)]
         required_tags = [tag for tag, is_required, _member in immediate_tags(members) if is_required]
         direct_fields = [member for member in members if member.kind == "field"]
-        sso_builder = f"{name}SsoBuilder"
         lines += [
-            f"template<class... Slots> class {builder};",
-            f"template<std::size_t InlineSlots, std::size_t InlineBytes, class... Slots> class {sso_builder};",
-            f"template<class Derived> struct {setters_mixin};",
             f"struct {policy} {{",
             "    using schema_type = Schema;",
             "    static constexpr bool has_field_policy_check_traits = true;",
-            "    template<class... Slots>",
-            f"    using rebind = {builder}<Slots...>;",
-            "    template<std::size_t InlineSlots, std::size_t InlineBytes, class... Slots>",
-            f"    using rebind_sso = std::conditional_t<InlineSlots == 16 && InlineBytes == 256, {builder}<Slots...>, {sso_builder}<InlineSlots, InlineBytes, Slots...>>;",
-            "    template<class Derived>",
-            f"    using named_setters = {setters_mixin}<Derived>;",
             f"    static constexpr std::string_view msg_type = {_cpp_string(message.msg_type)};",
             f"    inline static constexpr std::array<std::uint32_t, {len(allowed_tags)}> allowed_tags{{{{",
         ]
@@ -1313,86 +1402,252 @@ def render_header(schema: Schema, namespace: str) -> str:
                 ]
     lines += ["} // namespace nimblefix", "", f"namespace {ns} {{", ""]
 
-    # Leaf-first so nested GroupBuilder aliases are complete before their
-    # parent GroupEntryOwner tuple is declared.
+    def emit_stream_writer_body(
+        writer_cls: str,
+        policy: str,
+        members: tuple[MemberDef, ...],
+        is_entry: bool,
+        delimiter_tag: int = 0,
+    ) -> list[str]:
+        out: list[str] = []
+        req_members = [
+            (idx, schema.fields_by_name[m.field_name].number)
+            for idx, m in enumerate(members)
+            if m.required
+        ]
+        req_bit_by_tag = {tag: bit for bit, (_idx, tag) in enumerate(req_members)}
+        req_words = (len(req_members) + 63) // 64
+        has_req = len(req_members) > 0
+
+        if not is_entry:
+            out += [
+                "    [[nodiscard]] ::nimblefix::detail::StandardHeaderWriter header() noexcept {",
+                "        return ::nimblefix::detail::StandardHeaderWriter{buf_};",
+                "    }",
+            ]
+
+        # Emit scalar setters (compact 3-line delegation to StreamBuffer::emit_*)
+        for member in members:
+            if member.kind != "field":
+                continue
+            field = schema.fields_by_name[member.field_name]
+            setter = _snake_case(field.name)
+            wt = FIX_WIRE_TYPES[field.field_type]
+            tag_prefix = f"{field.number}="
+            plen = len(tag_prefix)
+            checked = field_needs_policy_check(field)
+            is_len_pair = field.number in field_pair_tags and field.field_type in {"LENGTH", "NUMINGROUP"}
+            is_data_pair = field.field_type in {"DATA", "XMLDATA"}
+
+            val_arg = f", &detail_stream::valid_{field.number}" if checked else ""
+            if is_data_pair:
+                len_tag = field_pair_tags[field.number]
+                len_prefix = f"{len_tag}="
+                emit_call = f"buf_.emit_data<{len_tag}u, {field.number}u>({_cpp_string(len_prefix)}, {len(len_prefix)}u, {_cpp_string(tag_prefix)}, {plen}u, std::forward<V>(value))"
+            elif wt == "character":
+                emit_call = f"buf_.emit_char<{field.number}u>({_cpp_string(tag_prefix)}, {plen}u, std::forward<V>(value){val_arg})"
+            elif wt == "integer":
+                pair_arg = f", {field_pair_tags[field.number]}u" if is_len_pair else ""
+                emit_call = f"buf_.emit_int<{field.number}u{pair_arg}>({_cpp_string(tag_prefix)}, {plen}u, std::forward<V>(value){val_arg})"
+            elif wt == "decimal":
+                emit_call = f"buf_.emit_decimal<{field.number}u>({_cpp_string(tag_prefix)}, {plen}u, std::forward<V>(value))"
+            elif wt == "utc_timestamp":
+                emit_call = f"buf_.emit_utc_timestamp<{field.number}u>({_cpp_string(tag_prefix)}, {plen}u, std::forward<V>(value))"
+            else:
+                emit_call = f"buf_.emit_str<{field.number}u>({_cpp_string(tag_prefix)}, {plen}u, std::forward<V>(value){val_arg})"
+
+            post_ops: list[str] = []
+            if is_entry:
+                if field.number == delimiter_tag:
+                    post_ops.append("first_field_ = false;")
+                else:
+                    post_ops.append(
+                        f"if (first_field_) {{ buf_.fail(::nimblefix::ErrorCode::required_field_missing, {delimiter_tag}); }}"
+                    )
+            if field.number in req_bit_by_tag:
+                bit = req_bit_by_tag[field.number]
+                if req_words == 1:
+                    post_ops.append(f"req_mask_ |= (std::uint64_t{{1}} << {bit}u);")
+                else:
+                    post_ops.append(f"req_mask_[{bit // 64}u] |= (std::uint64_t{{1}} << {bit % 64}u);")
+
+            if post_ops:
+                body = f"if ({emit_call}) {{ {' '.join(post_ops)} }} return *this;"
+            else:
+                body = f"(void){emit_call}; return *this;"
+            out += [
+                f"    template<class V> {writer_cls}& {setter}(V&& value) noexcept {{ {body} }}",
+            ]
+
+        # Emit repeating group setters: w.no_xxx(count, [&](auto& g) { g.entry()...; })
+        for member in members:
+            if member.kind != "group":
+                continue
+            counter = schema.fields_by_name[member.field_name]
+            setter = _snake_case(counter.name)
+            g_idx = group_indexes[group_key(member)]
+            scope_cls = group_symbol(g_idx, "StreamScope")
+            tag_prefix = f"{counter.number}="
+            plen = len(tag_prefix)
+            out += [
+                "    template<class Fn>",
+                f"    {writer_cls}& {setter}(std::size_t count, Fn&& fn) noexcept {{",
+            ]
+            if is_entry:
+                if counter.number == delimiter_tag:
+                    out.append("        first_field_ = false;")
+                else:
+                    out.append(
+                        f"        if (first_field_) {{ buf_.fail(::nimblefix::ErrorCode::required_field_missing, {delimiter_tag}); return *this; }}"
+                    )
+            if counter.number in req_bit_by_tag:
+                bit = req_bit_by_tag[counter.number]
+                if req_words == 1:
+                    out.append(f"        req_mask_ |= (std::uint64_t{{1}} << {bit}u);")
+                else:
+                    out.append(f"        req_mask_[{bit // 64}u] |= (std::uint64_t{{1}} << {bit % 64}u);")
+            out += [
+                "        buf_.enter_body_field();",
+                f"        buf_.write_tag_u64({_cpp_string(tag_prefix)}, {plen}u, static_cast<std::uint64_t>(count));",
+                f"        {scope_cls} scope{{buf_, count}};",
+                "        fn(scope);",
+                "        scope.finish();",
+                "        return *this;",
+                "    }",
+            ]
+
+        # Emit compile-time tag-addressed set<Tag>(value) helper (preserves compile-time type & tag guards)
+        out += [
+            "    template<std::uint32_t Tag, class V>",
+            f"    {writer_cls}& set(V&& value) noexcept {{",
+            "        static_assert(Tag > 0 && Tag <= ::nimblefix::detail::maximum_fix_tag, \"FIX tags must be in 1..999999999\");",
+            "        static_assert(!::nimblefix::detail::is_managed_tag(Tag), \"session and framing tags are engine managed\");",
+            f"        static_assert(::nimblefix::detail::policy_allows_tag<{policy}, Tag>(), \"tag is not allowed by this generated message\");",
+            "        using U = ::nimblefix::detail::unwrap_optional_t<V>;",
+            "        static_assert(::nimblefix::detail::supported_value_v<U>, \"unsupported static FIX field value type\");",
+            f"        static_assert(::nimblefix::detail::wire_value_compatible_v<::nimblefix::FieldWireType<{policy}, Tag>::value, U>,",
+            "            \"value type does not match the generated FIX field type\");",
+        ]
+        scalar_members = [m for m in members if m.kind == "field"]
+        for s_idx, member in enumerate(scalar_members):
+            field = schema.fields_by_name[member.field_name]
+            setter = _snake_case(field.name)
+            kw = "if constexpr" if s_idx == 0 else "else if constexpr"
+            out.append(f"        {kw} (Tag == {field.number}u) return {setter}(std::forward<V>(value));")
+        if scalar_members:
+            out.append("        else { static_assert(Tag == 0, \"use the named group(count, fn) setter for repeating groups\"); return *this; }")
+        else:
+            out.append("        (void)value; return *this;")
+        out.append("    }")
+
+        # Emit validate_required() & status()
+        out += [
+            "    [[nodiscard]] ::nimblefix::Status status() const noexcept { return buf_.status(); }",
+            "    [[nodiscard]] ::nimblefix::Status validate_required() const noexcept {",
+            "        if (!buf_.ok()) return buf_.status();",
+        ]
+        if is_entry:
+            out.append(f"        if (first_field_) return ::nimblefix::Status{{::nimblefix::ErrorCode::required_field_missing, {delimiter_tag}}};")
+        if has_req:
+            if req_words == 1:
+                all_mask = (1 << len(req_members)) - 1
+                out.append(f"        if ((req_mask_ & {all_mask}ULL) != {all_mask}ULL) {{")
+                for bit, (_midx, tag) in enumerate(req_members):
+                    out.append(f"            if ((req_mask_ & (std::uint64_t{{1}} << {bit}u)) == 0) return ::nimblefix::Status{{::nimblefix::ErrorCode::required_field_missing, {tag}}};")
+                out.append("        }")
+            else:
+                for bit, (_midx, tag) in enumerate(req_members):
+                    out.append(f"        if ((req_mask_[{bit // 64}u] & (std::uint64_t{{1}} << {bit % 64}u)) == 0) return ::nimblefix::Status{{::nimblefix::ErrorCode::required_field_missing, {tag}}};")
+        out += [
+            "        return ::nimblefix::Status::success();",
+            "    }",
+            "    void reset_entry_state() noexcept {",
+        ]
+        if is_entry:
+            out.append("        first_field_ = true;")
+        if has_req:
+            if req_words == 1:
+                out.append("        req_mask_ = 0;")
+            else:
+                out.append("        req_mask_.fill(0);")
+        out += [
+            "    }",
+            "private:",
+            "    ::nimblefix::detail::StreamBuffer& buf_;",
+        ]
+        if is_entry:
+            out.append("    bool first_field_{true};")
+        if has_req:
+            if req_words == 1:
+                out.append("    std::uint64_t req_mask_{0};")
+            else:
+                out.append(f"    std::array<std::uint64_t, {req_words}> req_mask_{{}};")
+        return out
+
+    # Emit repeating group StreamWriters & StreamScopes leaf-first so nested groups are complete before parents.
     for group_index in group_emit_order:
         key = group_keys[group_index]
         group = group_by_key[key]
-        symbol = group_symbol(group_index, "")
-        entry_name = group_symbol(group_index, "Entry")
-        builder = group_symbol(group_index, "EntryBuilder")
-        setters_mixin = group_symbol(group_index, "EntrySetters")
+        entry_writer = group_symbol(group_index, "EntryStreamWriter")
+        scope_cls = group_symbol(group_index, "StreamScope")
         policy = group_symbol(group_index, "EntryPolicy")
         count_tag = schema.fields_by_name[group.field_name].number
         delimiter_tag = schema.fields_by_name[group.members[0].field_name].number
-        members = group.members
         lines += [
-            f"template<class Derived>",
-            f"struct {setters_mixin} {{",
-            "    static constexpr bool is_group_entry = true;",
-        ]
-        for member in members:
-            if member.kind == "field":
-                field = schema.fields_by_name[member.field_name]
-                setter = _snake_case(field.name)
-                lines += [
-                    "    template<class V>",
-                    f"    auto {setter}(V&& value) && {{",
-                    f"        return std::move(static_cast<Derived&>(*this)).template set<{field.number}u>(std::forward<V>(value));",
-                    "    }",
-                ]
-            else:
-                child = schema.fields_by_name[member.field_name]
-                child_group_idx = group_indexes[group_key(member)]
-                child_group = group_by_key[group_keys[child_group_idx]]
-                child_delim = schema.fields_by_name[child_group.members[0].field_name].number
-                child_policy = group_symbol(child_group_idx, "EntryPolicy")
-                group_setter = _snake_case(child.name)
-                lines += [
-                    "    template<class G>",
-                    "        requires requires { std::remove_cvref_t<G>::count_tag; }",
-                    f"    auto {group_setter}(G&& group) && {{",
-                    f"        static_assert(std::remove_cvref_t<G>::count_tag == {child.number}u, \"wrong nested repeating group type\");",
-                    "        return ::nimblefix::attach_group(std::move(static_cast<Derived&>(*this)), std::forward<G>(group));",
-                    "    }",
-                    "    template<class FirstEntry, class... RestEntries>",
-                    "        requires (::nimblefix::detail::is_group_entry_v<FirstEntry> && (::nimblefix::detail::is_group_entry_v<RestEntries> && ...))",
-                    f"    auto {group_setter}(FirstEntry&& first, RestEntries&&... rest) && {{",
-                    f"        static_assert(std::is_same_v<typename std::remove_cvref_t<FirstEntry>::policy_type, {child_policy}> &&",
-                    f"                      (std::is_same_v<typename std::remove_cvref_t<RestEntries>::policy_type, {child_policy}> && ...),",
-                    "                      \"wrong nested repeating group entry type\");",
-                    f"        return ::nimblefix::attach_group(std::move(static_cast<Derived&>(*this)),",
-                    f"            ::nimblefix::make_static_group<{child.number}u, {child_delim}u>(std::forward<FirstEntry>(first), std::forward<RestEntries>(rest)...));",
-                    "    }",
-                ]
-        lines += [
-            "};",
-            "",
-            f"struct {entry_name} {{",
+            f"class {entry_writer} {{",
+            "public:",
             f"    using policy_type = {policy};",
             "    static constexpr bool is_group_entry = true;",
-            f"    static auto make(::nimblefix::MessageLimits limits = {{}});",
+            f"    explicit {entry_writer}(::nimblefix::detail::StreamBuffer& buf) noexcept : buf_(buf) {{}}",
+        ]
+        lines += emit_stream_writer_body(entry_writer, policy, group.members, True, delimiter_tag)
+        lines += [
             "};",
             "",
-            f"template<class... Slots>",
-            f"class {builder} : public ::nimblefix::MessageBuilder<{policy}, \"__entry__\", ::nimblefix::FieldList<Slots...>>, public {setters_mixin}<{builder}<Slots...>> {{",
-            f"    using Base = ::nimblefix::MessageBuilder<{policy}, \"__entry__\", ::nimblefix::FieldList<Slots...>>;",
+            f"class {scope_cls} {{",
             "public:",
-            "    static constexpr bool is_group_entry = true;",
-            "    using Base::Base;",
+            f"    static constexpr std::uint32_t count_tag = {count_tag}u;",
+            f"    static constexpr std::uint32_t delimiter_tag = {delimiter_tag}u;",
+            f"    {scope_cls}(::nimblefix::detail::StreamBuffer& buf, std::size_t expected_count) noexcept",
+            "        : buf_(buf), expected_count_(expected_count), active_entry_(buf) {}",
+            f"    {entry_writer}& entry() noexcept {{",
+            "        if (has_active_entry_) {",
+            "            buf_.fail(buf_.check_pending_pairs());",
+            "            buf_.fail(active_entry_.validate_required());",
+            "        }",
+            "        if (written_count_ >= expected_count_) {",
+            f"            buf_.fail(::nimblefix::ErrorCode::invalid_value, {count_tag});",
+            "        }",
+            "        ++written_count_;",
+            "        has_active_entry_ = true;",
+            "        active_entry_.reset_entry_state();",
+            "        return active_entry_;",
+            "    }",
+            "    void finish() noexcept {",
+            "        if (has_active_entry_) {",
+            "            buf_.fail(buf_.check_pending_pairs());",
+            "            buf_.fail(active_entry_.validate_required());",
+            "            has_active_entry_ = false;",
+            "        }",
+            "        if (written_count_ != expected_count_) {",
+            f"            buf_.fail(::nimblefix::ErrorCode::invalid_value, {count_tag});",
+            "        }",
+            "    }",
+            "private:",
+            "    ::nimblefix::detail::StreamBuffer& buf_;",
+            "    std::size_t expected_count_{};",
+            "    std::size_t written_count_{};",
+            "    bool has_active_entry_{false};",
+            f"    {entry_writer} active_entry_;",
             "};",
-            f"inline auto {entry_name}::make(::nimblefix::MessageLimits limits) {{ return {builder}<>{{limits}}; }}",
-            f"template<std::size_t Capacity = 16, std::size_t InlineBytes = 1024>",
-            f"using {symbol} = ::nimblefix::OwnedGroupBuilder<{count_tag}u, {delimiter_tag}u, Capacity, {'true' if group.required else 'false'}, InlineBytes>;",
             "",
         ]
 
     for index, message in enumerate(messages):
         name = message.name
         policy = f"{name}Policy"
-        builder = f"{name}Builder"
-        setters_mixin = f"{name}Setters"
         fixed_name = f"{name}Fixed"
+        writer_name = f"{name}StreamWriter"
         members = expanded_messages[name]
         direct_fields = [member for member in members if member.kind == "field"]
 
@@ -1424,51 +1679,6 @@ def render_header(schema: Schema, namespace: str) -> str:
         lines += ["};", ""]
 
         lines += [
-            f"template<class Derived>",
-            f"struct {setters_mixin} {{",
-        ]
-        for member in direct_fields:
-            field = schema.fields_by_name[member.field_name]
-            setter = _snake_case(field.name)
-            lines += [
-                "    template<class V>",
-                f"    auto {setter}(V&& value) && {{",
-                f"        return std::move(static_cast<Derived&>(*this)).template set<{field.number}>(std::forward<V>(value));",
-                "    }",
-            ]
-        for member in members:
-            if member.kind != "group":
-                continue
-            counter = schema.fields_by_name[member.field_name]
-            setter = _snake_case(counter.name)
-            g_idx = group_indexes[group_key(member)]
-            g_def = group_by_key[group_keys[g_idx]]
-            g_delim = schema.fields_by_name[g_def.members[0].field_name].number
-            g_policy = group_symbol(g_idx, "EntryPolicy")
-            group_type = f"{group_symbol(g_idx, '')}<>"
-            lines += [
-                "    template<class G>",
-                "        requires requires { std::remove_cvref_t<G>::count_tag; }",
-                f"    auto {setter}(G&& group) && {{",
-                f"        static_assert(std::remove_cvref_t<G>::count_tag == {counter.number}u, \"wrong repeating group type\");",
-                "        return ::nimblefix::attach_group(std::move(static_cast<Derived&>(*this)), std::forward<G>(group));",
-                "    }",
-                f"    auto {setter}({group_type}&& group) && {{",
-                "        return ::nimblefix::attach_group(std::move(static_cast<Derived&>(*this)), std::move(group));",
-                "    }",
-                "    template<class FirstEntry, class... RestEntries>",
-                "        requires (::nimblefix::detail::is_group_entry_v<FirstEntry> && (::nimblefix::detail::is_group_entry_v<RestEntries> && ...))",
-                f"    auto {setter}(FirstEntry&& first, RestEntries&&... rest) && {{",
-                f"        static_assert(std::is_same_v<typename std::remove_cvref_t<FirstEntry>::policy_type, {g_policy}> &&",
-                f"                      (std::is_same_v<typename std::remove_cvref_t<RestEntries>::policy_type, {g_policy}> && ...),",
-                "                      \"wrong repeating group entry type\");",
-                f"        return ::nimblefix::attach_group(std::move(static_cast<Derived&>(*this)),",
-                f"            ::nimblefix::make_static_group<{counter.number}u, {g_delim}u>(std::forward<FirstEntry>(first), std::forward<RestEntries>(rest)...));",
-                "    }",
-            ]
-        lines += ["};", ""]
-
-        lines += [
             f"template<class Shape, std::size_t ByteCapacity = 512>",
             f"class {fixed_name} : public ::nimblefix::FixedShapeMessage<{_cpp_string(message.msg_type)}, Shape, ByteCapacity, {policy}> {{",
             f"    using Base = ::nimblefix::FixedShapeMessage<{_cpp_string(message.msg_type)}, Shape, ByteCapacity, {policy}>;",
@@ -1486,64 +1696,31 @@ def render_header(schema: Schema, namespace: str) -> str:
             ]
         lines += ["};", ""]
 
-        draft_name = f"{name}Draft"
         lines += [
-            f"template<std::size_t InlineSlots = 16, std::size_t InlineBytes = 256>",
-            f"class {draft_name} : public ::nimblefix::DraftMessage<{_cpp_string(message.msg_type)}, {policy}, InlineSlots, InlineBytes> {{",
-            f"    using Base = ::nimblefix::DraftMessage<{_cpp_string(message.msg_type)}, {policy}, InlineSlots, InlineBytes>;",
+            f"class {writer_name} {{",
             "public:",
             "    using schema_type = Schema;",
-            "    using Base::Base;",
+            f"    using policy_type = {policy};",
+            f"    static constexpr std::string_view msg_type = {_cpp_string(message.msg_type)};",
+            f"    explicit {writer_name}(::nimblefix::detail::StreamBuffer& buf) noexcept : buf_(buf) {{}}",
         ]
-        for member in direct_fields:
-            field = schema.fields_by_name[member.field_name]
-            setter = _snake_case(field.name)
-            lines += [
-                "    template<class V>",
-                f"    {draft_name}& {setter}(V&& value) noexcept {{",
-                f"        (void)this->template set<{field.number}>(std::forward<V>(value));",
-                "        return *this;",
-                "    }",
-            ]
-        lines += ["};", ""]
-
-        sso_builder = f"{name}SsoBuilder"
+        lines += emit_stream_writer_body(writer_name, policy, members, False)
         lines += [
+            "};",
+            "",
             f"struct {name} {{",
             "    using schema_type = Schema;",
             f"    using view_type = {name}View;",
             f"    using policy_type = {policy};",
-            f"    using Draft = {draft_name}<>;",
-            f"    template<std::size_t InlineSlots = 16, std::size_t InlineBytes = 256>",
-            f"    using DraftWith = {draft_name}<InlineSlots, InlineBytes>;",
+            f"    using stream_writer_type = {writer_name};",
+            f"    using Writer = {writer_name};",
             f"    template<class Shape, std::size_t ByteCapacity = 512>",
             f"    using fixed_type = {fixed_name}<Shape, ByteCapacity>;",
             f"    template<std::size_t ByteCapacity, class... FieldSpecs>",
             f"    using Fixed = {fixed_name}<::nimblefix::Fields<FieldSpecs...>, ByteCapacity>;",
             f"    static constexpr std::string_view msg_type = {_cpp_string(message.msg_type)};",
             f"    inline static constexpr const MessageDescriptor& descriptor = messages[{index}];",
-            f"    static auto make(::nimblefix::MessageLimits limits = {{}});",
-            f"    template<std::size_t InlineSlots, std::size_t InlineBytes = 256>",
-            f"    static auto make(::nimblefix::MessageLimits limits = {{}});",
             "};",
-            "",
-            "template<class... Slots>",
-            f"class {builder} : public ::nimblefix::MessageBuilder<{policy}, {_cpp_string(message.msg_type)}, ::nimblefix::FieldList<Slots...>, 16, 256>, public {setters_mixin}<{builder}<Slots...>> {{",
-            f"    using Base = ::nimblefix::MessageBuilder<{policy}, {_cpp_string(message.msg_type)}, ::nimblefix::FieldList<Slots...>, 16, 256>;",
-            "public:",
-            "    using schema_type = Schema;",
-            "    using Base::Base;",
-            "};",
-            "template<std::size_t InlineSlots, std::size_t InlineBytes, class... Slots>",
-            f"class {sso_builder} : public ::nimblefix::MessageBuilder<{policy}, {_cpp_string(message.msg_type)}, ::nimblefix::FieldList<Slots...>, InlineSlots, InlineBytes>, public {setters_mixin}<{sso_builder}<InlineSlots, InlineBytes, Slots...>> {{",
-            f"    using Base = ::nimblefix::MessageBuilder<{policy}, {_cpp_string(message.msg_type)}, ::nimblefix::FieldList<Slots...>, InlineSlots, InlineBytes>;",
-            "public:",
-            "    using schema_type = Schema;",
-            "    using Base::Base;",
-            "};",
-            f"inline auto {name}::make(::nimblefix::MessageLimits limits) {{ return {builder}<>{{limits}}; }}",
-            f"template<std::size_t InlineSlots, std::size_t InlineBytes>",
-            f"inline auto {name}::make(::nimblefix::MessageLimits limits) {{ return {sso_builder}<InlineSlots, InlineBytes>{{limits}}; }}",
             "",
         ]
 

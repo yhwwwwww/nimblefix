@@ -98,18 +98,18 @@ void run_backend_roundtrip(nf::IoBackendKind backend_kind, std::size_t sessions_
     CHECK(acceptor.template on<fix::NewOrderSingle>(
         [&](nf::SessionContext& ctx, const fix::NewOrderSingleView& req) -> nf::Status {
             acc_received.fetch_add(1, std::memory_order_relaxed);
-            auto er = fix::ExecutionReport::make()
-                .order_id("ORD-1")
-                .exec_id("EX-1")
-                .cl_ord_id(req.cl_ord_id().value())
-                .exec_type('0')
-                .ord_status('0')
-                .symbol(req.symbol().value())
-                .side(req.side().value())
-                .leaves_qty(nf::Decimal{100, 0})
-                .cum_qty(nf::Decimal{0, 0})
-                .avg_px(nf::Decimal{0, 0});
-            return ctx.send(er).status();
+            return ctx.send_stream<fix::ExecutionReport>([&](auto& w) {
+                w.order_id("ORD-1")
+                 .exec_id("EX-1")
+                 .cl_ord_id(req.cl_ord_id().value())
+                 .exec_type('0')
+                 .ord_status('0')
+                 .symbol(req.symbol().value())
+                 .side(req.side().value())
+                 .leaves_qty(nf::Decimal{100, 0})
+                 .cum_qty(nf::Decimal{0, 0})
+                 .avg_px(nf::Decimal{0, 0});
+            }).status();
         }).ok());
 
     nf::EngineConfig ini_cfg = acc_cfg;
@@ -164,14 +164,15 @@ void run_backend_roundtrip(nf::IoBackendKind backend_kind, std::size_t sessions_
     for (std::size_t s = 0; s < handles.size(); ++s) {
         auto sender = handles[s].sender<fix::Schema>();
         for (int i = 0; i < orders_per_session; ++i) {
-            auto order = fix::NewOrderSingle::make()
-                .cl_ord_id("IO-" + std::to_string(s) + "-" + std::to_string(i))
-                .symbol("AAPL")
-                .side('1')
-                .transact_time("20261123-14:00:00.000")
-                .order_qty(nf::Decimal{100, 0})
-                .ord_type('1');
-            CHECK(sender.send(order).ok());
+            const auto cl_id = "IO-" + std::to_string(s) + "-" + std::to_string(i);
+            CHECK(sender.send_stream<fix::NewOrderSingle>([&](auto& w) {
+                w.cl_ord_id(cl_id)
+                 .symbol("AAPL")
+                 .side('1')
+                 .transact_time("20261123-14:00:00.000")
+                 .order_qty(nf::Decimal{100, 0})
+                 .ord_type('1');
+            }).ok());
         }
     }
 
@@ -230,11 +231,11 @@ void test_abrupt_disconnect_and_reconnect(nf::IoBackendKind backend_kind) {
     CHECK(acceptor.add_listener({"main", {"127.0.0.1", port}}).ok());
     CHECK(acceptor.add_acceptor({"acc-0", "main", "SELL", "BUY-0"}).ok());
     CHECK(acceptor.on<fix::NewOrderSingle>([&](nf::SessionContext& ctx, const fix::NewOrderSingleView& req) {
-        auto er = fix::ExecutionReport::make()
-            .order_id("ORD-1").exec_id("EX-1").cl_ord_id(req.cl_ord_id().value())
-            .exec_type('0').ord_status('0').symbol("AAPL").side('1')
-            .leaves_qty(nf::Decimal{100, 0}).cum_qty(nf::Decimal{0, 0}).avg_px(nf::Decimal{0, 0});
-        return ctx.send(er).status();
+        return ctx.send_stream<fix::ExecutionReport>([&](auto& w) {
+            w.order_id("ORD-1").exec_id("EX-1").cl_ord_id(req.cl_ord_id().value())
+             .exec_type('0').ord_status('0').symbol("AAPL").side('1')
+             .leaves_qty(nf::Decimal{100, 0}).cum_qty(nf::Decimal{0, 0}).avg_px(nf::Decimal{0, 0});
+        }).status();
     }).ok());
 
     std::thread acc_thread([&] { (void)acceptor.run(); });
@@ -273,11 +274,12 @@ void test_abrupt_disconnect_and_reconnect(nf::IoBackendKind backend_kind) {
         }
         auto sender = h.value().sender<fix::Schema>();
         for (int i = 0; i < 10; ++i) {
-            auto order = fix::NewOrderSingle::make()
-                .cl_ord_id("CYC-" + std::to_string(cycle) + "-" + std::to_string(i))
-                .symbol("AAPL").side('1').transact_time("20261123-14:00:00.000")
-                .order_qty(nf::Decimal{100, 0}).ord_type('1');
-            CHECK(sender.send(order).ok());
+            const auto cl_id = "CYC-" + std::to_string(cycle) + "-" + std::to_string(i);
+            CHECK(sender.send_stream<fix::NewOrderSingle>([&](auto& w) {
+                w.cl_ord_id(cl_id)
+                 .symbol("AAPL").side('1').transact_time("20261123-14:00:00.000")
+                 .order_qty(nf::Decimal{100, 0}).ord_type('1');
+            }).ok());
         }
         const auto d2 = std::chrono::steady_clock::now() + std::chrono::seconds(3);
         while (got.load() < 10 && std::chrono::steady_clock::now() < d2) {

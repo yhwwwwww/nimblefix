@@ -210,17 +210,22 @@ int main(int argc, char** argv) {
             .set<40>('2').set<44>("150.25"_dec);
         encode(value, buffer);
     });
-    measure("generated_build_encode", iterations, [&](std::size_t i) {
-        auto value = nf::fix44_sample::NewOrderSingle::make().cl_ord_id("DEMO-001")
-            .symbol("AAPL").side('1').transact_time("20261026-12:00:00.000")
-            .order_qty(static_cast<int>(i % 1000 + 1)).ord_type('2').price("150.25"_dec);
-        encode(value, buffer);
+    measure("generated_stream_encode", iterations, [&](std::size_t i) {
+        const auto enc = nf::encode_fix44_stream<nf::fix44_sample::NewOrderSingle>(header, buffer, [&](auto& w) {
+            w.cl_ord_id("DEMO-001").symbol("AAPL").side('1').transact_time("20261026-12:00:00.000")
+             .order_qty(static_cast<int>(i % 1000 + 1)).ord_type('2').price("150.25"_dec);
+        });
+        require(enc.ok());
+        consume(buffer.data(), enc.value());
     });
-    measure("generated_tag_build_encode", iterations, [&](std::size_t i) {
-        auto value = nf::fix44_sample::NewOrderSingle::make().set<11>("DEMO-001")
-            .set<55>("AAPL").set<54>('1').set<60>("20261026-12:00:00.000")
-            .set<38>(static_cast<int>(i % 1000 + 1)).set<40>('2').set<44>("150.25"_dec);
-        encode(value, buffer);
+    measure("generated_tag_stream_encode", iterations, [&](std::size_t i) {
+        const auto enc = nf::encode_fix44_stream<nf::fix44_sample::NewOrderSingle>(header, buffer,
+            [&](nf::fix44_sample::NewOrderSingle::Writer& w) {
+                w.set<11>("DEMO-001").set<55>("AAPL").set<54>('1').set<60>("20261026-12:00:00.000")
+                 .set<38>(static_cast<int>(i % 1000 + 1)).set<40>('2').set<44>("150.25"_dec);
+            });
+        require(enc.ok());
+        consume(buffer.data(), enc.value());
     });
     std::array<nf::FieldView, 32> scratch;
     measure("frame_flat_parse", iterations, [&](std::size_t) {

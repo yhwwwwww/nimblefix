@@ -175,20 +175,18 @@ void test_sender_owned_message_repeating_group_relocation() {
     for (int i = 0; i < 400 && !cli_active.load(std::memory_order_acquire); ++i) ::usleep(5000);
     CHECK(cli_active.load());
 
-    // Build NewOrderSingle with attached repeating group and send via cross-thread Sender!
-    auto p1 = fix44::NoPartyIDsGroupEntry::make().party_id("P1").party_id_source('D').party_role(1);
-    auto p2 = fix44::NoPartyIDsGroupEntry::make().party_id("P2").party_id_source('D').party_role(3);
-    fix44::NoPartyIDsGroup<4> parties;
-    CHECK(parties.add(std::move(p1)).ok());
-    CHECK(parties.add(std::move(p2)).ok());
-    auto order = fix44::NewOrderSingle::make()
-        .cl_ord_id("GRP-SEND-1")
-        .no_party_i_ds(std::move(parties))
-        .symbol("AAPL")
-        .side('1')
-        .transact_time(t0)
-        .ord_type('1');
-    const auto sent = sender.send(order);
+    // Stream NewOrderSingle with repeating group directly via cross-thread Sender!
+    const auto sent = sender.send_stream<fix44::NewOrderSingle>([&](auto& w) {
+        w.cl_ord_id("GRP-SEND-1")
+         .no_party_i_ds(2, [](auto& g) {
+             g.entry().party_id("P1").party_id_source('D').party_role(1);
+             g.entry().party_id("P2").party_id_source('D').party_role(3);
+         })
+         .symbol("AAPL")
+         .side('1')
+         .transact_time(t0)
+         .ord_type('1');
+    });
     CHECK(sent.ok());
 
     for (int i = 0; i < 400 && !got_group.load(std::memory_order_acquire); ++i) ::usleep(5000);
@@ -201,31 +199,28 @@ void test_sender_owned_message_repeating_group_relocation() {
     std::filesystem::remove_all(dir);
 }
 
-void test_direct_static_group_and_inline_arena_overflow() {
+void test_streaming_nested_groups_and_validation() {
     std::array<char, 2048> wire{};
     std::array<nf::FieldView, 64> scratch{};
 
-    // 1. Direct single & multi heterogeneous entries (compile-time StaticGroup, no container)
+    // 1. Two-level nested repeating group streaming (NoPartyIDs -> NoPartySubIDs)
     {
-        auto order = fix44::NewOrderSingle::make()
-            .cl_ord_id("STATIC-1")
-            .symbol("AAPL")
-            .side('1')
-            .transact_time(t0)
-            .ord_type('1')
-            .no_party_i_ds(
-                fix44::NoPartyIDsGroupEntry::make()
-                    .party_id("CLIENT1").party_id_source('D').party_role(1),
-                fix44::NoPartyIDsGroupEntry::make()
-                    .party_id("BROKER2").party_id_source('D').party_role(17)
-                    .no_party_sub_i_ds(
-                        fix44::NoPartySubIDsGroupEntry::make()
-                            .party_sub_id("DESK-A").party_sub_id_type(1),
-                        fix44::NoPartySubIDsGroupEntry::make()
-                            .party_sub_id("TRADER-B").party_sub_id_type(3)
-                    )
-            );
-        const auto enc = nf::encode_fix44(order, nf::SessionHeader{"BUY", "SELL", 2, t0}, wire);
+        const auto enc = nf::encode_fix44_stream<fix44::NewOrderSingle>(
+            nf::SessionHeader{"BUY", "SELL", 2, t0}, wire, [&](auto& w) {
+                w.cl_ord_id("STREAM-NESTED-1")
+                 .symbol("AAPL")
+                 .side('1')
+                 .transact_time(t0)
+                 .ord_type('1')
+                 .no_party_i_ds(2, [](auto& g) {
+                     g.entry().party_id("CLIENT1").party_id_source('D').party_role(1);
+                     g.entry().party_id("BROKER2").party_id_source('D').party_role(17)
+                         .no_party_sub_i_ds(2, [](auto& sg) {
+                             sg.entry().party_sub_id("DESK-A").party_sub_id_type(1);
+                             sg.entry().party_sub_id("TRADER-B").party_sub_id_type(3);
+                         });
+                 });
+            });
         CHECK(enc.ok());
         if (enc.ok()) {
             nf::FrameView frame{};
@@ -252,39 +247,58 @@ void test_direct_static_group_and_inline_arena_overflow() {
         }
     }
 
-    // 2. StaticGroup missing delimiter rejection
+    // 2. Group delimiter-first enforcement (setting non-delimiter field first must fail)
     {
-        auto bad = fix44::NewOrderSingle::make()
-            .cl_ord_id("STATIC-BAD")
-            .symbol("AAPL")
-            .side('1')
-            .transact_time(t0)
-            .ord_type('1')
-            .no_party_i_ds(
-                fix44::NoPartyIDsGroupEntry::make().party_id_source('D').party_role(1)
-            );
-        const auto enc = nf::encode_fix44(bad, nf::SessionHeader{"BUY", "SELL", 3, t0}, wire);
+        const auto enc = nf::encode_fix44_stream<fix44::NewOrderSingle>(
+            nf::SessionHeader{"BUY", "SELL", 3, t0}, wire, [&](auto& w) {
+                w.cl_ord_id("STREAM-BAD-DELIM")
+                 .symbol("AAPL")
+                 .side('1')
+                 .transact_time(t0)
+                 .ord_type('1')
+                 .no_party_i_ds(1, [](auto& g) {
+                     g.entry().party_id_source('D').party_role(1);
+                 });
+            });
         CHECK(!enc.ok());
         CHECK(enc.status().code == nf::ErrorCode::required_field_missing);
+        CHECK(enc.status().tag == 448);
     }
 
-    // 3. OwnedGroupBuilder tiny 64B inline arena forcing seamless heap spill + reset() reuse
+    // 3. Entry count mismatch rejection (declared 2, wrote 1)
     {
-        fix44::NoPartyIDsGroup<6, 64> parties;
-        for (int i = 0; i < 4; ++i) {
-            const std::string id = "PARTY-LONG-ID-" + std::to_string(i);
-            CHECK(parties.add(fix44::NoPartyIDsGroupEntry::make()
-                .party_id(id).party_id_source('D').party_role(i + 1)).ok());
-        }
-        auto moved_parties = std::move(parties);
-        auto order = fix44::NewOrderSingle::make()
-            .cl_ord_id("SPILL-1")
-            .symbol("AAPL")
-            .side('1')
-            .transact_time(t0)
-            .ord_type('1')
-            .no_party_i_ds(std::move(moved_parties));
-        const auto enc = nf::encode_fix44(order, nf::SessionHeader{"BUY", "SELL", 4, t0}, wire);
+        const auto enc = nf::encode_fix44_stream<fix44::NewOrderSingle>(
+            nf::SessionHeader{"BUY", "SELL", 4, t0}, wire, [&](auto& w) {
+                w.cl_ord_id("STREAM-BAD-COUNT")
+                 .symbol("AAPL")
+                 .side('1')
+                 .transact_time(t0)
+                 .ord_type('1')
+                 .no_party_i_ds(2, [](auto& g) {
+                     g.entry().party_id("ONLY-ONE").party_id_source('D').party_role(1);
+                 });
+            });
+        CHECK(!enc.ok());
+        CHECK(enc.status().code == nf::ErrorCode::invalid_value);
+        CHECK(enc.status().tag == 453);
+    }
+
+    // 4. Dynamic loop inside repeating group (runtime count & dynamic entries)
+    {
+        const auto enc = nf::encode_fix44_stream<fix44::NewOrderSingle>(
+            nf::SessionHeader{"BUY", "SELL", 5, t0}, wire, [&](auto& w) {
+                w.cl_ord_id("LOOP-1")
+                 .symbol("AAPL")
+                 .side('1')
+                 .transact_time(t0)
+                 .ord_type('1')
+                 .no_party_i_ds(4, [](auto& g) {
+                     for (int i = 0; i < 4; ++i) {
+                         const std::string id = "PARTY-LONG-ID-" + std::to_string(i);
+                         g.entry().party_id(id).party_id_source('D').party_role(i + 1);
+                     }
+                 });
+            });
         CHECK(enc.ok());
         if (enc.ok()) {
             nf::FrameView frame{};
@@ -300,31 +314,6 @@ void test_direct_static_group_and_inline_arena_overflow() {
                 CHECK(parsed_parties.value().at(3).get<448>().value() == "PARTY-LONG-ID-3");
             }
         }
-
-        // Reuse via reset()
-        fix44::NoPartyIDsGroup<4> reusable;
-        CHECK(reusable.add(fix44::NoPartyIDsGroupEntry::make()
-            .party_id("FIRST").party_id_source('D').party_role(1)).ok());
-        CHECK(reusable.size() == 1);
-        reusable.reset();
-        CHECK(reusable.empty());
-        CHECK(reusable.add(fix44::NoPartyIDsGroupEntry::make()
-            .party_id("SECOND").party_id_source('D').party_role(3)).ok());
-        CHECK(reusable.size() == 1);
-        auto order2 = fix44::NewOrderSingle::make()
-            .cl_ord_id("REUSE-1").symbol("AAPL").side('1').transact_time(t0).ord_type('1')
-            .no_party_i_ds(std::move(reusable));
-        const auto enc2 = nf::encode_fix44(order2, nf::SessionHeader{"BUY", "SELL", 5, t0}, wire);
-        CHECK(enc2.ok());
-        if (enc2.ok()) {
-            nf::FrameView frame{};
-            CHECK(nf::inspect_frame({wire.data(), enc2.value()}, frame, fix44::Schema::wire_hints()).ok());
-            nf::FlatMessageView msg{};
-            CHECK(nf::parse_flat_verified(frame, scratch, msg, fix44::Schema::wire_hints()).ok());
-            CHECK(nf::validate_schema_message(fix44::Schema::descriptor(), msg, nf::ValidationLevel::strict).ok());
-            const auto p = msg.as<fix44::NewOrderSingle>().no_party_i_ds();
-            CHECK(p.ok() && p.value().size() == 1 && p.value().at(0).get<448>().value() == "SECOND");
-        }
     }
 }
 
@@ -333,7 +322,7 @@ void test_direct_static_group_and_inline_arena_overflow() {
 int main() {
     test_two_level_nested_repeating_group_parsing_and_validation();
     test_sender_owned_message_repeating_group_relocation();
-    test_direct_static_group_and_inline_arena_overflow();
+    test_streaming_nested_groups_and_validation();
     if (failures != 0) {
         std::cerr << failures << " nested group test(s) failed\n";
         return 1;

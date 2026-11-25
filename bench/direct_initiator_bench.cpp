@@ -417,7 +417,44 @@ bool run_user_encode_bench(std::size_t warmup, std::size_t samples) {
 
     const auto stats = compute_stats(enc_ns, g_alloc_calls);
     std::cout << "=== 0.1.0-Parity Workload: Full 912-Field FIX 4.4 Schema | NewOrderSingle (7 fields + Price + NoPartyIDs[3]) & ExecutionReport (11 fields) ===\n";
-    print_ns_row("  User Encode (in-loop fill + encode_fix44 only, no session/journal)", stats, "msgs/sec");
+    print_ns_row("  User Encode (Fixed in-loop fill + encode_fix44, no session/journal)", stats, "msgs/sec");
+
+    // StreamWriter comparison on identical workload
+    for (std::size_t i = 0; i < warmup; ++i) {
+        nf::SessionHeader h{"BUY", "SELL", i + 2, wt};
+        if (!nf::encode_fix44_stream<fix::NewOrderSingle>(h, wire, [&](auto& w) {
+            w.cl_ord_id("ORD-000001").symbol("AAPL").side('1').transact_time(wt)
+             .order_qty(nf::Decimal{100, 0}).ord_type('2').price(nf::Decimal{18525, 2})
+             .no_party_i_ds(1, [](auto& g) {
+                 g.entry().party_id("CLIENT1").party_id_source('D').party_role(1);
+             });
+        }).ok()) return false;
+    }
+    std::vector<std::uint64_t> stream_ns;
+    stream_ns.reserve(samples);
+    sink = 0;
+    g_alloc_calls = 0;
+    g_track_alloc = true;
+    for (std::size_t i = 0; i < samples; ++i) {
+        nf::SessionHeader h{"BUY", "SELL", i + 2, wt};
+        const std::uint64_t t0 = now_ns();
+        const auto res = nf::encode_fix44_stream<fix::NewOrderSingle>(h, wire, [&](auto& w) {
+            w.cl_ord_id("ORD-000001").symbol("AAPL").side('1').transact_time(wt)
+             .order_qty(nf::Decimal{100, 0}).ord_type('2').price(nf::Decimal{18525, 2})
+             .no_party_i_ds(1, [](auto& g) {
+                 g.entry().party_id("CLIENT1").party_id_source('D').party_role(1);
+             });
+        });
+        const std::uint64_t t1 = now_ns();
+        if (!res.ok()) { g_track_alloc = false; return false; }
+        sink += static_cast<unsigned char>(wire[res.value() - 1]);
+        stream_ns.push_back(t1 - t0);
+    }
+    g_track_alloc = false;
+    const volatile std::uint64_t keep_stream = sink;
+    (void)keep_stream;
+    const auto stream_stats = compute_stats(stream_ns, g_alloc_calls);
+    print_ns_row("  User Encode (StreamWriter encode_fix44_stream, no session/journal)", stream_stats, "msgs/sec");
     return true;
 }
 
@@ -479,10 +516,17 @@ bool run_pre_tcp_bench(std::size_t warmup, std::size_t samples, LatencyStats& co
         return true;
     };
 
+    auto stream_order = [&](auto& w) noexcept {
+        w.cl_ord_id("ORD-000001").symbol("AAPL").side('1').transact_time(wt)
+         .order_qty(nf::Decimal{100, 0}).ord_type('2').price(nf::Decimal{18525, 2})
+         .no_party_i_ds(1, [](auto& g) noexcept {
+             g.entry().party_id("CLIENT1").party_id_source('D').party_role(1);
+         });
+    };
+
     // Warmup
     for (std::size_t i = 0; i < warmup; ++i) {
-        if (!order.populate("ORD-000001").ok()) { std::filesystem::remove_all(dir); return false; }
-        if (!init.send(order).ok()) { std::filesystem::remove_all(dir); return false; }
+        if (!init.send_stream<fix::NewOrderSingle>(stream_order).ok()) { std::filesystem::remove_all(dir); return false; }
         if (!feed_next_er()) { std::filesystem::remove_all(dir); return false; }
         const auto target = init.handler().received + 1;
         if (!init.poll_once().ok() || init.handler().received != target) {
@@ -503,12 +547,11 @@ bool run_pre_tcp_bench(std::size_t warmup, std::size_t samples, LatencyStats& co
     std::uint64_t rx_allocs = 0;
 
     for (std::size_t i = 0; i < samples; ++i) {
-        // 1. Outbound (pre-TCP): in-loop populate (7 scalars + NoPartyIDs group[3]) + encode into v2 mmap Journal + SSE4.2 CRC32C + SessionCore + write handoff
+        // 1. Outbound (pre-TCP): DirectInitiator::send_stream (7 scalars + NoPartyIDs[3]) directly into v2 mmap Journal + SSE4.2 CRC32C + SessionCore + write handoff
         g_alloc_calls = 0;
         g_track_alloc = true;
         const std::uint64_t t0 = now_ns();
-        if (!order.populate("ORD-000001").ok()) { g_track_alloc = false; std::filesystem::remove_all(dir); return false; }
-        if (!init.send(order).ok()) { g_track_alloc = false; std::filesystem::remove_all(dir); return false; }
+        if (!init.send_stream<fix::NewOrderSingle>(stream_order).ok()) { g_track_alloc = false; std::filesystem::remove_all(dir); return false; }
         const std::uint64_t t1 = now_ns();
         g_track_alloc = false;
         tx_allocs += g_alloc_calls;
@@ -549,7 +592,7 @@ bool run_pre_tcp_bench(std::size_t warmup, std::size_t samples, LatencyStats& co
 
     std::cout << "\n=== Pre-TCP Session Engine (In-Memory Transport, Full FIX 4.4 Schema + v2 mmap Journal, "
               << samples << " samples, warmup " << warmup << ") ===\n";
-    print_ns_row("  Session Outbound (in-loop fill + DirectInitiator::send + v2 mmap Journal)", tx_stats, "msgs/sec");
+    print_ns_row("  Session Outbound (DirectInitiator::send_stream + v2 mmap Journal)", tx_stats, "msgs/sec");
     print_ns_row("  Session Inbound  (recv + frame + parse + full FIX 4.4 Schema + v2 mmap Journal + callback)",
                  rx_stats, "msgs/sec");
     print_ns_row("  Combined (Outbound + Inbound pure FIX engine budget)", combined_out, "round-trips/sec");
@@ -600,12 +643,18 @@ bool run_tcp_bench(std::size_t warmup, std::size_t samples, LatencyStats& tcp_ou
         }
     }
 
-    ReusablePartyOrder order;
+    constexpr std::string_view wt{"20261123-00:00:00.000"};
+    auto stream_order = [&](auto& w) noexcept {
+        w.cl_ord_id("ORD-000001").symbol("AAPL").side('1').transact_time(wt)
+         .order_qty(nf::Decimal{100, 0}).ord_type('2').price(nf::Decimal{18525, 2})
+         .no_party_i_ds(1, [](auto& g) noexcept {
+             g.entry().party_id("CLIENT1").party_id_source('D').party_role(1);
+         });
+    };
 
     for (std::size_t i = 0; i < warmup; ++i) {
         const auto target = init.handler().received + 1;
-        if (!order.populate("ORD-000001").ok()) { peer.finish(); std::filesystem::remove_all(dir); return false; }
-        if (!init.send(order).ok()) { peer.finish(); std::filesystem::remove_all(dir); return false; }
+        if (!init.send_stream<fix::NewOrderSingle>(stream_order).ok()) { peer.finish(); std::filesystem::remove_all(dir); return false; }
         while (init.handler().received < target) {
             if (!init.poll_once().ok()) { peer.finish(); std::filesystem::remove_all(dir); return false; }
         }
@@ -620,8 +669,7 @@ bool run_tcp_bench(std::size_t warmup, std::size_t samples, LatencyStats& tcp_ou
         const auto target = init.handler().received + 1;
         g_track_alloc = true;
         const std::uint64_t t0 = now_ns();
-        if (!order.populate("ORD-000001").ok()) { g_track_alloc = false; peer.finish(); std::filesystem::remove_all(dir); return false; }
-        if (!init.send(order).ok()) { g_track_alloc = false; peer.finish(); std::filesystem::remove_all(dir); return false; }
+        if (!init.send_stream<fix::NewOrderSingle>(stream_order).ok()) { g_track_alloc = false; peer.finish(); std::filesystem::remove_all(dir); return false; }
         while (init.handler().received < target) {
             if (!init.poll_once().ok()) { g_track_alloc = false; peer.finish(); std::filesystem::remove_all(dir); return false; }
         }

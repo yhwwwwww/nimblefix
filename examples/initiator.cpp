@@ -63,12 +63,12 @@ int main(int argc, char** argv) try {
         try {
             const auto order = example::parse_order(line);
             pending.reserve(order.id);
-            auto message = nf::fix44::NewOrderSingle::make()
-                .cl_ord_id(order.id).handl_inst('1').symbol(order.symbol).side(order.side)
-                .transact_time(example::utc_now()).order_qty(order.quantity)
-                .ord_type(order.market ? '1' : '2');
-            const auto sent = order.market ? sender.send(message)
-                : sender.send(std::move(message).price(order.price));
+            const auto sent = sender.send_stream<nf::fix44::NewOrderSingle>([&](auto& w) {
+                w.cl_ord_id(order.id).handl_inst('1').symbol(order.symbol).side(order.side)
+                 .transact_time(example::utc_now()).order_qty(order.quantity)
+                 .ord_type(order.market ? '1' : '2');
+                if (!order.market) w.price(order.price);
+            });
             if (!sent.ok()) {
                 pending.discard(order.id);
                 example::error("REJECTED ClOrdID=", order.id, " reason=", sent.status().message());

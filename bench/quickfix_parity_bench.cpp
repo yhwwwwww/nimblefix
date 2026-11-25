@@ -590,21 +590,21 @@ bool run_suite1_encode(std::size_t warmup, std::size_t samples,
         nf_fixed = compute_stats(std::move(lats), g_alloc_calls.load());
     }
 
-    // 1B. NimbleFIX idiomatic fluent make() + direct entry (compile-time StaticGroup, 0-alloc)
-    Stats nf_static_fluent{};
+    // 1B. NimbleFIX StreamWriter (0-alloc, zero intermediate objects, dynamic groups/if)
+    Stats nf_stream{};
     {
         std::array<char, 1024> wire{};
         char id_buf[32];
         auto run_one = [&](std::size_t i) -> std::size_t {
             const auto cid = format_ord_id(id_buf, sizeof(id_buf), i);
-            auto order = fix::NewOrderSingle::make()
-                .cl_ord_id(cid).symbol("AAPL").side('1').transact_time(kFixedUtc)
-                .order_qty(nf::Decimal{100, 0}).ord_type('2').price(nf::Decimal{18525, 2})
-                .no_party_i_ds(
-                    fix::NoPartyIDsGroupEntry::make()
-                        .party_id("CLIENT1").party_id_source('D').party_role(1)
-                );
-            const auto r = nf::encode_fix44(order, nf::SessionHeader{"BUY", "SELL", i + 2, kFixedUtc}, wire);
+            const auto r = nf::encode_fix44_stream<fix::NewOrderSingle>(
+                nf::SessionHeader{"BUY", "SELL", i + 2, kFixedUtc}, wire, [&](auto& w) {
+                    w.cl_ord_id(cid).symbol("AAPL").side('1').transact_time(kFixedUtc)
+                     .order_qty(nf::Decimal{100, 0}).ord_type('2').price(nf::Decimal{18525, 2})
+                     .no_party_i_ds(1, [](auto& g) {
+                         g.entry().party_id("CLIENT1").party_id_source('D').party_role(1);
+                     });
+                });
             return r.ok() ? r.value() : 0;
         };
         for (std::size_t i = 0; i < warmup; ++i) sink += run_one(i);
@@ -621,44 +621,10 @@ bool run_suite1_encode(std::size_t warmup, std::size_t samples,
             lats.push_back(t1 - t0);
         }
         g_track_alloc.store(false, std::memory_order_release);
-        nf_static_fluent = compute_stats(std::move(lats), g_alloc_calls.load());
+        nf_stream = compute_stats(std::move(lats), g_alloc_calls.load());
     }
 
-    // 1C. NimbleFIX fluent make() + runtime dynamic NoPartyIDsGroup<> (1 KB inline arena)
-    Stats nf_fluent{};
-    {
-        std::array<char, 1024> wire{};
-        char id_buf[32];
-        auto run_one = [&](std::size_t i) -> std::size_t {
-            const auto cid = format_ord_id(id_buf, sizeof(id_buf), i);
-            fix::NoPartyIDsGroup<> parties;
-            (void)parties.add(fix::NoPartyIDsGroupEntry::make()
-                .party_id("CLIENT1").party_id_source('D').party_role(1));
-            auto order = fix::NewOrderSingle::make()
-                .cl_ord_id(cid).symbol("AAPL").side('1').transact_time(kFixedUtc)
-                .order_qty(nf::Decimal{100, 0}).ord_type('2').price(nf::Decimal{18525, 2})
-                .no_party_i_ds(std::move(parties));
-            const auto r = nf::encode_fix44(order, nf::SessionHeader{"BUY", "SELL", i + 2, kFixedUtc}, wire);
-            return r.ok() ? r.value() : 0;
-        };
-        for (std::size_t i = 0; i < warmup; ++i) sink += run_one(i);
-        std::vector<std::uint64_t> lats;
-        lats.reserve(samples);
-        g_alloc_calls.store(0, std::memory_order_relaxed);
-        g_track_alloc.store(true, std::memory_order_release);
-        for (std::size_t i = 0; i < samples; ++i) {
-            const std::uint64_t t0 = now_ns();
-            const auto n = run_one(i);
-            const std::uint64_t t1 = now_ns();
-            if (n == 0) { g_track_alloc.store(false); return false; }
-            sink += static_cast<unsigned char>(wire[n - 1]);
-            lats.push_back(t1 - t0);
-        }
-        g_track_alloc.store(false, std::memory_order_release);
-        nf_fluent = compute_stats(std::move(lats), g_alloc_calls.load());
-    }
-
-    // 1D. QuickFIX FIX44::NewOrderSingle + NoPartyIDs + toString()
+    // 1C. QuickFIX FIX44::NewOrderSingle + NoPartyIDs + toString()
     Stats qf_stats{};
     {
         std::string wire;
@@ -696,9 +662,8 @@ bool run_suite1_encode(std::size_t warmup, std::size_t samples,
     }
 
     (void)static_cast<std::uint64_t>(sink);
+    print_row_ns("NimbleFIX StreamWriter + PartyGroup (0-alloc)", nf_stream, &qf_stats);
     print_row_ns("NimbleFIX Fixed + PartyGroup (0-alloc)", nf_fixed, &qf_stats);
-    print_row_ns("NimbleFIX make() + direct entry (static)", nf_static_fluent, &qf_stats);
-    print_row_ns("NimbleFIX make() + NoPartyIDs<> (dynamic)", nf_fluent, &qf_stats);
     print_row_ns("QuickFIX FIX44::NewOrderSingle::toString", qf_stats);
     return true;
 }
@@ -860,13 +825,21 @@ bool run_nf_direct_initiator_rtt(std::size_t warmup, std::size_t samples, Stats&
         if (!init.poll_once().ok()) return false;
     }
 
-    ReusablePartyOrder order;
     char id_buf[32];
+    auto write_order = [&](std::string_view cid) noexcept {
+        return [cid](auto& w) noexcept {
+            w.cl_ord_id(cid).symbol("AAPL").side('1').transact_time(kFixedUtc)
+             .order_qty(nf::Decimal{100, 0}).ord_type('2').price(nf::Decimal{18525, 2})
+             .no_party_i_ds(1, [](auto& g) noexcept {
+                 g.entry().party_id("CLIENT1").party_id_source('D').party_role(1);
+             });
+        };
+    };
     for (std::size_t i = 0; i < warmup; ++i) {
         const auto cid = format_ord_id(id_buf, sizeof(id_buf), i);
         init.handler().expected_id = cid;
         const auto target = init.handler().received + 1;
-        if (!order.populate(cid).ok() || !init.send(order).ok()) return false;
+        if (!init.send_stream<fix::NewOrderSingle>(write_order(cid)).ok()) return false;
         while (init.handler().received < target) {
             if (!init.poll_once().ok()) return false;
         }
@@ -883,7 +856,7 @@ bool run_nf_direct_initiator_rtt(std::size_t warmup, std::size_t samples, Stats&
         const auto target = init.handler().received + 1;
         g_track_alloc.store(true, std::memory_order_release);
         const std::uint64_t t0 = now_ns();
-        if (!order.populate(cid).ok() || !init.send(order).ok()) { g_track_alloc.store(false); return false; }
+        if (!init.send_stream<fix::NewOrderSingle>(write_order(cid)).ok()) { g_track_alloc.store(false); return false; }
         while (init.handler().received < target) {
             if (!init.poll_once().ok()) { g_track_alloc.store(false); return false; }
         }
@@ -1399,18 +1372,23 @@ bool run_nf_direct_burst(bool batched, std::size_t warmup_bursts,
         if (!init.poll_once().ok()) return false;
     }
 
-    ReusablePartyOrder order;
     char id_buf[64];
 
     auto send_burst = [&](std::uint64_t t_burst) -> bool {
         for (std::size_t j = 0; j < burst_size; ++j) {
             const std::uint64_t t_send = now_ns();
             const auto cid = format_burst_id(id_buf, sizeof(id_buf), t_burst, t_send);
-            if (!order.populate(cid).ok()) return false;
+            auto write_order = [cid](auto& w) noexcept {
+                w.cl_ord_id(cid).symbol("AAPL").side('1').transact_time(kFixedUtc)
+                 .order_qty(nf::Decimal{100, 0}).ord_type('2').price(nf::Decimal{18525, 2})
+                 .no_party_i_ds(1, [](auto& g) noexcept {
+                     g.entry().party_id("CLIENT1").party_id_source('D').party_role(1);
+                 });
+            };
             if (batched) {
-                if (!init.enqueue(order).ok()) return false;
+                if (!init.enqueue_stream<fix::NewOrderSingle>(write_order).ok()) return false;
             } else {
-                if (!init.send(order).ok()) return false;
+                if (!init.send_stream<fix::NewOrderSingle>(write_order).ok()) return false;
             }
         }
         if (batched) {

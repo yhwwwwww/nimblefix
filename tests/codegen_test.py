@@ -43,7 +43,7 @@ class SchemaCodegenTests(unittest.TestCase):
 
         self.assertEqual(first, second)
         self.assertIn("struct NewOrderSingle", first)
-        self.assertIn("class NewOrderSingleBuilder", first)
+        self.assertIn("class NewOrderSingleStreamWriter", first)
         self.assertIn("struct Schema", first)
         self.assertIn('version = "4.4.0"', first)
         self.assertIn("cl_ord_id(V&& value)", first)
@@ -209,9 +209,13 @@ class SchemaCodegenTests(unittest.TestCase):
         )
         output = codegen.render_header(codegen.load_schema([path]), "nimblefix::fixture")
         self.assertIn("GroupDescriptor", output)
-        self.assertIn("OwnedGroupBuilder<453u, 448u", output)
-        self.assertIn("OwnedGroupBuilder<802u, 523u", output)
-        self.assertIn("static_assert(std::remove_cvref_t<G>::count_tag == 453u", output)
+        self.assertIn("class NoPartyIDsGroupStreamScope", output)
+        self.assertIn("count_tag = 453u;", output)
+        self.assertIn("delimiter_tag = 448u;", output)
+        self.assertIn("class NoPartySubIDsGroupStreamScope", output)
+        self.assertIn("count_tag = 802u;", output)
+        self.assertIn("delimiter_tag = 523u;", output)
+        self.assertIn("no_party_i_ds(std::size_t count, Fn&& fn)", output)
         self.assertIn("GroupCountTag<nimblefix::fixture::NewOrderSinglePolicy, 453>", output)
 
     def test_data_field_type_generates_binary_data_metadata(self):

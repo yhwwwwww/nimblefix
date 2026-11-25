@@ -90,6 +90,22 @@ public:
         return send(static_cast<const std::remove_reference_t<Message>&>(message));
     }
 
+    template <class Message, class Fn>
+        requires detail::streamable_message<Message>
+    [[nodiscard]] Result<SendReceipt> send_stream(Fn&& fn) const noexcept {
+        static_assert(!requires { requires Message::is_group_entry; },
+            "repeating group entries cannot be sent as standalone FIX messages");
+        if constexpr (!std::is_same_v<Schema, FlatSchema>) {
+            static_assert(std::is_same_v<Schema, typename Message::schema_type>,
+                "message schema does not match Sender schema");
+        }
+        if (!state_) return Status{ErrorCode::engine_stopped};
+        return detail::stream_body_and_invoke<Message>(std::forward<Fn>(fn),
+            [this](detail::MessageView view) noexcept {
+                return detail::enqueue_sender_message(state_, view, schema_fingerprint_);
+            });
+    }
+
     [[nodiscard]] Result<SendReceipt> receipt(std::uint64_t id) const noexcept {
         if (!state_) return Status{ErrorCode::engine_stopped};
         return detail::query_sender_receipt(state_, id);
@@ -149,6 +165,22 @@ public:
         }
     [[nodiscard]] Result<SendReceipt> send(Message&& message) const noexcept {
         return send(static_cast<const std::remove_reference_t<Message>&>(message));
+    }
+
+    template <class Message, class Fn>
+        requires detail::streamable_message<Message>
+    [[nodiscard]] Result<SendReceipt> send_stream(Fn&& fn) const noexcept {
+        static_assert(!requires { requires Message::is_group_entry; },
+            "repeating group entries cannot be sent as standalone FIX messages");
+        if constexpr (!std::is_same_v<Schema, FlatSchema>) {
+            static_assert(std::is_same_v<Schema, typename Message::schema_type>,
+                "message schema does not match ProducerLane schema");
+        }
+        if (!state_) return Status{ErrorCode::engine_stopped};
+        return detail::stream_body_and_invoke<Message>(std::forward<Fn>(fn),
+            [this](detail::MessageView view) noexcept {
+                return detail::enqueue_producer_lane_message(state_, view, schema_fingerprint_);
+            });
     }
 
     [[nodiscard]] Result<SendReceipt> receipt(std::uint64_t id) const noexcept {

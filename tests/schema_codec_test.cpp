@@ -220,13 +220,15 @@ void test_wide_group_dictionary_and_error_order() {
     CHECK(status.code == ErrorCode::duplicate_field && status.tag == 100);
 }
 
-void test_bounded_owned_group_payload() {
+void test_bounded_group_builder_payload() {
     using namespace nimblefix;
-    OwnedGroupBuilder<453, 448, 1> group;
+    using PartyEntry = FixedMessage<"G", Fields<Field<448, FieldKind::string>>, 32>;
+    GroupBuilder<453, 448, PartyEntry, 1> group;
+    PartyEntry entry_msg;
     std::string transient = "PARTY-OWNED";
-    const auto added = group.add(message<"G">().set<448>(std::string_view{transient}));
-    CHECK(added.ok());
+    CHECK(entry_msg.set<448>(std::string_view{transient}).ok());
     transient.assign("destroyed");
+    CHECK(group.add(std::move(entry_msg)).ok());
     const auto payload = group.view();
     CHECK(payload.entry_count == 1);
     if (payload.entry_count != 1) return;
@@ -235,7 +237,9 @@ void test_bounded_owned_group_payload() {
     CHECK(entry.value_bytes != nullptr);
     if (entry.value_bytes != nullptr)
         CHECK((std::string_view{entry.value_bytes, entry.value_byte_count} == "PARTY-OWNED"));
-    CHECK(group.add(message<"G">().set<448>("SECOND")).code == ErrorCode::capacity_exceeded);
+    PartyEntry second_msg;
+    CHECK(second_msg.set<448>("SECOND").ok());
+    CHECK(group.add(std::move(second_msg)).code == ErrorCode::capacity_exceeded);
 }
 
 } // namespace
@@ -243,7 +247,7 @@ void test_bounded_owned_group_payload() {
 int main() {
     test_scalar_validation();
     test_nested_group_projection_and_validation_levels();
-    test_bounded_owned_group_payload();
+    test_bounded_group_builder_payload();
     test_wide_group_dictionary_and_error_order();
     return failures == 0 ? 0 : 1;
 }

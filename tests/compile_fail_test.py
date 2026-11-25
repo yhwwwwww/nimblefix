@@ -24,12 +24,12 @@ CASES = {
 }
 
 GENERATED_CASES = {
-    "quantity_string": ('auto x = nf::fix44_sample::NewOrderSingle::make().order_qty("bad");', "generated FIX field type"),
-    "tagged_price_string": ('auto x = nf::fix44_sample::NewOrderSingle::make().set<44>("bad");', "generated FIX field type"),
-    "side_integer": ('auto x = nf::fix44_sample::NewOrderSingle::make().side(1);', "generated FIX field type"),
+    "quantity_string": ('auto& w = *static_cast<nf::fix44_sample::NewOrderSingle::Writer*>(nullptr); (void)w.order_qty("bad");', "generated FIX field type"),
+    "tagged_price_string": ('auto& w = *static_cast<nf::fix44_sample::NewOrderSingle::Writer*>(nullptr); (void)w.set<44>("bad");', "generated FIX field type"),
+    "side_integer": ('auto& w = *static_cast<nf::fix44_sample::NewOrderSingle::Writer*>(nullptr); (void)w.side(1);', "generated FIX field type"),
     "typed_generic_callback": ('nf::Engine<nf::fix44_sample::Schema>& e=*static_cast<nf::Engine<nf::fix44_sample::Schema>*>(nullptr); (void)e.on_message([](nf::SessionContext&, const nf::FlatMessageView&) { return nf::Status::success(); });', "on_message"),
     "typed_wrong_view": ('nf::Engine<nf::fix44_sample::Schema>& e=*static_cast<nf::Engine<nf::fix44_sample::Schema>*>(nullptr); (void)e.on<nf::fix44_sample::NewOrderSingle>([](nf::SessionContext&, int) { return nf::Status::success(); });', "on"),
-    "unknown_generated_field": ('auto x = nf::fix44_sample::NewOrderSingle::make().set<900001>("x");', "not allowed"),
+    "unknown_generated_field": ('auto& w = *static_cast<nf::fix44_sample::NewOrderSingle::Writer*>(nullptr); (void)w.set<900001>("x");', "not allowed"),
 }
 
 ENGINE_CASES = {

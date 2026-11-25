@@ -16,52 +16,37 @@ NimbleFIX 0.3 按**用多少付多少**分成三层，全部接口统一使用�
 
 初学者最容易混淆“消息的构造方式”和“网络发送方式”，其实它们完全正交、可以自由组合：
 
-### 1. 怎么构造一条消息（两种风格，按写法习惯二选一）
+### 1. 怎么写一条消息：**流式直接编码 `StreamWriter`（默认主力）** vs **`Fixed` 固定模板**
 
-两种写法默认都在栈上内置 **16 字段槽 + 256B 字符串区（SSO）**，常规订单均为 **0 `malloc`**；遇到偶发超多字段或超长字符串时**自动溢到堆上，绝不拒单**。如果需要更大的栈上免分配阈值，两者都支持直接自定义 `<槽位数, 字节数>`。
-
-**它们的核心区别在于“一次性链式表达式”还是“可逐句修改的普通对象”：**
-
-| 对比维度 | 写法 A：`NewOrderSingle::make()` | 写法 B：`NewOrderSingle::Draft` |
-| :--- | :--- | :--- |
-| **对象性质** | **不可变链式构造器（右值消费）**——必须一条链拼完 | **常规可变对象**——先声明变量，再逐句赋值 |
-| **能否拆开写 `order.symbol(...)`** | **不能**（每次 setter 返回新类型，不能对左值变量继续追加字段） | **可以**，逐句写、链式写都行 |
-| **如何写条件可选字段** | 传 `std::optional`（`nullopt` 自动跳过） | 原生 `if (...) order.price(...)` 和 `std::optional` 都可以 |
-| **覆盖已填字段 / `reset()` 复用** | **不支持**（一次性构造即用） | **支持**（同名字段直接覆盖，循环里 `order.reset()` 原地复用） |
-| **自定义 SSO 容量** | `NewOrderSingle::make<32, 1024>()`（默认 `<16, 256>`） | `NewOrderSingle::DraftWith<32, 1024>`（默认 `<16, 256>`） |
-| **什么时候选它** | 一行链式写完、字段来源直接就是结构体/optional（编译期定序，无运行期排序） | 业务里有多条 `if` 分段拼装、需要改写字段，或在热循环里 `reset()` 复用 |
+NimbleFIX 0.3 默认采用**零中间对象的流式编码 API（`StreamWriter`）**：不构造任何中间消息对象、不排序槽位、不额外拷贝字符串，直接在 `lambda` 里按强类型字段名流式写入目标缓冲区或 mmap Journal，全链路 **0 `malloc`**、原生支持 `if`/`for`、`std::optional`、动态标准头 `w.header()`（如 `50=SenderSubID`、`57=TargetSubID`）以及多层嵌套重复组：
 
 ```cpp
 namespace nf  = nimblefix;
 namespace fix = nimblefix::fix44;
 
-// 写法 A：一次性链式 make()（必须一气呵成拼完；可选字段传 std::optional）
-std::optional<nf::Decimal> opt_price = is_limit ? std::optional{nf::Decimal{15025, 2}} : std::nullopt;
-auto order_a = fix::NewOrderSingle::make() // 如需更大栈缓冲：make<32, 1024>()
-    .cl_ord_id("ORD-001")
-    .symbol("AAPL")
-    .side('1')
-    .transact_time("20261123-09:30:00.000")
-    .order_qty(nf::Decimal{100, 0})
-    .ord_type(is_limit ? '2' : '1')
-    .price(opt_price);                     // 有值就编 44=...，nullopt 自动跳过
-// 注意：下面这样对已有变量追加字段在写法 A 上是不允许的：
-// order_a.price(...);  // ❌ 编译不通过；需要逐句赋值/if 请用写法 B
+const bool is_limit = true;
+const std::optional<nf::Decimal> opt_price = is_limit ? std::optional{nf::Decimal{15025, 2}} : std::nullopt;
 
-// 写法 B：普通可变对象 Draft（支持逐句赋值、原生 if、覆盖改写、reset() 复用）
-fix::NewOrderSingle::Draft order_b;        // 如需更大栈缓冲：DraftWith<32, 1024>
-order_b.cl_ord_id("ORD-001");
-order_b.symbol("AAPL");
-order_b.side('1');
-order_b.transact_time("20261123-09:30:00.000");
-order_b.order_qty(nf::Decimal{100, 0});
-order_b.ord_type(is_limit ? '2' : '1');
-if (is_limit) order_b.price(nf::Decimal{15025, 2}); // 原生 if，随便写
-// 下一笔直接原地复用：
-// order_b.reset();
+// 直接传入 send_stream / enqueue_stream / try_push_stream / encode_fix44_stream：
+auto write_order = [&](auto& w) {
+    // 可选：每笔消息可动态变化的 Standard Header 字段（必须在正文前写入；引擎仅静态缓存 8/9 与 49/56）：
+    // w.header().sender_sub_id("DESK-A").target_sub_id("EXCH-1");
+    w.cl_ord_id("ORD-001")
+     .symbol("AAPL")
+     .side('1')
+     .transact_time("20261123-09:30:00.000")
+     .order_qty(nf::Decimal{100, 0})
+     .ord_type(is_limit ? '2' : '1')
+     .price(opt_price); // std::optional 有值才编，nullopt 自动跳过；也可以用原生 if (is_limit) w.price(...)
+
+    // 重复组（支持嵌套与运行期动态循环，0 堆分配）：
+    // w.no_party_i_ds(1, [](auto& g) {
+    //     g.entry().party_id("CLIENT1").party_id_source('D').party_role(1);
+    // });
+};
 ```
 
-> 无论用写法 A 还是写法 B 构造的消息，都可以直接传给下面任意一种发送方式。
+> 如需长期持有一个“可原地修改并反复重发”的固定字段集合模板，可使用 `fix::NewOrderSingle::Fixed<128, fix::field::ClOrdID, ...>`。
 
 ---
 
@@ -69,20 +54,20 @@ if (is_limit) order_b.price(nf::Decimal{15025, 2}); // 原生 if，随便写
 
 | 发送模式 | API | 适用场景 | 特点 |
 | :--- | :--- | :--- | :--- |
-| **① 单线程直发** | `init.send(order)` | 单笔低频 / Ping-Pong / 追求首笔最低延迟 | 立刻编码进 mmap Journal 并做 1 次非阻塞 `send()`，零跨线程开销 |
-| **② 同线程攒批发送** | `init.enqueue(order)` + `init.flush()` | 同线程密集连发（Burst，如一次扫多档发 10 笔） | 多笔订单先写入 Journal，最后 `flush()` 自动用 **1 次 `sendmsg/writev`** 整批发出 |
-| **③ 双线程无锁 SPSC 队列** | `DirectSendQueue`: 策略线程 `queue.try_push(order)` + I/O 线程 `init.drain(queue)` | 策略计算重 + 密集发单，需要策略核与网络核并行流水线 | 0 锁 0 `malloc`；策略线程把字段编码进无锁环，I/O 线程批量取单、编序列号落盘并 **1 次 `sendmsg/writev`** 发出 |
+| **① 单线程直发** | `init.send_stream<M>(fn)` | 单笔低频 / Ping-Pong / 追求首笔最低延迟 | 直接流式写入 mmap Journal 并做 1 次非阻塞 `send()`，零中间对象、零跨线程开销 |
+| **② 同线程攒批发送** | `init.enqueue_stream<M>(fn)` + `init.flush()` | 同线程密集连发（Burst，如一次扫多档发 10 笔） | 多笔订单直接流式写入 Journal，最后 `flush()` 自动用 **1 次 `sendmsg/writev`** 整批发出 |
+| **③ 双线程无锁 SPSC 队列** | `DirectSendQueue`: 策略线程 `queue.try_push_stream<M>(fn)` + I/O 线程 `init.drain(queue)` | 策略计算重 + 密集发单，需要策略核与网络核并行流水线 | 0 锁 0 `malloc`；策略线程把正文流式写入无锁环槽位，I/O 线程批量取单、补序列号落盘并 **1 次 `sendmsg/writev`** 发出 |
 
 #### 实测速查：不同场景下 4 种发单方式怎么选？（Release, FIX 4.4 + mmap Journal, 0 `malloc`）
 
 | 发送模式 | Ping-Pong 单笔单向 p50 | 纯密集连发 (32 笔×0 µs) CO-Free p50 / 吞吐 | 策略计算+连发 (32 笔×2 µs) CO-Free p50 / p99 |
 | :--- | ---: | ---: | ---: |
-| **① `DirectInitiator::send()`** | **4.97 µs** | 57.04 µs / 292k ord/s | 100.50 µs / 198.74 µs |
-| **② `DirectInitiator enqueue+flush`** | 5.01 µs | 22.73 µs / 946k ord/s | 95.40 µs / 130.63 µs |
-| **③ `DirectInitiator + DirectSendQueue`** | 5.13 µs | **18.14 µs** / **1.02M ord/s** | **48.52 µs** / **88.70 µs** |
-| **④ `Engine(busy_poll) + ProducerLane`** | 7.89 µs | 76.31 µs / 249k ord/s | 79.85 µs / 152.32 µs |
+| **① `DirectInitiator::send_stream()`** | **4.69 µs** | 49.93 µs / 335k ord/s | 86.87 µs / 228.77 µs |
+| **② `DirectInitiator enqueue_stream+flush`** | 5.42 µs | 14.58 µs / 1.27M ord/s | 80.85 µs / 217.01 µs |
+| **③ `DirectInitiator + DirectSendQueue`** | 5.27 µs | **12.86 µs** / **1.43M ord/s** | **42.62 µs** / **76.08 µs** |
+| **④ `Engine(busy_poll) + ProducerLane`** | 7.69 µs | 67.28 µs / 278k ord/s | 64.77 µs / 118.97 µs |
 
-> `CO-Free` = `对端收到时间 - Burst 开始时间`（无 Coordinated Omission 的真实延迟）。完整数据与构造方法（`make()` 340 ns / `Draft` 321 ns / `Fixed` 221 ns，均 0 分配）见 [benchmarks.md](benchmarks.md)。
+> `CO-Free` = `对端收到时间 - Burst 开始时间`（无 Coordinated Omission 的真实延迟）。完整数据与编码对比（`StreamWriter` **130 ns** / `Fixed` 220 ns，均 0 分配）见 [benchmarks.md](benchmarks.md)。
 
 ---
 
@@ -125,14 +110,12 @@ int main() {
     (void)init.connect();
     while (!init.is_active()) (void)init.poll_once();
 
-    // 构造消息（用写法 A 的 make() 或写法 B 的 Draft 都可以，默认 SSO 0 分配）
-    auto order = fix::NewOrderSingle::make()
-        .cl_ord_id("ORD-001").symbol("AAPL").side('1')
-        .transact_time("20261123-09:30:00.000")
-        .order_qty(nf::Decimal{100, 0}).ord_type('1');
-
-    // 模式 ①：单线程直发（立即写 Journal 并发出）
-    auto seq = init.send(order);
+    // 模式 ①：单线程流式直发（零中间对象，直接写入 mmap Journal 并发出）
+    auto seq = init.send_stream<fix::NewOrderSingle>([](auto& w) {
+        w.cl_ord_id("ORD-001").symbol("AAPL").side('1')
+         .transact_time("20261123-09:30:00.000")
+         .order_qty(nf::Decimal{100, 0}).ord_type('1');
+    });
     (void)seq;
 
     // 持续推进收发与心跳
@@ -145,7 +128,7 @@ int main() {
 ```cpp
 // 模式 ②：同线程密集连发 10 笔，合并为 1 次 writev/sendmsg 系统调用
 for (int i = 0; i < 10; ++i) {
-    (void)init.enqueue(order);
+    (void)init.enqueue_stream<fix::NewOrderSingle>(write_order);
 }
 (void)init.flush();
 
@@ -153,7 +136,7 @@ for (int i = 0; i < 10; ++i) {
 nf::DirectSendQueue queue{256, 512}; // 256 槽位，每条最大 512 字节，无锁 SPSC
 
 // 策略线程：
-(void)queue.try_push(order);         // 0 锁 0 malloc，把业务字段写入 SPSC 环
+(void)queue.try_push_stream<fix::NewOrderSingle>(write_order); // 0 锁 0 malloc，把业务字段直接流式写入 SPSC 环
 
 // I/O 线程循环中：
 (void)init.drain(queue);             // 批量弹出 -> 写 Journal -> 1 次 writev 发出
@@ -205,14 +188,14 @@ int main() {
 
     (void)engine.on<fix::NewOrderSingle>(
         [](nf::SessionContext& ctx, const fix::NewOrderSingleView& req) {
-            auto er = fix::ExecutionReport::make()
-                .order_id("ORD-1").exec_id("EX-1")
-                .cl_ord_id(req.cl_ord_id().value())
-                .exec_type('0').ord_status('0')
-                .symbol(req.symbol().value()).side(req.side().value())
-                .leaves_qty(req.order_qty().value())
-                .cum_qty(nf::Decimal{0, 0}).avg_px(nf::Decimal{0, 0});
-            return ctx.send(er).status();
+            return ctx.send_stream<fix::ExecutionReport>([&](auto& w) {
+                w.order_id("ORD-1").exec_id("EX-1")
+                 .cl_ord_id(req.cl_ord_id().value())
+                 .exec_type('0').ord_status('0')
+                 .symbol(req.symbol().value()).side(req.side().value())
+                 .leaves_qty(req.order_qty().value())
+                 .cum_qty(nf::Decimal{0, 0}).avg_px(nf::Decimal{0, 0});
+            }).status();
         });
 
     (void)engine.add_listener({.name = "main", .endpoint = {"127.0.0.1", 9876}});

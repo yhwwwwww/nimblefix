@@ -115,6 +115,7 @@ struct OwnedMessageHeader {
     EnumValueValidator enum_value_allowed{};
     bool has_slot_map{};
     bool has_presence{};
+    bool prebuilt_body{};
 };
 
 struct OwnedMessageLayout {
@@ -244,6 +245,7 @@ struct SenderCommandView {
     header.enum_value_allowed = message.enum_value_allowed;
     header.has_slot_map = message.slot_map != nullptr;
     header.has_presence = message.presence_bits != nullptr;
+    header.prebuilt_body = message.prebuilt_body;
     header.slots_offset = align_up(sizeof(OwnedMessageHeader), alignof(SlotValue));
     header.values_offset = header.slots_offset + message.field_count * sizeof(SlotValue);
     header.plan_offset = align_up(header.values_offset + message.value_byte_count, alignof(PlanField));
@@ -320,7 +322,11 @@ struct SenderCommandView {
             ? nullptr : reinterpret_cast<const std::uint32_t*>(base + header.required_offset),
         header.required_count, header.enum_value_allowed,
         groups,
-        header.group_count};
+        header.group_count,
+        header.prebuilt_body,
+        header.prebuilt_body,
+        false,
+        header.prebuilt_body};
 }
 
 void copy_owned_message(std::span<char> destination, const MessageView& source,

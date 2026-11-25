@@ -52,11 +52,23 @@ void independent_wire_fixture() {
     auto flat = nf::message<"D">().set<11>("DEMO-001").set<55>("AAPL")
         .set<54>('1').set<60>("20261026-12:00:00.000").set<38>(100)
         .set<40>('2').set<44>("150.25"_dec);
-    auto named = nf::fix44_sample::NewOrderSingle::make()
-        .price("150.25"_dec).ord_type('2').order_qty(100)
-        .transact_time("20261026-12:00:00.000").side('1').symbol("AAPL").cl_ord_id("DEMO-001");
     check_wire(flat);
-    check_wire(named);
+
+    // Streaming encoder must produce byte-identical frame (BodyLength=122, CheckSum=212).
+    {
+        std::array<char, 1024> output;
+        output.fill('!');
+        const auto streamed = nf::encode_fix44_stream<nf::fix44_sample::NewOrderSingle>(
+            header, output, [](auto& w) {
+                w.cl_ord_id("DEMO-001").symbol("AAPL").side('1')
+                 .transact_time("20261026-12:00:00.000").order_qty(100)
+                 .ord_type('2').price("150.25"_dec);
+            });
+        CHECK(streamed.ok());
+        CHECK(std::string_view(output.data(), streamed.value()) == expected);
+        CHECK(output[streamed.value()] == '!');
+    }
+
     // Flat declaration order is significant and is not sorted by numeric tag.
     auto different = nf::message<"Z">().set<900001>("last").set<11>("first");
     std::array<char, 256> output;

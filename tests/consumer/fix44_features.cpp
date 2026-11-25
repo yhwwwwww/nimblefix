@@ -39,19 +39,20 @@ int main() {
     });
     if (!acceptor.ok()) return 6;
 
-    auto order = nf::fix44::NewOrderSingle::make()
-        .cl_ord_id("INSTALLED-ORDER")
-        .handl_inst('1')
-        .symbol("AAPL")
-        .side('1')
-        .transact_time("20261031-12:00:00.000")
-        .order_qty("1"_dec)
-        .ord_type('1');
+    auto write_order = [](auto& w) {
+        w.cl_ord_id("INSTALLED-ORDER")
+         .handl_inst('1')
+         .symbol("AAPL")
+         .side('1')
+         .transact_time("20261031-12:00:00.000")
+         .order_qty("1"_dec)
+         .ord_type('1');
+    };
     auto sender = acceptor.value().sender<nf::fix44::Schema>();
     auto lane = acceptor.value().producer_lane<nf::fix44::Schema>();
     if (!lane.ok()) return 13;
-    if (lane.value().send(order).status().code != nf::ErrorCode::not_ready) return 14;
-    const auto not_active_yet = sender.send(order);
+    if (lane.value().send_stream<nf::fix44::NewOrderSingle>(write_order).status().code != nf::ErrorCode::not_ready) return 14;
+    const auto not_active_yet = sender.send_stream<nf::fix44::NewOrderSingle>(write_order);
     if (not_active_yet.ok() || not_active_yet.status().code != nf::ErrorCode::not_ready) return 7;
 
     if (!engine.validate().ok() || !engine.start().ok()) return 8;

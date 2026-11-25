@@ -135,18 +135,18 @@ PairResult run_pair(const std::filesystem::path& root, bool typed,
             if (order_id.empty() || exec_id.empty()) return {nf::ErrorCode::too_large};
 #if defined(NIMBLEFIX_SAMPLE_SCHEMA)
             if (typed) {
-                auto report = nf::fix44_sample::ExecutionReport::make()
-                    .order_id(order_id)
-                    .exec_id(exec_id)
-                    .cl_ord_id(cl_ord_id.value().value)
-                    .exec_type('0')
-                    .ord_status('0')
-                    .symbol(symbol.value().value)
-                    .side(side.value().value.front())
-                    .leaves_qty(order_qty.value())
-                    .cum_qty(0)
-                    .avg_px("0"_dec);
-                return context.send(report).status();
+                return context.send_stream<nf::fix44_sample::ExecutionReport>([&](auto& w) {
+                    w.order_id(order_id)
+                     .exec_id(exec_id)
+                     .cl_ord_id(cl_ord_id.value().value)
+                     .exec_type('0')
+                     .ord_status('0')
+                     .symbol(symbol.value().value)
+                     .side(side.value().value.front())
+                     .leaves_qty(order_qty.value())
+                     .cum_qty(0)
+                     .avg_px("0"_dec);
+                }).status();
             }
 #else
             (void)typed;
@@ -289,10 +289,10 @@ PairResult run_pair(const std::filesystem::path& root, bool typed,
         if (transact_time.empty()) return nf::Status{nf::ErrorCode::invalid_timestamp};
 #if defined(NIMBLEFIX_SAMPLE_SCHEMA)
         if (typed) {
-            auto order = nf::fix44_sample::NewOrderSingle::make()
-                .cl_ord_id(business_id).symbol("AAPL").side('1')
-                .transact_time(transact_time).order_qty(100).ord_type('2').price("150.25"_dec);
-            return sender.send(order);
+            return sender.send_stream<nf::fix44_sample::NewOrderSingle>([&](auto& w) {
+                w.cl_ord_id(business_id).symbol("AAPL").side('1')
+                 .transact_time(transact_time).order_qty(100).ord_type('2').price("150.25"_dec);
+            });
         }
 #else
         (void)typed;
