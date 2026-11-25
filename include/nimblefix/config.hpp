@@ -34,6 +34,8 @@ struct ConfigDocument {
     std::vector<ListenerConfig> listeners;
     std::vector<InitiatorConfig> initiators;
     std::vector<AcceptorConfig> acceptors;
+    std::size_t shards{1};
+    std::vector<int> cpu_cores;
 };
 
 struct ConfigLoadResult {

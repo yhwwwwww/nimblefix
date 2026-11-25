@@ -9,6 +9,8 @@
 #include <vector>
 
 #include <poll.h>
+#include <pthread.h>
+#include <sched.h>
 #include <sys/epoll.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -25,6 +27,20 @@ bool io_uring_available() noexcept {
 #else
     return false;
 #endif
+}
+
+Status pin_current_thread(int cpu_core) noexcept {
+    if (cpu_core < 0) return Status::success();
+    if (cpu_core >= CPU_SETSIZE) return Status{ErrorCode::invalid_config};
+    cpu_set_t set;
+    CPU_ZERO(&set);
+    CPU_SET(cpu_core, &set);
+    const int rc = ::pthread_setaffinity_np(::pthread_self(), sizeof(set), &set);
+    if (rc != 0) {
+        return Status{rc == EINVAL ? ErrorCode::invalid_config : ErrorCode::io_error, 0,
+                      static_cast<std::size_t>(rc)};
+    }
+    return Status::success();
 }
 
 } // namespace nimblefix
@@ -58,8 +74,13 @@ inline void cpu_relax() noexcept {
 
 class EpollBackend final : public IoBackend {
 public:
-    explicit EpollBackend(int fd, bool busy_poll) noexcept
-        : epoll_fd_(fd), busy_poll_(busy_poll) {}
+    explicit EpollBackend(int fd, bool busy_poll, IdleStrategy idle_strategy,
+                          std::uint32_t spin_iters, std::uint32_t yield_iters) noexcept
+        : epoll_fd_(fd),
+          busy_poll_(busy_poll),
+          idle_strategy_(busy_poll ? IdleStrategy::busy_spin : idle_strategy),
+          spin_iters_(spin_iters),
+          yield_iters_(yield_iters) {}
 
     ~EpollBackend() override {
         if (epoll_fd_ >= 0) {
@@ -122,12 +143,35 @@ public:
                 return -1;
             }
         }
-        const int timeout = busy_poll_ ? 0 : static_cast<int>(wait_ms);
+        int timeout = static_cast<int>(wait_ms);
+        bool spinning = false;
+        bool yielding = false;
+        if (idle_strategy_ == IdleStrategy::busy_spin) {
+            timeout = 0;
+            spinning = true;
+        } else if (idle_strategy_ == IdleStrategy::hybrid_backoff) {
+            if (idle_count_ < spin_iters_) {
+                timeout = 0;
+                spinning = true;
+            } else if (idle_count_ < spin_iters_ + yield_iters_) {
+                timeout = 0;
+                yielding = true;
+            }
+        }
         const int ready = ::epoll_wait(epoll_fd_, events_.data(), static_cast<int>(out.size()), timeout);
         if (ready <= 0) {
-            if (ready == 0 && busy_poll_ && wait_ms > 0) cpu_relax();
+            if (ready == 0 && wait_ms > 0) {
+                if (spinning) {
+                    cpu_relax();
+                    if (idle_strategy_ == IdleStrategy::hybrid_backoff) ++idle_count_;
+                } else if (yielding) {
+                    ::sched_yield();
+                    ++idle_count_;
+                }
+            }
             return ready;
         }
+        idle_count_ = 0;
         for (int i = 0; i < ready; ++i) {
             out[static_cast<std::size_t>(i)] = IoCompletion{
                 static_cast<IoTag*>(events_[static_cast<std::size_t>(i)].data.ptr),
@@ -142,6 +186,10 @@ public:
 private:
     int epoll_fd_{-1};
     bool busy_poll_{false};
+    IdleStrategy idle_strategy_{IdleStrategy::sleep};
+    std::uint32_t spin_iters_{10'000};
+    std::uint32_t yield_iters_{1'000};
+    std::uint64_t idle_count_{0};
     std::vector<epoll_event> events_;
 };
 
@@ -390,7 +438,10 @@ Result<std::unique_ptr<IoBackend>> create_io_backend(const IoBackendConfig& conf
             const int fd = ::epoll_create1(EPOLL_CLOEXEC);
             if (fd < 0) return Status{ErrorCode::io_error, 0, static_cast<std::size_t>(errno)};
             return std::unique_ptr<IoBackend>(
-                new EpollBackend(fd, config.kind == IoBackendKind::busy_poll));
+                new EpollBackend(fd, config.kind == IoBackendKind::busy_poll,
+                                 config.idle_strategy,
+                                 config.idle_spin_iterations,
+                                 config.idle_yield_iterations));
         }
         case IoBackendKind::io_uring: {
 #if defined(NIMBLEFIX_ENABLE_IO_URING)

@@ -127,8 +127,21 @@ xmake build acceptor-bench
 
 **Selection Guide**:
 - **`epoll`**: Default zero-dependency choice for moderate session counts and low idle CPU.
-- **`busy_poll`**: Dedicated isolated core with few sessions needing minimum 1-session p50 (`12.45 µs`, `73.5k ord/s`).
-- **`io_uring`**: Multi-session gateways where Proactor batching cuts syscall count, delivering the highest 8-session aggregate throughput (**146,037 ord/s**) and lowest p99 on both 1-session (**19.56 µs**, 1.64× lower than `epoll`) and 8-session (**97.90 µs**) without burning 100% CPU when idle.
+- **`busy_poll`** / **`hybrid_backoff`**: Dedicated cores needing minimum latency (`hybrid_backoff` spins during active bursts and sleeps cleanly when idle).
+- **`io_uring`**: Single-core multi-session gateways where Proactor batching cuts syscall count without burning 100% CPU when idle.
+- **`ShardedEngine` (Multi-Core Sharded Reactor)**: Scales across multiple pinned CPU cores on a single shared listening port with zero cross-shard steady-state locks.
+
+### Multi-Core Sharded Reactor Scaling (`acceptor-bench 1000 10000 8/16 sharded`)
+*(Full 912-field `FIX44.xml` strict validation + `NoPartyIDs[1]` + `StreamWriter` `ExecutionReport` + real mmap Journal, 1 shared listening port, strict 1-in-flight TCP ping-pong on 8C/16T host shared with client threads.)*
+
+| Configuration | Sessions | p50 | p99 | p99.9 | Aggregate Throughput | Speedup vs 1-Core |
+| :--- | ---: | ---: | ---: | ---: | ---: | ---: |
+| **1-core `Engine` (`epoll`)** | 8 | 32.99 µs | 76.91 µs | 227.25 µs | 176,387 ord/s | 1.00× |
+| **4-shard `ShardedEngine` (`epoll`, pinned)** | 8 | 16.58 µs | 22.15 µs | 31.21 µs | 433,318 ord/s | **2.46×** (**3.47×** lower p99) |
+| **4-shard `ShardedEngine` (`hybrid_backoff`, pinned)** | 8 | **16.39 µs** | **21.27 µs** | **28.98 µs** | **443,302 ord/s** | **2.51×** (**7.84×** lower p99.9) |
+| **1-core `Engine` (`epoll`)** | 16 | 75.64 µs | 161.11 µs | 346.42 µs | 176,184 ord/s | 1.00× |
+| **4-shard `ShardedEngine` (`epoll`, pinned)** | 16 | 31.41 µs | 51.06 µs | 112.79 µs | 466,617 ord/s | **2.65×** (**3.15×** lower p99) |
+| **4-shard `ShardedEngine` (`hybrid_backoff`, pinned)** | 16 | **31.19 µs** | **49.99 µs** | **96.74 µs** | **470,973 ord/s** | **2.67×** (**3.22×** lower p99) |
 
 ---
 

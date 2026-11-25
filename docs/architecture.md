@@ -90,5 +90,8 @@ OS readiness/completion handling is abstracted behind `IoBackend` (`<nimblefix/i
 - **`busy_poll`**: Zero-sleep nonblocking poll loop for dedicated isolated cores targeting minimum 1-session latency.
 - **`io_uring` (optional Linux Proactor)**: Uses `liburing` with `IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN | IORING_SETUP_R_DISABLED` (enabling the ring lazily on the `run()` thread). Submits true asynchronous `IORING_OP_RECV` and `IORING_OP_SEND` batches while sleeping cleanly when idle — delivering +66% aggregate throughput and 2.35× lower p99 under 8 concurrent sessions compared to `epoll`.
 
-### Multi-Core Scaling Roadmap
-For deployments scaling to hundreds or thousands of high-rate sessions beyond a single core's budget, the planned model is a **Sharded Reactor** (`K` independent `IoBackend` loops with static session-to-shard pinning), preserving strict single-writer lock-free protocol state and journal locality within every shard.
+### Multi-Core Scaling: `ShardedEngine` (Sharded Reactor) & Core Affinity
+For multi-core deployments scaling across many concurrent sessions (`<nimblefix/sharded_engine.hpp>`):
+- **`ShardedEngine<Schema, Policy>`** runs `K` completely independent `IoBackend` (`epoll` / `busy_poll` / `io_uring`) reactor threads with optional per-shard Linux CPU core pinning (`cpu_cores` / `pin_current_thread`) and configurable `IdleStrategy` (`sleep`, `busy_spin`, `hybrid_backoff`).
+- **Static Session-to-Shard Pinning**: Every Initiator and Acceptor session is pinned to exactly one shard (`shard_index` or automatic round-robin), preserving strict single-writer lock-free `SessionCore` and segmented mmap Journal ownership within every shard.
+- **Single-Port Shared Acceptor Handoff**: Shared Acceptor listeners bind once on Shard 0. When a client connects and sends its initial `Logon (35=A)` (plaintext TCP or TLS), Shard 0 routes by `(SenderCompID, TargetCompID, BeginString)` and hands the accepted socket directly into the owning shard's reactor loop — 100% of steady-state order processing executes lock-free on the owning shard's pinned CPU core.

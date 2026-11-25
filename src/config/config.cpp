@@ -446,7 +446,8 @@ class Loader {
                   "max_pending_inbound_messages",
                   "max_pending_inbound_bytes", "max_pending_sender_messages", "max_pending_sender_bytes",
                   "sender_receipt_capacity", "max_producer_lanes_per_session", "diagnostic_capacity", "queued",
-                  "io_backend"});
+                  "io_backend", "idle_strategy", "idle_spin_iterations", "idle_yield_iterations",
+                  "cpu_core", "shards", "cpu_cores"});
             const auto dispatch = string(*engine, "dispatch", "engine", "inline");
             if (dispatch == "queued")
                 document.dispatch = ConfigDispatch::queued_callbacks;
@@ -463,6 +464,42 @@ class Loader {
                 document.engine.io_backend.kind = IoBackendKind::io_uring;
             } else {
                 error(engine->get("io_backend"), "engine.io_backend", "epoll, busy_poll or io_uring");
+            }
+            const auto idle = string(*engine, "idle_strategy", "engine",
+                                     backend == "busy_poll" ? "busy_spin" : "sleep");
+            if (idle == "sleep")
+                document.engine.io_backend.idle_strategy = IdleStrategy::sleep;
+            else if (idle == "busy_spin")
+                document.engine.io_backend.idle_strategy = IdleStrategy::busy_spin;
+            else if (idle == "hybrid_backoff")
+                document.engine.io_backend.idle_strategy = IdleStrategy::hybrid_backoff;
+            else
+                error(engine->get("idle_strategy"), "engine.idle_strategy",
+                      "sleep, busy_spin or hybrid_backoff");
+            document.engine.io_backend.idle_spin_iterations = static_cast<std::uint32_t>(
+                integer(*engine, "idle_spin_iterations", "engine", 10'000, 0, 100'000'000));
+            document.engine.io_backend.idle_yield_iterations = static_cast<std::uint32_t>(
+                integer(*engine, "idle_yield_iterations", "engine", 1'000, 0, 100'000'000));
+            if (const auto *core = engine->get("cpu_core")) {
+                const auto val = core->value<std::int64_t>();
+                if (!val || *val < -1 || *val >= 1024)
+                    error(core, "engine.cpu_core", "integer -1..1023");
+                else
+                    document.engine.cpu_core = static_cast<int>(*val);
+            }
+            document.shards = integer(*engine, "shards", "engine", 1, 1, 64);
+            if (const auto *cores = engine->get("cpu_cores")) {
+                const auto *array = cores->as_array();
+                if (array == nullptr || array->size() > 64)
+                    error(cores, "engine.cpu_cores", "an array of at most 64 CPU core integers");
+                else
+                    for (const auto &entry : *array) {
+                        const auto val = entry.value<std::int64_t>();
+                        if (!val || *val < -1 || *val >= 1024)
+                            error(&entry, "engine.cpu_cores", "integer -1..1023");
+                        else
+                            document.cpu_cores.push_back(static_cast<int>(*val));
+                    }
             }
             document.schema = string(*engine, "schema", "engine", "none");
             if (document.schema != "none" && document.schema != "fix44")

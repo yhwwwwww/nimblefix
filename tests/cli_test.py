@@ -84,6 +84,12 @@ def test(binary, root):
     failover_toml.write_text('''version = 1
 [engine]
 dispatch = "inline"
+io_backend = "epoll"
+idle_strategy = "hybrid_backoff"
+idle_spin_iterations = 5000
+idle_yield_iterations = 500
+shards = 4
+cpu_cores = [0, 1, 2, 3]
 [engine.storage]
 directory = "state-failover"
 [[sessions]]

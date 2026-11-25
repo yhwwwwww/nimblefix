@@ -3,6 +3,7 @@
 #include <nimblefix/group.hpp>
 #include <nimblefix/message.hpp>
 #include <nimblefix/session.hpp>
+#include <nimblefix/sharded_engine.hpp>
 
 #include <algorithm>
 #include <array>
@@ -619,6 +620,134 @@ bool run_engine_acceptor_tcp(std::size_t session_count, std::size_t warmup, std:
     return true;
 }
 
+bool run_sharded_acceptor_tcp(std::size_t shard_count, std::size_t session_count,
+                              std::size_t warmup, std::size_t samples,
+                              nf::IoBackendConfig backend_cfg, std::string_view label,
+                              LatencyStats& stats_out, double& agg_rate_out) {
+    char pat[] = "/tmp/nimblefix-sharded-tcp-XXXXXX";
+    char* dir_raw = ::mkdtemp(pat);
+    if (!dir_raw) return false;
+    std::string dir{dir_raw};
+
+    const std::uint16_t port = pick_free_port();
+    if (port == 0) { std::filesystem::remove_all(dir); return false; }
+
+    const unsigned hw = std::max(1U, std::thread::hardware_concurrency());
+    nf::ShardedEngineConfig scfg{};
+    scfg.shard_count = shard_count;
+    for (std::size_t i = 0; i < shard_count; ++i) {
+        scfg.cpu_cores.push_back(static_cast<int>(i % hw));
+    }
+    scfg.base.storage.directory = dir;
+    scfg.base.storage.journal_capacity_bytes = 32U * 1024U * 1024U;
+    scfg.base.storage.segment_bytes = 4U * 1024U * 1024U;
+    scfg.base.storage.journal_max_records = 131'072;
+    scfg.base.heartbeat_ms = 60'000;
+    scfg.base.max_sessions = std::max<std::size_t>(16, session_count + 4);
+    scfg.base.io_backend = backend_cfg;
+
+    auto created = nf::ShardedEngine<fix::Schema, nf::Inline>::create(scfg);
+    if (!created.ok()) {
+        std::cerr << label << " sharded create failed: " << created.status().message() << '\n';
+        std::filesystem::remove_all(dir);
+        return false;
+    }
+    auto engine = std::move(created).value();
+    if (!engine.add_listener({"main", {"127.0.0.1", port}}).ok()) {
+        std::cerr << label << " add_listener failed\n";
+        std::filesystem::remove_all(dir);
+        return false;
+    }
+    for (std::size_t s = 0; s < session_count; ++s) {
+        nf::AcceptorConfig ac{};
+        ac.name = "session-" + std::to_string(s);
+        ac.listener = "main";
+        ac.local_comp_id = "SELL";
+        ac.remote_comp_id = "BUY-" + std::to_string(s);
+        if (!engine.add_acceptor(ac).ok()) {
+            std::cerr << label << " add_acceptor failed\n";
+            std::filesystem::remove_all(dir);
+            return false;
+        }
+    }
+    if (!engine.on_error([label](const nf::ErrorEvent& ev) {
+            std::cerr << "[" << label << "] error: " << ev.format() << '\n';
+        }).ok()) {
+        std::filesystem::remove_all(dir);
+        return false;
+    }
+    if (!engine.on<fix::NewOrderSingle>([](nf::SessionContext& ctx, const fix::NewOrderSingleView& req) noexcept {
+            const auto cid = req.cl_ord_id();
+            const std::string_view id = cid.ok() ? cid.value() : std::string_view{"ORD-000001"};
+            return ctx.send_stream<fix::ExecutionReport>([&](auto& w) noexcept {
+                w.order_id("ORDER-1").cl_ord_id(id).exec_id("EXEC-1")
+                 .exec_type('0').ord_status('0').side('1')
+                 .order_qty(nf::Decimal{100, 0}).leaves_qty(nf::Decimal{100, 0})
+                 .cum_qty(nf::Decimal{0, 0}).avg_px(nf::Decimal{0, 0})
+                 .symbol("AAPL");
+            }).status();
+        }).ok()) {
+        std::filesystem::remove_all(dir);
+        return false;
+    }
+
+    std::thread server_thread([&] { (void)engine.run(); });
+
+    std::atomic<int> ready_count{0};
+    std::atomic<bool> go_flag{false};
+    std::vector<std::vector<std::uint64_t>> per_client_rtt(session_count);
+    std::vector<std::atomic<bool>> client_ok(session_count);
+    std::vector<std::thread> clients;
+    clients.reserve(session_count);
+    for (std::size_t s = 0; s < session_count; ++s) {
+        client_ok[s].store(false);
+        clients.emplace_back([&, s] {
+            const bool ok = run_tcp_client_session(port, "BUY-" + std::to_string(s),
+                warmup, samples, per_client_rtt[s], ready_count, go_flag);
+            client_ok[s].store(ok, std::memory_order_release);
+        });
+    }
+
+    while (ready_count.load(std::memory_order_acquire) < static_cast<int>(session_count)) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    const std::uint64_t t_wall_start = now_ns();
+    go_flag.store(true, std::memory_order_release);
+
+    bool all_ok = true;
+    for (std::size_t s = 0; s < session_count; ++s) {
+        clients[s].join();
+        if (!client_ok[s].load(std::memory_order_acquire)) all_ok = false;
+    }
+    const std::uint64_t t_wall_ns = now_ns() - t_wall_start;
+
+    engine.request_stop();
+    server_thread.join();
+    std::filesystem::remove_all(dir);
+    if (!all_ok) {
+        std::cerr << label << " client failed\n";
+        return false;
+    }
+
+    std::vector<std::uint64_t> merged;
+    merged.reserve(session_count * samples);
+    for (const auto& v : per_client_rtt) merged.insert(merged.end(), v.begin(), v.end());
+    stats_out = compute_stats(merged, 0);
+    agg_rate_out = (static_cast<double>(merged.size()) * 1e9) / static_cast<double>(t_wall_ns);
+
+    std::cout << "\n=== " << label << " (" << shard_count << " shards, " << session_count
+              << " session(s), " << samples << " orders/session, warmup " << warmup << ") ===\n"
+              << std::fixed << std::setprecision(3)
+              << "  p50  = " << stats_out.p50_ns / 1000.0 << " us\n"
+              << "  p95  = " << stats_out.p95_ns / 1000.0 << " us\n"
+              << "  p99  = " << stats_out.p99_ns / 1000.0 << " us\n"
+              << "  p99.9= " << stats_out.p999_ns / 1000.0 << " us\n"
+              << "  max  = " << stats_out.max_ns / 1000.0 << " us\n"
+              << "  agg  = " << static_cast<std::uint64_t>(agg_rate_out) << " orders/sec ("
+              << shard_count << " pinned shards)\n";
+    return true;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -626,6 +755,28 @@ int main(int argc, char** argv) {
     const std::size_t samples = argc > 2 ? std::stoull(argv[2]) : 20'000;
     const std::size_t multi_sessions = argc > 3 ? std::stoull(argv[3]) : 8;
     const std::string_view backend_arg = argc > 4 ? std::string_view{argv[4]} : std::string_view{"all"};
+
+    if (backend_arg == "sharded") {
+        LatencyStats s1{}, s4{}, s8{};
+        double r1 = 0.0, r4 = 0.0, r8 = 0.0;
+        const std::size_t w = std::min<std::size_t>(warmup, 1'000);
+        if (!run_engine_acceptor_tcp(multi_sessions, w, samples, nf::IoBackendKind::epoll,
+                "Baseline [epoll, 1 core]: Engine", s1, r1)) return 6;
+        if (!run_sharded_acceptor_tcp(4, multi_sessions, w, samples,
+                nf::IoBackendConfig::epoll(), "Sharded [epoll, 4 shards]", s4, r4)) return 7;
+        if (!run_sharded_acceptor_tcp(4, multi_sessions, w, samples,
+                nf::IoBackendConfig::hybrid(), "Sharded [hybrid_backoff, 4 shards]", s8, r8)) return 8;
+        std::cout << "\n--- Sharded Scaling Summary (" << multi_sessions << " concurrent sessions, 1 shared port) ---\n"
+                  << "  1-core epoll           : p50=" << std::fixed << std::setprecision(2) << s1.p50_ns / 1000.0
+                  << " us | p99=" << s1.p99_ns / 1000.0 << " us | agg=" << static_cast<std::uint64_t>(r1) << " ord/s\n"
+                  << "  4-shard epoll          : p50=" << s4.p50_ns / 1000.0
+                  << " us | p99=" << s4.p99_ns / 1000.0 << " us | agg=" << static_cast<std::uint64_t>(r4)
+                  << " ord/s (" << std::setprecision(2) << (r4 / r1) << "x)\n"
+                  << "  4-shard hybrid_backoff : p50=" << s8.p50_ns / 1000.0
+                  << " us | p99=" << s8.p99_ns / 1000.0 << " us | agg=" << static_cast<std::uint64_t>(r8)
+                  << " ord/s (" << std::setprecision(2) << (r8 / r1) << "x)\n";
+        return 0;
+    }
 
     LatencyStats pre_tcp{};
     if (!run_pre_tcp_acceptor(warmup, samples, pre_tcp)) return 1;

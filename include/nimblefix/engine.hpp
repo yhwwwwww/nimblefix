@@ -59,6 +59,8 @@ struct EngineConfig {
     std::size_t diagnostic_capacity{256};
     WireHints wire_hints{};
     std::function<Status(const FlatMessageView&)> message_validator{};
+    // Optional Linux CPU core pinning for this Engine's reactor owner thread (-1 = unpinned).
+    int cpu_core{-1};
 };
 
 struct InitiatorConfig {
@@ -191,6 +193,13 @@ public:
     [[nodiscard]] Result<SessionHandle> add_initiator(InitiatorConfig config) noexcept;
     [[nodiscard]] Result<ListenerHandle> add_listener(ListenerConfig config) noexcept;
     [[nodiscard]] Result<SessionHandle> add_acceptor(AcceptorConfig config) noexcept;
+    // Internal sharded-reactor hooks: add a non-binding virtual listener on a non-zero shard
+    // and register a Logon-routing rule on the listener-owning shard to hand accepted sockets
+    // directly to the owning shard's reactor loop.
+    [[nodiscard]] Result<ListenerHandle> add_handoff_listener(ListenerConfig config) noexcept;
+    [[nodiscard]] Status register_remote_acceptor_route(std::string_view listener_name,
+        FixVersion version, std::string_view local_comp_id, std::string_view remote_comp_id,
+        EngineRuntime* target_shard) noexcept;
     [[nodiscard]] Status validate() const noexcept;
     [[nodiscard]] Status run() noexcept;
     [[nodiscard]] Status start() noexcept;

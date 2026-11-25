@@ -163,7 +163,7 @@ Binary footprint (Release): `direct-initiator-example` is **336 KB** (`libnimble
 | **`busy_poll`** (zero-sleep nonblocking poll) | **12.45 µs** | 23.38 µs | **73,464 ord/s** | 45.38 µs | 118.44 µs | 129,649 ord/s |
 | **`io_uring`** (Proactor `RECV`/`SEND`, sleeping) | 14.58 µs | **19.56 µs** | 66,515 ord/s | 49.10 µs | **97.90 µs** | **146,037 ord/s** (+9%) |
 
-*(Pre-TCP Acceptor `SessionDriver` wire-in -> 912-field Schema -> in-handler ER -> Journal -> flush: **p50 = 1.71 µs**, **p99 = 3.03 µs**, **581,156 ord/s**.)*
+*(Pre-TCP Acceptor `SessionDriver` wire-in -> 912-field Schema -> in-handler ER -> Journal -> flush: **p50 = 1.71 µs**, **p99 = 3.03 µs**, **581,156 ord/s**; 4-shard pinned `ShardedEngine` (`hybrid_backoff`, 1 shared port): **8 sessions = 443k ord/s** with **p99 = 21.27 µs / p99.9 = 28.98 µs** (3.62× lower p99, 7.84× lower p99.9 than 1-core `epoll`), **16 sessions = 471k ord/s** (2.67×).)*
 
 ### 5. NimbleFIX 0.3 vs QuickFIX 1.16.0 (`quickfix-parity-bench`, Strictly Same-Methodology)
 

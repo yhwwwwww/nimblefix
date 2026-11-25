@@ -1485,6 +1485,22 @@ struct EngineRuntime::Impl {
         TlsContext tls_context;
         std::uint64_t accept_backoff_until{};
         IoTag io_tag{make_tag(TargetKind::listener)};
+        bool handoff_only{false};
+    };
+
+    struct RemoteRoute {
+        std::size_t listener_index{no_index};
+        FixVersion version{FixVersion::fix44};
+        std::string local_comp_id;
+        std::string remote_comp_id;
+        EngineRuntime* target{nullptr};
+    };
+
+    struct HandoffItem {
+        std::string listener_name;
+        TcpStream stream;
+        std::optional<TlsStream> tls;
+        std::string receive_buffer;
     };
 
     struct Peer;
@@ -2704,6 +2720,7 @@ struct EngineRuntime::Impl {
     [[nodiscard]] Status bind_listeners() noexcept {
         try {
         for (auto& listener : listeners) {
+            if (listener.handoff_only) continue;
             if (listener.config.tls.enabled) {
                 auto context = TlsContext::create(listener.config.tls, true);
                 if (!context.ok()) return context.status();
@@ -2985,6 +3002,28 @@ struct EngineRuntime::Impl {
             if (type != "A") return {ErrorCode::protocol_error, 35};
             const auto acceptor_index = match_acceptor(source.listener_index, sender, target, first_frame.version);
             if (acceptor_index == no_index) {
+                for (const auto& route : remote_routes) {
+                    if (route.listener_index == source.listener_index &&
+                        route.version == first_frame.version &&
+                        route.remote_comp_id == sender &&
+                        route.local_comp_id == target &&
+                        route.target != nullptr && route.target->impl_ != nullptr) {
+                        const bool had_poll = source.io_tag.poll_armed;
+                        io_remove(source.io_tag);
+                        if (had_poll && io_backend && io_backend->supports_proactor()) {
+                            io_backend->flush_submissions();
+                        }
+                        HandoffItem item{};
+                        item.listener_name = listeners[source.listener_index].config.name;
+                        item.stream = std::move(source.stream);
+                        item.tls = std::move(source.tls);
+                        source.tls.reset();
+                        item.receive_buffer = std::move(source.receive_buffer);
+                        source.closed = true;
+                        route.target->impl_->enqueue_handoff(std::move(item));
+                        return Status::success();
+                    }
+                }
                 identity_rejected = true;
                 return {ErrorCode::protocol_error, 49};
             }
@@ -3606,9 +3645,60 @@ struct EngineRuntime::Impl {
         return Status::success();
     }
 
+    void enqueue_handoff(HandoffItem item) noexcept {
+        try {
+            {
+                std::lock_guard lock(handoff_mutex);
+                incoming_handoffs.push_back(std::move(item));
+                has_pending_handoffs.store(true, std::memory_order_release);
+            }
+            wake();
+        } catch (...) {
+            // Item's RAII TcpStream closes cleanly on failure.
+        }
+    }
+
+    void drain_handoffs(std::uint64_t now) noexcept {
+        std::vector<HandoffItem> batch;
+        {
+            std::lock_guard lock(handoff_mutex);
+            if (incoming_handoffs.empty()) {
+                has_pending_handoffs.store(false, std::memory_order_release);
+                return;
+            }
+            batch.swap(incoming_handoffs);
+            has_pending_handoffs.store(false, std::memory_order_release);
+        }
+        for (auto& item : batch) {
+            std::size_t listener_idx = no_index;
+            for (std::size_t i = 0; i < listeners.size(); ++i) {
+                if (listeners[i].config.name == item.listener_name) {
+                    listener_idx = i;
+                    break;
+                }
+            }
+            if (listener_idx == no_index || pending.size() >= config.max_pending_connections) continue;
+            try {
+                auto connection = std::make_unique<Pending>();
+                connection->listener_index = listener_idx;
+                connection->stream = std::move(item.stream);
+                connection->tls = std::move(item.tls);
+                connection->handshaking = false;
+                connection->receive_buffer = std::move(item.receive_buffer);
+                connection->deadline = now + config.logon_timeout_ms;
+                auto* raw = connection.get();
+                pending.push_back(std::move(connection));
+                (void)process_pending_buffer(*raw, now);
+            } catch (...) {}
+        }
+    }
+
     [[nodiscard]] Status owner_iteration(std::uint32_t maximum_wait_ms) {
         std::array<char, sizeof(std::uint64_t)> wake_bytes{};
             auto now = monotonic_ms();
+            if (has_pending_handoffs.load(std::memory_order_acquire)) {
+                drain_handoffs(now);
+            }
             expire_pending_commands(now);
             for (auto& peer : peers) {
                 if (!peer->closed && peer->connection == Connection::connected &&
@@ -3869,6 +3959,10 @@ struct EngineRuntime::Impl {
     std::vector<InitiatorConfig> initiators;
     std::vector<std::shared_ptr<SessionControl>> initiator_sessions;
     std::vector<Listener> listeners;
+    std::vector<RemoteRoute> remote_routes;
+    std::mutex handoff_mutex;
+    std::vector<HandoffItem> incoming_handoffs;
+    std::atomic<bool> has_pending_handoffs{false};
     std::vector<Acceptor> acceptors;
     std::vector<std::shared_ptr<SessionControl>> sessions;
     std::size_t pending_expiry_session_cursor{};
@@ -4056,6 +4150,51 @@ Result<ListenerHandle> EngineRuntime::add_listener(ListenerConfig config) noexce
     } catch (...) { return Status{ErrorCode::capacity_exceeded}; }
 }
 
+Result<ListenerHandle> EngineRuntime::add_handoff_listener(ListenerConfig config) noexcept {
+    if (!impl_ || impl_->has_run.load(std::memory_order_acquire) ||
+        !plain_identifier(config.name, 128) || !is_numeric_host(config.endpoint.host, true) ||
+        config.backlog == 0 || config.backlog > static_cast<std::size_t>(std::numeric_limits<int>::max()) ||
+        impl_->listeners.size() >= impl_->config.max_sessions)
+        return Status{ErrorCode::invalid_config};
+    for (const auto& listener : impl_->listeners)
+        if (listener.config.name == config.name) return Status{ErrorCode::invalid_config};
+    try {
+        const auto name = config.name;
+        Impl::Listener listener;
+        listener.config = std::move(config);
+        listener.handoff_only = true;
+        impl_->listeners.push_back(std::move(listener));
+        return ListenerHandle{name};
+    } catch (...) { return Status{ErrorCode::capacity_exceeded}; }
+}
+
+Status EngineRuntime::register_remote_acceptor_route(std::string_view listener_name,
+    FixVersion version, std::string_view local_comp_id, std::string_view remote_comp_id,
+    EngineRuntime* target_shard) noexcept {
+    if (!impl_ || impl_->has_run.load(std::memory_order_acquire) || target_shard == nullptr)
+        return Status{ErrorCode::invalid_config};
+    std::size_t listener_idx = no_index;
+    for (std::size_t i = 0; i < impl_->listeners.size(); ++i) {
+        if (impl_->listeners[i].config.name == listener_name) {
+            listener_idx = i;
+            break;
+        }
+    }
+    if (listener_idx == no_index) return Status{ErrorCode::invalid_config};
+    for (const auto& existing : impl_->remote_routes) {
+        if (existing.listener_index == listener_idx && existing.version == version &&
+            existing.local_comp_id == local_comp_id && existing.remote_comp_id == remote_comp_id)
+            return Status{ErrorCode::invalid_config};
+    }
+    try {
+        impl_->remote_routes.push_back(Impl::RemoteRoute{
+            listener_idx, version, std::string{local_comp_id}, std::string{remote_comp_id}, target_shard});
+        return Status::success();
+    } catch (...) {
+        return Status{ErrorCode::capacity_exceeded};
+    }
+}
+
 Result<SessionHandle> EngineRuntime::add_acceptor(AcceptorConfig config) noexcept {
     if (!impl_ || impl_->has_run.load(std::memory_order_acquire) ||
         !plain_identifier(config.name, 128) ||
@@ -4121,6 +4260,13 @@ Status EngineRuntime::start() noexcept {
     if (!impl_->has_run.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
         return {ErrorCode::invalid_config};
     impl_->owner_thread = std::this_thread::get_id();
+    if (impl_->config.cpu_core >= 0) {
+        if (const auto pin = pin_current_thread(impl_->config.cpu_core); !pin.ok()) {
+            impl_->final_status = pin;
+            impl_->iteration_finished = true;
+            return poll_once();
+        }
+    }
     for (const auto& session : impl_->sessions)
         if (session && session->sender) session->sender->freeze_producer_lanes();
     try {

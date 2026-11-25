@@ -2,6 +2,7 @@
 #include <nimblefix/fix44_sample.hpp>
 #include <nimblefix/io_backend.hpp>
 #include <nimblefix/message.hpp>
+#include <nimblefix/sharded_engine.hpp>
 
 #include <atomic>
 #include <chrono>
@@ -9,8 +10,11 @@
 #include <cstdlib>
 #include <filesystem>
 #include <iostream>
+#include <mutex>
+#include <set>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 #include <arpa/inet.h>
@@ -295,12 +299,152 @@ void test_abrupt_disconnect_and_reconnect(nf::IoBackendKind backend_kind) {
     if (g_failures == 0) std::cout << "[PASS] disconnect/reconnect lifecycle on backend\n";
 }
 
+void test_core_affinity_idle_strategy_and_sharded_reactor() {
+    // 1. CPU affinity helper contract
+    CHECK(nf::pin_current_thread(-1).ok());
+    CHECK(nf::pin_current_thread(0).ok());
+    CHECK(nf::pin_current_thread(99999).code == nf::ErrorCode::invalid_config);
+
+    // 2. ShardedEngine: 4 shards (with core affinity + hybrid_backoff), 1 shared port,
+    //    8 Acceptor sessions & 8 Sharded Initiator sessions across 4 shards.
+    TempDir dir_acc;
+    TempDir dir_ini;
+    const std::uint16_t port = pick_free_port();
+    CHECK(port != 0);
+
+    constexpr std::size_t kShards = 4;
+    constexpr std::size_t kSessions = 8;
+    constexpr int kOrdersPerSession = 30;
+    const unsigned hw = std::max(1U, std::thread::hardware_concurrency());
+
+    nf::ShardedEngineConfig acc_scfg{};
+    acc_scfg.shard_count = kShards;
+    for (std::size_t i = 0; i < kShards; ++i) {
+        acc_scfg.cpu_cores.push_back(static_cast<int>(i % hw));
+    }
+    acc_scfg.base.storage.directory = dir_acc.path;
+    acc_scfg.base.storage.journal_capacity_bytes = 2U * 1024U * 1024U;
+    acc_scfg.base.storage.segment_bytes = 256U * 1024U;
+    acc_scfg.base.storage.journal_max_records = 4096;
+    acc_scfg.base.io_backend = nf::IoBackendConfig::hybrid(200, 50);
+
+    nf::ShardedEngineConfig ini_scfg = acc_scfg;
+    ini_scfg.base.storage.directory = dir_ini.path;
+
+    auto acc_res = nf::ShardedEngine<fix::Schema, nf::Inline>::create(acc_scfg);
+    auto ini_res = nf::ShardedEngine<fix::Schema, nf::Inline>::create(ini_scfg);
+    CHECK(acc_res.ok() && ini_res.ok());
+    if (!acc_res.ok() || !ini_res.ok()) return;
+    auto acceptor = std::move(acc_res).value();
+    auto initiator = std::move(ini_res).value();
+    CHECK(acceptor.shard_count() == kShards);
+    CHECK(initiator.shard_count() == kShards);
+
+    CHECK(acceptor.add_listener({"main", {"127.0.0.1", port}}).ok());
+
+    std::vector<nf::SessionHandle> handles;
+    handles.reserve(kSessions);
+    for (std::size_t s = 0; s < kSessions; ++s) {
+        const std::string acc_name = "acc-" + std::to_string(s);
+        const std::string ini_name = "ini-" + std::to_string(s);
+        const std::string client_id = "SHARD-BUY-" + std::to_string(s);
+        CHECK(acceptor.add_acceptor({acc_name, "main", "SELL", client_id}).ok());
+        CHECK(acceptor.session_shard(acc_name) == (s % kShards));
+        auto h = initiator.add_initiator({ini_name, client_id, "SELL", {"127.0.0.1", port}});
+        CHECK(h.ok());
+        CHECK(initiator.session_shard(ini_name) == (s % kShards));
+        if (h.ok()) handles.push_back(std::move(h).value());
+    }
+
+    std::atomic<int> acc_received{0};
+    std::atomic<int> ini_received{0};
+    std::mutex tid_mu;
+    std::unordered_map<std::string, std::thread::id> session_tid;
+    std::set<std::thread::id> distinct_acc_tids;
+
+    CHECK(acceptor.on<fix::NewOrderSingle>([&](nf::SessionContext& ctx, const fix::NewOrderSingleView& req) {
+        const auto tid = std::this_thread::get_id();
+        {
+            std::lock_guard lock(tid_mu);
+            const std::string sname{ctx.session_name()};
+            auto [it, inserted] = session_tid.emplace(sname, tid);
+            if (!inserted) CHECK(it->second == tid); // Every session stays pinned to 1 shard thread!
+            distinct_acc_tids.insert(tid);
+        }
+        acc_received.fetch_add(1, std::memory_order_relaxed);
+        return ctx.send_stream<fix::ExecutionReport>([&](auto& w) {
+            w.order_id("ORD-SHARD").exec_id("EX-SHARD").cl_ord_id(req.cl_ord_id().value())
+             .exec_type('0').ord_status('0').symbol("AAPL").side('1')
+             .leaves_qty(nf::Decimal{100, 0}).cum_qty(nf::Decimal{0, 0}).avg_px(nf::Decimal{0, 0});
+        }).status();
+    }).ok());
+
+    CHECK(initiator.on<fix::ExecutionReport>([&](nf::SessionContext&, const fix::ExecutionReportView&) {
+        ini_received.fetch_add(1, std::memory_order_relaxed);
+        return nf::Status::success();
+    }).ok());
+
+    CHECK(acceptor.validate().ok());
+    CHECK(initiator.validate().ok());
+
+    std::thread acc_thread([&] { (void)acceptor.run(); });
+    std::thread ini_thread([&] { (void)initiator.run(); });
+
+    const auto active_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (std::chrono::steady_clock::now() < active_deadline) {
+        std::size_t active_n = 0;
+        for (std::size_t s = 0; s < handles.size(); ++s) {
+            const auto snap = initiator.snapshot("ini-" + std::to_string(s));
+            if (snap.ok() && snap.value().state == nf::SessionState::active) ++active_n;
+        }
+        if (active_n == kSessions) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+
+    for (std::size_t s = 0; s < handles.size(); ++s) {
+        auto sender = handles[s].sender<fix::Schema>();
+        for (int i = 0; i < kOrdersPerSession; ++i) {
+            const auto cl_id = "SH-" + std::to_string(s) + "-" + std::to_string(i);
+            CHECK(sender.send_stream<fix::NewOrderSingle>([&](auto& w) {
+                w.cl_ord_id(cl_id)
+                 .symbol("AAPL")
+                 .side('1')
+                 .transact_time("20261123-14:00:00.000")
+                 .order_qty(nf::Decimal{100, 0})
+                 .ord_type('1');
+            }).ok());
+        }
+    }
+
+    const int expected_total = static_cast<int>(kSessions) * kOrdersPerSession;
+    const auto done_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (ini_received.load(std::memory_order_relaxed) < expected_total &&
+           std::chrono::steady_clock::now() < done_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    CHECK(acc_received.load() == expected_total);
+    CHECK(ini_received.load() == expected_total);
+    CHECK(distinct_acc_tids.size() == kShards);
+
+    initiator.request_stop();
+    acceptor.request_stop();
+    ini_thread.join();
+    acc_thread.join();
+
+    if (g_failures == 0) {
+        std::cout << "[PASS] ShardedEngine (" << kShards << " shards pinned, "
+                  << kSessions << " sessions x " << kOrdersPerSession
+                  << " orders, hybrid_backoff, 1 shared port)\n";
+    }
+}
+
 } // namespace
 
 int main() {
     run_backend_roundtrip<nf::Inline>(nf::IoBackendKind::epoll, 2, 25, "epoll Inline");
     run_backend_roundtrip<nf::Queued>(nf::IoBackendKind::epoll, 2, 25, "epoll Queued");
     run_backend_roundtrip<nf::Inline>(nf::IoBackendKind::busy_poll, 2, 25, "busy_poll Inline");
+    test_core_affinity_idle_strategy_and_sharded_reactor();
 
     if (nf::io_uring_available()) {
         run_backend_roundtrip<nf::Inline>(nf::IoBackendKind::io_uring, 1, 50, "io_uring Inline 1-session");
