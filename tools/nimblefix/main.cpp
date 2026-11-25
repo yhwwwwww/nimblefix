@@ -1,5 +1,6 @@
 #include <nimblefix/config.hpp>
 #include <nimblefix/journal.hpp>
+#include <nimblefix/telemetry.hpp>
 #include <nimblefix/tls.hpp>
 
 #if defined(NIMBLEFIX_BUILTIN_FIX44)
@@ -79,6 +80,7 @@ struct Arguments {
     std::uint32_t samples{10'000};
     std::string bench_case{"encode"};
     bool json{};
+    bool prometheus{};
     bool help{};
     bool print_version{};
     bool force{};
@@ -95,6 +97,7 @@ void help() {
                  "  schema generate --xml PATH --namespace NAME --output HEADER [--generator PATH]\n"
                  "  inspect frame --path PATH [--json]\n"
                  "  inspect journal --path PATH --session-key KEY [--json]\n"
+                 "  telemetry --path PATH [--json | --prometheus]\n"
                  "  doctor [--config PATH] [--json]\n"
                  "  bench --case encode|parse [--samples N] [--json] (optional benchmark build)\n"
                  "  --help | --version\n";
@@ -119,6 +122,10 @@ bool parse(int argc, char **argv, Arguments &args) {
         if (value.starts_with("--")) supplied.insert(value);
         if (value == "--json") {
             args.json = true;
+            continue;
+        }
+        if (value == "--prometheus") {
+            args.prometheus = true;
             continue;
         }
         if (value == "--force") {
@@ -184,6 +191,7 @@ bool parse(int argc, char **argv, Arguments &args) {
     else if (args.command == "run") allowed.insert({"--config", "--duration-ms"});
     else if (args.command == "validate" || args.command == "doctor") allowed.insert("--config");
     else if (args.command == "inspect") allowed.insert({"--path", "--session-key"});
+    else if (args.command == "telemetry") allowed.insert({"--path", "--prometheus"});
     else if (args.command == "schema") {
         allowed.insert("--xml");
         if (args.operation == "generate") allowed.insert({"--output", "--namespace", "--generator"});
@@ -202,6 +210,8 @@ bool parse(int argc, char **argv, Arguments &args) {
     if (args.command == "inspect")
         return !args.path.empty() &&
                (args.operation == "frame" || (args.operation == "journal" && !args.session_key.empty()));
+    if (args.command == "telemetry")
+        return !args.path.empty();
     if (args.command == "schema")
         return !args.xml.empty() && (args.operation == "check" || args.operation == "summary" ||
                                      (args.operation == "generate" && !args.output.empty()));
@@ -524,6 +534,83 @@ int inspect_frame(const Arguments &args) {
     return 0;
 }
 
+int show_telemetry(const Arguments &args) {
+    auto opened = nf::TelemetryReader::open(std::filesystem::absolute(args.path));
+    if (!opened.ok()) {
+        return problem(args, opened.status(), "cannot open mmap telemetry region", 1);
+    }
+    const auto &reader = opened.value();
+    if (args.prometheus) {
+        std::cout << reader.format_prometheus();
+        return 0;
+    }
+    const auto snaps = reader.read_all();
+    constexpr std::string_view state_names[]{
+        "disconnected", "awaiting_logon", "active", "logout_pending", "closed", "failed"};
+    if (args.json) {
+        std::cout << "{\"pid\":" << reader.writer_pid() << ",\"sessions\":[";
+        for (std::size_t i = 0; i < snaps.size(); ++i) {
+            const auto &s = snaps[i];
+            if (i != 0) std::cout << ',';
+            const auto st_idx = static_cast<std::size_t>(s.state);
+            const auto st_name = st_idx < 6 ? state_names[st_idx] : std::string_view{"unknown"};
+            std::cout << "{\"name\":" << quote(s.name)
+                      << ",\"local_comp_id\":" << quote(s.local_comp_id)
+                      << ",\"remote_comp_id\":" << quote(s.remote_comp_id)
+                      << ",\"state\":" << quote(st_name)
+                      << ",\"next_inbound_seq\":" << s.next_inbound_seq
+                      << ",\"next_outbound_seq\":" << s.next_outbound_seq
+                      << ",\"inbound_frames\":" << s.inbound_frames
+                      << ",\"outbound_frames\":" << s.outbound_frames
+                      << ",\"business_deliveries\":" << s.business_deliveries
+                      << ",\"inbound_bytes\":" << s.inbound_bytes
+                      << ",\"outbound_bytes\":" << s.outbound_bytes
+                      << ",\"errors\":" << s.error_count
+                      << ",\"active_endpoint_index\":" << s.active_endpoint_index
+                      << ",\"stages\":{";
+            for (std::size_t st = 0; st < static_cast<std::size_t>(nf::TelemetryStage::count); ++st) {
+                if (st != 0) std::cout << ',';
+                const auto &h = s.stages[st];
+                std::cout << quote(nf::telemetry_stage_name(static_cast<nf::TelemetryStage>(st)))
+                          << ":{\"count\":" << h.count
+                          << ",\"min_ns\":" << h.min_ns
+                          << ",\"p50_ns\":" << h.p50_ns
+                          << ",\"p90_ns\":" << h.p90_ns
+                          << ",\"p99_ns\":" << h.p99_ns
+                          << ",\"p999_ns\":" << h.p999_ns
+                          << ",\"p9999_ns\":" << h.p9999_ns
+                          << ",\"max_ns\":" << h.max_ns << '}';
+            }
+            std::cout << "}}";
+        }
+        std::cout << "]}\n";
+    } else {
+        std::cout << "Telemetry writer PID=" << reader.writer_pid()
+                  << " sessions=" << snaps.size() << '\n';
+        for (const auto &s : snaps) {
+            const auto st_idx = static_cast<std::size_t>(s.state);
+            const auto st_name = st_idx < 6 ? state_names[st_idx] : std::string_view{"unknown"};
+            std::cout << "  session=" << s.name << " (" << s.local_comp_id << "->" << s.remote_comp_id
+                      << ") state=" << st_name
+                      << " in=" << s.inbound_frames << " out=" << s.outbound_frames
+                      << " deliveries=" << s.business_deliveries << " errors=" << s.error_count << '\n';
+            for (std::size_t st = 0; st < static_cast<std::size_t>(nf::TelemetryStage::count); ++st) {
+                const auto &h = s.stages[st];
+                if (h.count == 0) continue;
+                std::cout << "    stage=" << nf::telemetry_stage_name(static_cast<nf::TelemetryStage>(st))
+                          << " n=" << h.count
+                          << " p50=" << h.p50_ns << "ns"
+                          << " p90=" << h.p90_ns << "ns"
+                          << " p99=" << h.p99_ns << "ns"
+                          << " p99.9=" << h.p999_ns << "ns"
+                          << " p99.99=" << h.p9999_ns << "ns"
+                          << " max=" << h.max_ns << "ns\n";
+            }
+        }
+    }
+    return 0;
+}
+
 int inspect_journal(const Arguments &args) {
     nf::JournalConfig config;
     const auto path = std::filesystem::absolute(args.path).string();
@@ -791,6 +878,7 @@ int main(int argc, char **argv) {
             return generate_schema(args);
         if (args.command == "inspect")
             return args.operation == "frame" ? inspect_frame(args) : inspect_journal(args);
+        if (args.command == "telemetry") return show_telemetry(args);
         if (args.command == "schema") return check_schema(args);
         const auto loaded = nf::load_config(args.config);
         if (!loaded.ok())

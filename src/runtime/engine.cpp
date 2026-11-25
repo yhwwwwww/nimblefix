@@ -1441,11 +1441,13 @@ struct SessionControl {
     std::atomic<std::size_t> last_error_offset{0};
     std::atomic<std::uint64_t> next_inbound_seq{1}, next_outbound_seq{1};
     std::atomic<std::uint64_t> received_frames{0}, received_bytes{0}, written_bytes{0};
+    std::atomic<std::uint64_t> outbound_frames{0};
     std::atomic<std::uint64_t> business_deliveries{0};
     std::atomic<std::size_t> pending_messages{0}, pending_bytes{0};
     std::atomic<std::size_t> pending_inbound_messages{0}, pending_inbound_bytes{0};
     std::atomic<bool> read_paused{false};
     std::atomic<std::size_t> active_endpoint_index{0};
+    TelemetrySessionSlot* telemetry_slot{nullptr};
     std::uint64_t callback_started_ms{};
     bool active_callback_pending{};
     std::uint64_t active_pending_generation{};
@@ -1556,6 +1558,7 @@ struct EngineRuntime::Impl {
         std::size_t uring_tx_offset{};
         bool uring_rx_in_flight{};
         bool uring_tx_in_flight{};
+        bool telemetry_probes{};
 
         [[nodiscard]] std::string_view unread_view() const noexcept {
             return {receive_buffer.data() + receive_head, receive_buffer.size() - receive_head};
@@ -2245,13 +2248,26 @@ struct EngineRuntime::Impl {
             } else if (active_callback_command && command.generation != peer.generation) {
                 accepted = Status{ErrorCode::connection_closed};
             } else if (command.dependency == 0) {
+                const std::uint64_t j_t0 = (peer.telemetry_probes && peer.session->telemetry_slot)
+                    ? telemetry_now_ns() : 0ULL;
                 accepted = peer.driver->send(message, admission_now,
                     timestamp_view(wall, peer.settings.timestamp_precision));
+                if (j_t0 != 0ULL && accepted.ok()) {
+                    peer.session->telemetry_slot->record_stage(TelemetryStage::journal, telemetry_now_ns() - j_t0);
+                }
             } else {
                 const bool recovery = command.recovery || command.generation != peer.generation;
+                const std::uint64_t j_t0 = (peer.telemetry_probes && peer.session->telemetry_slot)
+                    ? telemetry_now_ns() : 0ULL;
                 accepted = peer.driver->send_dependent(message, admission_now,
                     timestamp_view(wall, peer.settings.timestamp_precision),
                     command.dependency, command.dependency_ordinal, recovery);
+                if (j_t0 != 0ULL && accepted.ok()) {
+                    peer.session->telemetry_slot->record_stage(TelemetryStage::journal, telemetry_now_ns() - j_t0);
+                }
+            }
+            if (accepted.ok()) {
+                peer.session->outbound_frames.fetch_add(1, std::memory_order_relaxed);
             }
             if (!accepted.ok() && accepted.status().code == ErrorCode::queue_full) {
                 sender.block_commands();
@@ -2308,11 +2324,19 @@ struct EngineRuntime::Impl {
                 ++processed;
                 continue;
             }
+            const std::uint64_t j_t0 = (peer.telemetry_probes && peer.session->telemetry_slot)
+                ? telemetry_now_ns() : 0ULL;
             auto accepted = peer.driver->send(message, admission_now,
                 timestamp_view(wall, peer.settings.timestamp_precision));
+            if (j_t0 != 0ULL && accepted.ok()) {
+                peer.session->telemetry_slot->record_stage(TelemetryStage::journal, telemetry_now_ns() - j_t0);
+            }
             if (!accepted.ok() && accepted.status().code == ErrorCode::queue_full) {
                 sender.block_commands();
                 break;
+            }
+            if (accepted.ok()) {
+                peer.session->outbound_frames.fetch_add(1, std::memory_order_relaxed);
             }
             const auto send_status = accepted.status();
             const bool send_ok = accepted.ok();
@@ -2475,6 +2499,7 @@ struct EngineRuntime::Impl {
             session->last_error_tag.store(status.tag, std::memory_order_relaxed);
             session->last_error_offset.store(status.offset, std::memory_order_relaxed);
             session->last_error.store(status.code, std::memory_order_release);
+            if (session->telemetry_slot != nullptr) session->telemetry_slot->inc_error();
             break;
         }
         if (!error_callback) return;
@@ -2505,6 +2530,30 @@ struct EngineRuntime::Impl {
             session.pending_inbound_messages.store(driver.pending_inbound_messages(), std::memory_order_relaxed);
             session.pending_inbound_bytes.store(driver.pending_inbound_bytes(), std::memory_order_relaxed);
             session.read_paused.store(!driver.can_receive(), std::memory_order_relaxed);
+            if (auto* slot = session.telemetry_slot) {
+                const auto next_out = driver.next_outbound_seq();
+                const auto out_frames = std::max<std::uint64_t>(
+                    session.outbound_frames.load(std::memory_order_relaxed),
+                    next_out > 1 ? next_out - 1 : 0ULL);
+                slot->state.store(static_cast<std::uint8_t>(session.state.load(std::memory_order_relaxed)),
+                                  std::memory_order_relaxed);
+                slot->generation.store(session.generation.load(std::memory_order_relaxed),
+                                       std::memory_order_relaxed);
+                slot->next_inbound_seq.store(driver.next_inbound_seq(), std::memory_order_relaxed);
+                slot->next_outbound_seq.store(next_out, std::memory_order_relaxed);
+                slot->inbound_frames.store(session.received_frames.load(std::memory_order_relaxed),
+                                           std::memory_order_relaxed);
+                slot->outbound_frames.store(out_frames, std::memory_order_relaxed);
+                slot->business_deliveries.store(session.business_deliveries.load(std::memory_order_relaxed),
+                                                std::memory_order_relaxed);
+                slot->inbound_bytes.store(session.received_bytes.load(std::memory_order_relaxed),
+                                          std::memory_order_relaxed);
+                slot->outbound_bytes.store(session.written_bytes.load(std::memory_order_relaxed),
+                                           std::memory_order_relaxed);
+                slot->active_endpoint_index.store(session.active_endpoint_index.load(std::memory_order_relaxed),
+                                                  std::memory_order_relaxed);
+                slot->last_update_ns.store(telemetry_now_ns(), std::memory_order_relaxed);
+            }
         }
     }
 
@@ -2551,10 +2600,21 @@ struct EngineRuntime::Impl {
 
     [[nodiscard]] Status open_driver(Peer& peer, SessionRole role) noexcept {
         try {
+            peer.telemetry_probes = config.telemetry_stage_probes;
             SessionCallbacks callbacks;
             callbacks.deferred_delivery = queued;
             {
-                callbacks.validate_message = [this](const FlatMessageView& message) {
+                callbacks.validate_message = [this, peer_ptr = &peer](const FlatMessageView& message) {
+                    const std::uint64_t v_t0 = (peer_ptr->telemetry_probes && peer_ptr->session &&
+                                                peer_ptr->session->telemetry_slot)
+                        ? telemetry_now_ns() : 0ULL;
+                    auto finish = [&](Status st) noexcept -> Status {
+                        if (v_t0 != 0ULL) {
+                            peer_ptr->session->telemetry_slot->record_stage(
+                                TelemetryStage::validate, telemetry_now_ns() - v_t0);
+                        }
+                        return st;
+                    };
                     std::string_view msg_type{};
                     std::size_t msg_type_offset = 0;
                     if (schema != nullptr) {
@@ -2564,18 +2624,18 @@ struct EngineRuntime::Impl {
                             msg_type_offset = fields[2].offset;
                         } else {
                             const auto type = message.find_unique(35);
-                            if (!type.ok()) return type.status();
+                            if (!type.ok()) return finish(type.status());
                             msg_type = type.value().value;
                             msg_type_offset = type.value().offset;
                         }
                         const auto schema_status = validate_schema_message_for_type(
                             *schema, msg_type, msg_type_offset, fields, ValidationLevel::strict,
                             message.parsed_index());
-                        if (!schema_status.ok()) return schema_status;
+                        if (!schema_status.ok()) return finish(schema_status);
                     }
                     if (config.message_validator) {
                         const auto checked = config.message_validator(message);
-                        if (!checked.ok()) return checked;
+                        if (!checked.ok()) return finish(checked);
                     }
                     if (schema != nullptr) {
                         const auto h = std::lower_bound(typed_handlers.begin(), typed_handlers.end(),
@@ -2589,10 +2649,10 @@ struct EngineRuntime::Impl {
                                     return item.msg_type < value;
                                 });
                             const bool ignored = ig != ignored_messages.end() && ig->msg_type == msg_type;
-                            if (!ignored) return Status{ErrorCode::message_unhandled, 35};
+                            if (!ignored) return finish(Status{ErrorCode::message_unhandled, 35});
                         }
                     }
-                    return Status::success();
+                    return finish(Status::success());
                 };
             }
             callbacks.wire_hints = wire_hints;
@@ -3099,6 +3159,8 @@ struct EngineRuntime::Impl {
         while (!peer.closed && peer.connection == Connection::connected &&
                peer.unread_size() != 0 && processed < frame_budget && peer.driver->can_receive()) {
             FrameView frame{};
+            const bool probe = peer.telemetry_probes && peer.session && peer.session->telemetry_slot;
+            const std::uint64_t p_t0 = probe ? telemetry_now_ns() : 0ULL;
             const auto status = inspect_frame(peer.unread_view(), frame, {},
                 CodecLimits{config.max_frame_bytes, peer.settings.verify_checksum});
             if (status.code == ErrorCode::need_more) return Status::success();
@@ -3109,6 +3171,10 @@ struct EngineRuntime::Impl {
             const auto wall = wall_timestamp();
             const auto received = peer.driver->receive_verified(frame, now,
                 timestamp_view(wall, peer.settings.timestamp_precision));
+            if (p_t0 != 0ULL && received.code != ErrorCode::queue_full) {
+                peer.session->telemetry_slot->record_stage(
+                    TelemetryStage::parse, telemetry_now_ns() - p_t0);
+            }
             if (received.code == ErrorCode::queue_full) return Status::success();
             if (peer.session) {
                 peer.session->received_frames.fetch_add(1, std::memory_order_relaxed);
@@ -3173,8 +3239,13 @@ struct EngineRuntime::Impl {
             const auto budget = io_byte_budget - total;
             const auto read_size = std::min({read_chunk_size, available, budget});
             if (read_size == 0) break;
+            const std::uint64_t r_t0 = (peer.telemetry_probes && peer.session && peer.session->telemetry_slot)
+                ? telemetry_now_ns() : 0ULL;
             const auto io = peer.tls ? peer.tls->read(std::span<char>{scratch, read_size})
                 : peer.stream.read(std::span<char>{scratch, read_size});
+            if (r_t0 != 0ULL && io.bytes != 0) {
+                peer.session->telemetry_slot->record_stage(TelemetryStage::read, telemetry_now_ns() - r_t0);
+            }
             if (!io.status.ok()) {
                 drop_peer(peer, io.status, now, true);
                 return io.status;
@@ -3270,7 +3341,12 @@ struct EngineRuntime::Impl {
 
     static WriteResult socket_writer(void* context, std::span<const char> bytes) noexcept {
         auto* peer = static_cast<Peer*>(context);
+        const std::uint64_t w_t0 = (peer->telemetry_probes && peer->session && peer->session->telemetry_slot)
+            ? telemetry_now_ns() : 0ULL;
         const auto result = peer->tls ? peer->tls->write(bytes) : peer->stream.write(bytes);
+        if (w_t0 != 0ULL && result.bytes != 0) {
+            peer->session->telemetry_slot->record_stage(TelemetryStage::write, telemetry_now_ns() - w_t0);
+        }
         const auto status = result.peer_closed
             ? Status{ErrorCode::connection_closed} : result.status;
         if (result.bytes != 0 && peer->session)
@@ -3624,6 +3700,22 @@ struct EngineRuntime::Impl {
         }
         auto status = create_storage_directory();
         if (!status.ok()) return status;
+        if (config.shared_telemetry) {
+            telemetry = config.shared_telemetry;
+        } else if (!config.telemetry_path.empty()) {
+            auto created = TelemetryWriter::create(
+                config.telemetry_path, std::max<std::size_t>(64, config.max_sessions));
+            if (!created.ok()) return created.status();
+            telemetry = std::move(created).value();
+        }
+        if (telemetry) {
+            for (const auto& session : sessions) {
+                if (session && session->sender && session->telemetry_slot == nullptr) {
+                    session->telemetry_slot = telemetry->register_session(
+                        session->name, session->sender->local_comp_id, session->sender->remote_comp_id);
+                }
+            }
+        }
         status = start_diagnostics();
         if (!status.ok()) return status;
         status = bind_listeners();
@@ -3956,6 +4048,7 @@ struct EngineRuntime::Impl {
     std::atomic<std::uint64_t> diagnostics_dropped{0};
 
     EngineConfig config;
+    std::shared_ptr<TelemetryWriter> telemetry;
     std::vector<InitiatorConfig> initiators;
     std::vector<std::shared_ptr<SessionControl>> initiator_sessions;
     std::vector<Listener> listeners;

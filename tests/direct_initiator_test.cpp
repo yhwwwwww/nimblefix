@@ -854,6 +854,124 @@ void test_multi_endpoint_failover_and_backoff() {
     CHECK(init.active_endpoint().port == 9001);
 }
 
+void test_zero_overhead_mmap_telemetry_and_stage_histograms() {
+    // 1. Histogram bucket accuracy and quantile monotonicity
+    nf::TelemetryHistogram hist{};
+    for (std::uint64_t ns = 50; ns <= 10'000; ns += 50) {
+        hist.record(ns);
+    }
+    const auto sum = hist.summarize();
+    CHECK(sum.count == 200);
+    CHECK(sum.min_ns == 50);
+    CHECK(sum.max_ns == 10'000);
+    CHECK(sum.p50_ns >= 4'800 && sum.p50_ns <= 5'500);
+    CHECK(sum.p90_ns >= 8'800 && sum.p90_ns <= 9'600);
+    CHECK(sum.p99_ns >= 9'800 && sum.p99_ns <= 10'000);
+    CHECK(sum.p50_ns <= sum.p90_ns && sum.p90_ns <= sum.p99_ns &&
+          sum.p99_ns <= sum.p999_ns && sum.p999_ns <= sum.p9999_ns &&
+          sum.p9999_ns <= sum.max_ns);
+
+    // 2. DirectInitiator with mmap telemetry + all 5 stage probes under 0-malloc / 0-mutex / 0-fsync audit
+    TempDir dir;
+    const std::filesystem::path tel_path = std::filesystem::path{dir.path} / "direct.nfxt";
+    nf::DirectInitiatorConfig cfg{};
+    cfg.host = "127.0.0.1";
+    cfg.port = 9876;
+    cfg.storage_directory = dir.path;
+    cfg.local_comp_id = "BUY";
+    cfg.remote_comp_id = "SELL";
+    cfg.telemetry_path = tel_path;
+    cfg.telemetry_stage_probes = true;
+
+    struct CountHandler {
+        int delivered{};
+        [[nodiscard]] nf::Status on_message(const nf::FlatMessageView&, const nf::DeliveryInfo&) noexcept {
+            ++delivered;
+            return nf::Status::success();
+        }
+    };
+
+    auto opened = nf::DirectInitiator<fix::Schema, CountHandler, LoopbackTransport>::open(cfg);
+    CHECK(opened.ok());
+    if (!opened.ok()) return;
+    auto init = std::move(opened).value();
+    init.transport().tx_wire.reserve(256U * 1024U);
+    init.transport().rx_wire.reserve(256U * 1024U);
+
+    CHECK(init.connect(1, t0).ok());
+    std::string wire;
+    CHECK(init.transport().pop_sent_frame(wire));
+    init.transport().push_from_peer(make_frame(nf::message<"A">().set<98>(0).set<108>(30), "SELL", "BUY", 1, t0));
+    CHECK(init.poll_once(2, t0).ok());
+    CHECK(init.is_active());
+
+    // Pre-build 20 inbound ExecutionReport frames to feed during audited hot path
+    std::vector<std::string> ers;
+    ers.reserve(20);
+    for (int i = 0; i < 20; ++i) {
+        auto er = nf::message<"8">()
+            .set<37>("ORD-" + std::to_string(i))
+            .set<17>("EX-" + std::to_string(i))
+            .set<11>("TEL-" + std::to_string(i))
+            .set<150>('0').set<39>('0')
+            .set<55>("AAPL").set<54>('1')
+            .set<151>(nf::Decimal{100, 0})
+            .set<14>(nf::Decimal{0, 0})
+            .set<6>(nf::Decimal{0, 0});
+        ers.push_back(make_frame(er, "SELL", "BUY", static_cast<std::uint64_t>(2 + i), t1));
+    }
+
+    g_malloc_calls.store(0);
+    g_mutex_calls.store(0);
+    g_fsync_calls.store(0);
+    g_audit_hot_path.store(true);
+    for (int i = 0; i < 20; ++i) {
+        char cid[16] = "TEL-00";
+        cid[4] = static_cast<char>('0' + (i / 10));
+        cid[5] = static_cast<char>('0' + (i % 10));
+        const auto seq = init.send_stream<fix::NewOrderSingle>([&](auto& w) {
+            w.cl_ord_id(std::string_view{cid, 6})
+             .symbol("AAPL").side('1').transact_time(t1)
+             .order_qty(nf::Decimal{100, 0}).ord_type('1');
+        }, 10, t1);
+        CHECK(seq.ok());
+        init.transport().rx_wire.append(ers[static_cast<std::size_t>(i)]);
+        CHECK(init.poll_once(10, t1).ok());
+    }
+    g_audit_hot_path.store(false);
+
+    CHECK(g_malloc_calls.load() == 0);
+    CHECK(g_mutex_calls.load() == 0);
+    CHECK(g_fsync_calls.load() == 0);
+    CHECK(init.handler().delivered == 20);
+
+    // 3. Out-of-band read-only sidecar inspection via TelemetryReader
+    auto reader_res = nf::TelemetryReader::open(tel_path);
+    CHECK(reader_res.ok());
+    if (!reader_res.ok()) return;
+    const auto& reader = reader_res.value();
+    CHECK(reader.writer_pid() > 0);
+    const auto snaps = reader.read_all();
+    CHECK(snaps.size() == 1);
+    if (snaps.size() == 1) {
+        const auto& s = snaps[0];
+        CHECK(s.local_comp_id == "BUY" && s.remote_comp_id == "SELL");
+        CHECK(s.state == nf::SessionState::active);
+        CHECK(s.inbound_frames == 21);   // Logon + 20 ERs
+        CHECK(s.outbound_frames == 21);  // Logon + 20 NOS
+        CHECK(s.business_deliveries == 20);
+        CHECK(s.error_count == 0);
+        CHECK(s.stages[static_cast<std::size_t>(nf::TelemetryStage::read)].count >= 21);
+        CHECK(s.stages[static_cast<std::size_t>(nf::TelemetryStage::parse)].count >= 21);
+        CHECK(s.stages[static_cast<std::size_t>(nf::TelemetryStage::validate)].count == 20);
+        CHECK(s.stages[static_cast<std::size_t>(nf::TelemetryStage::journal)].count >= 40);
+        CHECK(s.stages[static_cast<std::size_t>(nf::TelemetryStage::write)].count >= 21);
+    }
+    const auto prom = reader.format_prometheus();
+    CHECK(prom.find("nimblefix_session_inbound_frames_total") != std::string::npos);
+    CHECK(prom.find("stage=\"validate\",quantile=\"0.99\"") != std::string::npos);
+}
+
 } // namespace
 
 int main() {
@@ -864,6 +982,7 @@ int main() {
     test_sigkill_crash_recovery_redelivers_uncommitted_delivery();
     test_subms_timestamps_and_optional_checksum_skip();
     test_multi_endpoint_failover_and_backoff();
+    test_zero_overhead_mmap_telemetry_and_stage_histograms();
     if (failures != 0) {
         std::cerr << failures << " direct initiator test(s) failed\n";
         return 1;

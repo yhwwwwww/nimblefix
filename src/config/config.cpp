@@ -447,7 +447,7 @@ class Loader {
                   "max_pending_inbound_bytes", "max_pending_sender_messages", "max_pending_sender_bytes",
                   "sender_receipt_capacity", "max_producer_lanes_per_session", "diagnostic_capacity", "queued",
                   "io_backend", "idle_strategy", "idle_spin_iterations", "idle_yield_iterations",
-                  "cpu_core", "shards", "cpu_cores"});
+                  "cpu_core", "shards", "cpu_cores", "telemetry_path", "telemetry_stage_probes"});
             const auto dispatch = string(*engine, "dispatch", "engine", "inline");
             if (dispatch == "queued")
                 document.dispatch = ConfigDispatch::queued_callbacks;
@@ -501,6 +501,10 @@ class Loader {
                             document.cpu_cores.push_back(static_cast<int>(*val));
                     }
             }
+            if (engine->contains("telemetry_path"))
+                document.engine.telemetry_path = path(string(*engine, "telemetry_path", "engine"));
+            document.engine.telemetry_stage_probes =
+                boolean(*engine, "telemetry_stage_probes", "engine", false);
             document.schema = string(*engine, "schema", "engine", "none");
             if (document.schema != "none" && document.schema != "fix44")
                 error(engine->get("schema"), "engine.schema", "none or fix44");

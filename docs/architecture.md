@@ -95,3 +95,12 @@ For multi-core deployments scaling across many concurrent sessions (`<nimblefix/
 - **`ShardedEngine<Schema, Policy>`** runs `K` completely independent `IoBackend` (`epoll` / `busy_poll` / `io_uring`) reactor threads with optional per-shard Linux CPU core pinning (`cpu_cores` / `pin_current_thread`) and configurable `IdleStrategy` (`sleep`, `busy_spin`, `hybrid_backoff`).
 - **Static Session-to-Shard Pinning**: Every Initiator and Acceptor session is pinned to exactly one shard (`shard_index` or automatic round-robin), preserving strict single-writer lock-free `SessionCore` and segmented mmap Journal ownership within every shard.
 - **Single-Port Shared Acceptor Handoff**: Shared Acceptor listeners bind once on Shard 0. When a client connects and sends its initial `Logon (35=A)` (plaintext TCP or TLS), Shard 0 routes by `(SenderCompID, TargetCompID, BeginString)` and hands the accepted socket directly into the owning shard's reactor loop — 100% of steady-state order processing executes lock-free on the owning shard's pinned CPU core.
+
+---
+
+## 6. Out-of-Band mmap Telemetry & Stage Latency Probes
+
+To avoid introducing monitoring jitter onto trading threads, NimbleFIX provides an opt-in `MAP_SHARED` mmap telemetry file (`<nimblefix/telemetry.hpp>`, `.nfxt` format):
+- **Single-Writer Lock-Free Design**: Each session owns one cache-line-aligned `TelemetrySessionSlot` written exclusively by its protocol-owner thread using relaxed load+store updates (no `lock` RMW prefix, no mutex, no heap allocation, no syscall). `ShardedEngine` shares a single `.nfxt` mapping across all `K` shards so external monitors inspect one file.
+- **5 Stage HDR Histograms**: When `telemetry_stage_probes = true`, `read`, `parse`, `validate`, `journal`, and `write` durations are recorded into 433-bucket log-linear nanosecond histograms (`[0, 256 ns)` in 16 ns bins + 26 octaves × 16 sub-buckets up to 17.1 s), exporting `min/p50/p90/p99/p99.9/p99.99/max`.
+- **Read-Only Sidecar Export**: `TelemetryReader::open(path)` maps the region `O_RDONLY` / `PROT_READ` with zero writes or locks on the trading process, powering both embedded monitors and `nimblefix telemetry --path <file.nfxt> [--json | --prometheus]`.

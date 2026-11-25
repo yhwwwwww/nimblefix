@@ -42,9 +42,9 @@ Goal: Push both outbound encoding and inbound strict parsing/validation firmly i
   - **8 concurrent sessions**: 1-core `epoll` **176k ord/s** (`p99 = 76.91 µs`, `p99.9 = 227.25 µs`) -> 4-shard pinned `hybrid_backoff` **443k ord/s (2.51×)** with **`p99 = 21.27 µs` (3.62× lower)** and **`p99.9 = 28.98 µs` (7.84× lower)**.
   - **16 concurrent sessions**: 1-core `epoll` **176k ord/s** (`p50 = 75.64 µs`, `p99 = 161.11 µs`) -> 4-shard pinned `hybrid_backoff` **471k ord/s (2.67×)** with **`p50 = 31.19 µs`** and **`p99 = 49.99 µs` (3.22× lower)**.
 
-### 7. Zero-Hot-Path-Impact Telemetry Ring & Stage Probes
-- Expose a lock-free / mmap-backed telemetry region (inspired by out-of-band monitoring queues) that records per-session state, counters, and nanosecond stage latency histograms (`p50/p90/p99/p99.9/p99.99` across read, parse, validate, journal, and write) without locks, allocations, or syscalls on the hot path.
-- Enable external sidecar tools / Prometheus / Grafana exporters to read metrics with zero jitter impact on trading threads.
+### 7. [Done] Zero-Hot-Path-Impact Telemetry Ring & Stage Probes
+- **Status**: Implemented and verified via `<nimblefix/telemetry.hpp>` (`TelemetryWriter`, `TelemetryReader`, lock-free 433-bucket HDR log-linear nanosecond `TelemetryHistogram`), `DirectInitiator`, `Engine`, `ShardedEngine` (shared single `.nfxt` across all shards), TOML configuration (`telemetry_path`, `telemetry_stage_probes`), and `nimblefix telemetry --path <file.nfxt> [--json | --prometheus]`.
+- **Verified Contract**: Per-session state, counters, and 5 stage latency histograms (`read`, `parse`, `validate`, `journal`, `write` with `p50/p90/p99/p99.9/p99.99`) run with **0 steady-state heap allocations, 0 mutex locks, and 0 fsync** on `DirectInitiator`, and are readable out-of-band via read-only `O_RDONLY`/`PROT_READ` mmap from external sidecar tools or Prometheus exporters.
 
 ### 8. Deterministic Historical Replay (`nimblefix-cli replay`)
 - Build on the existing lease-protected mmap Journal reader to replay recorded FIX sessions (original timing or full-speed) into a target endpoint or offline test harness for deterministic bug reproduction and regression benchmarking.

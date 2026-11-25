@@ -159,7 +159,12 @@ password = "SHOULD-NEVER-APPEAR"
     assert any(field["tag"] == 554 and field["value"] == "<redacted>" for field in json.loads(inspected.stdout)[0]["fields"])
 
     config = config_dir / "acceptor.toml"
+    telemetry_file = config_dir / "telemetry.nfxt"
     content = original.decode().replace("127.0.0.1:9876", "127.0.0.1:0")
+    content = content.replace(
+        "[engine.storage]",
+        f'telemetry_path = {json.dumps(str(telemetry_file))}\ntelemetry_stage_probes = true\n[engine.storage]',
+    )
     content += '''
 timestamp_precision = "us"
 verify_checksum = true
@@ -205,6 +210,15 @@ require_tls = false
         files = [path for path in (config_dir / "state").rglob("*") if path.is_file()]
         assert files
         for path in files: assert secret.encode() not in path.read_bytes(), f"credential leaked to {path.name}"
+        assert telemetry_file.is_file(), "telemetry mmap file was not created"
+        tel_json = json.loads(execute(binary, root, "telemetry", "--path", telemetry_file, "--json").stdout)
+        assert tel_json["pid"] > 0 and len(tel_json["sessions"]) == 1
+        sess = tel_json["sessions"][0]
+        assert sess["business_deliveries"] == 1 and sess["inbound_frames"] >= 2
+        assert sess["stages"]["parse"]["count"] >= 2 and sess["stages"]["write"]["count"] >= 1
+        tel_prom = execute(binary, root, "telemetry", "--path", telemetry_file, "--prometheus").stdout
+        assert "nimblefix_session_business_deliveries_total" in tel_prom
+        assert 'stage="parse",quantile="0.99"' in tel_prom
     finally:
         if server.poll() is None: server.kill(); server.communicate()
 

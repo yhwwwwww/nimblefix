@@ -328,8 +328,15 @@ void test_core_affinity_idle_strategy_and_sharded_reactor() {
     acc_scfg.base.storage.journal_max_records = 4096;
     acc_scfg.base.io_backend = nf::IoBackendConfig::hybrid(200, 50);
 
+    const std::filesystem::path acc_tel = std::filesystem::path{dir_acc.path} / "acceptor.nfxt";
+    acc_scfg.base.telemetry_path = acc_tel;
+    acc_scfg.base.telemetry_stage_probes = true;
+
     nf::ShardedEngineConfig ini_scfg = acc_scfg;
     ini_scfg.base.storage.directory = dir_ini.path;
+    const std::filesystem::path ini_tel = std::filesystem::path{dir_ini.path} / "initiator.nfxt";
+    ini_scfg.base.telemetry_path = ini_tel;
+    ini_scfg.base.telemetry_stage_probes = true;
 
     auto acc_res = nf::ShardedEngine<fix::Schema, nf::Inline>::create(acc_scfg);
     auto ini_res = nf::ShardedEngine<fix::Schema, nf::Inline>::create(ini_scfg);
@@ -425,6 +432,32 @@ void test_core_affinity_idle_strategy_and_sharded_reactor() {
     CHECK(acc_received.load() == expected_total);
     CHECK(ini_received.load() == expected_total);
     CHECK(distinct_acc_tids.size() == kShards);
+
+    // Out-of-band read-only sidecar check on shared ShardedEngine mmap telemetry region
+    {
+        auto acc_reader = nf::TelemetryReader::open(acc_tel);
+        auto ini_reader = nf::TelemetryReader::open(ini_tel);
+        CHECK(acc_reader.ok() && ini_reader.ok());
+        if (acc_reader.ok() && ini_reader.ok()) {
+            const auto acc_snaps = acc_reader.value().read_all();
+            const auto ini_snaps = ini_reader.value().read_all();
+            CHECK(acc_snaps.size() == kSessions);
+            CHECK(ini_snaps.size() == kSessions);
+            std::uint64_t acc_deliv = 0, ini_deliv = 0, acc_val = 0, ini_jrn = 0;
+            for (const auto& s : acc_snaps) {
+                acc_deliv += s.business_deliveries;
+                acc_val += s.stages[static_cast<std::size_t>(nf::TelemetryStage::validate)].count;
+            }
+            for (const auto& s : ini_snaps) {
+                ini_deliv += s.business_deliveries;
+                ini_jrn += s.stages[static_cast<std::size_t>(nf::TelemetryStage::journal)].count;
+            }
+            CHECK(acc_deliv == static_cast<std::uint64_t>(expected_total));
+            CHECK(ini_deliv == static_cast<std::uint64_t>(expected_total));
+            CHECK(acc_val == static_cast<std::uint64_t>(expected_total));
+            CHECK(ini_jrn == static_cast<std::uint64_t>(expected_total));
+        }
+    }
 
     initiator.request_stop();
     acceptor.request_stop();

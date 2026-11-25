@@ -72,10 +72,20 @@ public:
                 schema_wire_hints = Schema::wire_hints();
             }
 
+            std::shared_ptr<TelemetryWriter> shared_tel = config.base.shared_telemetry;
+            if (!shared_tel && !config.base.telemetry_path.empty()) {
+                const std::size_t cap = std::min<std::size_t>(1024, std::max<std::size_t>(64, config.base.max_sessions * count));
+                auto created_tel = TelemetryWriter::create(config.base.telemetry_path, cap);
+                if (!created_tel.ok()) return created_tel.status();
+                shared_tel = std::move(created_tel).value();
+            }
+
             std::vector<std::unique_ptr<detail::EngineRuntime>> shards;
             shards.reserve(count);
             for (std::size_t i = 0; i < count; ++i) {
                 EngineConfig shard_cfg = config.base;
+                shard_cfg.shared_telemetry = shared_tel;
+                shard_cfg.telemetry_path.clear();
                 if (i < config.cpu_cores.size()) {
                     shard_cfg.cpu_core = config.cpu_cores[i];
                 } else {

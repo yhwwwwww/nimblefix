@@ -20,6 +20,7 @@
 #include <nimblefix/session.hpp>
 #include <nimblefix/settings.hpp>
 #include <nimblefix/status.hpp>
+#include <nimblefix/telemetry.hpp>
 #include <nimblefix/tls.hpp>
 
 namespace nimblefix {
@@ -61,6 +62,11 @@ struct EngineConfig {
     std::function<Status(const FlatMessageView&)> message_validator{};
     // Optional Linux CPU core pinning for this Engine's reactor owner thread (-1 = unpinned).
     int cpu_core{-1};
+    // Optional mmap-backed telemetry region path (empty = disabled, zero overhead).
+    std::filesystem::path telemetry_path{};
+    bool telemetry_stage_probes{false};
+    // Internal shared writer used by ShardedEngine so all shards publish into one mmap file.
+    std::shared_ptr<TelemetryWriter> shared_telemetry{};
 };
 
 struct InitiatorConfig {

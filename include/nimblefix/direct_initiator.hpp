@@ -30,6 +30,7 @@
 #include <nimblefix/settings.hpp>
 #include <nimblefix/status.hpp>
 #include <nimblefix/tcp_transport.hpp>
+#include <nimblefix/telemetry.hpp>
 
 namespace nimblefix {
 
@@ -71,6 +72,9 @@ struct DirectInitiatorConfig {
     // overrides host/port and follows connection_strategy.
     std::vector<TcpEndpoint> endpoints{};
     ConnectionStrategy connection_strategy{};
+    // Optional mmap telemetry region (.nfxt) for zero-overhead out-of-band observability.
+    std::filesystem::path telemetry_path{};
+    bool telemetry_stage_probes{false};
 };
 
 // Default no-op handler for tests or send-only initiators.
@@ -404,8 +408,16 @@ public:
         auto opened = Journal::open(jcfg);
         if (!opened.ok()) return opened.status();
 
+        std::shared_ptr<TelemetryWriter> telemetry_writer{};
+        if (!config.telemetry_path.empty()) {
+            auto created = TelemetryWriter::create(config.telemetry_path, 4);
+            if (!created.ok()) return created.status();
+            telemetry_writer = std::move(created).value();
+        }
+
         DirectInitiator init(std::move(config), std::move(handler),
-                             std::move(transport), std::move(opened).value());
+                             std::move(transport), std::move(opened).value(),
+                             std::move(telemetry_writer));
         if (!init.recovery_status_.ok()) return init.recovery_status_;
         return init;
     } catch (const std::bad_alloc&) {
@@ -430,6 +442,9 @@ public:
         for (std::size_t attempt = 0; attempt < max_immediate; ++attempt) {
             const auto& ep = failover_.current_endpoint();
             const std::size_t idx = failover_.current_index();
+            if (telemetry_slot_ != nullptr) {
+                telemetry_slot_->active_endpoint_index.store(idx, std::memory_order_relaxed);
+            }
             if constexpr (requires { handler_.on_endpoint_selected(ep, idx); }) {
                 try { handler_.on_endpoint_selected(ep, idx); } catch (...) {}
             }
@@ -509,8 +524,13 @@ public:
                     return fail(Status{ErrorCode::too_large});
                 }
             }
+            const std::uint64_t read_t0 = (telemetry_slot_ != nullptr && config_.telemetry_stage_probes)
+                ? telemetry_now_ns() : 0ULL;
             const auto io = transport_.read(std::span<char>{rx_buf_.data() + rx_tail_, rx_buf_.size() - rx_tail_});
             if (io.bytes != 0) {
+                if (read_t0 != 0ULL) {
+                    telemetry_slot_->record_stage(TelemetryStage::read, telemetry_now_ns() - read_t0);
+                }
                 rx_tail_ += io.bytes;
                 if (const auto st = drain_rx_frames(now_ms); !st.ok()) return st;
             }
@@ -770,6 +790,7 @@ public:
     }
     [[nodiscard]] bool needs_maintenance() const noexcept { return journal_.needs_maintenance(); }
     [[nodiscard]] const Journal& journal() const noexcept { return journal_; }
+    [[nodiscard]] const TelemetrySessionSlot* telemetry_slot() const noexcept { return telemetry_slot_; }
     [[nodiscard]] Handler& handler() noexcept { return handler_; }
     [[nodiscard]] const Handler& handler() const noexcept { return handler_; }
     [[nodiscard]] Transport& transport() noexcept { return transport_; }
@@ -792,11 +813,13 @@ private:
         RecordId dependency{};
     };
 
-    DirectInitiator(DirectInitiatorConfig cfg, Handler h, Transport tr, Journal j)
+    DirectInitiator(DirectInitiatorConfig cfg, Handler h, Transport tr, Journal j,
+                    std::shared_ptr<TelemetryWriter> tw = {})
         : config_(std::move(cfg)),
           handler_(std::move(h)),
           transport_(std::move(tr)),
           journal_(std::move(j)),
+          telemetry_writer_(std::move(tw)),
           core_(SessionRole::initiator, config_.heartbeat_ms,
                 config_.logon_timeout_ms, config_.logout_timeout_ms,
                 journal_.next_inbound_seq(), journal_.next_outbound_seq()),
@@ -851,6 +874,20 @@ private:
             }
         }
         peer_ack_seq_ = std::max(current_epoch_ack, retained_floor > 1 ? retained_floor - 1 : 0);
+        if (telemetry_writer_) {
+            telemetry_slot_ = telemetry_writer_->register_session(
+                config_.session_key, config_.local_comp_id, config_.remote_comp_id);
+            sync_telemetry_state();
+        }
+    }
+
+    void sync_telemetry_state() noexcept {
+        if (telemetry_slot_ == nullptr) return;
+        telemetry_slot_->state.store(static_cast<std::uint8_t>(state()), std::memory_order_release);
+        telemetry_slot_->next_inbound_seq.store(core_.next_inbound(), std::memory_order_relaxed);
+        telemetry_slot_->next_outbound_seq.store(core_.next_outbound(), std::memory_order_relaxed);
+        telemetry_slot_->active_endpoint_index.store(failover_.current_index(), std::memory_order_relaxed);
+        telemetry_slot_->last_update_ns.store(telemetry_now_ns(), std::memory_order_relaxed);
     }
 
     [[nodiscard]] Status set_wall_time(std::string_view v) noexcept {
@@ -902,6 +939,10 @@ private:
         logon_tx_size_ = 0;
         detail::direct_secure_clear(deferred_logon_buf_);
         deferred_logon_size_ = 0;
+        if (telemetry_slot_ != nullptr) {
+            telemetry_slot_->inc_error();
+            sync_telemetry_state();
+        }
         if constexpr (requires { handler_.on_error(err); }) {
             try { handler_.on_error(err); } catch (...) {}
         }
@@ -930,6 +971,7 @@ private:
         ev.now_ms = now_ms;
         (void)core_.process(ev);
         (void)failover_.on_failure_or_disconnect(now_ms, was_active);
+        sync_telemetry_state();
         if constexpr (requires { handler_.on_disconnected(reason); }) {
             try { handler_.on_disconnected(reason); } catch (...) {}
         }
@@ -1030,6 +1072,8 @@ private:
 
         JournalRecord committed_rec{};
         bool committed_ok = false;
+        const std::uint64_t j_t0 = (telemetry_slot_ != nullptr && config_.telemetry_stage_probes)
+            ? telemetry_now_ns() : 0ULL;
         auto reserved = journal_.reserve(RecordKind::outbound, seq, seq, 0, reserve_bound);
         if (reserved.ok()) {
             const auto encoded = encode_fix(msg, header, reserved.value().payload);
@@ -1050,6 +1094,9 @@ private:
             if (!appended.ok()) return fail(appended.status());
             committed_rec = appended.value();
         }
+        if (j_t0 != 0ULL) {
+            telemetry_slot_->record_stage(TelemetryStage::journal, telemetry_now_ns() - j_t0);
+        }
 
         detail::CoreEvent app{};
         app.kind = detail::CoreEventKind::outbound_appended;
@@ -1061,9 +1108,18 @@ private:
 
         // Fast-path direct socket write when immediate_write is requested and TX queue & replay are idle!
         const auto payload = committed_rec.payload;
+        if (telemetry_slot_ != nullptr) {
+            telemetry_slot_->inc_outbound(payload.size());
+            sync_telemetry_state();
+        }
         if (immediate_write && tx_count_ == 0 && !replay_active_ && replay_count_ == 0 &&
             transport_.valid() && !transport_.is_connecting()) {
+            const std::uint64_t w_t0 = (telemetry_slot_ != nullptr && config_.telemetry_stage_probes)
+                ? telemetry_now_ns() : 0ULL;
             const auto io = transport_.write(std::span<const char>{payload.data(), payload.size()});
+            if (w_t0 != 0ULL && io.bytes != 0) {
+                telemetry_slot_->record_stage(TelemetryStage::write, telemetry_now_ns() - w_t0);
+            }
             if (io.bytes == payload.size() && io.status.ok()) {
                 detail::CoreEvent wr{};
                 wr.kind = detail::CoreEventKind::outbound_written;
@@ -1130,6 +1186,8 @@ private:
 
         JournalRecord committed_rec{};
         bool committed_ok = false;
+        const std::uint64_t j_t0 = (telemetry_slot_ != nullptr && config_.telemetry_stage_probes)
+            ? telemetry_now_ns() : 0ULL;
         auto reserved = journal_.reserve(RecordKind::outbound, seq, seq, 0, reserve_bound);
         if (reserved.ok()) {
             const auto encoded = stream_into(reserved.value().payload);
@@ -1150,6 +1208,9 @@ private:
             if (!appended.ok()) return fail(appended.status());
             committed_rec = appended.value();
         }
+        if (j_t0 != 0ULL) {
+            telemetry_slot_->record_stage(TelemetryStage::journal, telemetry_now_ns() - j_t0);
+        }
 
         detail::CoreEvent app{};
         app.kind = detail::CoreEventKind::outbound_appended;
@@ -1160,9 +1221,18 @@ private:
         if (!aout.status.ok()) return fail(aout.status);
 
         const auto payload = committed_rec.payload;
+        if (telemetry_slot_ != nullptr) {
+            telemetry_slot_->inc_outbound(payload.size());
+            sync_telemetry_state();
+        }
         if (immediate_write && tx_count_ == 0 && !replay_active_ && replay_count_ == 0 &&
             transport_.valid() && !transport_.is_connecting()) {
+            const std::uint64_t w_t0 = (telemetry_slot_ != nullptr && config_.telemetry_stage_probes)
+                ? telemetry_now_ns() : 0ULL;
             const auto io = transport_.write(std::span<const char>{payload.data(), payload.size()});
+            if (w_t0 != 0ULL && io.bytes != 0) {
+                telemetry_slot_->record_stage(TelemetryStage::write, telemetry_now_ns() - w_t0);
+            }
             if (io.bytes == payload.size() && io.status.ok()) {
                 detail::CoreEvent wr{};
                 wr.kind = detail::CoreEventKind::outbound_written;
@@ -1230,6 +1300,10 @@ private:
 
         if (const auto st = enqueue_tx(committed_rec.id, committed_rec.payload.size(), seq, msg_type); !st.ok())
             return fail(st);
+        if (telemetry_slot_ != nullptr) {
+            telemetry_slot_->inc_outbound(committed_rec.payload.size());
+            sync_telemetry_state();
+        }
         return seq;
     }
 
@@ -1268,6 +1342,9 @@ private:
         }
         if (const auto st = enqueue_tx(committed_id, encoded_size, seq, msg_type); !st.ok())
             return st;
+        if (telemetry_slot_ != nullptr) {
+            telemetry_slot_->inc_outbound(encoded_size);
+        }
         detail::CoreEvent ev{};
         ev.kind = detail::CoreEventKind::outbound_appended;
         ev.now_ms = now_ms;
@@ -1314,6 +1391,9 @@ private:
             detail::direct_secure_clear(logon_tx_buf_);
             logon_tx_size_ = 0;
             return st;
+        }
+        if (telemetry_slot_ != nullptr) {
+            telemetry_slot_->inc_outbound(actual.value());
         }
         detail::CoreEvent ev{};
         ev.kind = detail::CoreEventKind::outbound_appended;
@@ -1455,7 +1535,12 @@ private:
                             chunks[n_chunks++] = {rec->payload.data() + entry.offset, entry.size - entry.offset};
                         }
                     }
+                    const std::uint64_t wb_t0 = (telemetry_slot_ != nullptr && config_.telemetry_stage_probes)
+                        ? telemetry_now_ns() : 0ULL;
                     const auto io = transport_.write_batch(std::span<const std::span<const char>>{chunks.data(), n_chunks});
+                    if (wb_t0 != 0ULL && io.bytes != 0) {
+                        telemetry_slot_->record_stage(TelemetryStage::write, telemetry_now_ns() - wb_t0);
+                    }
                     std::size_t remaining = io.bytes;
                     while (remaining > 0 && tx_count_ != 0) {
                         auto& front = tx_ring_[tx_head_];
@@ -1490,7 +1575,12 @@ private:
                 slice = {rec->payload.data() + q->offset, q->size - q->offset};
             }
 
+            const std::uint64_t w_t0 = (telemetry_slot_ != nullptr && config_.telemetry_stage_probes)
+                ? telemetry_now_ns() : 0ULL;
             const auto io = transport_.write(slice);
+            if (w_t0 != 0ULL && io.bytes != 0) {
+                telemetry_slot_->record_stage(TelemetryStage::write, telemetry_now_ns() - w_t0);
+            }
             if (io.bytes != 0) {
                 if (replay_due) replay_offset_ += io.bytes;
                 else q->offset += io.bytes;
@@ -1586,7 +1676,12 @@ private:
                                             std::uint64_t now_ms,
                                             std::string_view known_msg_type = {},
                                             std::size_t msg_type_offset = 0) noexcept {
+        const std::uint64_t v_t0 = (telemetry_slot_ != nullptr && config_.telemetry_stage_probes)
+            ? telemetry_now_ns() : 0ULL;
         const auto valid = detail::direct_schema_validate<Schema>(msg, known_msg_type, msg_type_offset);
+        if (v_t0 != 0ULL) {
+            telemetry_slot_->record_stage(TelemetryStage::validate, telemetry_now_ns() - v_t0);
+        }
         if (!valid.ok()) {
             const auto tags = detail::direct_extract_tags(msg);
             const auto ref_type = tags.msg_type ? tags.msg_type->value : std::string_view{};
@@ -1617,6 +1712,7 @@ private:
             cb = Status{ErrorCode::callback_failed};
         }
         if (!cb.ok()) return fail(Status{ErrorCode::callback_failed, cb.tag, cb.offset});
+        if (telemetry_slot_ != nullptr) telemetry_slot_->inc_delivery();
         const auto d = append_delivery(info.record_id, info.msg_seq_num);
         return d.ok() ? d : fail(d);
     }
@@ -1702,6 +1798,7 @@ private:
                 break;
             case detail::CoreActionKind::become_active: {
                 failover_.on_session_active();
+                sync_telemetry_state();
                 Status act{};
                 try {
                     if constexpr (requires { handler_.on_active(*this); }) act = handler_.on_active(*this);
@@ -1729,7 +1826,12 @@ private:
                                                bool is_deferred) noexcept {
         constexpr auto hints = detail::direct_schema_wire_hints<Schema>();
         FlatMessageView message{};
+        const std::uint64_t p_t0 = (telemetry_slot_ != nullptr && config_.telemetry_stage_probes)
+            ? telemetry_now_ns() : 0ULL;
         if (const auto st = parse_flat_verified(fv, parse_fields_, message, hints); !st.ok()) return fail(st);
+        if (p_t0 != 0ULL) {
+            telemetry_slot_->record_stage(TelemetryStage::parse, telemetry_now_ns() - p_t0);
+        }
         message.bind_index(&parse_index_);
         const auto tags = detail::direct_extract_tags(message);
         if (tags.dup_tag != 0) return fail(Status{ErrorCode::duplicate_field, static_cast<int>(tags.dup_tag)});
@@ -1920,9 +2022,17 @@ private:
             return fail(Status{ErrorCode::protocol_error});
 
         const std::uint64_t persisted_next = (seq_reset_ev || gapfill_ev) ? next_inbound : 0;
+        const std::uint64_t ij_t0 = (telemetry_slot_ != nullptr && config_.telemetry_stage_probes)
+            ? telemetry_now_ns() : 0ULL;
         const auto appended = journal_.append(RecordKind::inbound, effective_seq, 0, 0,
                                               fv.bytes, persisted_next);
+        if (ij_t0 != 0ULL) {
+            telemetry_slot_->record_stage(TelemetryStage::journal, telemetry_now_ns() - ij_t0);
+        }
         if (!appended.ok()) return fail(appended.status());
+        if (telemetry_slot_ != nullptr) {
+            telemetry_slot_->inc_inbound(fv.bytes.size());
+        }
         const RecordId inbound_id = appended.value().id;
         if (ack_cand) peer_ack_seq_ = *ack_cand;
 
@@ -1968,6 +2078,7 @@ private:
             }
         }
         update_retention_floor();
+        sync_telemetry_state();
 
         if (deferred_logon || merged_gf_covered_logon) {
             detail::direct_secure_clear(deferred_logon_buf_);
@@ -1991,6 +2102,8 @@ private:
     Handler handler_;
     Transport transport_;
     Journal journal_;
+    std::shared_ptr<TelemetryWriter> telemetry_writer_{};
+    TelemetrySessionSlot* telemetry_slot_{nullptr};
     detail::SessionCore core_;
     detail::FastUtcClock clock_{};
     detail::StaticSessionPrefix session_prefix_{};
