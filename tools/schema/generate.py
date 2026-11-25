@@ -22,6 +22,13 @@ MAX_XML_DEPTH = 64
 MAX_XML_ITEMS = 50_000
 MAX_FIX_TAG = 999_999_999
 MANAGED_TAGS = frozenset({8, 9, 10, 34, 35, 43, 49, 52, 56, 122, 369})
+SESSION_OR_FRAME_TAGS = frozenset({8, 9, 10, 34, 35, 43, 49, 52, 56, 122, 369, 1128})
+BUILTIN_FIX44_PAIRS = frozenset({
+    (90, 91), (93, 89), (95, 96), (212, 213),
+    (348, 349), (350, 351), (352, 353), (354, 355),
+    (356, 357), (358, 359), (360, 361), (362, 363),
+    (364, 365), (445, 446), (618, 619), (621, 622),
+})
 
 FIX_WIRE_TYPES = {
     "STRING": "string",
@@ -1139,6 +1146,12 @@ def render_header(schema: Schema, namespace: str) -> str:
             code = ord(message.msg_type)
             if code < 128 and single_char_msg[code] == -1:
                 single_char_msg[code] = index
+    schema_pairs = [
+        (field_pair_tags[field.number], field.number)
+        for field in fields
+        if field.field_type in {"DATA", "XMLDATA"}
+    ]
+    builtin_only_pairs = all(pair in BUILTIN_FIX44_PAIRS for pair in schema_pairs)
     lines += [
         "}};",
         "",
@@ -1146,18 +1159,26 @@ def render_header(schema: Schema, namespace: str) -> str:
         "    " + ", ".join(str(v) for v in single_char_msg),
         "}};",
         "",
+        "namespace detail_validate {",
+        "[[nodiscard]] inline ::nimblefix::Status fast_validate_message(",
+        "    std::string_view msg_type, std::size_t msg_type_offset,",
+        "    std::span<const ::nimblefix::FieldView> fields,",
+        "    ::nimblefix::ValidationLevel level,",
+        "    ::nimblefix::detail::ParsedFieldIndex* out_index) noexcept;",
+        "} // namespace detail_validate",
+        "",
         "inline constexpr ::nimblefix::SchemaDescriptor schema_descriptor{",
         f"    {_cpp_string(dict(schema.identity).get('type', 'FIX'))}, {_cpp_string(version)}, {_cpp_string(fingerprint)},",
         "    std::span<const FieldDescriptor>{fields}, std::span<const GroupDescriptor>{groups},",
         "    std::span<const ComponentDescriptor>{components}, std::span<const MessageDescriptor>{messages},",
-        f"    {header_comp_idx}, {trailer_comp_idx}, std::span<const std::int16_t>{{single_char_message_index}}",
+        f"    {header_comp_idx}, {trailer_comp_idx}, std::span<const std::int16_t>{{single_char_message_index}},",
+        "    &detail_validate::fast_validate_message",
         "};",
         "",
-        f"inline constexpr std::array<::nimblefix::LengthDataPair, {sum(1 for field in fields if field.field_type in {'DATA', 'XMLDATA'})}> schema_length_data_pairs{{{{",
+        f"inline constexpr std::array<::nimblefix::LengthDataPair, {len(schema_pairs)}> schema_length_data_pairs{{{{",
     ]
-    for field in fields:
-        if field.field_type in {"DATA", "XMLDATA"}:
-            lines.append(f"    {{{field_pair_tags[field.number]}u, {field.number}u}},")
+    for len_tag, data_tag in schema_pairs:
+        lines.append(f"    {{{len_tag}u, {data_tag}u}},")
     lines += [
         "}};",
         "",
@@ -1175,7 +1196,7 @@ def render_header(schema: Schema, namespace: str) -> str:
         "    [[nodiscard]] static constexpr const ::nimblefix::SchemaDescriptor& descriptor() noexcept { return schema_descriptor; }",
         "    [[nodiscard]] static constexpr const ::nimblefix::MessageDescriptor* find_message(std::string_view value) noexcept { return descriptor().find_message(value); }",
         "    [[nodiscard]] static constexpr const ::nimblefix::FieldDescriptor* find_field(std::uint32_t tag) noexcept { return descriptor().find_field(tag); }",
-        "    [[nodiscard]] static constexpr ::nimblefix::WireHints wire_hints() noexcept { return {std::span<const ::nimblefix::LengthDataPair>{schema_length_data_pairs}}; }",
+        f"    [[nodiscard]] static constexpr ::nimblefix::WireHints wire_hints() noexcept {{ return {{std::span<const ::nimblefix::LengthDataPair>{{schema_length_data_pairs}}, true, {'true' if builtin_only_pairs else 'false'}}}; }}",
         "    template<class Visitor> static void for_each_message(Visitor&& visitor);",
         "};",
         "",
@@ -1316,6 +1337,499 @@ def render_header(schema: Schema, namespace: str) -> str:
                     f"[[nodiscard]] inline bool valid_{field.number}(std::string_view v) noexcept {{ return {cond}; }}"
                 )
     lines += ["} // namespace detail_stream", ""]
+
+    # Emit generated switch-based single-pass inbound schema validator (Stage B).
+    _BASE_FIELD_CHECK = {
+        "character": "::nimblefix::detail::check_char(f)",
+        "boolean": "::nimblefix::detail::check_bool(f)",
+        "signed_integer": "::nimblefix::detail::check_i64(f)",
+        "unsigned_integer": "::nimblefix::detail::check_u64(f)",
+        "day_of_month": "::nimblefix::detail::check_day_of_month(f)",
+        "tag_number": "::nimblefix::detail::check_tag_num(f)",
+        "decimal": "::nimblefix::detail::check_decimal(f)",
+        "utc_timestamp": "::nimblefix::detail::check_utc_ts(f)",
+        "utc_date": "::nimblefix::detail::check_date(f)",
+        "local_market_date": "::nimblefix::detail::check_date(f)",
+        "utc_time": "::nimblefix::detail::check_time(f)",
+        "month_year": "::nimblefix::detail::check_month_year(f)",
+        "binary_data": "::nimblefix::detail::check_binary(f)",
+        "text": "::nimblefix::detail::check_text(f)",
+        "multiple_value_string": "::nimblefix::detail::check_mvs(f, false)",
+        "multiple_string_value": "::nimblefix::detail::check_mvs(f, false)",
+        "multiple_char_value": "::nimblefix::detail::check_mvs(f, true)",
+    }
+
+    def _byte_case(b: int) -> str:
+        ch = chr(b)
+        if ch == "'":
+            return "case '\\'':"
+        if ch == "\\":
+            return "case '\\\\':"
+        if 0x20 <= b <= 0x7E:
+            return f"case '{ch}':"
+        return f"case static_cast<char>({b}):"
+
+    def _scalar_check_expr(field: FieldDef) -> str:
+        if field.enum_values:
+            return f"check_field_{field.number}(f, level)"
+        return _BASE_FIELD_CHECK[FIX_FIELD_CLASSES[field.field_type]]
+
+    def _level_len_data_pairs(members: tuple[MemberDef, ...]) -> list[tuple[int, int]]:
+        pairs_seen: dict[tuple[int, int], None] = {}
+        for m in members:
+            if m.kind != "field":
+                continue
+            fdef = schema.fields_by_name[m.field_name]
+            if fdef.field_type in {"DATA", "XMLDATA"}:
+                lt = field_pair_tags.get(fdef.number, 0)
+                if lt != 0:
+                    pairs_seen[(lt, fdef.number)] = None
+            elif fdef.number in field_pair_tags and fdef.field_type in {"LENGTH", "NUMINGROUP"}:
+                dt = field_pair_tags[fdef.number]
+                if dt != 0:
+                    pairs_seen[(fdef.number, dt)] = None
+        return list(pairs_seen.keys())
+
+    lines += ["namespace detail_validate {"]
+
+    # Per-field enum validators (only emitted for fields with enum_values).
+    for field in fields:
+        if not field.enum_values:
+            continue
+        fc = FIX_FIELD_CLASSES[field.field_type]
+        enums = [ev[0] for ev in field.enum_values]
+        e1 = [e.encode("utf-8")[0] for e in enums if len(e.encode("utf-8")) == 1]
+        e2 = [
+            (e.encode("utf-8")[0] << 8) | e.encode("utf-8")[1]
+            for e in enums
+            if len(e.encode("utf-8")) == 2
+        ]
+        e_other = [e for e in enums if len(e.encode("utf-8")) > 2]
+        if e1 and not e2 and not e_other:
+            cases = " ".join(_byte_case(b) for b in e1)
+            lines.append(
+                f"[[nodiscard]] inline bool enum_ok_{field.number}(std::string_view v) noexcept {{ if (v.size() != 1) return false; switch (v[0]) {{ {cases} return true; default: return false; }} }}"
+            )
+        else:
+            lines.append(f"[[nodiscard]] inline bool enum_ok_{field.number}(std::string_view v) noexcept {{")
+            lines.append("    switch (v.size()) {")
+            if e1:
+                cases = " ".join(_byte_case(b) for b in e1)
+                lines.append(f"    case 1: switch (v[0]) {{ {cases} return true; default: return false; }}")
+            if e2:
+                cases2 = " ".join(f"case 0x{code:04x}u:" for code in e2)
+                lines.append(
+                    f"    case 2: switch ((static_cast<unsigned>(static_cast<unsigned char>(v[0])) << 8U) | static_cast<unsigned char>(v[1])) {{ {cases2} return true; default: return false; }}"
+                )
+            if e_other:
+                cond = " || ".join(f"v == {_cpp_string(e)}" for e in e_other)
+                lines.append(f"    default: return {cond};")
+            else:
+                lines.append("    default: return false;")
+            lines.append("    }")
+            lines.append("}")
+
+        if fc in ("multiple_value_string", "multiple_char_value", "multiple_string_value"):
+            lines += [
+                f"[[nodiscard]] inline bool enum_mvs_ok_{field.number}(std::string_view v) noexcept {{",
+                "    for (std::size_t first = 0; first < v.size();) {",
+                "        const auto sep = v.find(' ', first);",
+                "        const auto last = sep == std::string_view::npos ? v.size() : sep;",
+                f"        if (!enum_ok_{field.number}(v.substr(first, last - first))) return false;",
+                "        first = sep == std::string_view::npos ? v.size() : sep + 1;",
+                "    }",
+                "    return true;",
+                "}",
+            ]
+            enum_call = f"enum_mvs_ok_{field.number}(f.value)"
+        else:
+            enum_call = f"enum_ok_{field.number}(f.value)"
+
+        base_check = _BASE_FIELD_CHECK[fc]
+        lines.append(
+            f"[[nodiscard]] inline ::nimblefix::Status check_field_{field.number}(const ::nimblefix::FieldView& f, ::nimblefix::ValidationLevel level) noexcept {{ "
+            f"if (const auto st = {base_check}; !st.ok()) return st; "
+            f"if (level == ::nimblefix::ValidationLevel::strict && !{enum_call}) return {{::nimblefix::ErrorCode::invalid_value, static_cast<int>(f.tag), f.offset}}; "
+            "return ::nimblefix::Status::success(); }"
+        )
+
+    # Header / Trailer tag predicates.
+    header_members = expanded_components.get("Header", ())
+    trailer_members = expanded_components.get("Trailer", ())
+    header_scalar_tags = sorted({schema.fields_by_name[m.field_name].number for m in header_members if m.kind == "field"})
+    header_all_tags = sorted({schema.fields_by_name[m.field_name].number for m in header_members})
+    header_groups = [
+        (schema.fields_by_name[m.field_name].number, group_indexes[group_key(m)])
+        for m in header_members if m.kind == "group"
+    ]
+    trailer_scalar_tags = sorted({schema.fields_by_name[m.field_name].number for m in trailer_members if m.kind == "field"})
+    trailer_all_tags = sorted({schema.fields_by_name[m.field_name].number for m in trailer_members})
+    trailer_groups = [
+        (schema.fields_by_name[m.field_name].number, group_indexes[group_key(m)])
+        for m in trailer_members if m.kind == "group"
+    ]
+
+    def _emit_tag_pred(fn_name: str, tags: list[int]) -> None:
+        if not tags:
+            lines.append(f"[[nodiscard]] inline bool {fn_name}(std::uint32_t) noexcept {{ return false; }}")
+            return
+        cases = " ".join(f"case {t}u:" for t in tags)
+        lines.append(
+            f"[[nodiscard]] inline bool {fn_name}(std::uint32_t tag) noexcept {{ switch (tag) {{ {cases} return true; default: return false; }} }}"
+        )
+
+    _emit_tag_pred("is_header_scalar_tag", header_scalar_tags)
+    _emit_tag_pred("is_header_tag", header_all_tags)
+    _emit_tag_pred("is_trailer_scalar_tag", trailer_scalar_tags)
+    _emit_tag_pred("is_trailer_tag", trailer_all_tags)
+
+    # Group validators emitted leaf-first (group_emit_order).
+    for g_idx in group_emit_order:
+        group = group_by_key[group_keys[g_idx]]
+        g_members = group.members
+        count_tag = schema.fields_by_name[group.field_name].number
+        delim_member = g_members[0]
+        delim_tag = schema.fields_by_name[delim_member.field_name].number
+        g_tags = sorted({schema.fields_by_name[m.field_name].number for m in g_members})
+        _emit_tag_pred(f"group_contains_{g_idx}", g_tags)
+
+        seen_words = max(1, (len(g_members) + 63) // 64)
+        ld_pairs = _level_len_data_pairs(g_members)
+        ld_len_set = {lt for lt, _dt in ld_pairs}
+        ld_data_set = {dt for _lt, dt in ld_pairs}
+        req_by_word: dict[int, list[tuple[int, int]]] = {}
+        for m_idx, m in enumerate(g_members):
+            if m.required:
+                req_by_word.setdefault(m_idx // 64, []).append((m_idx % 64, schema.fields_by_name[m.field_name].number))
+
+        lines += [
+            f"[[nodiscard]] inline ::nimblefix::Status validate_group_{g_idx}(",
+            "    std::span<const ::nimblefix::FieldView> fields,",
+            "    std::size_t& cursor,",
+            "    ::nimblefix::ValidationLevel level,",
+            "    ::nimblefix::detail::FastAncestorStack& ancestors,",
+            "    ::nimblefix::Status& first_content_err,",
+            "    std::size_t depth) noexcept {",
+            "    (void)level; (void)ancestors; (void)first_content_err;",
+            "    if (depth > ::nimblefix::detail::max_schema_group_depth || cursor >= fields.size())",
+            "        return {::nimblefix::ErrorCode::invalid_value, 0, cursor};",
+            "    std::uint64_t count{};",
+            "    if (!::nimblefix::detail::parse_unsigned(fields[cursor].value, count) || count > fields.size() - cursor - 1)",
+            f"        return {{::nimblefix::ErrorCode::invalid_value, {count_tag}, fields[cursor].offset}};",
+            "    ++cursor;",
+            "    for (std::uint64_t entry_i = 0; entry_i < count; ++entry_i) {",
+            f"        if (cursor >= fields.size() || fields[cursor].tag != {delim_tag}u)",
+            f"            return {{::nimblefix::ErrorCode::invalid_value, {delim_tag}, cursor < fields.size() ? fields[cursor].offset : 0}};",
+        ]
+        if seen_words == 1:
+            lines.append("        std::uint64_t seen = 1ULL;")
+        else:
+            lines.append(f"        std::uint64_t seen[{seen_words}]{{}}; seen[0] = 1ULL;")
+        lines += [
+            "        ::nimblefix::Status entry_dup_err{};",
+            "        ::nimblefix::Status entry_scalar_err{};",
+            "        ::nimblefix::Status entry_unknown_err{};",
+        ]
+        if ld_pairs:
+            lines.append("        bool has_ld = false;")
+            for lt, dt in ld_pairs:
+                lines.append(f"        int ld_len_{lt} = -1, ld_data_{dt} = -1;")
+
+        # Handle member 0 (delimiter)
+        if delim_member.kind == "field":
+            dfield = schema.fields_by_name[delim_member.field_name]
+            lines.append("        if (level != ::nimblefix::ValidationLevel::structure) {")
+            lines.append("            const auto& f = fields[cursor];")
+            lines.append(f"            if (const auto st = {_scalar_check_expr(dfield)}; !st.ok()) entry_scalar_err = st;")
+            if dfield.number in ld_len_set:
+                lines.append(f"            ld_len_{dfield.number} = static_cast<int>(cursor); has_ld = true;")
+            if dfield.number in ld_data_set:
+                lines.append(f"            ld_data_{dfield.number} = static_cast<int>(cursor); has_ld = true;")
+            lines.append("        }")
+            lines.append("        ++cursor;")
+        else:
+            nested_g_idx = group_indexes[group_key(delim_member)]
+            lines += [
+                f"        if (ancestors.count < ::nimblefix::detail::FastAncestorStack::max_depth) ancestors.predicates[ancestors.count++] = &group_contains_{g_idx};",
+                f"        const auto dgst = validate_group_{nested_g_idx}(fields, cursor, level, ancestors, entry_scalar_err, depth + 1);",
+                "        if (ancestors.count > 0) --ancestors.count;",
+                "        if (!dgst.ok()) return dgst;",
+            ]
+
+        lines += [
+            "        bool entry_done = false;",
+            "        while (cursor < fields.size() && !entry_done) {",
+            "            const auto& f = fields[cursor];",
+            "            const auto tag = f.tag;",
+            f"            if (tag == {delim_tag}u) break;",
+            "            switch (tag) {",
+        ]
+        for m_idx in range(1, len(g_members)):
+            m = g_members[m_idx]
+            mfield = schema.fields_by_name[m.field_name]
+            w = m_idx // 64
+            b = m_idx % 64
+            seen_expr = "seen" if seen_words == 1 else f"seen[{w}]"
+            lines.append(f"            case {mfield.number}u: {{")
+            if m.kind == "field":
+                lines.append("                if (level != ::nimblefix::ValidationLevel::structure) {")
+                lines.append(
+                    f"                    if (({seen_expr} & (std::uint64_t{{1}} << {b}u)) != 0) {{ if (entry_dup_err.ok()) entry_dup_err = {{::nimblefix::ErrorCode::duplicate_field, {mfield.number}, f.offset}}; }}"
+                )
+                lines.append(f"                    else {{ {seen_expr} |= (std::uint64_t{{1}} << {b}u); if (entry_scalar_err.ok()) {{ if (const auto st = {_scalar_check_expr(mfield)}; !st.ok()) entry_scalar_err = st; }} }}")
+                if mfield.number in ld_len_set:
+                    lines.append(f"                    if (ld_len_{mfield.number} < 0) {{ ld_len_{mfield.number} = static_cast<int>(cursor); has_ld = true; }}")
+                if mfield.number in ld_data_set:
+                    lines.append(f"                    if (ld_data_{mfield.number} < 0) {{ ld_data_{mfield.number} = static_cast<int>(cursor); has_ld = true; }}")
+                lines.append("                }")
+                lines.append("                ++cursor;")
+                lines.append("                break;")
+            else:
+                nested_g_idx = group_indexes[group_key(m)]
+                lines.append("                if (level != ::nimblefix::ValidationLevel::structure) {")
+                lines.append(
+                    f"                    if (({seen_expr} & (std::uint64_t{{1}} << {b}u)) != 0) {{ if (entry_dup_err.ok()) entry_dup_err = {{::nimblefix::ErrorCode::duplicate_field, {mfield.number}, f.offset}}; }}"
+                )
+                lines.append(f"                    else {{ {seen_expr} |= (std::uint64_t{{1}} << {b}u); }}")
+                lines.append("                }")
+                lines += [
+                    f"                if (ancestors.count < ::nimblefix::detail::FastAncestorStack::max_depth) ancestors.predicates[ancestors.count++] = &group_contains_{g_idx};",
+                    f"                const auto gst = validate_group_{nested_g_idx}(fields, cursor, level, ancestors, entry_scalar_err, depth + 1);",
+                    "                if (ancestors.count > 0) --ancestors.count;",
+                    "                if (!gst.ok()) return gst;",
+                    "                break;",
+                ]
+            lines.append("            }")
+        lines += [
+            "            default:",
+            "                if (tag == 10u || ancestors.contains(tag)) { entry_done = true; break; }",
+            "                if (level == ::nimblefix::ValidationLevel::strict && entry_unknown_err.ok())",
+            "                    entry_unknown_err = {::nimblefix::ErrorCode::invalid_value, static_cast<int>(tag), f.offset};",
+            "                ++cursor;",
+            "                break;",
+            "            }",
+            "        }",
+            "        if (level != ::nimblefix::ValidationLevel::structure && first_content_err.ok()) {",
+            "            if (!entry_dup_err.ok()) first_content_err = entry_dup_err;",
+            "            else if (!entry_scalar_err.ok()) first_content_err = entry_scalar_err;",
+        ]
+        if ld_pairs:
+            lines.append("            else if (has_ld) {")
+            for lt, dt in ld_pairs:
+                lines.append(f"                if (first_content_err.ok()) {{ if (const auto ldst = ::nimblefix::detail::check_len_data_pair(fields, {lt}u, ld_len_{lt}, ld_data_{dt}); !ldst.ok()) first_content_err = ldst; }}")
+            lines.append("            }")
+        if req_by_word:
+            lines.append("            if (first_content_err.ok()) {")
+            for w in sorted(req_by_word):
+                mask = sum(1 << bit for bit, _tag in req_by_word[w])
+                seen_expr = "seen" if seen_words == 1 else f"seen[{w}]"
+                lines.append(f"                if (({seen_expr} & 0x{mask:x}ULL) != 0x{mask:x}ULL) {{")
+                for bit, rtag in req_by_word[w]:
+                    lines.append(f"                    if (({seen_expr} & (std::uint64_t{{1}} << {bit}u)) == 0) first_content_err = {{::nimblefix::ErrorCode::required_field_missing, {rtag}}};")
+                    lines.append("                    else")
+                lines[-1] = lines[-1].rstrip()[:-4].rstrip()  # remove trailing else
+                lines.append("                }")
+            lines.append("            }")
+        lines += [
+            "            if (first_content_err.ok() && !entry_unknown_err.ok()) first_content_err = entry_unknown_err;",
+            "        }",
+            "    }",
+            "    return ::nimblefix::Status::success();",
+            "}",
+        ]
+
+    # Per-message single-pass validators.
+    for msg_idx, message in enumerate(messages):
+        m_members = expanded_messages[message.name]
+        msg_has_groups = any(m.kind == "group" for m in m_members)
+        msg_tags_set = {schema.fields_by_name[m.field_name].number for m in m_members}
+        if msg_has_groups:
+            _emit_tag_pred(f"msg_contains_{msg_idx}", sorted(msg_tags_set))
+
+        seen_words = max(1, (len(m_members) + 63) // 64)
+        ld_pairs = _level_len_data_pairs(m_members)
+        ld_len_set = {lt for lt, _dt in ld_pairs}
+        ld_data_set = {dt for _lt, dt in ld_pairs}
+        req_by_word_m: dict[int, list[tuple[int, int]]] = {}
+        for m_idx, m in enumerate(m_members):
+            if m.required:
+                req_by_word_m.setdefault(m_idx // 64, []).append((m_idx % 64, schema.fields_by_name[m.field_name].number))
+
+        active_header_groups = [(t, gi) for t, gi in header_groups if t not in msg_tags_set and t not in SESSION_OR_FRAME_TAGS]
+        active_trailer_groups = [(t, gi) for t, gi in trailer_groups if t not in msg_tags_set and t not in SESSION_OR_FRAME_TAGS]
+        needs_ancestors = msg_has_groups or bool(active_header_groups) or bool(active_trailer_groups)
+
+        lines += [
+            f"[[nodiscard]] inline ::nimblefix::Status validate_msg_{msg_idx}(",
+            "    std::span<const ::nimblefix::FieldView> fields,",
+            "    ::nimblefix::ValidationLevel level,",
+            "    ::nimblefix::detail::ParsedFieldIndex* out_index) noexcept {",
+            "    (void)level;",
+            "    if (out_index != nullptr) {",
+            "        if (fields.size() < 0xFFFFu) out_index->begin(&schema_descriptor, " + f"{msg_idx}u);",
+            "        else { out_index->invalidate(); out_index = nullptr; }",
+            "    }",
+            "    auto fail_ret = [&](::nimblefix::Status st) noexcept -> ::nimblefix::Status {",
+            "        if (out_index != nullptr) out_index->invalidate();",
+            "        return st;",
+            "    };",
+        ]
+        if seen_words == 1:
+            lines.append("    std::uint64_t seen = 0;")
+        else:
+            lines.append(f"    std::uint64_t seen[{seen_words}]{{}};")
+        lines += [
+            "    ::nimblefix::Status first_content_err{};",
+            "    ::nimblefix::Status first_unknown_err{};",
+        ]
+        if needs_ancestors:
+            lines.append("    ::nimblefix::detail::FastAncestorStack ancestors{};")
+            if trailer_all_tags:
+                lines.append("    ancestors.trailer_pred = &is_trailer_tag;")
+        if ld_pairs:
+            lines.append("    bool has_ld = false;")
+            for lt, dt in ld_pairs:
+                lines.append(f"    int ld_len_{lt} = -1, ld_data_{dt} = -1;")
+
+        lines += [
+            "    for (std::size_t cursor = 0; cursor < fields.size();) {",
+            "        const auto& f = fields[cursor];",
+            "        const auto tag = f.tag;",
+            "        switch (tag) {",
+            "        case 8u: case 9u: case 10u: case 34u: case 35u: case 43u:",
+            "        case 49u: case 52u: case 56u: case 122u: case 369u: case 1128u:",
+            "            ++cursor;",
+            "            break;",
+        ]
+        for m_idx, m in enumerate(m_members):
+            mfield = schema.fields_by_name[m.field_name]
+            if mfield.number in SESSION_OR_FRAME_TAGS:
+                continue
+            w = m_idx // 64
+            b = m_idx % 64
+            seen_expr = "seen" if seen_words == 1 else f"seen[{w}]"
+            lines.append(f"        case {mfield.number}u: {{")
+            lines.append(
+                f"            if (({seen_expr} & (std::uint64_t{{1}} << {b}u)) != 0) return fail_ret({{::nimblefix::ErrorCode::duplicate_field, {mfield.number}, f.offset}});"
+            )
+            lines.append(f"            {seen_expr} |= (std::uint64_t{{1}} << {b}u);")
+            if m.kind == "field":
+                lines.append(f"            if (out_index != nullptr) out_index->record({m_idx}u, cursor);")
+                lines.append(f"            if (first_content_err.ok()) {{ if (const auto st = {_scalar_check_expr(mfield)}; !st.ok()) first_content_err = st; }}")
+                if mfield.number in ld_len_set:
+                    lines.append(f"            ld_len_{mfield.number} = static_cast<int>(cursor); has_ld = true;")
+                if mfield.number in ld_data_set:
+                    lines.append(f"            ld_data_{mfield.number} = static_cast<int>(cursor); has_ld = true;")
+                lines.append("            ++cursor;")
+                lines.append("            break;")
+            else:
+                g_idx = group_indexes[group_key(m)]
+                lines += [
+                    "            const std::size_t g_start = cursor;",
+                    f"            ancestors.predicates[ancestors.count++] = &msg_contains_{msg_idx};",
+                    f"            const auto gst = validate_group_{g_idx}(fields, cursor, level, ancestors, first_content_err, 1);",
+                    "            --ancestors.count;",
+                    "            if (!gst.ok()) return fail_ret(gst);",
+                    f"            if (out_index != nullptr) out_index->record({m_idx}u, g_start, cursor);",
+                    "            break;",
+                ]
+            lines.append("        }")
+        lines.append("        default:")
+        for htag, hgi in active_header_groups:
+            lines += [
+                f"            if (tag == {htag}u) {{",
+                "                ::nimblefix::Status dummy_err{};",
+                "                ancestors.predicates[ancestors.count++] = &is_header_tag;",
+                f"                const auto hst = validate_group_{hgi}(fields, cursor, ::nimblefix::ValidationLevel::structure, ancestors, dummy_err, 1);",
+                "                --ancestors.count;",
+                "                if (!hst.ok()) return fail_ret(hst);",
+                "                break;",
+                "            }",
+            ]
+        for ttag, tgi in active_trailer_groups:
+            lines += [
+                f"            if (tag == {ttag}u) {{",
+                "                ::nimblefix::Status dummy_err{};",
+                "                ancestors.predicates[ancestors.count++] = &is_trailer_tag;",
+                f"                const auto tst = validate_group_{tgi}(fields, cursor, ::nimblefix::ValidationLevel::structure, ancestors, dummy_err, 1);",
+                "                --ancestors.count;",
+                "                if (!tst.ok()) return fail_ret(tst);",
+                "                break;",
+                "            }",
+            ]
+        lines += [
+            "            if (is_header_scalar_tag(tag) || is_trailer_scalar_tag(tag)) { ++cursor; break; }",
+            "            if (level == ::nimblefix::ValidationLevel::strict && first_unknown_err.ok())",
+            "                first_unknown_err = {::nimblefix::ErrorCode::invalid_value, static_cast<int>(tag), f.offset};",
+            "            ++cursor;",
+            "            break;",
+            "        }",
+            "    }",
+            "    if (!first_content_err.ok()) return fail_ret(first_content_err);",
+        ]
+        if ld_pairs:
+            lines.append("    if (has_ld) {")
+            for lt, dt in ld_pairs:
+                lines.append(f"        if (const auto ldst = ::nimblefix::detail::check_len_data_pair(fields, {lt}u, ld_len_{lt}, ld_data_{dt}); !ldst.ok()) return fail_ret(ldst);")
+            lines.append("    }")
+        if req_by_word_m:
+            lines.append("    if (level != ::nimblefix::ValidationLevel::structure) {")
+            for w in sorted(req_by_word_m):
+                mask = sum(1 << bit for bit, _tag in req_by_word_m[w])
+                seen_expr = "seen" if seen_words == 1 else f"seen[{w}]"
+                lines.append(f"        if (({seen_expr} & 0x{mask:x}ULL) != 0x{mask:x}ULL) {{")
+                for bit, rtag in req_by_word_m[w]:
+                    lines.append(f"            if (({seen_expr} & (std::uint64_t{{1}} << {bit}u)) == 0) return fail_ret({{::nimblefix::ErrorCode::required_field_missing, {rtag}}});")
+                lines.append("        }")
+            lines.append("    }")
+        lines += [
+            "    if (!first_unknown_err.ok()) return fail_ret(first_unknown_err);",
+            "    return ::nimblefix::Status::success();",
+            "}",
+        ]
+
+    # Top-level O(1) MsgType switch dispatcher.
+    m1 = [(m.msg_type.encode("utf-8")[0], idx) for idx, m in enumerate(messages) if len(m.msg_type.encode("utf-8")) == 1]
+    m2 = [
+        ((m.msg_type.encode("utf-8")[0] << 8) | m.msg_type.encode("utf-8")[1], idx)
+        for idx, m in enumerate(messages)
+        if len(m.msg_type.encode("utf-8")) == 2
+    ]
+    m_other = [(m.msg_type, idx) for idx, m in enumerate(messages) if len(m.msg_type.encode("utf-8")) > 2]
+    lines += [
+        "[[nodiscard]] inline ::nimblefix::Status fast_validate_message(",
+        "    std::string_view msg_type, std::size_t msg_type_offset,",
+        "    std::span<const ::nimblefix::FieldView> fields,",
+        "    ::nimblefix::ValidationLevel level,",
+        "    ::nimblefix::detail::ParsedFieldIndex* out_index) noexcept {",
+    ]
+    if m1:
+        lines.append("    if (msg_type.size() == 1) {")
+        lines.append("        switch (msg_type[0]) {")
+        for b, idx in m1:
+            lines.append(f"        {_byte_case(b)} return validate_msg_{idx}(fields, level, out_index);")
+        lines.append("        default: break;")
+        lines.append("        }")
+        lines.append("    }")
+    if m2:
+        kw = "else if" if m1 else "if"
+        lines.append(f"    {kw} (msg_type.size() == 2) {{")
+        lines.append("        switch ((static_cast<unsigned>(static_cast<unsigned char>(msg_type[0])) << 8U) | static_cast<unsigned char>(msg_type[1])) {")
+        for code, idx in m2:
+            lines.append(f"        case 0x{code:04x}u: return validate_msg_{idx}(fields, level, out_index);")
+        lines.append("        default: break;")
+        lines.append("        }")
+        lines.append("    }")
+    if m_other:
+        for mt, idx in m_other:
+            lines.append(f"    if (msg_type == {_cpp_string(mt)}) return validate_msg_{idx}(fields, level, out_index);")
+    lines += [
+        "    if (out_index != nullptr) out_index->invalidate();",
+        "    return {::nimblefix::ErrorCode::unsupported, 35, msg_type_offset};",
+        "}",
+        "} // namespace detail_validate",
+        "",
+    ]
 
     # Group policies (kept for FixedShapeMessage + GroupBuilder and StreamWriter traits).
     for group_index in range(len(group_keys)):
@@ -1658,22 +2172,24 @@ def render_header(schema: Schema, namespace: str) -> str:
             "public:",
             f"    explicit {name}View(const ::nimblefix::FlatMessageView& flat) noexcept : Base(flat, messages[{index}]) {{}}",
         ]
-        for member in direct_fields:
+        for member_idx, member in enumerate(members):
+            if member.kind != "field":
+                continue
             field = schema.fields_by_name[member.field_name]
             getter = _snake_case(field.name)
             lines += [
                 "    [[nodiscard]] auto " + getter + "() const noexcept {",
-                f"        return this->template get<{field.number}>();",
+                f"        return this->template get_indexed<{field.number}u, {index}u, {member_idx}u>();",
                 "    }",
             ]
-        for member in members:
+        for member_idx, member in enumerate(members):
             if member.kind != "group":
                 continue
             group_field = schema.fields_by_name[member.field_name]
             group_getter = _snake_case(member.field_name)
             lines += [
                 "    [[nodiscard]] auto " + group_getter + "() const noexcept {",
-                f"        return this->template group<{group_field.number}>();",
+                f"        return this->template group_indexed<{group_field.number}u, {index}u, {member_idx}u>();",
                 "    }",
             ]
         lines += ["};", ""]

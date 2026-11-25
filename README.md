@@ -139,12 +139,12 @@ CO-Free = `t_recv - t_burst_start` (Coordinated-Omission-Free one-way latency fr
 
 | Workload Boundary | p50 | p95 | p99 | Throughput | Heap Allocs |
 | :--- | ---: | ---: | ---: | ---: | :---: |
-| **User Encode (`StreamWriter`)** (`encode_fix44_stream`) | **140.0 ns** | 171.0 ns | **171.0 ns** | **6,936,597 msgs/s** | **0** |
-| **User Encode (`Fixed`)** (in-loop fill + `encode_fix44`) | 351.0 ns | 501.0 ns | 2,915.0 ns | 2,269,455 msgs/s | **0** |
-| **Pre-TCP Session Outbound** (`DirectInitiator::send_stream` + mmap Journal) | **281.0 ns** | 340.0 ns | **481.0 ns** | **3,466,060 msgs/s** | **0** |
-| **Pre-TCP Session Inbound** (frame + parse + 912-field Schema + dual Journal records + callback) | **972.0 ns** | 1,042.0 ns | 1,162.0 ns | 1,035,217 msgs/s | **0** |
-| **Pre-TCP Combined** (total pure FIX engine round-trip budget) | **1.26 µs** | 1.37 µs | **1.55 µs** | **797,135 rt/s** | **0** |
-| **Real TCP Loopback RTT** (kernel TCP + full FIX 4.4 + mmap Journal) | **10.32 µs** | 12.03 µs | 14.59 µs | 93,417 rt/s | **0** |
+| **User Encode (`StreamWriter`)** (`encode_fix44_stream`) | **140.0 ns** | 150.0 ns | **151.0 ns** | **7,089,686 msgs/s** | **0** |
+| **User Encode (`Fixed`)** (in-loop fill + `encode_fix44`) | 351.0 ns | 391.0 ns | 411.0 ns | 2,804,887 msgs/s | **0** |
+| **Pre-TCP Session Outbound** (`DirectInitiator::send_stream` + mmap Journal) | **211.0 ns** | 280.0 ns | **421.0 ns** | **4,420,157 msgs/s** | **0** |
+| **Pre-TCP Session Inbound** (frame + parse + 912-field Schema + dual Journal records + callback) | **721.0 ns** | 822.0 ns | **1,062.0 ns** | **1,392,046 msgs/s** | **0** |
+| **Pre-TCP Combined** (total pure FIX engine round-trip budget) | **942.0 ns** | 1,091.0 ns | **1,442.0 ns** | **1,058,645 rt/s** | **0** |
+| **Real TCP Loopback RTT** (kernel TCP + full FIX 4.4 + mmap Journal) | **9.67 µs** | 10.67 µs | 13.28 µs | 103,837 rt/s | **0** |
 
 Binary footprint (Release): `direct-initiator-example` is **336 KB** (`libnimblefix-core.a`: 409 KB) vs full multi-session `initiator-example` at **1.2 MB**.
 
@@ -164,11 +164,11 @@ Both engines run in the same `-O3` binary against the same full 912-field `schem
 
 | Suite (`1000` warmup / `5000` samples) | NimbleFIX 0.3 (p50 / p99 / alloc) | QuickFIX 1.16.0 (p50 / p99 / alloc) | Speedup (p50) |
 | :--- | :--- | :--- | ---: |
-| **Codec Encode** (`StreamWriter` / `Fixed`) | **211 ns** / **381 ns** (**0.00** alloc) | 1,663 ns / 2,635 ns / 19.00 | **7.88×** / **4.36×** |
-| **Parse + Full `FIX44.xml` Strict + Read** | **1,323 ns** / **1,383 ns** / **0.00** | 2,826 ns / 2,895 ns / 15.00 | **2.14×** |
-| **TCP Initiator RTT** (`DirectInitiator` / `Engine busy_poll` / `epoll`) | **10.78 µs** / **14.92 µs** / **20.89 µs** (**0.00** alloc) | 21.03 µs / p99 32.79 µs / 35.06 | **1.95×** / 1.41× / 1.01× |
-| **TCP Acceptor RTT** (`Engine busy_poll` / `epoll`) | **9.96 µs** / **11.85 µs** (p99 **14.42 µs**, **0.00** alloc) | 20.41 µs / p99 26.49 µs / 37.04 | **2.05×** / 1.72× |
-| **TCP Dense Burst 32×** (`enqueue_stream` + `sendmsg`, CO-Free 1-way) | **14.38 µs** / **18.90 µs** / **0.00** (**1.33M/s**) | 182.43 µs / 348.31 µs / 28.06 (92k/s) | **12.69×** (**14.4×** rate) |
+| **Codec Encode** (`StreamWriter` / `Fixed`) | **170 ns** / **371 ns** (**0.00** alloc) | 1,463 ns / 1,523 ns / 19.00 | **8.61×** / **3.94×** |
+| **Parse + Full `FIX44.xml` Strict + Read** | **421 ns** / **431 ns** / **0.00** | 2,795 ns / 3,386 ns / 15.00 | **6.64×** |
+| **TCP Initiator RTT** (`DirectInitiator` / `Engine busy_poll` / `epoll`) | **10.21 µs** / **14.39 µs** / **19.16 µs** (**0.00** alloc) | 23.72 µs / p99 34.56 µs / 35.06 | **2.32×** / 1.65× / 1.24× |
+| **TCP Acceptor RTT** (`Engine busy_poll` / `epoll`) | **10.59 µs** / **11.57 µs** (p99 **14.33 µs**, **0.00** alloc) | 23.20 µs / p99 33.92 µs / 37.00 | **2.19×** / 2.01× |
+| **TCP Dense Burst 32×** (`enqueue_stream` + `sendmsg`, CO-Free 1-way) | **12.63 µs** / **23.51 µs** / **0.00** (**1.34M/s**) | 198.47 µs / 399.32 µs / 28.06 (80k/s) | **15.71×** (**16.6×** rate) |
 
 ---
 

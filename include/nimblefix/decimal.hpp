@@ -55,6 +55,7 @@ struct DecimalParseResult {
     const std::uint64_t limit = negative ? negative_limit : positive_limit;
     std::uint64_t magnitude = 0;
     std::uint8_t scale = 0;
+    std::uint8_t sig_digits = 0;
     bool point_seen = false;
     bool digit_seen = false;
 
@@ -68,8 +69,15 @@ struct DecimalParseResult {
         if (ch < '0' || ch > '9') return {};
         digit_seen = true;
         const auto digit = static_cast<std::uint64_t>(ch - '0');
-        if (magnitude > (limit - digit) / 10) return {};
-        magnitude = magnitude * 10 + digit;
+        if (magnitude != 0 || digit != 0) {
+            if (sig_digits < 18U) {
+                magnitude = magnitude * 10ULL + digit;
+                ++sig_digits;
+            } else {
+                if (magnitude > (limit - digit) / 10ULL) return {};
+                magnitude = magnitude * 10ULL + digit;
+            }
+        }
         if (point_seen) {
             if (scale == 18) return {};
             ++scale;
@@ -86,6 +94,16 @@ struct DecimalParseResult {
         coefficient = static_cast<std::int64_t>(magnitude);
     }
     return {coefficient, scale, true};
+}
+
+[[nodiscard]] inline Result<Decimal> parse_decimal_fast(std::string_view text) noexcept {
+    const auto parsed = parse_decimal_constexpr(text.data(), text.size());
+    if (!parsed.valid) return Status{ErrorCode::invalid_decimal};
+    return Decimal{parsed.coefficient, parsed.scale};
+}
+
+[[nodiscard]] inline bool is_valid_decimal_fast(std::string_view text) noexcept {
+    return parse_decimal_constexpr(text.data(), text.size()).valid;
 }
 
 } // namespace detail

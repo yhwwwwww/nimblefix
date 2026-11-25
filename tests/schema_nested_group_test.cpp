@@ -317,12 +317,183 @@ void test_streaming_nested_groups_and_validation() {
     }
 }
 
+void test_stage_b_fast_validate_and_indexed_view() {
+    // Copy descriptor with fast_validate cleared so we can assert 100% equivalence
+    // between the generated switch-based fast validator and generic validate_members_fast.
+    nf::SchemaDescriptor generic_desc = fix44::Schema::descriptor();
+    CHECK(generic_desc.fast_validate != nullptr);
+    generic_desc.fast_validate = nullptr;
+
+    auto assert_equiv = [&](std::span<const nf::FieldView> fields,
+                            std::string_view msg_type,
+                            nf::ValidationLevel level) {
+        nf::detail::ParsedFieldIndex idx{};
+        const auto fast_st = nf::validate_schema_message_for_type(
+            fix44::Schema::descriptor(), msg_type, 0, fields, level, &idx);
+        const auto gen_st = nf::validate_schema_message_for_type(
+            generic_desc, msg_type, 0, fields, level, nullptr);
+        CHECK(fast_st.code == gen_st.code);
+        CHECK(fast_st.tag == gen_st.tag);
+        if (!fast_st.ok()) {
+            CHECK(idx.schema_id == nullptr);
+        }
+    };
+
+    // 1. Valid NewOrderSingle with NoPartyIDs[1] + O(1) ParsedFieldIndex reuse across messages
+    std::array<char, 2048> wire{};
+    std::array<nf::FieldView, 64> scratch{};
+    nf::detail::ParsedFieldIndex idx{};
+    {
+        const auto enc = nf::encode_fix44_stream<fix44::NewOrderSingle>(
+            nf::SessionHeader{"BUY", "SELL", 10, t0}, wire, [&](auto& w) {
+                w.cl_ord_id("IDX-1")
+                 .symbol("AAPL")
+                 .side('1')
+                 .transact_time(t0)
+                 .order_qty(nf::Decimal{250, 0})
+                 .ord_type('2')
+                 .price(nf::Decimal{18525, 2})
+                 .no_party_i_ds(1, [](auto& g) {
+                     g.entry().party_id("DESK1").party_id_source('D').party_role(1);
+                 });
+            });
+        CHECK(enc.ok());
+        nf::FrameView fv{};
+        CHECK(nf::inspect_frame({wire.data(), enc.value()}, fv, fix44::Schema::wire_hints()).ok());
+        nf::FlatMessageView mv{};
+        CHECK(nf::parse_flat_verified(fv, scratch, mv, fix44::Schema::wire_hints()).ok());
+        mv.bind_index(&idx);
+        CHECK(nf::validate_schema_message(fix44::Schema::descriptor(), mv, nf::ValidationLevel::strict).ok());
+        CHECK(idx.schema_id == &fix44::Schema::descriptor());
+        const auto nos = mv.as<fix44::NewOrderSingle>();
+        CHECK(nos.cl_ord_id().value() == "IDX-1");
+        CHECK(nos.symbol().value() == "AAPL");
+        CHECK(nos.side().value() == '1');
+        CHECK(nos.order_qty().value() == nf::Decimal(250, 0));
+        CHECK(nos.price().value() == nf::Decimal(18525, 2));
+        // Absent optional field must return missing_field in O(1)
+        const auto abs_acc = nos.account();
+        CHECK(!abs_acc.ok() && abs_acc.status().code == nf::ErrorCode::missing_field && abs_acc.status().tag == 1);
+        const auto grp = nos.no_party_i_ds();
+        CHECK(grp.ok() && grp.value().size() == 1);
+        CHECK(grp.value().at(0).get<448>().value() == "DESK1");
+        CHECK(grp.value().at(0).get<447>().value() == 'D');
+        CHECK(grp.value().at(0).get<452>().value() == 1);
+        std::size_t iter_count = 0;
+        for (const auto& e : grp.value()) {
+            CHECK(e.get<448>().value() == "DESK1");
+            ++iter_count;
+        }
+        CHECK(iter_count == 1);
+    }
+
+    // Reuse same ParsedFieldIndex for a second NewOrderSingle WITHOUT price or parties:
+    // generation stamp must ensure old Price(44) and NoPartyIDs(453) are NOT visible!
+    {
+        const auto enc = nf::encode_fix44_stream<fix44::NewOrderSingle>(
+            nf::SessionHeader{"BUY", "SELL", 11, t0}, wire, [&](auto& w) {
+                w.cl_ord_id("IDX-2")
+                 .symbol("MSFT")
+                 .side('2')
+                 .transact_time(t0)
+                 .ord_type('1');
+            });
+        CHECK(enc.ok());
+        nf::FrameView fv{};
+        CHECK(nf::inspect_frame({wire.data(), enc.value()}, fv, fix44::Schema::wire_hints()).ok());
+        nf::FlatMessageView mv{};
+        CHECK(nf::parse_flat_verified(fv, scratch, mv, fix44::Schema::wire_hints()).ok());
+        mv.bind_index(&idx);
+        CHECK(nf::validate_schema_message(fix44::Schema::descriptor(), mv, nf::ValidationLevel::strict).ok());
+        const auto nos = mv.as<fix44::NewOrderSingle>();
+        CHECK(nos.cl_ord_id().value() == "IDX-2");
+        CHECK(nos.symbol().value() == "MSFT");
+        CHECK(!nos.price().ok() && nos.price().status().code == nf::ErrorCode::missing_field);
+        CHECK(!nos.no_party_i_ds().ok() && nos.no_party_i_ds().status().code == nf::ErrorCode::missing_field);
+    }
+
+    // 2. Equivalence matrix across error kinds, validation levels, and precedence
+    const std::array<nf::FieldView, 7> base_nos{{
+        {8, "FIX.4.4", 0}, {9, "60", 10}, {35, "D", 15},
+        {11, "O1", 20}, {54, "1", 26}, {60, t0, 31}, {40, "1", 56},
+    }};
+    assert_equiv(base_nos, "D", nf::ValidationLevel::strict);
+    assert_equiv(base_nos, "D", nf::ValidationLevel::required);
+    assert_equiv(base_nos, "D", nf::ValidationLevel::structure);
+
+    // Bad timestamp error code must be invalid_timestamp
+    {
+        auto f = base_nos;
+        f[5].value = "NOT-A-TIMESTAMP";
+        assert_equiv(f, "D", nf::ValidationLevel::strict);
+        const auto st = nf::validate_schema_message_for_type(
+            fix44::Schema::descriptor(), "D", 0, f, nf::ValidationLevel::strict, &idx);
+        CHECK(st.code == nf::ErrorCode::invalid_timestamp && st.tag == 60);
+    }
+
+    // Invalid enum rejected in strict, accepted in required/structure
+    {
+        auto f = base_nos;
+        f[4].value = "Z"; // invalid Side enum
+        assert_equiv(f, "D", nf::ValidationLevel::strict);
+        assert_equiv(f, "D", nf::ValidationLevel::required);
+        assert_equiv(f, "D", nf::ValidationLevel::structure);
+    }
+
+    // Duplicate beats earlier bad scalar
+    {
+        const std::array<nf::FieldView, 8> f{{
+            {8, "FIX.4.4", 0}, {9, "60", 10}, {35, "D", 15},
+            {11, "O1", 20}, {54, "Z", 26}, {60, t0, 31}, {40, "1", 56}, {11, "DUP", 61},
+        }};
+        assert_equiv(f, "D", nf::ValidationLevel::strict);
+    }
+
+    // Bad group delimiter beats earlier bad scalar
+    {
+        const std::array<nf::FieldView, 9> f{{
+            {8, "FIX.4.4", 0}, {9, "60", 10}, {35, "D", 15},
+            {11, "O1", 20}, {54, "Z", 26}, {60, t0, 31}, {40, "1", 56},
+            {453, "1", 61}, {447, "D", 67}, // missing delimiter 448!
+        }};
+        assert_equiv(f, "D", nf::ValidationLevel::strict);
+        assert_equiv(f, "D", nf::ValidationLevel::structure);
+    }
+
+    // Unknown tag rejected in strict, accepted in required/structure; required beats unknown
+    {
+        const std::array<nf::FieldView, 7> f{{
+            {8, "FIX.4.4", 0}, {9, "60", 10}, {35, "D", 15},
+            {99999, "CUSTOM", 20}, {11, "O1", 33}, {54, "1", 39}, {60, t0, 44}, // missing required 40
+        }};
+        assert_equiv(f, "D", nf::ValidationLevel::strict);
+        assert_equiv(f, "D", nf::ValidationLevel::required);
+        assert_equiv(f, "D", nf::ValidationLevel::structure);
+    }
+
+    // DATA/LENGTH pair validation (EncodedTextLen=354 / EncodedText=355)
+    {
+        const std::array<nf::FieldView, 8> orphan_data{{
+            {8, "FIX.4.4", 0}, {9, "60", 10}, {35, "D", 15},
+            {11, "O1", 20}, {54, "1", 26}, {60, t0, 31}, {40, "1", 56}, {355, "abc", 61},
+        }};
+        assert_equiv(orphan_data, "D", nf::ValidationLevel::strict);
+        const std::array<nf::FieldView, 9> mismatch_len{{
+            {8, "FIX.4.4", 0}, {9, "60", 10}, {35, "D", 15},
+            {11, "O1", 20}, {54, "1", 26}, {60, t0, 31}, {40, "1", 56},
+            {354, "5", 61}, {355, "abc", 67},
+        }};
+        assert_equiv(mismatch_len, "D", nf::ValidationLevel::strict);
+    }
+}
+
 } // namespace
 
 int main() {
     test_two_level_nested_repeating_group_parsing_and_validation();
     test_sender_owned_message_repeating_group_relocation();
     test_streaming_nested_groups_and_validation();
+    test_stage_b_fast_validate_and_indexed_view();
     if (failures != 0) {
         std::cerr << failures << " nested group test(s) failed\n";
         return 1;

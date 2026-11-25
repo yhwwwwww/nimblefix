@@ -186,7 +186,7 @@ template <class Schema>
     else if constexpr (requires { Schema::descriptor(); }) {
         if (!known_msg_type.empty()) {
             return validate_schema_message_for_type(Schema::descriptor(), known_msg_type,
-                msg_type_offset, message.fields(), ValidationLevel::strict);
+                msg_type_offset, message.fields(), ValidationLevel::strict, message.parsed_index());
         }
         return validate_schema_message(Schema::descriptor(), message, ValidationLevel::strict);
     } else return Status::success();
@@ -815,7 +815,9 @@ private:
         if (const auto st = inspect_frame(bytes, fv, hints, CodecLimits{config_.max_frame_bytes}); !st.ok())
             return st;
         if (fv.consumed != bytes.size()) return Status{ErrorCode::invalid_frame};
-        return parse_flat_verified(fv, parse_fields_, out, hints);
+        if (const auto st = parse_flat_verified(fv, parse_fields_, out, hints); !st.ok()) return st;
+        out.bind_index(&parse_index_);
+        return Status::success();
     }
 
     [[nodiscard]] Status fail(Status err) noexcept {
@@ -1652,6 +1654,7 @@ private:
         constexpr auto hints = detail::direct_schema_wire_hints<Schema>();
         FlatMessageView message{};
         if (const auto st = parse_flat_verified(fv, parse_fields_, message, hints); !st.ok()) return fail(st);
+        message.bind_index(&parse_index_);
         const auto tags = detail::direct_extract_tags(message);
         if (tags.dup_tag != 0) return fail(Status{ErrorCode::duplicate_field, static_cast<int>(tags.dup_tag)});
         if (tags.begin == nullptr || tags.begin->value != begin_string(config_.version))
@@ -1926,6 +1929,7 @@ private:
     std::vector<char> logon_tx_buf_;
     std::vector<char> admin_arena_;
     std::vector<FieldView> parse_fields_;
+    detail::ParsedFieldIndex parse_index_{};
     std::vector<TxEntry> tx_ring_;
     std::vector<ReplayRange> replay_ring_;
     std::vector<RecordId> recovery_ids_;

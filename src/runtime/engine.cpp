@@ -2537,7 +2537,8 @@ struct EngineRuntime::Impl {
                             msg_type_offset = type.value().offset;
                         }
                         const auto schema_status = validate_schema_message_for_type(
-                            *schema, msg_type, msg_type_offset, fields, ValidationLevel::strict);
+                            *schema, msg_type, msg_type_offset, fields, ValidationLevel::strict,
+                            message.parsed_index());
                         if (!schema_status.ok()) return schema_status;
                     }
                     if (config.message_validator) {

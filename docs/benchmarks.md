@@ -91,12 +91,12 @@ Workload: Full 912-field FIX 4.4 `NewOrderSingle` (7 scalars including `Price` +
 
 | Boundary | p50 | p95 | p99 | Throughput | Heap Allocs |
 | :--- | ---: | ---: | ---: | ---: | :---: |
-| **User Encode (`StreamWriter`)** (`encode_fix44_stream`, no session/journal) | **140.0 ns** | 171.0 ns | **171.0 ns** | **6,936,597 msgs/s** | **0** |
-| **User Encode (`Fixed`)** (in-loop fill + `encode_fix44`, no session/journal) | 351.0 ns | 501.0 ns | 2,915.0 ns | 2,269,455 msgs/s | **0** |
-| **Pre-TCP Outbound** (`DirectInitiator::send_stream` + mmap Journal) | **281.0 ns** | 340.0 ns | **481.0 ns** | **3,466,060 msgs/s** | **0** |
-| **Pre-TCP Inbound** (frame + parse + 912-field Schema + dual Journal records + callback) | **972.0 ns** | 1,042.0 ns | 1,162.0 ns | 1,035,217 msgs/s | **0** |
-| **Pre-TCP Combined** (total pure FIX engine round-trip budget) | **1.26 µs** | 1.37 µs | **1.55 µs** | **797,135 rt/s** | **0** |
-| **Real TCP Loopback RTT** (kernel TCP + full FIX 4.4 + mmap Journal) | **10.32 µs** | 12.03 µs | 14.59 µs | 93,417 rt/s | **0** |
+| **User Encode (`StreamWriter`)** (`encode_fix44_stream`, no session/journal) | **140.0 ns** | 150.0 ns | **151.0 ns** | **7,089,686 msgs/s** | **0** |
+| **User Encode (`Fixed`)** (in-loop fill + `encode_fix44`, no session/journal) | 351.0 ns | 391.0 ns | 411.0 ns | 2,804,887 msgs/s | **0** |
+| **Pre-TCP Outbound** (`DirectInitiator::send_stream` + mmap Journal) | **211.0 ns** | 280.0 ns | **421.0 ns** | **4,420,157 msgs/s** | **0** |
+| **Pre-TCP Inbound** (frame + parse + 912-field Schema + dual Journal records + callback) | **721.0 ns** | 822.0 ns | **1,062.0 ns** | **1,392,046 msgs/s** | **0** |
+| **Pre-TCP Combined** (total pure FIX engine round-trip budget) | **942.0 ns** | 1,091.0 ns | **1,442.0 ns** | **1,058,645 rt/s** | **0** |
+| **Real TCP Loopback RTT** (kernel TCP + full FIX 4.4 + mmap Journal) | **9.67 µs** | 10.67 µs | 13.28 µs | 103,837 rt/s | **0** |
 
 ---
 
@@ -169,39 +169,39 @@ cmake --build build-cmake --target quickfix-parity-bench -j
 #### Suite 1: Codec Encode (`NewOrderSingle` + `NoPartyIDs[1]` + Session Header & `CheckSum`, 5,000 samples)
 | Engine / API | p50 | p99 | Rate | Heap Allocs / op | Speedup (p50) |
 | :--- | ---: | ---: | ---: | ---: | ---: |
-| **NimbleFIX `StreamWriter` + `PartyGroup` (0-alloc)** | **211.0 ns** | **280.0 ns** | **4,599,202/s** | **0.00** | **7.88×** |
-| **NimbleFIX `Fixed` + `PartyGroup` (0-alloc)** | **381.0 ns** | **531.0 ns** | **2,582,191/s** | **0.00** | **4.36×** |
-| **QuickFIX `FIX44::NewOrderSingle::toString`** | 1,663.0 ns | 2,635.0 ns | 590,390/s | 19.00 | 1.00× |
+| **NimbleFIX `StreamWriter` + `PartyGroup` (0-alloc)** | **170.0 ns** | **181.0 ns** | **5,779,304/s** | **0.00** | **8.61×** |
+| **NimbleFIX `Fixed` + `PartyGroup` (0-alloc)** | **371.0 ns** | **421.0 ns** | **2,633,072/s** | **0.00** | **3.94×** |
+| **QuickFIX `FIX44::NewOrderSingle::toString`** | 1,463.0 ns | 1,523.0 ns | 679,232/s | 19.00 | 1.00× |
 
 #### Suite 2: Parse + Full `FIX44.xml` Strict Validation + Typed Field & Group Read (5,000 samples)
 | Engine | p50 | p99 | Rate | Heap Allocs / op | Speedup (p50) |
 | :--- | ---: | ---: | ---: | ---: | ---: |
-| **NimbleFIX `parse` + `FIX44` strict + typed view** | **1,323.0 ns** | **1,383.0 ns** | **748,344/s** | **0.00** | **2.14×** |
-| **QuickFIX `setString` + `FIX44` validate + `get`** | 2,826.0 ns | 2,895.0 ns | 351,430/s | 15.00 | 1.00× |
+| **NimbleFIX `parse` + `FIX44` strict + O(1) indexed view** | **421.0 ns** | **431.0 ns** | **2,357,773/s** | **0.00** | **6.64×** |
+| **QuickFIX `setString` + `FIX44` validate + `get`** | 2,795.0 ns | 3,386.0 ns | 352,979/s | 15.00 | 1.00× |
 
 #### Suite 3: Real Loopback TCP Initiator Ping-Pong RTT (5,000 orders, 1,000 warmup)
 | Engine / Mode | p50 | p99 | Throughput | Heap Allocs / op | Speedup (p50) |
 | :--- | ---: | ---: | ---: | ---: | ---: |
-| **NimbleFIX `DirectInitiator` (`send_stream`, Layer 0)** | **10.78 µs** | 27.38 µs | **83,565 rt/s** | **0.00** | **1.95×** |
-| **NimbleFIX `Engine` (`busy_poll`)** | 14.92 µs | **22.64 µs** | 64,150 rt/s | **0.00** | 1.41× |
-| **NimbleFIX `Engine` (`epoll`)** | 20.89 µs | 31.19 µs | 46,869 rt/s | **0.00** | 1.01× |
-| **QuickFIX `SocketInitiator` (`FileStore`)** | 21.03 µs | 32.79 µs | 44,618 rt/s | 35.06 | 1.00× |
+| **NimbleFIX `DirectInitiator` (`send_stream`, Layer 0)** | **10.21 µs** | **17.12 µs** | **92,236 rt/s** | **0.00** | **2.32×** |
+| **NimbleFIX `Engine` (`busy_poll`)** | 14.39 µs | 18.33 µs | 71,298 rt/s | **0.00** | 1.65× |
+| **NimbleFIX `Engine` (`epoll`)** | 19.16 µs | 29.70 µs | 50,588 rt/s | **0.00** | 1.24× |
+| **QuickFIX `SocketInitiator` (`FileStore`)** | 23.72 µs | 34.56 µs | 40,707 rt/s | 35.06 | 1.00× |
 
 #### Suite 4: Real Loopback TCP Acceptor Turnaround RTT (5,000 orders, 1,000 warmup)
 | Engine / Mode | p50 | p99 | Throughput | Heap Allocs / op | Speedup (p50) |
 | :--- | ---: | ---: | ---: | ---: | ---: |
-| **NimbleFIX `Engine` Acceptor (`busy_poll`)** | **9.96 µs** | **14.42 µs** | **89,827 ord/s** | **0.00** | **2.05×** |
-| **NimbleFIX `Engine` Acceptor (`epoll`)** | 11.85 µs | 15.45 µs | 78,358 ord/s | **0.00** | 1.72× |
-| **QuickFIX `SocketAcceptor` (`FileStore`)** | 20.41 µs | 26.49 µs | 46,537 ord/s | 37.04 | 1.00× |
+| **NimbleFIX `Engine` Acceptor (`busy_poll`)** | **10.59 µs** | **14.33 µs** | **88,772 ord/s** | **0.00** | **2.19×** |
+| **NimbleFIX `Engine` Acceptor (`epoll`)** | 11.57 µs | 17.61 µs | 76,687 ord/s | **0.00** | 2.01× |
+| **QuickFIX `SocketAcceptor` (`FileStore`)** | 23.20 µs | 33.92 µs | 42,185 ord/s | 37.00 | 1.00× |
 
 #### Suite 5: Open-Loop Dense Burst (156 bursts × 32 orders, CO-Free 1-Way Latency & Throughput)
 | Engine / Mode | CO-Free 1-Way p50 | CO-Free 1-Way p99 | Throughput | Heap Allocs / op | Speedup (p50) |
 | :--- | ---: | ---: | ---: | ---: | ---: |
-| **NimbleFIX `DirectInitiator::send_stream()`** | 63.47 µs | 128.66 µs | 259,302 ord/s | **0.00** | 2.87× |
-| **NimbleFIX `DirectInitiator` `enqueue_stream` + `sendmsg`** | **14.38 µs** | **18.90 µs** | **1,325,868 ord/s** | **0.00** | **12.69×** |
-| **QuickFIX `SocketInitiator::sendToTarget`** | 182.43 µs | 348.31 µs | 91,957 ord/s | 28.06 | 1.00× |
+| **NimbleFIX `DirectInitiator::send_stream()`** | 59.25 µs | 114.14 µs | 284,662 ord/s | **0.00** | 3.35× |
+| **NimbleFIX `DirectInitiator` `enqueue_stream` + `sendmsg`** | **12.63 µs** | **23.51 µs** | **1,338,302 ord/s** | **0.00** | **15.71×** |
+| **QuickFIX `SocketInitiator::sendToTarget`** | 198.47 µs | 399.32 µs | 80,393 ord/s | 28.06 | 1.00× |
 
 ### Key Takeaways
 1. **Zero steady-state heap traffic across ALL APIs**: Both `StreamWriter` (with dynamic repeating groups, `if`/`for`, and `std::optional`) and `Fixed` record **0.00 heap allocations/op** across all 5 suites (including full 912-field `FIX44.xml` validation and mmap journaling), whereas QuickFIX performs **15–37 heap allocations/op** (`std::map`/`std::string`/group nodes).
-2. **Streaming encoding accelerates both codec and burst throughput**: `StreamWriter` cuts `NewOrderSingle + NoPartyIDs[1]` encode latency to **211 ns (7.88× faster than QuickFIX)** and boosts 32-order burst throughput (`enqueue_stream + flush`) to **1.33M ord/s** with **14.38 µs CO-Free p50 (12.69× lower than QuickFIX)** and **18.90 µs p99 (18.4× lower)**.
-3. **Architecture scales when latency matters most**: Switching to single-threaded Layer 0 `DirectInitiator` achieves **~9.6–10.8 µs** Initiator ping-pong RTT (~2× faster than QuickFIX) and `Engine(busy_poll)` Acceptor hits **9.96 µs (2.05× faster)** with **14.42 µs p99**.
+2. **Sub-microsecond codec in both directions**: `StreamWriter` cuts `NewOrderSingle + NoPartyIDs[1]` encode latency to **170 ns (8.61× faster than QuickFIX)**, while generated `switch(tag)` single-pass validation + generation-stamped O(1) `ParsedFieldIndex` cuts full 912-field strict parse + validate + typed read to **421 ns (6.64× faster than QuickFIX)** — bringing the entire Pre-TCP round-trip FIX engine budget to **942 ns (0.942 µs)**!
+3. **Architecture scales when latency matters most**: Switching to single-threaded Layer 0 `DirectInitiator` achieves **~9.67–10.21 µs** Initiator ping-pong RTT (**2.32× faster than QuickFIX**), `Engine(busy_poll)` Acceptor hits **10.59 µs (2.19× faster)** with **14.33 µs p99**, and 32-order burst (`enqueue_stream + flush`) reaches **1.34M ord/s** with **12.63 µs CO-Free p50 (15.71× lower than QuickFIX)**.

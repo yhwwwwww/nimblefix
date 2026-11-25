@@ -427,6 +427,7 @@ struct SessionDriver::Impl {
     std::vector<char> logon_tx_buffer;
     std::vector<char> admin_arena;
     std::vector<FieldView> parse_fields;
+    detail::ParsedFieldIndex parse_index{};
     std::vector<ReceiptSlot> receipt_slots;
     std::vector<ReplayRange> replay_slots;
     std::vector<RecoverySlot> recovery_slots;
@@ -1084,7 +1085,12 @@ struct SessionDriver::Impl {
             return status;
         }
         if (frame.consumed != bytes.size()) return Status{ErrorCode::invalid_frame};
-        return parse_flat_verified(frame, parse_fields, message, callbacks.wire_hints);
+        if (const auto status = parse_flat_verified(frame, parse_fields, message, callbacks.wire_hints);
+            !status.ok()) {
+            return status;
+        }
+        message.bind_index(&parse_index);
+        return Status::success();
     }
 
     [[nodiscard]] Status parse_inbound_header(const InboundTags& tags,
@@ -2063,6 +2069,7 @@ struct SessionDriver::Impl {
                 !status.ok()) {
                 return fail(status);
             }
+            message.bind_index(&parse_index);
         } else {
             if (const auto status = parse_frame(frame_bytes, message); !status.ok()) return fail(status);
         }

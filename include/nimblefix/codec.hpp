@@ -30,6 +30,8 @@ struct LengthDataPair {
 // FIX 4.4 standard pairs are always recognized as well.
 struct WireHints {
     std::span<const LengthDataPair> length_data_pairs{};
+    bool prevalidated{false};
+    bool builtin_only{false};
 };
 
 struct FrameView {
@@ -37,6 +39,8 @@ struct FrameView {
     std::string_view bytes{};
     std::size_t consumed{};
     FixVersion version{FixVersion::fix44};
+    std::uint32_t body_start_offset{};
+    std::uint32_t checksum_offset{};
 };
 
 // On success, output.bytes is the first validated frame and output.consumed is
@@ -53,11 +57,62 @@ struct FieldView {
     std::size_t offset{};
 };
 
+namespace detail {
+
+// Generation-stamped O(1) top-level field index populated during single-pass
+// schema validation. Zero memset on begin(); touches only present fields.
+struct ParsedFieldIndex {
+    static constexpr std::size_t max_members = 768;
+    std::array<std::uint16_t, max_members> wire_idx{};
+    std::array<std::uint16_t, max_members> group_end{};
+    std::array<std::uint32_t, max_members> stamp{};
+    std::uint32_t generation{1};
+    std::uint32_t msg_index{0xFFFF'FFFFu};
+    const void* schema_id{nullptr};
+
+    void begin(const void* schema_ptr, std::uint32_t message_idx) noexcept {
+        schema_id = schema_ptr;
+        msg_index = message_idx;
+        if (++generation == 0) {
+            stamp.fill(0);
+            generation = 1;
+        }
+    }
+
+    void invalidate() noexcept {
+        schema_id = nullptr;
+        msg_index = 0xFFFF'FFFFu;
+    }
+
+    void record(std::uint32_t member_idx, std::size_t field_idx, std::size_t end_idx = 0) noexcept {
+        if (member_idx < max_members && field_idx < 0xFFFFu) {
+            wire_idx[member_idx] = static_cast<std::uint16_t>(field_idx);
+            group_end[member_idx] = end_idx < 0xFFFFu ? static_cast<std::uint16_t>(end_idx) : 0u;
+            stamp[member_idx] = generation;
+        }
+    }
+
+    [[nodiscard]] bool matches(const void* schema_ptr, std::uint32_t message_idx) const noexcept {
+        return schema_id == schema_ptr && msg_index == message_idx;
+    }
+
+    [[nodiscard]] int lookup(std::uint32_t member_idx) const noexcept {
+        if (member_idx < max_members && stamp[member_idx] == generation) {
+            return static_cast<int>(wire_idx[member_idx]);
+        }
+        return -1;
+    }
+};
+
+} // namespace detail
+
 class FlatMessageView {
 public:
     [[nodiscard]] std::string_view frame() const noexcept { return frame_; }
     [[nodiscard]] std::span<const FieldView> fields() const noexcept { return fields_; }
     [[nodiscard]] Result<FieldView> find_unique(std::uint32_t tag) const noexcept;
+    void bind_index(detail::ParsedFieldIndex* idx) const noexcept { parsed_index_ = idx; }
+    [[nodiscard]] detail::ParsedFieldIndex* parsed_index() const noexcept { return parsed_index_; }
     [[nodiscard]] std::string_view msg_type() const noexcept {
         if (fields_.size() >= 3 && fields_[2].tag == 35) return fields_[2].value;
         const auto found = find_unique(35);
@@ -88,6 +143,7 @@ private:
 
     std::string_view frame_{};
     std::span<const FieldView> fields_{};
+    mutable detail::ParsedFieldIndex* parsed_index_{nullptr};
 };
 
 // Revalidates the frame, then fills caller-owned scratch in wire order. The

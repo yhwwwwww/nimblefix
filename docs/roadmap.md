@@ -8,13 +8,13 @@ This document tracks the planned engineering priorities for NimbleFIX after `0.3
 
 Goal: Push both outbound encoding and inbound strict parsing/validation firmly into the **sub-microsecond** regime while preserving 0 steady-state heap allocations and FIX protocol correctness.
 
-### 1. Expected-Order Fast-Path Parser & Validator
-- **Motivation**: Full 912-field `FIX44.xml` strict parsing + validation currently takes `~861 ns – 1.32 µs`. Most counterparties emit fields in a predictable canonical/venue order.
+### 1. [Done] Generated Switch-Based Fused Inbound Validator & O(1) Indexed View
+- **Status**: Implemented and verified across codegen (`tools/schema/generate.py`), `SchemaDescriptor::fast_validate`, `detail::ParsedFieldIndex`, `inspect_frame`/`parse_flat_verified`, inline `Decimal::parse`, `DirectInitiator`, `SessionDriver`, and `Engine`.
 - **Design**:
-  - Codegen emits expected-order field transition hints alongside the existing compact member-index tables.
-  - Inbound parser/validator checks the next expected tag with an O(1) cursor comparison first; out-of-order (still FIX-valid) tags seamlessly fall back to the existing compact table lookup without losing strictness.
-  - Reduce redundant per-field header/timestamp re-validation on the hot path.
-- **Target**: Strict 912-field parse + validate + typed view read under **~400–600 ns** (`~2×` faster than `0.3`).
+  - Codegen emits per-schema `detail_validate::fast_validate_message` with compile-time `switch (tag)` single-pass validation, bitset duplicate & required-field checks, leaf-first repeating group validators, and O(1) `MsgType` dispatch while preserving 100% exact error codes, `ValidationLevel`, and error precedence.
+  - Generation-stamped `detail::ParsedFieldIndex` (zero `memset` per frame) records top-level field wire indices and repeating group boundaries during validation, powering O(1) `{Msg}View` getters (`get_indexed` / `group_indexed`) with transparent fallback for unindexed views.
+  - Prevalidated/builtin-only `WireHints`, zero-division tag & decimal parsing, and single-pass `fast_checksum_bytes` eliminate framing overhead.
+- **Measured Result**: Full 912-field `FIX44.xml` strict parse + validate + typed field & group read dropped from **1,323 ns -> 421 ns p50** (**3.14× faster**, **6.64× faster than QuickFIX 1.16.0** at 2,795 ns, **0 alloc**); Pre-TCP `DirectInitiator` inbound dropped from **972 ns -> 721 ns p50** (**1.39M msgs/s**); **combined pure FIX engine round-trip budget reached 942 ns (0.942 µs, 1.06M rt/s)** — sub-microsecond end-to-end!
 
 ### 2. [Done] Zero-Intermediate-Copy Streaming Encoder (`StreamWriter` / `send_stream`)
 - **Status**: Implemented and verified across Layer 0/1/2 (`encode_stream`, `encode_fix44_stream`, `encode_body_stream`, `DirectInitiator::send_stream`/`enqueue_stream`, `DirectSendQueue::try_push_stream`, `SessionContext`/`SessionDriver`/`Sender`/`ProducerLane::send_stream`); legacy `make()` and `Draft` builders removed (`Fixed` preserved).

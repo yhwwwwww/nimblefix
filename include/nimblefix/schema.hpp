@@ -109,6 +109,18 @@ struct MessageDescriptor {
     }
 };
 
+enum class ValidationLevel : std::uint8_t {
+    structure,
+    required,
+    strict,
+};
+
+using FastValidateFn = Status (*)(std::string_view msg_type,
+                                  std::size_t msg_type_offset,
+                                  std::span<const FieldView> fields,
+                                  ValidationLevel level,
+                                  detail::ParsedFieldIndex* out_index) noexcept;
+
 struct SchemaDescriptor {
     std::string_view type{};
     std::string_view version{};
@@ -120,6 +132,7 @@ struct SchemaDescriptor {
     std::int32_t header_component_index{-1};
     std::int32_t trailer_component_index{-1};
     std::span<const std::int16_t> single_char_message_index{};
+    FastValidateFn fast_validate{nullptr};
 
     // Dictionary application version and session transport are distinct for FIXT.
     [[nodiscard]] constexpr bool matches_session(FixVersion transport,
@@ -175,12 +188,6 @@ struct SchemaDescriptor {
         for (const auto& message : messages) if (message.name == name) return &message;
         return nullptr;
     }
-};
-
-enum class ValidationLevel : std::uint8_t {
-    structure,
-    required,
-    strict,
 };
 
 template <class Schema, std::uint32_t Tag>
@@ -298,6 +305,113 @@ inline constexpr std::size_t max_schema_group_depth = 64;
     return day >= 1 && day <= max_day;
 }
 
+[[nodiscard]] inline bool valid_mvs_value(std::string_view value, bool single_char) noexcept {
+    if (!detail::is_valid_text(value)) return false;
+    for (std::size_t first = 0; first < value.size();) {
+        const auto separator = value.find(' ', first);
+        const auto last = separator == std::string_view::npos ? value.size() : separator;
+        if (last == first || (single_char && last - first != 1)) return false;
+        first = separator == std::string_view::npos ? value.size() : separator + 1;
+        if (first == value.size() && separator != std::string_view::npos) return false;
+    }
+    return true;
+}
+
+using TagPredicateFn = bool (*)(std::uint32_t tag) noexcept;
+
+struct FastAncestorStack {
+    static constexpr std::size_t max_depth = max_schema_group_depth + 2;
+    TagPredicateFn predicates[max_depth];
+    std::size_t count{0};
+    TagPredicateFn trailer_pred{nullptr};
+
+    [[nodiscard]] bool contains(std::uint32_t tag) const noexcept {
+        for (std::size_t i = count; i > 0; --i) {
+            if (predicates[i - 1](tag)) return true;
+        }
+        return trailer_pred != nullptr && trailer_pred(tag);
+    }
+};
+
+[[nodiscard]] inline Status check_char(const FieldView& f) noexcept {
+    if (f.value.size() == 1 && static_cast<unsigned char>(f.value[0]) >= 0x20U && f.value[0] != 0x7f)
+        return Status::success();
+    return {ErrorCode::invalid_value, static_cast<int>(f.tag), f.offset};
+}
+[[nodiscard]] inline Status check_bool(const FieldView& f) noexcept {
+    if (f.value.size() == 1 && (f.value[0] == 'Y' || f.value[0] == 'N')) return Status::success();
+    return {ErrorCode::invalid_value, static_cast<int>(f.tag), f.offset};
+}
+[[nodiscard]] inline Status check_i64(const FieldView& f) noexcept {
+    std::int64_t v{};
+    if (parse_signed(f.value, v)) return Status::success();
+    return {ErrorCode::invalid_value, static_cast<int>(f.tag), f.offset};
+}
+[[nodiscard]] inline Status check_u64(const FieldView& f) noexcept {
+    std::uint64_t v{};
+    if (parse_unsigned(f.value, v)) return Status::success();
+    return {ErrorCode::invalid_value, static_cast<int>(f.tag), f.offset};
+}
+[[nodiscard]] inline Status check_day_of_month(const FieldView& f) noexcept {
+    std::uint64_t v{};
+    if (parse_unsigned(f.value, v) && v >= 1U && v <= 31U) return Status::success();
+    return {ErrorCode::invalid_value, static_cast<int>(f.tag), f.offset};
+}
+[[nodiscard]] inline Status check_tag_num(const FieldView& f) noexcept {
+    std::uint64_t v{};
+    if (!f.value.empty() && f.value[0] != '0' && parse_unsigned(f.value, v) &&
+        v > 0U && v <= maximum_fix_tag) return Status::success();
+    return {ErrorCode::invalid_value, static_cast<int>(f.tag), f.offset};
+}
+[[nodiscard]] inline Status check_decimal(const FieldView& f) noexcept {
+    if (is_valid_decimal_fast(f.value)) return Status::success();
+    return {ErrorCode::invalid_value, static_cast<int>(f.tag), f.offset};
+}
+[[nodiscard]] inline Status check_utc_ts(const FieldView& f) noexcept {
+    if (is_valid_utc_timestamp(f.value)) return Status::success();
+    return {ErrorCode::invalid_timestamp, static_cast<int>(f.tag), f.offset};
+}
+[[nodiscard]] inline Status check_date(const FieldView& f) noexcept {
+    if (valid_date(f.value)) return Status::success();
+    return {ErrorCode::invalid_value, static_cast<int>(f.tag), f.offset};
+}
+[[nodiscard]] inline Status check_time(const FieldView& f) noexcept {
+    if (valid_time(f.value)) return Status::success();
+    return {ErrorCode::invalid_value, static_cast<int>(f.tag), f.offset};
+}
+[[nodiscard]] inline Status check_month_year(const FieldView& f) noexcept {
+    if (valid_month_year(f.value)) return Status::success();
+    return {ErrorCode::invalid_value, static_cast<int>(f.tag), f.offset};
+}
+[[nodiscard]] inline Status check_binary(const FieldView& f) noexcept {
+    if (!f.value.empty()) return Status::success();
+    return {ErrorCode::invalid_value, static_cast<int>(f.tag), f.offset};
+}
+[[nodiscard]] inline Status check_text(const FieldView& f) noexcept {
+    if (is_valid_text(f.value)) return Status::success();
+    return {ErrorCode::invalid_value, static_cast<int>(f.tag), f.offset};
+}
+[[nodiscard]] inline Status check_mvs(const FieldView& f, bool single_char) noexcept {
+    if (valid_mvs_value(f.value, single_char)) return Status::success();
+    return {ErrorCode::invalid_value, static_cast<int>(f.tag), f.offset};
+}
+[[nodiscard]] inline Status check_len_data_pair(std::span<const FieldView> fields,
+    std::uint32_t len_tag, int len_idx, int data_idx) noexcept {
+    if (data_idx >= 0) {
+        if (len_idx < 0) return {ErrorCode::missing_field, static_cast<int>(len_tag)};
+        std::uint64_t len{};
+        if (!parse_unsigned(fields[static_cast<std::size_t>(len_idx)].value, len) ||
+            len == 0 || len != fields[static_cast<std::size_t>(data_idx)].value.size()) {
+            return {ErrorCode::invalid_value, static_cast<int>(len_tag),
+                fields[static_cast<std::size_t>(len_idx)].offset};
+        }
+    } else if (len_idx >= 0) {
+        return {ErrorCode::invalid_value, static_cast<int>(len_tag),
+            fields[static_cast<std::size_t>(len_idx)].offset};
+    }
+    return Status::success();
+}
+
 [[nodiscard]] inline bool valid_field_value(const FieldDescriptor& field, std::string_view value) noexcept {
     switch (field.field_class) {
     case FieldClass::character: return value.size() == 1 && static_cast<unsigned char>(value[0]) >= 0x20 && value[0] != 0x7f;
@@ -317,29 +431,18 @@ inline constexpr std::size_t max_schema_group_depth = 64;
         std::uint64_t parsed{};
         return parse_unsigned(value, parsed) && parsed > 0 && parsed <= maximum_fix_tag;
     }
-    case FieldClass::decimal: return Decimal::parse(value).ok();
+    case FieldClass::decimal: return detail::is_valid_decimal_fast(value);
     case FieldClass::utc_timestamp: return detail::is_valid_utc_timestamp(value);
     case FieldClass::utc_date:
     case FieldClass::local_market_date: return valid_date(value);
     case FieldClass::utc_time: return valid_time(value);
     case FieldClass::month_year: return valid_month_year(value);
     case FieldClass::binary_data: return !value.empty();
-    case FieldClass::text:
+    case FieldClass::text: return detail::is_valid_text(value);
     case FieldClass::multiple_value_string:
     case FieldClass::multiple_char_value:
-    case FieldClass::multiple_string_value: {
-        if (!detail::is_valid_text(value)) return false;
-        if (field.field_class == FieldClass::text) return true;
-        for (std::size_t first = 0; first < value.size();) {
-            const auto separator = value.find(' ', first);
-            const auto last = separator == std::string_view::npos ? value.size() : separator;
-            if (last == first || (field.field_class == FieldClass::multiple_char_value && last - first != 1))
-                return false;
-            first = separator == std::string_view::npos ? value.size() : separator + 1;
-            if (first == value.size() && separator != std::string_view::npos) return false;
-        }
-        return true;
-    }
+    case FieldClass::multiple_string_value:
+        return valid_mvs_value(value, field.field_class == FieldClass::multiple_char_value);
     }
     return false;
 }
@@ -609,7 +712,7 @@ private:
             const auto* group = descriptor_group(schema_, member);
             if (group == nullptr) continue;
             bloom_ |= group_tag_bloom_bit(group->count_tag);
-            if (count_ == groups_.size()) {
+            if (count_ == 16U) {
                 overflow_ = true;
                 return;
             }
@@ -624,7 +727,7 @@ private:
     std::span<const std::uint32_t> header_tags_{};
     std::uint64_t bloom_{};
     bool indexed_{};
-    std::array<const GroupDescriptor*, 16> groups_{};
+    const GroupDescriptor* groups_[16];
     std::size_t count_{};
     bool overflow_{};
 };
@@ -950,7 +1053,7 @@ template <class T>
         if (!parse_unsigned(text, value)) return Status{ErrorCode::invalid_value, static_cast<int>(tag)};
         return value;
     } else if constexpr (std::is_same_v<T, Decimal>) {
-        const auto result = Decimal::parse(text);
+        const auto result = detail::parse_decimal_fast(text);
         if (!result.ok()) return Status{ErrorCode::invalid_decimal, static_cast<int>(tag)};
         return result.value();
     }
@@ -973,7 +1076,12 @@ template <class T>
 
 [[nodiscard]] inline Status validate_schema_message_for_type(const SchemaDescriptor& schema,
     std::string_view msg_type, std::size_t msg_type_offset,
-    std::span<const FieldView> fields, ValidationLevel level = ValidationLevel::strict) noexcept {
+    std::span<const FieldView> fields, ValidationLevel level = ValidationLevel::strict,
+    detail::ParsedFieldIndex* out_index = nullptr) noexcept {
+    if (schema.fast_validate != nullptr) {
+        return schema.fast_validate(msg_type, msg_type_offset, fields, level, out_index);
+    }
+    if (out_index != nullptr) out_index->invalidate();
     const auto* descriptor = schema.find_message(msg_type);
     if (descriptor == nullptr) return {ErrorCode::unsupported, 35, msg_type_offset};
     detail::AncestorStack ancestors;
@@ -985,10 +1093,15 @@ template <class T>
 
 [[nodiscard]] inline Status validate_schema_message(const SchemaDescriptor& schema,
     const FlatMessageView& message, ValidationLevel level = ValidationLevel::strict) noexcept {
+    const auto fields = message.fields();
+    if (fields.size() >= 3 && fields[2].tag == 35) {
+        return validate_schema_message_for_type(schema, fields[2].value, fields[2].offset,
+            fields, level, message.parsed_index());
+    }
     const auto msg_type = message.find_unique(35);
     if (!msg_type.ok()) return msg_type.status();
     return validate_schema_message_for_type(schema, msg_type.value().value, msg_type.value().offset,
-        message.fields(), level);
+        fields, level, message.parsed_index());
 }
 
 template <class Schema>
@@ -1018,6 +1131,11 @@ public:
         }
     private:
         void advance_scan() noexcept {
+            if (view_->entry_count_ == 1 && view_->group_end_ > view_->count_index_ + 1) {
+                status_ = Status::success();
+                next_cursor_ = view_->group_end_;
+                return;
+            }
             const auto scan = detail::scan_group_entry(*view_->schema_, view_->fields_,
                 view_->ancestors_, *view_->descriptor_, cursor_, 0);
             status_ = scan.status;
@@ -1067,17 +1185,36 @@ public:
         if (ancestors.count < detail::max_schema_group_depth + 2)
             ancestors.levels[ancestors.count++] = parent_level;
         return GroupView{schema, *descriptor, ancestors, fields, lookup.index,
-            static_cast<std::size_t>(count)};
+            static_cast<std::size_t>(count), scan.end};
     }
 
 private:
+    template <class> friend class TypedMessageView;
     friend class GroupEntryView<Schema>;
     friend class Iterator;
+
+    [[nodiscard]] static Result<GroupView<Schema>> from_indexed(const SchemaDescriptor& schema,
+        const MessageDescriptor& parent_msg, const GroupDescriptor& descriptor,
+        std::span<const FieldView> fields, std::size_t count_index, std::size_t group_end) noexcept {
+        std::uint64_t count{};
+        if (count_index >= fields.size() || !detail::parse_unsigned(fields[count_index].value, count) ||
+            count > fields.size() - count_index - 1) {
+            return Status{ErrorCode::invalid_value, static_cast<int>(descriptor.count_tag),
+                count_index < fields.size() ? fields[count_index].offset : 0};
+        }
+        detail::AncestorStack ancestors;
+        ancestors.trailer = detail::find_trailer_component(schema);
+        ancestors.levels[0] = detail::MemberLevel{parent_msg.members, parent_msg.members_by_tag};
+        ancestors.count = 1;
+        return GroupView{schema, descriptor, ancestors, fields, count_index,
+            static_cast<std::size_t>(count), group_end};
+    }
+
     GroupView(const SchemaDescriptor& schema, const GroupDescriptor& descriptor,
         detail::AncestorStack ancestors, std::span<const FieldView> fields,
-        std::size_t count_index, std::size_t entry_count) noexcept
+        std::size_t count_index, std::size_t entry_count, std::size_t group_end = 0) noexcept
         : schema_(&schema), descriptor_(&descriptor), ancestors_(ancestors), fields_(fields),
-          count_index_(count_index), entry_count_(entry_count) {}
+          count_index_(count_index), entry_count_(entry_count), group_end_(group_end) {}
 
     const SchemaDescriptor* schema_{};
     const GroupDescriptor* descriptor_{};
@@ -1085,6 +1222,7 @@ private:
     std::span<const FieldView> fields_{};
     std::size_t count_index_{};
     std::size_t entry_count_{};
+    std::size_t group_end_{};
 };
 
 template <class Schema>
@@ -1096,11 +1234,24 @@ public:
     template <std::uint32_t Tag>
     [[nodiscard]] Result<FieldValueType<Schema, Tag>> get() const noexcept {
         if (!status_.ok()) return status_;
+        using Value = FieldValueType<Schema, Tag>;
+        if (descriptor_->has_group_index && descriptor_->group_count_tags.empty()) {
+            const FieldView* found = nullptr;
+            for (const auto& f : fields_) {
+                if (f.tag == Tag) {
+                    if (found != nullptr) {
+                        return Status{ErrorCode::duplicate_field, static_cast<int>(Tag), f.offset};
+                    }
+                    found = &f;
+                }
+            }
+            if (found == nullptr) return Status{ErrorCode::missing_field, static_cast<int>(Tag)};
+            return detail::parse_field_value<Value>(found->value, Tag);
+        }
         const auto lookup = detail::find_level_field(*schema_, descriptor_->members, fields_, Tag,
             descriptor_->members_by_tag, &ancestors_, nullptr,
             descriptor_->group_count_tags, descriptor_->group_count_tag_bloom, descriptor_->has_group_index);
         if (!lookup.status.ok()) return lookup.status;
-        using Value = FieldValueType<Schema, Tag>;
         return detail::parse_field_value<Value>(fields_[lookup.index].value, Tag);
     }
 
@@ -1141,6 +1292,10 @@ inline GroupEntryView<Schema> GroupView<Schema>::at(std::size_t index) const noe
     if (index >= entry_count_)
         return GroupEntryView<Schema>{*schema_, *descriptor_, ancestors_, {},
             Status{ErrorCode::missing_field, static_cast<int>(count_tag()), index}};
+    if (entry_count_ == 1 && group_end_ > count_index_ + 1) {
+        return GroupEntryView<Schema>{*schema_, *descriptor_, ancestors_,
+            fields_.subspan(count_index_ + 1, group_end_ - (count_index_ + 1))};
+    }
     std::size_t cursor = count_index_ + 1;
     for (std::size_t entry = 0; entry <= index; ++entry) {
         const auto start = cursor;
@@ -1177,6 +1332,41 @@ public:
         if (field == nullptr) return lookup_status;
         using Value = FieldValueType<Schema, Tag>;
         return detail::parse_field_value<Value>(field->value, Tag);
+    }
+
+protected:
+    template <std::uint32_t Tag, std::uint32_t MsgIdx, std::uint32_t MemberIdx>
+    [[nodiscard]] Result<FieldValueType<Schema, Tag>> get_indexed() const noexcept {
+        if constexpr (MemberIdx < detail::ParsedFieldIndex::max_members) {
+            if (const auto* idx = flat_.parsed_index();
+                idx != nullptr && idx->matches(&Schema::descriptor(), MsgIdx)) {
+                const int wire_idx = idx->lookup(MemberIdx);
+                if (wire_idx < 0) return Status{ErrorCode::missing_field, static_cast<int>(Tag)};
+                const auto fields = flat_.fields();
+                if (static_cast<std::size_t>(wire_idx) < fields.size()) {
+                    using Value = FieldValueType<Schema, Tag>;
+                    return detail::parse_field_value<Value>(fields[static_cast<std::size_t>(wire_idx)].value, Tag);
+                }
+            }
+        }
+        return get<Tag>();
+    }
+
+    template <std::uint32_t CountTag, std::uint32_t MsgIdx, std::uint32_t MemberIdx>
+    [[nodiscard]] Result<GroupView<Schema>> group_indexed() const noexcept {
+        if constexpr (MemberIdx < detail::ParsedFieldIndex::max_members) {
+            if (const auto* idx = flat_.parsed_index();
+                idx != nullptr && idx->matches(&Schema::descriptor(), MsgIdx)) {
+                const int wire_idx = idx->lookup(MemberIdx);
+                if (wire_idx < 0) return Status{ErrorCode::missing_field, static_cast<int>(CountTag)};
+                const auto& desc = Schema::descriptor();
+                const auto g_idx = descriptor_->members[MemberIdx].group_index;
+                return GroupView<Schema>::from_indexed(desc, *descriptor_, desc.groups[g_idx],
+                    flat_.fields(), static_cast<std::size_t>(wire_idx),
+                    static_cast<std::size_t>(idx->group_end[MemberIdx]));
+            }
+        }
+        return group<CountTag>();
     }
 
 private:

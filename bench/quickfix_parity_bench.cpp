@@ -692,12 +692,14 @@ bool run_suite2_parse(std::size_t warmup, std::size_t samples,
     Stats nf_stats{};
     {
         std::array<nf::FieldView, 64> scratch{};
+        nf::detail::ParsedFieldIndex parse_index{};
         const auto hints = fix::Schema::wire_hints();
         auto run_one = [&]() -> bool {
             nf::FrameView fv{};
             if (!nf::inspect_frame(wire, fv, hints).ok()) return false;
             nf::FlatMessageView mv{};
             if (!nf::parse_flat_verified(fv, scratch, mv, hints).ok()) return false;
+            mv.bind_index(&parse_index);
             if (!nf::validate_schema_message(fix::Schema::descriptor(), mv, nf::ValidationLevel::strict).ok()) return false;
             const auto nos = mv.as<fix::NewOrderSingle>();
             const auto cid = nos.cl_ord_id();
