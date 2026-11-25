@@ -9,7 +9,7 @@ This document tracks the planned engineering priorities for NimbleFIX after `0.3
 Goal: Push both outbound encoding and inbound strict parsing/validation firmly into the **sub-microsecond** regime while preserving 0 steady-state heap allocations and FIX protocol correctness.
 
 ### 1. [Done] Generated Switch-Based Fused Inbound Validator & O(1) Indexed View
-- **Status**: Implemented and verified across codegen (`tools/schema/generate.py`), `SchemaDescriptor::fast_validate`, `detail::ParsedFieldIndex`, `inspect_frame`/`parse_flat_verified`, inline `Decimal::parse`, `DirectInitiator`, `SessionDriver`, and `Engine`.
+- **Status**: Implemented and verified across the native C++20 schema compiler (`tools/schema/generate.cpp` / `nimblefix-schema-gen`), `SchemaDescriptor::fast_validate`, `detail::ParsedFieldIndex`, `inspect_frame`/`parse_flat_verified`, inline `Decimal::parse`, `DirectInitiator`, `SessionDriver`, and `Engine`.
 - **Design**:
   - Codegen emits per-schema `detail_validate::fast_validate_message` with compile-time `switch (tag)` single-pass validation, bitset duplicate & required-field checks, leaf-first repeating group validators, and O(1) `MsgType` dispatch while preserving 100% exact error codes, `ValidationLevel`, and error precedence.
   - Generation-stamped `detail::ParsedFieldIndex` (zero `memset` per frame) records top-level field wire indices and repeating group boundaries during validation, powering O(1) `{Msg}View` getters (`get_indexed` / `group_indexed`) with transparent fallback for unindexed views.
@@ -25,7 +25,7 @@ Goal: Push both outbound encoding and inbound strict parsing/validation firmly i
 - **Safety**: Even when `verify_checksum = false` is explicitly opted into on trusted links, `10=ddd<SOH>` framing syntax and `000..255` range remain strictly enforced.
 
 ### 4. [Done] Log-Driven Schema Optimization Tooling (`--from-fix-log`)
-- **Status**: Implemented in `tools/schema/generate.py` with `--from-fix-log <path>` (repeatable) and `--keep-all-fields`.
+- **Status**: Implemented in the native C++20 schema compiler (`tools/schema/generate.cpp` / `nimblefix-schema-gen`) with `--from-fix-log <path>` (repeatable) and `--keep-all-fields`.
 - **Capabilities**: Scans raw SOH (`\x01`), pipe-delimited (`|`), or binary `.nfxj` journal files to prune unobserved business messages and optional fields/groups while automatically preserving admin messages, required fields, repeating group delimiters, `Header`/`Trailer`, and paired `LENGTH`/`DATA` tags.
 
 ---

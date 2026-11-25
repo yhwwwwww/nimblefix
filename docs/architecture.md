@@ -27,7 +27,7 @@ NimbleFIX 0.3 is structured as a **3-layer, pay-only-for-what-you-need** C++20 F
 
 - **Layer 0 (`nimblefix_core`)** gives single-session trading clients direct access to the protocol engine, mmap journal, and TCP transport with zero `Engine`, `epoll`, `mutex`, or background-thread overhead (~336 KB Release binary).
 - **Layer 0 + TLS (`nimblefix_core_tls`)** adds nonblocking OpenSSL 3 TLS/mTLS by swapping only the `Transport` template parameter on `DirectInitiator`.
-- **Layer 1 / 2 (`nimblefix`)** adds multi-session multiplexing, Acceptor listeners, pluggable `IoBackend`, `Queued` worker pools, MPSC/SPSC cross-thread sending, runtime XML dictionaries, and the TOML CLI.
+- **Layer 1 / 2 (`nimblefix`)** adds multi-session multiplexing, Acceptor listeners, pluggable `IoBackend`, `Queued` worker pools, MPSC/SPSC cross-thread sending, and optional runtime XML dictionaries. All library targets expose pure C++ configuration structs with zero config-file format preference; the optional standalone `nimblefix` CLI (`tools/nimblefix`) parses TOML purely as an application-layer utility.
 
 ---
 
@@ -46,7 +46,7 @@ The primary generated outbound API streams typed FIX fields directly into the de
 | **Untyped / Runtime**: `nf::message<"D">()` / `DynamicMessage` | Arbitrary runtime `(tag, value)` pairs | SSO / heap | Mutable | Low-level admin frames & dynamic venue tags |
 
 ### Compact Member Indexing & Subset Codegen
-- `tools/schema/generate.py` compiles standard or custom FIX XML dictionaries into compact constexpr tables.
+- `nimblefix-schema-gen` (`tools/schema/generate.cpp`, pure zero-dependency C++20) compiles standard or custom FIX XML dictionaries into compact constexpr tables.
 - All per-message slot tables and deduplication bitsets are indexed by **compact per-message member index**, never by raw FIX tag number — supporting custom venue tags across `1..999,999,999` with zero memory bloat.
 - `--messages NewOrderSingle,ExecutionReport,...` prunes unused business messages while preserving required admin messages, components, and repeating groups.
 
