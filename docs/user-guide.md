@@ -90,8 +90,8 @@ nf::Status on_message(const nf::FlatMessageView& msg,
                       const nf::DeliveryInfo& info) noexcept {
     if (msg.is<fix::ExecutionReport>()) {
         const auto er = msg.as<fix::ExecutionReport>();
-        const std::string_view exec_id = er.exec_id().value_or("");
-        const auto cum_qty = er.cum_qty(); // std::optional<nf::Decimal>
+        const auto exec_id = er.exec_id(); // Result<std::string_view>
+        const auto cum_qty = er.cum_qty(); // Result<nf::Decimal>
         // Views borrow the parser/journal buffer for this callback only.
         // Copy any string_view values you need to retain past callback return.
         (void)exec_id; (void)cum_qty; (void)info;

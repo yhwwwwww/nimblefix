@@ -90,8 +90,8 @@ nf::Status on_message(const nf::FlatMessageView& msg,
                       const nf::DeliveryInfo& info) noexcept {
     if (msg.is<fix::ExecutionReport>()) {
         const auto er = msg.as<fix::ExecutionReport>();
-        const std::string_view exec_id = er.exec_id().value_or("");
-        const auto cum_qty = er.cum_qty(); // std::optional<nf::Decimal>
+        const auto exec_id = er.exec_id(); // Result<std::string_view>
+        const auto cum_qty = er.cum_qty(); // Result<nf::Decimal>
         // 视图仅借用当次回调的解析/日志缓冲；若需在回调外保留字符串请自行拷贝。
         (void)exec_id; (void)cum_qty; (void)info;
     }

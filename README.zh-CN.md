@@ -94,13 +94,13 @@ auto write_order = [&](auto& w) {
 | 基准项 | NimbleFIX (p50 / p99) | 吞吐 | 堆分配 |
 | :--- | ---: | ---: | :---: |
 | **流式编码**（`NewOrderSingle` + `NoPartyIDs[3]`） | **140 ns** / **151 ns** | 7.09M msgs/s | 0 |
-| **解析 + 912 字段严格校验 + 字段读取** | **421 ns** / **431 ns** | 2.36M msgs/s | 0 |
-| **纯引擎 Pre-TCP 往返**（`DirectInitiator` + mmap 日志） | **942 ns** / **1.44 µs** | 1.06M rt/s | 0 |
-| **本机 TCP Ping-Pong RTT**（`DirectInitiator`） | **9.67 µs** / **13.28 µs** | 104k rt/s | 0 |
-| **本机 TCP 32 笔密集连发**（`DirectSendQueue`，CO-Free 单向） | **12.86 µs** / **22.64 µs** | 1.43M ord/s | 0 |
-| **4 分片 `ShardedEngine` Acceptor**（16 并发会话，单端口） | **31.19 µs** / **49.99 µs** | 471k ord/s | 0 |
+| **解析 + 912 字段严格校验 + 字段读取** | **361 ns** / **371 ns** | 2.73M msgs/s | 0 |
+| **纯引擎 Pre-TCP Acceptor 往返**（`SessionDriver` + mmap 日志） | **912 ns** / **1.13 µs** | 1.04M ord/s | 0 |
+| **本机 TCP Ping-Pong RTT**（`DirectInitiator` / `Engine` Acceptor） | **8.85 µs** / **9.35 µs** | 110k / 94k rt/s | 0 |
+| **本机 TCP 32 笔密集连发**（`DirectSendQueue` / `Engine + ProducerLane`） | **13.03 µs** / **17.18 µs** | 1.34M / 1.18M ord/s | 0 |
+| **4 分片 `ShardedEngine` Acceptor**（16 并发会话，单端口） | **29.82 µs** / **48.55 µs** | **503k ord/s** | 0 |
 
-在严格同口径对比 QuickFIX 1.16.0（同一 `FIX44.xml` 严格校验与磁盘持久化）中：编码快 **8.6×**，解析校验快 **6.6×**，TCP 往返延迟低 **2.3×**，32 笔密集连发延迟低 **15.7×**。
+在严格同口径对比 QuickFIX 1.16.0（同一 `FIX44.xml` 严格校验与磁盘持久化）中：编码快 **8.8×**，解析校验快 **6.8×**，TCP 往返延迟低 **2.4×**，32 笔密集连发延迟低 **12.8×**。
 
 ---
 

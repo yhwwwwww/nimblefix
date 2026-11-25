@@ -94,13 +94,13 @@ Measured in Release mode (`-O3`, GCC 16.2.1, AMD Ryzen 7 7840HS, Linux 7.2) with
 | Benchmark | NimbleFIX (p50 / p99) | Throughput | Heap Allocs |
 | :--- | ---: | ---: | :---: |
 | **Stream Encode** (`NewOrderSingle` + `NoPartyIDs[3]`) | **140 ns** / **151 ns** | 7.09M msgs/s | 0 |
-| **Strict Parse + 912-Field Validate + Read** | **421 ns** / **431 ns** | 2.36M msgs/s | 0 |
-| **Pre-TCP Engine Round-Trip** (`DirectInitiator` + mmap Journal) | **942 ns** / **1.44 µs** | 1.06M rt/s | 0 |
-| **Loopback TCP Ping-Pong RTT** (`DirectInitiator`) | **9.67 µs** / **13.28 µs** | 104k rt/s | 0 |
-| **Loopback TCP 32-Order Burst** (`DirectSendQueue`, CO-Free 1-way) | **12.86 µs** / **22.64 µs** | 1.43M ord/s | 0 |
-| **4-Shard `ShardedEngine` Acceptor** (16 sessions, 1 port) | **31.19 µs** / **49.99 µs** | 471k ord/s | 0 |
+| **Strict Parse + 912-Field Validate + Read** | **361 ns** / **371 ns** | 2.73M msgs/s | 0 |
+| **Pre-TCP Acceptor Turnaround** (`SessionDriver` + mmap journal) | **912 ns** / **1.13 µs** | 1.04M ord/s | 0 |
+| **Loopback TCP Ping-Pong RTT** (`DirectInitiator` / `Engine` Acceptor) | **8.85 µs** / **9.35 µs** | 110k / 94k rt/s | 0 |
+| **Loopback TCP 32-Order Burst** (`DirectSendQueue` / `Engine + ProducerLane`) | **13.03 µs** / **17.18 µs** | 1.34M / 1.18M ord/s | 0 |
+| **4-Shard `ShardedEngine` Acceptor** (16 sessions, 1 port) | **29.82 µs** / **48.55 µs** | **503k ord/s** | 0 |
 
-In same-methodology parity tests against QuickFIX 1.16.0 (identical `FIX44.xml` strict validation and on-disk persistence): **8.6× faster** encode, **6.6× faster** strict parse & validate, **2.3× lower** TCP RTT, and **15.7× lower** 32-order burst latency.
+In same-methodology parity tests against QuickFIX 1.16.0 (identical `FIX44.xml` strict validation and on-disk persistence): **8.8× faster** encode, **6.8× faster** strict parse & validate, **2.4× lower** TCP RTT, and **12.8× lower** 32-order burst latency.
 
 ---
 

@@ -294,6 +294,11 @@ struct InboundTags {
         else if (slot == nullptr) slot = &field;
     };
     for (const auto& field : message.fields()) {
+        if (field.tag > 141) {
+            if (field.tag == 369) assign(out.peer_ack, field);
+            else if (field.tag == 1137) assign(out.appl_ver, field);
+            continue;
+        }
         switch (field.tag) {
         case 8: assign(out.begin, field); break;
         case 35: assign(out.msg_type, field); break;
@@ -304,7 +309,6 @@ struct InboundTags {
         case 43: assign(out.poss_dup, field); break;
         case 122: assign(out.orig_time, field); break;
         case 112: assign(out.test_id, field); break;
-        case 369: assign(out.peer_ack, field); break;
         case 7: assign(out.begin_seq, field); break;
         case 16: assign(out.end_seq, field); break;
         case 36: assign(out.new_seq, field); break;
@@ -312,7 +316,6 @@ struct InboundTags {
         case 98: assign(out.encrypt, field); break;
         case 108: assign(out.hb_int, field); break;
         case 141: assign(out.reset_flag, field); break;
-        case 1137: assign(out.appl_ver, field); break;
         case 58: assign(out.text, field); break;
         default: break;
         }
@@ -401,6 +404,13 @@ struct SessionDriver::Impl {
             const auto* latest = journal.find_outbound(current_max_outbound);
             if (latest != nullptr) last_retention_outbound_segment = segment_index(latest->id);
         }
+        last_appended_outbound_segment = last_retention_outbound_segment;
+        if (current_max_outbound != 0) {
+            if (const auto* latest = journal.find_outbound(current_max_outbound); latest != nullptr) {
+                last_appended_outbound_segment = std::max(last_appended_outbound_segment, segment_index(latest->id));
+            }
+        }
+        (void)session_prefix.init(fix_version(), config.local_comp_id, config.remote_comp_id);
         if (next_receipt_id == 0) next_receipt_id = 1;
     }
 
@@ -441,7 +451,9 @@ struct SessionDriver::Impl {
     std::uint64_t next_receipt_id{1};
     std::uint64_t peer_ack_seq{};
     std::uint32_t last_retention_outbound_segment{};
+    std::uint32_t last_appended_outbound_segment{};
     std::uint32_t last_retention_inbound_segment{};
+    detail::StaticSessionPrefix session_prefix{};
     std::uint64_t last_byte_progress_ms{};
     std::uint64_t pending_since_ms{};
     std::size_t tx_head{};
@@ -561,6 +573,12 @@ struct SessionDriver::Impl {
     }
 
     [[nodiscard]] Status update_retention_floor(bool force = false) noexcept {
+        const auto cursor = journal.completed_inbound_record_id();
+        const auto inbound_segment = segment_index(cursor);
+        if (!force && inbound_segment <= last_retention_inbound_segment &&
+            last_appended_outbound_segment <= last_retention_outbound_segment) {
+            return Status::success();
+        }
         const auto latest = journal.next_outbound_seq() == 0 ? 0 : journal.next_outbound_seq() - 1;
         std::uint64_t window_floor = 1;
         if (config.retain_outbound_messages != 0 && latest >= config.retain_outbound_messages)
@@ -569,7 +587,6 @@ struct SessionDriver::Impl {
             ? peer_ack_seq : peer_ack_seq + 1;
         auto floor = std::min(window_floor, ack_floor);
         floor = std::max(floor, journal.lowest_retained_outbound_seq());
-        const auto cursor = journal.completed_inbound_record_id();
         std::uint32_t outbound_segment = 0;
         if (floor <= latest) {
             if (const auto* boundary = journal.find_outbound(floor); boundary != nullptr)
@@ -578,11 +595,10 @@ struct SessionDriver::Impl {
             if (const auto* boundary = journal.find_outbound(latest); boundary != nullptr)
                 outbound_segment = segment_index(boundary->id);
         }
-        const auto inbound_segment = segment_index(cursor);
         if (!force && outbound_segment <= last_retention_outbound_segment &&
             inbound_segment <= last_retention_inbound_segment)
             return Status::success();
-        const auto status = journal.set_retention_floor(floor, journal.completed_inbound_record_id());
+        const auto status = journal.set_retention_floor(floor, cursor);
         if (status.code == ErrorCode::unsupported) return Status::success();
         if (status.ok()) {
             last_retention_outbound_segment = std::max(last_retention_outbound_segment, outbound_segment);
@@ -818,6 +834,7 @@ struct SessionDriver::Impl {
                     if (!committed.ok()) return committed.status();
                     record_id = committed.value().id;
                     encoded_size = encoded.value();
+                    last_appended_outbound_segment = std::max(last_appended_outbound_segment, segment_index(record_id));
                     if (const auto status = update_retention_floor(); !status.ok()) return fail(status);
                     committed_zero_copy = true;
                 } else if (encoded.status().code != ErrorCode::capacity_exceeded) {
@@ -838,6 +855,7 @@ struct SessionDriver::Impl {
                     std::string_view{encode_buffer.data(), encoded_size}, 0);
                 if (!appended.ok()) return appended.status();
                 record_id = appended.value().id;
+                last_appended_outbound_segment = std::max(last_appended_outbound_segment, segment_index(record_id));
                 if (const auto status = update_retention_floor(); !status.ok()) return fail(status);
             }
         }
@@ -1455,10 +1473,11 @@ struct SessionDriver::Impl {
     }
 
     void forget_recovery(RecordId inbound_id) noexcept {
-        for (std::size_t i = 0; i < recovery_count; ++i) {
-            if (recovery_slots[i].id != inbound_id) continue;
-            recovery_bytes -= recovery_slots[i].bytes;
-            for (std::size_t move = i + 1; move < recovery_count; ++move) {
+        for (std::size_t i = recovery_count; i > 0; --i) {
+            const std::size_t idx = i - 1;
+            if (recovery_slots[idx].id != inbound_id) continue;
+            recovery_bytes -= recovery_slots[idx].bytes;
+            for (std::size_t move = idx + 1; move < recovery_count; ++move) {
                 recovery_slots[move - 1] = recovery_slots[move];
             }
             --recovery_count;
@@ -1468,8 +1487,8 @@ struct SessionDriver::Impl {
     }
 
     [[nodiscard]] RecoverySlot* find_recovery_slot(RecordId id) noexcept {
-        for (std::size_t i = 0; i < recovery_count; ++i) {
-            if (recovery_slots[i].id == id) return &recovery_slots[i];
+        for (std::size_t i = recovery_count; i > 0; --i) {
+            if (recovery_slots[i - 1].id == id) return &recovery_slots[i - 1];
         }
         return nullptr;
     }
@@ -1818,12 +1837,23 @@ struct SessionDriver::Impl {
         }
         reserve_bound = std::min(config.max_frame_bytes, reserve_bound);
 
-        // Zero-copy path: encode directly into pre-faulted v2 mmap Journal payload slot.
+        // Zero-copy path: encode directly into pre-faulted mmap Journal payload slot.
         RecordId committed_id = 0;
         std::size_t encoded_size = 0;
         auto reserved = journal.reserve(RecordKind::outbound, sequence, receipt_id, dependency, reserve_bound);
         if (reserved.ok()) {
-            const auto encoded = encode_fix(message, header, reserved.value().payload);
+            Result<std::size_t> encoded{Status{ErrorCode::capacity_exceeded}};
+            if (message.prebuilt_body && session_prefix.valid) {
+                auto buf = detail::StreamBuffer::begin_session_frame(
+                    reserved.value().payload, message.msg_type, session_prefix,
+                    sequence, wall_time, header.last_msg_seq_num_processed);
+                if (buf.ok() && message.value_byte_count != 0) {
+                    buf.write_raw(message.value_bytes, message.value_byte_count);
+                }
+                encoded = buf.finish_frame();
+            } else {
+                encoded = encode_fix(message, header, reserved.value().payload);
+            }
             if (encoded.ok()) {
                 if (encoded.value() > max_allowed) {
                     capacity_blocked = true;
@@ -1852,6 +1882,7 @@ struct SessionDriver::Impl {
             encoded_size = encoded.value();
         }
         if (dependency != 0 && receipt_id != 0) increment_dependent_reply(dependency);
+        last_appended_outbound_segment = std::max(last_appended_outbound_segment, segment_index(committed_id));
         if (const auto status = update_retention_floor(); !status.ok()) return fail(status);
         if (const auto status = enqueue(committed_id, encoded_size, sequence,
                 receipt_id, message.msg_type, now_ms, true); !status.ok()) {
@@ -1864,6 +1895,88 @@ struct SessionDriver::Impl {
         event.now_ms = now_ms;
         event.sequence = sequence;
         event.msg_type = message.msg_type;
+        const auto output = core.process(event);
+        if (!output.status.ok()) return fail(output.status);
+        return SendReceipt{receipt_id, sequence, ReceiptState::appended, Status::success()};
+    }
+
+    [[nodiscard]] Result<SendReceipt> send_application_stream(std::string_view msg_type,
+        SessionDriver::StreamEncodeFn encode_fn, void* encode_ctx,
+        std::uint64_t now_ms, std::string_view wall_time, RecordId dependency) noexcept {
+        if (fatal) return last_status.ok() ? Status{ErrorCode::engine_stopped} : last_status;
+        if (!is_active()) return Status{ErrorCode::not_ready};
+        if (msg_type.empty() || is_session_admin(msg_type)) {
+            return Status{ErrorCode::managed_field, 35};
+        }
+        if (msg_type.size() > max_msg_type_bytes) return Status{ErrorCode::unsupported, 35};
+        const auto message_limit = config.max_pending_messages - config.admin_reserve_messages;
+        const auto byte_limit = config.max_pending_bytes - config.admin_reserve_bytes;
+        const auto replay_reserve = replay_reservation_bytes();
+        if (business_count >= message_limit || tx_count >= tx_slots.size() ||
+            business_bytes >= byte_limit ||
+            replay_reserve > config.max_pending_bytes - pending_bytes_count) {
+            capacity_blocked = true;
+            return Status{ErrorCode::queue_full};
+        }
+        const auto sequence = core.next_outbound();
+        if (sequence == 0) return fail(Status{ErrorCode::too_large, 34});
+        const auto receipt_id = next_receipt_id;
+        if (receipt_id == 0) return fail(Status{ErrorCode::receipt_expired});
+        const std::size_t max_allowed = std::min({
+            config.max_frame_bytes,
+            byte_limit - business_bytes,
+            config.max_pending_bytes - pending_bytes_count - replay_reserve
+        });
+        const auto last_proc = last_processed_seq();
+        const std::size_t fast_reserve = std::min<std::size_t>(config.max_frame_bytes, 1024U);
+
+        RecordId committed_id = 0;
+        std::size_t encoded_size = 0;
+        auto reserved = journal.reserve(RecordKind::outbound, sequence, receipt_id, dependency, fast_reserve);
+        if (reserved.ok()) {
+            const auto encoded = encode_fn(encode_ctx, reserved.value().payload,
+                session_prefix, sequence, wall_time, last_proc);
+            if (encoded.ok()) {
+                if (encoded.value() > max_allowed) {
+                    capacity_blocked = true;
+                    return Status{ErrorCode::queue_full};
+                }
+                const auto committed = journal.commit(reserved.value(), encoded.value());
+                if (!committed.ok()) return fail(committed.status());
+                committed_id = committed.value().id;
+                encoded_size = encoded.value();
+            } else if (encoded.status().code != ErrorCode::capacity_exceeded) {
+                return encoded.status();
+            }
+        }
+        if (committed_id == 0) {
+            const auto encoded = encode_fn(encode_ctx, encode_buffer,
+                session_prefix, sequence, wall_time, last_proc);
+            if (!encoded.ok()) return encoded.status();
+            if (encoded.value() > max_allowed) {
+                capacity_blocked = true;
+                return Status{ErrorCode::queue_full};
+            }
+            const auto appended = journal.append(RecordKind::outbound, sequence, receipt_id, dependency,
+                std::string_view{encode_buffer.data(), encoded.value()});
+            if (!appended.ok()) return fail(appended.status());
+            committed_id = appended.value().id;
+            encoded_size = encoded.value();
+        }
+        if (dependency != 0 && receipt_id != 0) increment_dependent_reply(dependency);
+        last_appended_outbound_segment = std::max(last_appended_outbound_segment, segment_index(committed_id));
+        if (const auto status = update_retention_floor(); !status.ok()) return fail(status);
+        if (const auto status = enqueue(committed_id, encoded_size, sequence,
+                receipt_id, msg_type, now_ms, true); !status.ok()) {
+            return fail(Status{ErrorCode::protocol_error, 34});
+        }
+        put_receipt(receipt_id, sequence, ReceiptState::appended);
+        ++next_receipt_id;
+        detail::CoreEvent event{};
+        event.kind = detail::CoreEventKind::outbound_appended;
+        event.now_ms = now_ms;
+        event.sequence = sequence;
+        event.msg_type = msg_type;
         const auto output = core.process(event);
         if (!output.status.ok()) return fail(output.status);
         return SendReceipt{receipt_id, sequence, ReceiptState::appended, Status::success()};
@@ -1930,6 +2043,7 @@ struct SessionDriver::Impl {
             peer_ack_seq = 0;
             local_epoch_reset_started = true;
             last_retention_outbound_segment = 0;
+            last_appended_outbound_segment = 0;
             if (const auto status = update_retention_floor(true); !status.ok()) return fail(status);
         }
         detail::CoreEvent event{};
@@ -2268,6 +2382,7 @@ struct SessionDriver::Impl {
             peer_ack_seq = 0;
             peer_reset_requested = true;
             last_retention_outbound_segment = 0;
+            last_appended_outbound_segment = 0;
             if (const auto status = update_retention_floor(true); !status.ok()) return fail(status);
         }
 
@@ -2503,6 +2618,70 @@ struct SessionDriver::Impl {
         return fatal ? last_status : Status::success();
     }
 
+    [[nodiscard]] Status on_flush_batch(WriteBatchFn write_batch, WriteFn write_single,
+        void* context, std::uint64_t now_ms, std::size_t byte_budget) noexcept {
+        if (write_batch == nullptr || write_single == nullptr) return Status{ErrorCode::invalid_config};
+        if (fatal) return last_status.ok() ? Status{ErrorCode::engine_stopped} : last_status;
+        if (core.state() == SessionState::disconnected || core.state() == SessionState::closed ||
+            core.state() == SessionState::failed) return Status{ErrorCode::not_ready};
+        if (replay_active || replay_count != 0 || tx_count <= 1) {
+            return on_flush(write_single, context, now_ms, byte_budget);
+        }
+        callback_now_ms = now_ms;
+        std::size_t written_this_turn = 0;
+        while (written_this_turn < byte_budget && !should_close && tx_count != 0) {
+            if (replay_active || replay_count != 0 || tx_count == 1 || front_tx()->ephemeral) {
+                return on_flush(write_single, context, now_ms, byte_budget - written_this_turn);
+            }
+            std::array<std::span<const char>, 64> chunks{};
+            std::size_t chunk_count = 0;
+            std::size_t batch_bytes = 0;
+            const std::size_t remaining_budget = byte_budget - written_this_turn;
+            for (std::size_t i = 0; i < tx_count && chunk_count < chunks.size() && batch_bytes < remaining_budget; ++i) {
+                const auto& desc = tx_slots[tx_index(i)];
+                if (desc.ephemeral) break;
+                const auto* record = journal.find_record(desc.record_id);
+                if (record == nullptr || record->kind != RecordKind::outbound ||
+                    record->payload.size() != desc.frame_size || desc.offset > desc.frame_size) {
+                    return fail(Status{ErrorCode::corrupt_store});
+                }
+                const std::size_t rem = desc.frame_size - desc.offset;
+                const std::size_t take = std::min(rem, remaining_budget - batch_bytes);
+                chunks[chunk_count++] = std::span<const char>{record->payload.data() + desc.offset, take};
+                batch_bytes += take;
+            }
+            if (chunk_count == 0) break;
+            const auto result = chunk_count == 1
+                ? write_single(context, chunks[0])
+                : write_batch(context, std::span<const std::span<const char>>{chunks.data(), chunk_count});
+            if (result.bytes_written > batch_bytes) return fail(Status{ErrorCode::protocol_error});
+            if (result.bytes_written != 0) {
+                written_this_turn += result.bytes_written;
+                last_byte_progress_ms = now_ms;
+                write_timer_active = true;
+                stall_logout_attempted = false;
+                stall_logout_deadline = 0;
+                std::size_t left = result.bytes_written;
+                while (left != 0 && tx_count != 0) {
+                    auto* front = front_tx();
+                    const std::size_t rem = front->frame_size - front->offset;
+                    if (left >= rem) {
+                        left -= rem;
+                        front->offset = front->frame_size;
+                        if (const auto status = pop_tx(true, now_ms); !status.ok()) return status;
+                        if (core.should_close()) should_close = true;
+                    } else {
+                        front->offset += left;
+                        left = 0;
+                    }
+                }
+            }
+            if (!result.status.ok()) return transport_failure(result.status);
+            if (result.bytes_written == 0 || result.would_block) break;
+        }
+        return fatal ? last_status : Status::success();
+    }
+
 };
 
 SessionDriver::SessionDriver(std::unique_ptr<Impl> impl) noexcept : impl_(std::move(impl)) {
@@ -2667,11 +2846,33 @@ Result<SendReceipt> SessionDriver::send_dependent(detail::MessageView message,
         dependency, dependency_ordinal, recovery);
 }
 
+Result<SendReceipt> SessionDriver::send_stream_dependent(std::string_view msg_type,
+    StreamEncodeFn encode_fn, void* encode_ctx,
+    std::uint64_t now_ms, std::string_view wall_time, RecordId dependency,
+    std::size_t, bool) noexcept {
+    if (!impl_) return Status{ErrorCode::engine_stopped};
+    if (const auto status = impl_->claim_owner(); !status.ok()) return status;
+    if (dependency != 0 && !impl_->callback_active &&
+        (!impl_->callbacks.deferred_delivery || impl_->deferred_delivery_id != dependency))
+        return Status{ErrorCode::not_ready};
+    if (const auto status = impl_->set_wall_time(wall_time); !status.ok()) return status;
+    impl_->callback_now_ms = now_ms;
+    return impl_->send_application_stream(msg_type, encode_fn, encode_ctx,
+        now_ms, impl_->callback_wall_time, dependency);
+}
+
 Status SessionDriver::flush(WriteFn write, void* context, std::uint64_t now_ms,
     std::size_t byte_budget) noexcept {
     if (!impl_) return Status{ErrorCode::engine_stopped};
     if (const auto status = impl_->claim_owner(); !status.ok()) return status;
     return impl_->on_flush(write, context, now_ms, byte_budget);
+}
+
+Status SessionDriver::flush_batch(WriteBatchFn write_batch, WriteFn write_single,
+    void* context, std::uint64_t now_ms, std::size_t byte_budget) noexcept {
+    if (!impl_) return Status{ErrorCode::engine_stopped};
+    if (const auto status = impl_->claim_owner(); !status.ok()) return status;
+    return impl_->on_flush_batch(write_batch, write_single, context, now_ms, byte_budget);
 }
 
 Result<SendReceipt> SessionDriver::receipt(std::uint64_t id) const noexcept {

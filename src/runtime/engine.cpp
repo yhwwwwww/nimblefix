@@ -62,7 +62,19 @@ class WakeControl {
 public:
     explicit WakeControl(int fd) noexcept : fd_(fd) {}
 
+    void set_sleeping(bool value) noexcept {
+        if (value) sleeping_.store(true, std::memory_order_seq_cst);
+        else sleeping_.store(false, std::memory_order_release);
+    }
+
+    [[nodiscard]] bool consume_wake_pending() noexcept {
+        return wake_pending_.exchange(false, std::memory_order_acq_rel);
+    }
+
     void wake() noexcept {
+        wake_pending_.store(true, std::memory_order_release);
+        std::atomic_thread_fence(std::memory_order_seq_cst);
+        if (!sleeping_.load(std::memory_order_acquire)) return;
         constexpr std::uint64_t closed = std::uint64_t{1} << 63U;
         gate_.fetch_add(1, std::memory_order_acq_rel);
         if ((gate_.load(std::memory_order_acquire) & closed) != 0) {
@@ -84,6 +96,7 @@ public:
     void close() noexcept {
         constexpr std::uint64_t closed = std::uint64_t{1} << 63U;
         constexpr std::uint64_t active_mask = ~closed;
+        sleeping_.store(false, std::memory_order_release);
         gate_.fetch_or(closed, std::memory_order_acq_rel);
         while ((gate_.load(std::memory_order_acquire) & active_mask) != 0)
             std::this_thread::yield();
@@ -94,6 +107,8 @@ public:
 private:
     std::atomic<std::uint64_t> gate_{0};
     std::atomic<int> fd_{-1};
+    alignas(64) std::atomic<bool> sleeping_{false};
+    alignas(64) std::atomic<bool> wake_pending_{false};
 };
 
 struct OwnedMessageHeader {
@@ -268,13 +283,23 @@ struct SenderCommandView {
     if (!message.status.ok()) return message.status;
     if (message.msg_type.size() > maximum_msg_type_size || session_admin_type(message.msg_type))
         return Status{ErrorCode::managed_field, 35};
-    const auto timestamp = std::string_view{"99991231-23:59:59.999"};
-    SessionHeader header{local_comp_id, remote_comp_id,
-        std::numeric_limits<std::uint64_t>::max(), timestamp, false, {}, version};
-    if (emit_last_processed) header.last_msg_seq_num_processed = std::numeric_limits<std::uint64_t>::max();
-    const auto wire_size = measure_fix(message, header);
-    if (!wire_size.ok()) return wire_size.status();
-    if (wire_size.value() > max_frame_bytes) return Status{ErrorCode::too_large};
+    bool size_verified = false;
+    if (message.prebuilt_body && message.field_count == 0 && message.group_count == 0 &&
+        !message.msg_type.empty()) {
+        // O(1) upper bound for stream-encoded body: 8/9/35/49/56/34/52/369/10 overhead <= 128 B + comp_ids.
+        const std::size_t upper = 128U + local_comp_id.size() + remote_comp_id.size() +
+            message.msg_type.size() + message.value_byte_count;
+        if (upper <= max_frame_bytes) size_verified = true;
+    }
+    if (!size_verified) {
+        const auto timestamp = std::string_view{"99991231-23:59:59.999"};
+        SessionHeader header{local_comp_id, remote_comp_id,
+            std::numeric_limits<std::uint64_t>::max(), timestamp, false, {}, version};
+        if (emit_last_processed) header.last_msg_seq_num_processed = std::numeric_limits<std::uint64_t>::max();
+        const auto wire_size = measure_fix(message, header);
+        if (!wire_size.ok()) return wire_size.status();
+        if (wire_size.value() > max_frame_bytes) return Status{ErrorCode::too_large};
+    }
     std::size_t payload_size{};
     if (!message_node_size(message, payload_size)) return Status{ErrorCode::too_large};
     OwnedMessageLayout result{};
@@ -525,7 +550,7 @@ public:
         byte_write += reserved;
         const auto payload_position = static_cast<std::size_t>((reservation_begin + padding) % capacity);
         copy_owned_message(std::span<char>{arena.data() + payload_position, payload_size}, message);
-        const auto accepted_ms = monotonic_ms();
+        const auto accepted_ms = max_pending_age_ms != 0 ? monotonic_ms() : 0ULL;
         slots[static_cast<std::size_t>(producer_tail % slots.size())] = ProducerLaneCommandSlot{
             id, reservation_begin, reserved, payload_position, payload_size, accepted_ms};
         tail.store(producer_tail + 1, std::memory_order_release);
@@ -534,7 +559,7 @@ public:
     }
 
     [[nodiscard]] bool peek(ProducerLaneCommandSlot& command,
-        std::span<char> scratch, MessageView& message) noexcept {
+        std::span<char>, MessageView& message) noexcept {
         if (blocked.load(std::memory_order_acquire) ||
             !active.load(std::memory_order_acquire) || stopped.load(std::memory_order_acquire))
             return false;
@@ -543,9 +568,9 @@ public:
         if (consumer_head == consumer_tail || consumer_head > consumer_tail || slots.empty())
             return false;
         command = slots[static_cast<std::size_t>(consumer_head % slots.size())];
-        if (command.payload_size > scratch.size()) return false;
-        std::memcpy(scratch.data(), arena.data() + command.payload_offset, command.payload_size);
-        message = view_owned_message(scratch.first(command.payload_size));
+        if (command.payload_offset + command.payload_size > arena.size()) return false;
+        // Zero-copy view directly over the SPSC arena slice owned until finish() advances byte_read.
+        message = view_owned_message(std::span<char>{arena.data() + command.payload_offset, command.payload_size});
         return true;
     }
 
@@ -1559,6 +1584,7 @@ struct EngineRuntime::Impl {
         bool uring_rx_in_flight{};
         bool uring_tx_in_flight{};
         bool telemetry_probes{};
+        const RegisteredMessageHandler* last_validated_handler{};
 
         [[nodiscard]] std::string_view unread_view() const noexcept {
             return {receive_buffer.data() + receive_head, receive_buffer.size() - receive_head};
@@ -2210,29 +2236,35 @@ struct EngineRuntime::Impl {
         }
     }
 
-    void process_sender_commands(Peer& peer, std::uint64_t,
-        std::size_t command_budget = 32) noexcept {
+    void process_sender_commands(Peer& peer, std::uint64_t now_ms,
+        std::size_t command_budget = 64) noexcept {
         if (!peer.session || !peer.driver || peer.closed) return;
-        auto scratch = sender_scratch();
-        if (scratch.empty()) return;
-        const auto wall = wall_timestamp();
         auto& sender = *peer.session->sender;
         const bool drain_in_flight = peer.session->callback_in_flight.load(std::memory_order_acquire);
         if (!sender.is_active() && !drain_in_flight) return;
+        if (sender.pending_command_hint.load(std::memory_order_acquire) == 0) {
+            sender.sync_receipts(*peer.driver);
+            return;
+        }
+        auto scratch = sender_scratch();
+        if (scratch.empty()) return;
+        const auto wall = wall_timestamp();
         for (std::size_t processed = 0; processed < command_budget; ++processed) {
-            auto admission_now = monotonic_ms();
-            const auto expired = sender.expire_head(admission_now);
-            if (expired) {
-                const Result<SendReceipt> result{Status{ErrorCode::backlog_timeout}};
-                note_sender_command_result(*peer.session, *expired, result);
-                report_error(peer.name, result.status());
-                continue;
+            const auto admission_now = sender.max_pending_age_ms != 0 ? monotonic_ms() : now_ms;
+            if (sender.max_pending_age_ms != 0) {
+                const auto expired = sender.expire_head(admission_now);
+                if (expired) {
+                    const Result<SendReceipt> result{Status{ErrorCode::backlog_timeout}};
+                    note_sender_command_result(*peer.session, *expired, result);
+                    report_error(peer.name, result.status());
+                    continue;
+                }
             }
             SenderCommandSlot command{};
             MessageView message{};
             if (!sender.pop(command, scratch, message)) break;
-            admission_now = monotonic_ms();
-            if (pending_expired(command.accepted_ms, admission_now, sender.max_pending_age_ms)) {
+            if (sender.max_pending_age_ms != 0 &&
+                pending_expired(command.accepted_ms, admission_now, sender.max_pending_age_ms)) {
                 const auto overdue = sender.expire_head(admission_now);
                 if (overdue) {
                     const Result<SendReceipt> expired_result{Status{ErrorCode::backlog_timeout}};
@@ -2281,11 +2313,19 @@ struct EngineRuntime::Impl {
         sender.sync_receipts(*peer.driver);
     }
 
-    void process_producer_lanes(Peer& peer, std::uint64_t,
-        std::size_t command_budget = 32) noexcept {
+    void process_producer_lanes(Peer& peer, std::uint64_t now_ms,
+        std::size_t command_budget = 64) noexcept {
         if (command_budget == 0 || !peer.session || !peer.driver || peer.closed) return;
         auto& sender = *peer.session->sender;
         if (sender.producer_lanes.empty() || !sender.is_active()) return;
+        bool any_ready = false;
+        for (const auto& lane : sender.producer_lanes) {
+            if (lane && (lane->has_commands() || lane->pending_driver_receipts != 0)) {
+                any_ready = true;
+                break;
+            }
+        }
+        if (!any_ready) return;
         auto scratch = sender_scratch();
         if (scratch.empty()) return;
 
@@ -2303,13 +2343,15 @@ struct EngineRuntime::Impl {
                 ++empty_lanes;
                 continue;
             }
-            auto admission_now = monotonic_ms();
-            const auto expired = lane->expire_head(admission_now);
-            if (expired) {
-                empty_lanes = 0;
-                ++processed;
-                report_error(peer.name, Status{ErrorCode::backlog_timeout});
-                continue;
+            const auto admission_now = lane->max_pending_age_ms != 0 ? monotonic_ms() : now_ms;
+            if (lane->max_pending_age_ms != 0) {
+                const auto expired = lane->expire_head(admission_now);
+                if (expired) {
+                    empty_lanes = 0;
+                    ++processed;
+                    report_error(peer.name, Status{ErrorCode::backlog_timeout});
+                    continue;
+                }
             }
             ProducerLaneCommandSlot command{};
             MessageView message{};
@@ -2318,8 +2360,8 @@ struct EngineRuntime::Impl {
                 continue;
             }
             empty_lanes = 0;
-            admission_now = monotonic_ms();
-            if (pending_expired(command.accepted_ms, admission_now, lane->max_pending_age_ms)) {
+            if (lane->max_pending_age_ms != 0 &&
+                pending_expired(command.accepted_ms, admission_now, lane->max_pending_age_ms)) {
                 if (lane->expire_head(admission_now)) report_error(peer.name, Status{ErrorCode::backlog_timeout});
                 ++processed;
                 continue;
@@ -2637,13 +2679,16 @@ struct EngineRuntime::Impl {
                         const auto checked = config.message_validator(message);
                         if (!checked.ok()) return finish(checked);
                     }
+                    peer_ptr->last_validated_handler = nullptr;
                     if (schema != nullptr) {
                         const auto h = std::lower_bound(typed_handlers.begin(), typed_handlers.end(),
                             msg_type, [](const RegisteredMessageHandler& item, std::string_view value) {
                                 return item.msg_type < value;
                             });
                         const bool handled = h != typed_handlers.end() && h->msg_type == msg_type;
-                        if (!handled) {
+                        if (handled) {
+                            peer_ptr->last_validated_handler = &*h;
+                        } else {
                             const auto ig = std::lower_bound(ignored_messages.begin(), ignored_messages.end(),
                                 msg_type, [](const IgnoredMessageType& item, std::string_view value) {
                                     return item.msg_type < value;
@@ -2704,7 +2749,16 @@ struct EngineRuntime::Impl {
             } else {
                 callbacks.on_message = [this, peer_ptr = &peer](SessionContext& context,
                     const FlatMessageView& message, const DeliveryInfo& info) -> Status {
-                    const auto delivered = dispatch_business(context, message, info);
+                    Status delivered{};
+                    const auto* cached = peer_ptr->last_validated_handler;
+                    peer_ptr->last_validated_handler = nullptr;
+                    const auto fields = message.fields();
+                    if (cached != nullptr && fields.size() >= 3 && fields[2].tag == 35 &&
+                        fields[2].value == cached->msg_type) {
+                        delivered = cached->callback(context, message, info);
+                    } else {
+                        delivered = dispatch_business(context, message, info);
+                    }
                     if (delivered.ok() && peer_ptr->session)
                         peer_ptr->session->business_deliveries.fetch_add(1, std::memory_order_relaxed);
                     return delivered;
@@ -3154,14 +3208,16 @@ struct EngineRuntime::Impl {
         return frame_status;
     }
 
-    [[nodiscard]] Status process_peer_buffer(Peer& peer, std::uint64_t now) noexcept {
+    [[nodiscard]] Status process_peer_buffer(Peer& peer, std::uint64_t now,
+        bool* hit_budget = nullptr) noexcept {
         std::size_t processed = 0;
+        if (hit_budget != nullptr) *hit_budget = false;
         while (!peer.closed && peer.connection == Connection::connected &&
                peer.unread_size() != 0 && processed < frame_budget && peer.driver->can_receive()) {
             FrameView frame{};
             const bool probe = peer.telemetry_probes && peer.session && peer.session->telemetry_slot;
             const std::uint64_t p_t0 = probe ? telemetry_now_ns() : 0ULL;
-            const auto status = inspect_frame(peer.unread_view(), frame, {},
+            const auto status = inspect_frame(peer.unread_view(), frame, wire_hints,
                 CodecLimits{config.max_frame_bytes, peer.settings.verify_checksum});
             if (status.code == ErrorCode::need_more) return Status::success();
             if (!status.ok()) {
@@ -3196,6 +3252,9 @@ struct EngineRuntime::Impl {
                 if (state != SessionState::active) peer.session->sender->set_active(false);
             }
         }
+        if (hit_budget != nullptr && processed == frame_budget && peer.unread_size() != 0) {
+            *hit_budget = true;
+        }
         return Status::success();
     }
 
@@ -3225,13 +3284,16 @@ struct EngineRuntime::Impl {
         char scratch[read_chunk_size];
         std::size_t total = 0;
         while (!peer.closed && peer.driver && peer.driver->can_receive() && total < io_byte_budget) {
-            const auto already_buffered = process_peer_buffer(peer, now);
-            if (!already_buffered.ok() || peer.closed) return already_buffered;
-            if (!peer.driver->can_receive()) break;
-            if (has_complete_buffered_frame(peer)) break;
-            if (peer.unread_size() >= config.max_frame_bytes) {
-                drop_peer(peer, Status{ErrorCode::too_large}, now, true);
-                return {ErrorCode::too_large};
+            if (peer.unread_size() != 0) {
+                bool hit_budget = false;
+                const auto already_buffered = process_peer_buffer(peer, now, &hit_budget);
+                if (!already_buffered.ok() || peer.closed) return already_buffered;
+                if (!peer.driver->can_receive()) break;
+                if (hit_budget && has_complete_buffered_frame(peer)) break;
+                if (peer.unread_size() >= config.max_frame_bytes) {
+                    drop_peer(peer, Status{ErrorCode::too_large}, now, true);
+                    return {ErrorCode::too_large};
+                }
             }
             const auto high_water = config.max_frame_bytes + read_chunk_size;
             if (peer.receive_buffer.size() >= high_water) peer.compact_receive();
@@ -3263,13 +3325,14 @@ struct EngineRuntime::Impl {
                 drop_peer(peer, Status{ErrorCode::capacity_exceeded}, now, true);
                 return {ErrorCode::capacity_exceeded};
             }
-            const auto processed = process_peer_buffer(peer, now);
+            bool hit_budget = false;
+            const auto processed = process_peer_buffer(peer, now, &hit_budget);
             if (!processed.ok() || peer.closed) return processed;
             // Must check can_receive() before too_large: backpressure read-pause can leave
             // multiple complete frames buffered past max_frame_bytes without any single frame
             // exceeding max_frame_bytes.
             if (!peer.driver->can_receive()) break;
-            if (has_complete_buffered_frame(peer)) break;
+            if (hit_budget && has_complete_buffered_frame(peer)) break;
             if (peer.unread_size() >= config.max_frame_bytes) {
                 drop_peer(peer, Status{ErrorCode::too_large}, now, true);
                 return {ErrorCode::too_large};
@@ -3354,13 +3417,31 @@ struct EngineRuntime::Impl {
         return {result.bytes, result.would_block, status};
     }
 
+    static WriteResult socket_batch_writer(void* context,
+        std::span<const std::span<const char>> chunks) noexcept {
+        auto* peer = static_cast<Peer*>(context);
+        const std::uint64_t w_t0 = (peer->telemetry_probes && peer->session && peer->session->telemetry_slot)
+            ? telemetry_now_ns() : 0ULL;
+        const auto result = peer->stream.write_batch(chunks);
+        if (w_t0 != 0ULL && result.bytes != 0) {
+            peer->session->telemetry_slot->record_stage(TelemetryStage::write, telemetry_now_ns() - w_t0);
+        }
+        const auto status = result.peer_closed
+            ? Status{ErrorCode::connection_closed} : result.status;
+        if (result.bytes != 0 && peer->session)
+            peer->session->written_bytes.fetch_add(result.bytes, std::memory_order_relaxed);
+        return {result.bytes, result.would_block, status};
+    }
+
     [[nodiscard]] Status write_peer(Peer& peer, std::uint64_t now) noexcept {
         if (peer.closed || peer.connection != Connection::connected || !peer.driver ||
             !peer.driver->needs_write()) return Status::success();
         if (io_backend && io_backend->supports_proactor() && !peer.tls) {
             return proactor_kick_send(peer, now);
         }
-        const auto status = peer.driver->flush(&socket_writer, &peer, now, io_byte_budget);
+        const auto status = peer.tls
+            ? peer.driver->flush(&socket_writer, &peer, now, io_byte_budget)
+            : peer.driver->flush_batch(&socket_batch_writer, &socket_writer, &peer, now, io_byte_budget);
         if (!status.ok()) {
             drop_peer(peer, status, now, false);
             return status;
@@ -3787,6 +3868,7 @@ struct EngineRuntime::Impl {
 
     [[nodiscard]] Status owner_iteration(std::uint32_t maximum_wait_ms) {
         std::array<char, sizeof(std::uint64_t)> wake_bytes{};
+            if (wake_control) (void)wake_control->consume_wake_pending();
             auto now = monotonic_ms();
             if (has_pending_handoffs.load(std::memory_order_acquire)) {
                 drain_handoffs(now);
@@ -3794,12 +3876,22 @@ struct EngineRuntime::Impl {
             expire_pending_commands(now);
             for (auto& peer : peers) {
                 if (!peer->closed && peer->connection == Connection::connected &&
-                    peer->driver && peer->session)
-                    {
-                        process_sender_commands(*peer, now);
-                        if (!peer->session->sender->producer_lanes.empty())
-                            process_producer_lanes(*peer, now);
+                    peer->driver && peer->session) {
+                    process_sender_commands(*peer, now);
+                    if (!peer->session->sender->producer_lanes.empty())
+                        process_producer_lanes(*peer, now);
+                    // Flush newly queued outbound frames immediately (via write_batch/sendmsg)
+                    // instead of round-tripping through epoll_ctl(+EPOLLOUT) + epoll_wait.
+                    if (!peer->closed && peer->driver && peer->driver->needs_write() &&
+                        !(peer->tls && peer->tls->write_wants_read())) {
+                        (void)write_peer(*peer, now);
+                        if (!peer->closed && peer->driver && peer->session) {
+                            peer->session->sender->sync_receipts(*peer->driver);
+                            for (const auto& lane : peer->session->sender->producer_lanes)
+                                if (lane) lane->sync_receipts(*peer->driver);
+                        }
                     }
+                }
             }
             collect_worker_completions();
             const bool completed_worker = finish_worker_completions(now);
@@ -3928,11 +4020,35 @@ struct EngineRuntime::Impl {
                 io_sync(peer->io_tag, peer->stream.native_handle(), events);
             }
 
-            now = monotonic_ms();
             const auto deadline = compute_deadline(now);
-            const auto wait_ms = buffered_work || deadline <= now ? 0U : static_cast<unsigned>(
+            auto wait_ms = buffered_work || deadline <= now ? 0U : static_cast<unsigned>(
                 std::min<std::uint64_t>(deadline - now, maximum_wait_ms));
+            const bool may_block = wait_ms > 0 && io_backend &&
+                io_backend->kind() != IoBackendKind::busy_poll;
+            if (may_block && wake_control) {
+                wake_control->set_sleeping(true);
+                bool woke_early = wake_control->consume_wake_pending() ||
+                    has_pending_handoffs.load(std::memory_order_acquire) ||
+                    stopping.load(std::memory_order_acquire);
+                if (!woke_early) {
+                    for (const auto& peer : peers) {
+                        if (!peer->closed && peer->connection == Connection::connected &&
+                            peer->session && peer->session->sender->has_ready_commands()) {
+                            woke_early = true;
+                            break;
+                        }
+                    }
+                }
+                if (woke_early) {
+                    wake_control->set_sleeping(false);
+                    wait_ms = 0;
+                }
+            }
             const int ready = io_backend->wait(io_completions, wait_ms);
+            if (may_block && wake_control) {
+                wake_control->set_sleeping(false);
+                (void)wake_control->consume_wake_pending();
+            }
             if (ready < 0) {
                 if (errno == EINTR) return Status::success();
                 iteration_finished = true;

@@ -348,9 +348,21 @@ Result<JournalRecord> Journal::commit(const ReservedRecord& reserved,
     records_.push_back(appended);
     if (reserved.kind == RecordKind::outbound) outbound_index_.push_back(record_index);
     if (reserved.kind == RecordKind::delivery) {
-        auto inbound = std::lower_bound(records_.begin(), records_.end(), reserved.dependency,
-            [](const JournalRecord& item, RecordId value) { return item.id < value; });
-        if (inbound != records_.end() && inbound->id == reserved.dependency) inbound->delivered = true;
+        JournalRecord* inbound = nullptr;
+        const std::size_t n = records_.size();
+        const std::size_t scan_min = n > 5 ? n - 5 : 0;
+        for (std::size_t idx = n - 1; idx > scan_min; --idx) {
+            if (records_[idx - 1].id == reserved.dependency) {
+                inbound = &records_[idx - 1];
+                break;
+            }
+        }
+        if (inbound == nullptr) {
+            auto found = std::lower_bound(records_.begin(), records_.end(), reserved.dependency,
+                [](const JournalRecord& item, RecordId value) { return item.id < value; });
+            if (found != records_.end() && found->id == reserved.dependency) inbound = &*found;
+        }
+        if (inbound != nullptr) inbound->delivered = true;
     }
     published_record_count_.store(records_.size(), std::memory_order_release);
     segment->write_offset += total_size;
@@ -900,6 +912,13 @@ void Journal::advance_completed_inbound_cursor() noexcept {
 }
 
 const JournalRecord* Journal::find_record(RecordId id) const noexcept {
+    const std::size_t n = records_.size();
+    const std::size_t tail_scan = n < 4 ? n : 4;
+    for (std::size_t i = 0; i < tail_scan; ++i) {
+        const auto& rec = records_[n - 1 - i];
+        if (rec.id == id) return &rec;
+        if (rec.id < id) return nullptr;
+    }
     const auto found = std::lower_bound(records_.begin(), records_.end(), id,
         [](const JournalRecord& record, RecordId value) { return record.id < value; });
     return found != records_.end() && found->id == id ? &*found : nullptr;
@@ -927,6 +946,13 @@ Result<JournalLease> Journal::pin_record(RecordId id) const noexcept {
 }
 
 const JournalRecord* Journal::find_outbound(std::uint64_t seq) const noexcept {
+    if (outbound_index_.empty()) return nullptr;
+    const auto& back = records_[outbound_index_.back()];
+    if (back.seq == seq) return &back;
+    if (back.seq < seq) return nullptr;
+    const auto& front = records_[outbound_index_.front()];
+    if (front.seq == seq) return &front;
+    if (front.seq > seq) return nullptr;
     const auto found = std::lower_bound(outbound_index_.begin(), outbound_index_.end(), seq,
         [this](std::size_t index, std::uint64_t value) { return records_[index].seq < value; });
     if (found == outbound_index_.end() || records_[*found].seq != seq) return nullptr;

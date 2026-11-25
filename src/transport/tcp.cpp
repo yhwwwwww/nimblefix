@@ -129,6 +129,33 @@ SocketIoResult TcpStream::write(std::span<const char> input) noexcept {
     return {0, false, false, socket_error()};
 }
 
+SocketIoResult TcpStream::write_batch(std::span<const std::span<const char>> chunks) noexcept {
+    if (fd_ < 0) return {0, false, true, Status{ErrorCode::invalid_value}};
+    if (chunks.empty()) return {};
+    if (chunks.size() == 1) return write(chunks[0]);
+    std::array<iovec, 64> iov{};
+    std::size_t count_iov = 0;
+    for (const auto& chunk : chunks) {
+        if (chunk.empty()) continue;
+        if (count_iov >= iov.size()) break;
+        iov[count_iov].iov_base = const_cast<char*>(chunk.data());
+        iov[count_iov].iov_len = chunk.size();
+        ++count_iov;
+    }
+    if (count_iov == 0) return {};
+    msghdr hdr{};
+    hdr.msg_iov = iov.data();
+    hdr.msg_iovlen = count_iov;
+    ssize_t count;
+    do {
+        count = ::sendmsg(fd_, &hdr, MSG_NOSIGNAL);
+    } while (count < 0 && errno == EINTR);
+    if (count > 0) return {static_cast<std::size_t>(count), false, false, Status::success()};
+    if (count == 0) return {0, false, true, Status::success()};
+    if (errno == EAGAIN || errno == EWOULDBLOCK) return {0, true, false, Status::success()};
+    return {0, false, false, socket_error()};
+}
+
 Status TcpStream::finish_connect() noexcept {
     if (fd_ < 0) return Status{ErrorCode::invalid_value};
     int error = 0;

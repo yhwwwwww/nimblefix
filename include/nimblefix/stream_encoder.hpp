@@ -828,6 +828,23 @@ template <class Message, class Fn>
     return buf.finish_body();
 }
 
+template <class Message, class Fn>
+    requires detail::streamable_message<Message>
+[[nodiscard]] Result<std::size_t> encode_session_stream(
+    std::span<char> output, const detail::StaticSessionPrefix& prefix,
+    std::uint64_t msg_seq_num, std::string_view prevalidated_wall_time,
+    std::optional<std::uint64_t> last_processed_seq, Fn&& fn) noexcept {
+    static_assert(!requires { requires Message::is_group_entry; },
+        "repeating group entries cannot be encoded as standalone FIX messages");
+    auto buf = detail::StreamBuffer::begin_session_frame(
+        output, Message::msg_type, prefix, msg_seq_num, prevalidated_wall_time, last_processed_seq);
+    if (!buf.ok()) return buf.status();
+    typename Message::stream_writer_type writer{buf};
+    fn(writer);
+    if (const auto req = writer.validate_required(); !req.ok()) return req;
+    return buf.finish_frame();
+}
+
 namespace detail {
 
 // Stack-first body streaming helper for Layer 1/2 send_stream() entry points
@@ -839,11 +856,11 @@ template <class Message, class Fn, class Sink>
     using ReturnType = decltype(sink(std::declval<MessageView>()));
     static_assert(!requires { requires Message::is_group_entry; },
         "repeating group entries cannot be sent as standalone FIX messages");
-    std::array<char, 4096> stack_buf{};
-    const auto body_len = encode_body_stream<Message>(stack_buf, fn);
+    char stack_buf[4096];
+    const auto body_len = encode_body_stream<Message>(std::span<char>{stack_buf, sizeof(stack_buf)}, fn);
     if (body_len.ok()) {
         return sink(make_prebuilt_body_view(
-            Message::msg_type, std::string_view{stack_buf.data(), body_len.value()}));
+            Message::msg_type, std::string_view{stack_buf, body_len.value()}));
     }
     if (body_len.status().code != ErrorCode::capacity_exceeded) {
         return ReturnType{body_len.status()};

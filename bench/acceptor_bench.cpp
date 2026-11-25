@@ -215,7 +215,6 @@ bool run_pre_tcp_acceptor(std::size_t warmup, std::size_t samples, LatencyStats&
     if (!dir_raw) return false;
     std::string dir{dir_raw};
 
-    fix::ExecutionReportFixed<ErShape, 128> er;
     std::uint64_t replies_sent = 0;
 
     nf::SessionCallbacks callbacks{};
@@ -224,15 +223,28 @@ bool run_pre_tcp_acceptor(std::size_t warmup, std::size_t samples, LatencyStats&
         const auto fields = msg.fields();
         if (fields.size() >= 3 && fields[2].tag == 35) {
             return nf::validate_schema_message_for_type(
-                fix::Schema::descriptor(), fields[2].value, fields[2].offset, fields, nf::ValidationLevel::strict);
+                fix::Schema::descriptor(), fields[2].value, fields[2].offset, fields,
+                nf::ValidationLevel::strict, msg.parsed_index());
         }
         return nf::validate_schema_message(fix::Schema::descriptor(), msg, nf::ValidationLevel::strict);
     };
     callbacks.on_message = [&](nf::SessionContext& ctx, const nf::FlatMessageView& msg, const nf::DeliveryInfo&) noexcept {
-        const auto cid = msg.find_unique(11);
-        const std::string_view id = cid.ok() ? cid.value().value : std::string_view{"ORD-000001"};
-        if (const auto st = populate_er(er, id); !st.ok()) return st;
-        const auto sent = ctx.send(er);
+        const auto req = msg.as<fix::NewOrderSingle>();
+        const auto cid = req.cl_ord_id();
+        const std::string_view id = cid.ok() ? cid.value() : std::string_view{"ORD-000001"};
+        const auto sent = ctx.send_stream<fix::ExecutionReport>([&](auto& w) {
+            w.order_id("ORDER-1")
+             .cl_ord_id(id)
+             .exec_id("EXEC-1")
+             .exec_type('0')
+             .ord_status('0')
+             .side('1')
+             .order_qty(nf::Decimal{100, 0})
+             .leaves_qty(nf::Decimal{100, 0})
+             .cum_qty(nf::Decimal{0, 0})
+             .avg_px(nf::Decimal{0, 0})
+             .symbol("AAPL");
+        });
         if (!sent.ok()) return sent.status();
         ++replies_sent;
         return nf::Status::success();

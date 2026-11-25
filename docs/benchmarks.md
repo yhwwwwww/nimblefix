@@ -49,28 +49,28 @@ Each order embeds `<t_burst_ns>-<t_send_ns>` in `ClOrdID (11)`. The receiving pe
 
 | Mode | 1-Way p50 | 1-Way p99 | RTT p50 | Throughput |
 | :--- | ---: | ---: | ---: | ---: |
-| **1. `DirectInitiator::send_stream()`** (1-thread, no queue) | **4.69 µs** | **7.73 µs** | **8.86 µs** | **105,905 rt/s** |
-| **2. `DirectInitiator::enqueue_stream()+flush()`** (1-thread `sendmsg`) | 5.42 µs | 9.39 µs | 10.39 µs | 88,421 rt/s |
-| **3. `DirectInitiator + DirectSendQueue::try_push_stream()`** (2-thread SPSC) | 5.27 µs | 8.72 µs | 9.09 µs | 101,836 rt/s |
-| **4. `Engine(busy_poll) + ProducerLane::send_stream()`** (2-thread SPSC) | 7.69 µs | 12.07 µs | 12.27 µs | 74,338 rt/s |
+| **1. `DirectInitiator::send_stream()`** (1-thread, no queue) | **4.64 µs** | **7.61 µs** | **8.61 µs** | **110,081 rt/s** |
+| **2. `DirectInitiator::enqueue_stream()+flush()`** (1-thread `sendmsg`) | 4.74 µs | 8.03 µs | 8.76 µs | 102,958 rt/s |
+| **3. `DirectInitiator + DirectSendQueue::try_push_stream()`** (2-thread SPSC) | 5.11 µs | 7.69 µs | 8.65 µs | **112,950 rt/s** |
+| **4. `Engine(busy_poll) + ProducerLane::send_stream()`** (2-thread SPSC) | **5.48 µs** | **7.96 µs** | **9.92 µs** | **98,067 rt/s** |
 
 #### Workload 2: Dense Burst — 0 µs Strategy Compute (200 bursts × 32 orders, 20 warmup bursts)
 
 | Mode | CO-Free p50 | CO-Free p99 | Enq->Recv p50 | Throughput |
 | :--- | ---: | ---: | ---: | ---: |
-| **1. `DirectInitiator::send_stream()`** (1-thread, no queue) | 49.93 µs | 98.19 µs | 4.60 µs | 335,194 ord/s |
-| **2. `DirectInitiator::enqueue_stream()+flush()`** (1-thread `sendmsg`) | 14.58 µs | **19.83 µs** | 11.26 µs | 1,274,415 ord/s |
-| **3. `DirectInitiator + DirectSendQueue::try_push_stream()`** (2-thread SPSC + `sendmsg`) | **12.86 µs** | 22.64 µs | 12.16 µs | **1,430,830 ord/s** |
-| **4. `Engine(busy_poll) + ProducerLane::send_stream()`** (2-thread SPSC) | 67.28 µs | 117.28 µs | 53.81 µs | 277,608 ord/s |
+| **1. `DirectInitiator::send_stream()`** (1-thread, no queue) | 49.18 µs | 99.08 µs | 4.62 µs | 341,745 ord/s |
+| **2. `DirectInitiator::enqueue_stream()+flush()`** (1-thread `sendmsg`) | **12.19 µs** | **19.32 µs** | 9.63 µs | **1,402,288 ord/s** |
+| **3. `DirectInitiator + DirectSendQueue::try_push_stream()`** (2-thread SPSC + `sendmsg`) | 13.03 µs | 25.00 µs | 12.38 µs | 1,344,907 ord/s |
+| **4. `Engine(busy_poll) + ProducerLane::send_stream()`** (2-thread SPSC + `sendmsg`) | **17.18 µs** | **26.87 µs** | 12.72 µs | **1,178,200 ord/s** |
 
 #### Workload 3: Dense Burst + 2 µs Strategy Compute per Order (200 bursts × 32 orders)
 
 | Mode | CO-Free p50 | CO-Free p99 | Enq->Recv p50 | Throughput |
 | :--- | ---: | ---: | ---: | ---: |
-| **1. `DirectInitiator::send_stream()`** (1-thread, no queue) | 86.87 µs | 228.77 µs | 5.55 µs | 179,146 ord/s |
-| **2. `DirectInitiator::enqueue_stream()+flush()`** (1-thread `sendmsg`) | 80.85 µs | 217.01 µs | 45.87 µs | 320,174 ord/s |
-| **3. `DirectInitiator + DirectSendQueue::try_push_stream()`** (2-thread SPSC + `sendmsg`) | **42.62 µs** | **76.08 µs** | 7.42 µs | **421,837 ord/s** |
-| **4. `Engine(busy_poll) + ProducerLane::send_stream()`** (2-thread SPSC) | 64.77 µs | 118.97 µs | 19.07 µs | 280,372 ord/s |
+| **1. `DirectInitiator::send_stream()`** (1-thread, no queue) | 85.58 µs | 169.47 µs | 5.48 µs | 192,543 ord/s |
+| **2. `DirectInitiator::enqueue_stream()+flush()`** (1-thread `sendmsg`) | 78.57 µs | 83.32 µs | 42.18 µs | 358,644 ord/s |
+| **3. `DirectInitiator + DirectSendQueue::try_push_stream()`** (2-thread SPSC + `sendmsg`) | **41.50 µs** | **78.99 µs** | 6.61 µs | **409,374 ord/s** |
+| **4. `Engine(busy_poll) + ProducerLane::send_stream()`** (2-thread SPSC + `sendmsg`) | **44.11 µs** | **81.11 µs** | **6.53 µs** | **398,843 ord/s** |
 
 ---
 
@@ -104,32 +104,25 @@ xmake build acceptor-bench
 ./build/linux/x86_64/release/acceptor-bench 2000 20000 8 all
 ```
 
-### Acceptor Tiers (`epoll`)
+### Acceptor Tiers (`epoll` & `busy_poll`)
 | Tier | p50 | p95 | p99 | Throughput |
 | :--- | ---: | ---: | ---: | ---: |
-| **Tier 1: Pre-TCP Acceptor** (`SessionDriver` wire-in -> 912-field Schema -> in-handler ER -> mmap journal -> flush) | **1.71 µs** | 1.83 µs | 3.03 µs | **581,156 ord/s** |
-| **Tier 2: 1-Session TCP** (`Engine<fix44::Schema, Inline>`, 1 `epoll` thread) | **14.68 µs** | 18.59 µs | 32.07 µs | **62,553 ord/s** |
-| **Tier 3: 8 Concurrent Sessions TCP** (`Engine<fix44::Schema, Inline>`, 1 `epoll` thread) | **44.56 µs** | 94.84 µs | 114.46 µs | **133,972 ord/s** |
-
-### Same-Run `IoBackend` Comparison (`acceptor-bench 2000 20000 8 all`)
-
-| `IoBackend` | 1-Session p50 | 1-Session p99 | 1-Session Rate | 8-Session p50 | 8-Session p99 | 8-Session Aggregate |
-| :--- | ---: | ---: | ---: | ---: | ---: | ---: |
-| **`epoll`** (default) | 14.68 µs | 32.07 µs | 62,553 ord/s | **44.56 µs** | 114.46 µs | 133,972 ord/s |
-| **`busy_poll`** (zero-sleep spin) | **12.45 µs** | 23.38 µs | **73,464 ord/s** | 45.38 µs | 118.44 µs | 129,649 ord/s |
-| **`io_uring`** (Proactor `RECV`/`SEND`, sleeping) | 14.58 µs | **19.56 µs** | 66,515 ord/s | 49.10 µs | **97.90 µs** | **146,037 ord/s** (+9%) |
+| **Tier 1: Pre-TCP Acceptor** (`SessionDriver` wire-in -> 912-field Schema -> `send_stream` ER -> mmap journal -> flush) | **912 ns** | 962 ns | **1.13 µs** | **1,043,558 ord/s** |
+| **Tier 2: 1-Session TCP (`epoll`)** (`Engine<fix44::Schema, Inline>`, 1 thread) | **11.19 µs** | 13.99 µs | 18.50 µs | **80,606 ord/s** |
+| **Tier 2: 1-Session TCP (`busy_poll`)** (`Engine<fix44::Schema, Inline>`, 1 thread) | **9.35 µs** | 12.53 µs | **15.73 µs** | **94,160 ord/s** |
+| **Tier 3: 8 Concurrent Sessions TCP (`epoll`)** (`Engine<fix44::Schema, Inline>`, 1 thread) | **32.45 µs** | 68.56 µs | 76.04 µs | **180,535 ord/s** |
 
 ### Multi-Core `ShardedEngine` Scaling (`acceptor-bench 1000 10000 8/16 sharded`)
 *(Full 912-field `FIX44.xml` strict validation + `NoPartyIDs[1]` + `StreamWriter` `ExecutionReport` + real mmap journal, 1 shared listening port, strict 1-in-flight TCP ping-pong on 8C/16T host shared with client threads.)*
 
 | Configuration | Sessions | p50 | p99 | p99.9 | Aggregate Throughput | Speedup vs 1-Core |
 | :--- | ---: | ---: | ---: | ---: | ---: | ---: |
-| **1-core `Engine` (`epoll`)** | 8 | 32.99 µs | 76.91 µs | 227.25 µs | 176,387 ord/s | 1.00× |
-| **4-shard `ShardedEngine` (`epoll`, pinned)** | 8 | 16.58 µs | 22.15 µs | 31.21 µs | 433,318 ord/s | **2.46×** (**3.47×** lower p99) |
-| **4-shard `ShardedEngine` (`hybrid_backoff`, pinned)** | 8 | **16.39 µs** | **21.27 µs** | **28.98 µs** | **443,302 ord/s** | **2.51×** (**7.84×** lower p99.9) |
-| **1-core `Engine` (`epoll`)** | 16 | 75.64 µs | 161.11 µs | 346.42 µs | 176,184 ord/s | 1.00× |
-| **4-shard `ShardedEngine` (`epoll`, pinned)** | 16 | 31.41 µs | 51.06 µs | 112.79 µs | 466,617 ord/s | **2.65×** (**3.15×** lower p99) |
-| **4-shard `ShardedEngine` (`hybrid_backoff`, pinned)** | 16 | **31.19 µs** | **49.99 µs** | **96.74 µs** | **470,973 ord/s** | **2.67×** (**3.22×** lower p99) |
+| **1-core `Engine` (`epoll`)** | 8 | 32.01 µs | 75.70 µs | 233.57 µs | 180,564 ord/s | 1.00× |
+| **4-shard `ShardedEngine` (`epoll`, pinned)** | 8 | 15.73 µs | 21.97 µs | 34.98 µs | 456,296 ord/s | **2.53×** (**3.45×** lower p99) |
+| **4-shard `ShardedEngine` (`hybrid_backoff`, pinned)** | 8 | **15.52 µs** | **20.28 µs** | **30.32 µs** | **462,905 ord/s** | **2.56×** (**7.70×** lower p99.9) |
+| **1-core `Engine` (`epoll`)** | 16 | 73.69 µs | 161.47 µs | 400.03 µs | 179,777 ord/s | 1.00× |
+| **4-shard `ShardedEngine` (`epoll`, pinned)** | 16 | 29.99 µs | **48.17 µs** | 66.46 µs | 496,186 ord/s | **2.76×** (**3.35×** lower p99) |
+| **4-shard `ShardedEngine` (`hybrid_backoff`, pinned)** | 16 | **29.82 µs** | 48.55 µs | **64.47 µs** | **503,230 ord/s** | **2.80×** (**6.20×** lower p99.9) |
 
 ---
 
@@ -159,9 +152,9 @@ xmake build quickfix-parity-bench
 
 | Suite | NimbleFIX (p50 / p99 / alloc) | QuickFIX 1.16.0 (p50 / p99 / alloc) | Speedup (p50) |
 | :--- | :--- | :--- | ---: |
-| **Codec Encode** (`StreamWriter` / `Fixed`) | **170 ns** / **181 ns** (**0.00** alloc) · `Fixed` **371 ns** | 1,463 ns / 1,523 ns / 19.00 | **8.61×** / **3.94×** |
-| **Parse + Full `FIX44.xml` Strict + Typed Read** | **421 ns** / **431 ns** / **0.00** | 2,795 ns / 3,386 ns / 15.00 | **6.64×** |
-| **TCP Initiator Ping-Pong RTT** (`DirectInitiator`) | **10.21 µs** / **17.12 µs** / **0.00** (92k rt/s) | 23.72 µs / 34.56 µs / 35.06 (41k rt/s) | **2.32×** |
-| **TCP Initiator Ping-Pong RTT** (`Engine busy_poll` / `epoll`) | **14.39 µs** / **19.16 µs** / **0.00** | 23.72 µs / 34.56 µs / 35.06 | **1.65×** / **1.24×** |
-| **TCP Acceptor Turnaround RTT** (`Engine busy_poll` / `epoll`) | **10.59 µs** / **11.57 µs** (p99 **14.33 µs**, **0.00**) | 23.20 µs / 33.92 µs / 37.00 (42k ord/s) | **2.19×** / **2.01×** |
-| **TCP Dense Burst 32×** (`enqueue_stream` + `sendmsg`, CO-Free 1-way) | **12.63 µs** / **23.51 µs** / **0.00** (**1.34M/s**) | 198.47 µs / 399.32 µs / 28.06 (80k/s) | **15.71×** (**16.6×** rate) |
+| **Codec Encode** (`StreamWriter` / `Fixed`) | **150 ns** / **151 ns** (**0.00** alloc) · `Fixed` **331 ns** | 1,312 ns / 1,383 ns / 19.00 | **8.75×** / **3.96×** |
+| **Parse + Full `FIX44.xml` Strict + Typed Read** | **361 ns** / **371 ns** / **0.00** | 2,464 ns / 2,495 ns / 15.00 | **6.83×** |
+| **TCP Initiator Ping-Pong RTT** (`DirectInitiator`) | **8.85 µs** / **11.89 µs** / **0.00** (110k rt/s) | 21.58 µs / 29.90 µs / 35.06 (45k rt/s) | **2.44×** |
+| **TCP Initiator Ping-Pong RTT** (`Engine busy_poll` / `epoll`) | **10.52 µs** / **16.66 µs** / **0.00** | 21.58 µs / 29.90 µs / 35.06 | **2.05×** / **1.30×** |
+| **TCP Acceptor Turnaround RTT** (`Engine busy_poll` / `epoll`) | **9.45 µs** / **11.46 µs** (p99 **12.96 µs**, **0.00**) | 21.20 µs / 34.48 µs / 37.04 (44k ord/s) | **2.24×** / **1.85×** |
+| **TCP Dense Burst 32×** (`enqueue_stream` + `sendmsg`, CO-Free 1-way) | **13.95 µs** / **35.88 µs** / **0.00** (**1.23M/s**) | 178.67 µs / 352.25 µs / 28.06 (92k/s) | **12.81×** (**13.3×** rate) |

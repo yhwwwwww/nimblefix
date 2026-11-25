@@ -114,6 +114,7 @@ struct WriteResult {
 };
 
 using WriteFn = WriteResult (*)(void* context, std::span<const char> bytes) noexcept;
+using WriteBatchFn = WriteResult (*)(void* context, std::span<const std::span<const char>> chunks) noexcept;
 
 class SessionDriver;
 
@@ -138,10 +139,7 @@ public:
 
     template <class Message, class Fn>
         requires detail::streamable_message<Message>
-    [[nodiscard]] Result<SendReceipt> send_stream(Fn&& fn) noexcept {
-        return detail::stream_body_and_invoke<Message>(std::forward<Fn>(fn),
-            [this](detail::MessageView view) noexcept { return send(view); });
-    }
+    [[nodiscard]] Result<SendReceipt> send_stream(Fn&& fn) noexcept;
 
     // Session logout may be requested from the active callback. Message
     // delivery callbacks use send() for durable replies; logout there would
@@ -271,16 +269,25 @@ public:
         requires detail::streamable_message<Message>
     [[nodiscard]] Result<SendReceipt> send_stream(Fn&& fn,
         std::uint64_t now_ms, std::string_view wall_time) noexcept {
-        return detail::stream_body_and_invoke<Message>(std::forward<Fn>(fn),
-            [this, now_ms, wall_time](detail::MessageView view) noexcept {
-                return send(view, now_ms, wall_time);
-            });
+        static_assert(!requires { requires Message::is_group_entry; },
+            "repeating group entries cannot be sent as standalone FIX messages");
+        auto& ref = fn;
+        return send_stream_dependent(Message::msg_type,
+            +[](void* ctx, std::span<char> out, const detail::StaticSessionPrefix& prefix,
+                std::uint64_t seq, std::string_view wt,
+                std::optional<std::uint64_t> last_proc) noexcept -> Result<std::size_t> {
+                return encode_session_stream<Message>(
+                    out, prefix, seq, wt, last_proc, *static_cast<std::remove_reference_t<Fn>*>(ctx));
+            },
+            &ref, now_ms, wall_time, 0, 0, false);
     }
 
     // Performs at most byte_budget bytes of transport work. Short writes retain
     // their offset; would_block leaves the queue unchanged.
     [[nodiscard]] Status flush(WriteFn write, void* context, std::uint64_t now_ms,
         std::size_t byte_budget) noexcept;
+    [[nodiscard]] Status flush_batch(WriteBatchFn write_batch, WriteFn write_single,
+        void* context, std::uint64_t now_ms, std::size_t byte_budget) noexcept;
 
     [[nodiscard]] Result<SendReceipt> receipt(std::uint64_t id) const noexcept;
     [[nodiscard]] SessionState state() const noexcept;
@@ -304,10 +311,42 @@ private:
     friend class detail::EngineRuntime;
     struct Impl;
     explicit SessionDriver(std::unique_ptr<Impl> impl) noexcept;
+    using StreamEncodeFn = Result<std::size_t> (*)(
+        void* ctx, std::span<char> out, const detail::StaticSessionPrefix& prefix,
+        std::uint64_t seq, std::string_view wall_time,
+        std::optional<std::uint64_t> last_processed) noexcept;
+
     [[nodiscard]] Result<SendReceipt> send_dependent(detail::MessageView message,
+        std::uint64_t now_ms, std::string_view wall_time, RecordId dependency,
+        std::size_t dependency_ordinal, bool recovery) noexcept;
+    [[nodiscard]] Result<SendReceipt> send_stream_dependent(std::string_view msg_type,
+        StreamEncodeFn encode_fn, void* encode_ctx,
         std::uint64_t now_ms, std::string_view wall_time, RecordId dependency,
         std::size_t dependency_ordinal, bool recovery) noexcept;
     std::unique_ptr<Impl> impl_{};
 };
+
+template <class Message, class Fn>
+    requires detail::streamable_message<Message>
+[[nodiscard]] inline Result<SendReceipt> SessionContext::send_stream(Fn&& fn) noexcept {
+    static_assert(!requires { requires Message::is_group_entry; },
+        "repeating group entries cannot be sent as standalone FIX messages");
+    if (driver_ != nullptr && !delivery_.is_recovery &&
+        send_ordinal_ != std::numeric_limits<std::size_t>::max()) {
+        auto& ref = fn;
+        auto result = driver_->send_stream_dependent(Message::msg_type,
+            +[](void* ctx, std::span<char> out, const detail::StaticSessionPrefix& prefix,
+                std::uint64_t seq, std::string_view wt,
+                std::optional<std::uint64_t> last_proc) noexcept -> Result<std::size_t> {
+                return encode_session_stream<Message>(
+                    out, prefix, seq, wt, last_proc, *static_cast<std::remove_reference_t<Fn>*>(ctx));
+            },
+            &ref, now_ms_, wall_time_, delivery_.record_id, send_ordinal_, false);
+        if (result.ok()) ++send_ordinal_;
+        return result;
+    }
+    return detail::stream_body_and_invoke<Message>(std::forward<Fn>(fn),
+        [this](detail::MessageView view) noexcept { return send(view); });
+}
 
 } // namespace nimblefix
