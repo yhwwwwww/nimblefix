@@ -10,7 +10,7 @@ if(@NIMBLEFIX_ENABLE_XML@)
 endif()
 
 include("${CMAKE_CURRENT_LIST_DIR}/NimbleFIXTargets.cmake")
-set_and_check(NIMBLEFIX_SCHEMA_GENERATOR "@PACKAGE_CMAKE_INSTALL_DATADIR@/nimblefix/schema/generate.py")
+set(NIMBLEFIX_SCHEMA_GENERATOR NimbleFIX::nimblefix-schema-gen)
 include("${CMAKE_CURRENT_LIST_DIR}/NimbleFIXSchema.cmake")
 set(NimbleFIX_core_FOUND TRUE)
 set(NimbleFIX_tls_FOUND @NIMBLEFIX_ENABLE_TLS@)

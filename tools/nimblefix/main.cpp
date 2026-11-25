@@ -458,8 +458,8 @@ std::filesystem::path find_generator(const Arguments &args) {
         return {};
     const auto directory =
         std::filesystem::path{std::string{buffer.data(), static_cast<std::size_t>(count)}}.parent_path();
-    for (const auto &candidate : {directory / "share/nimblefix/schema/generate.py",
-                                  directory.parent_path() / "share/nimblefix/schema/generate.py"})
+    for (const auto &candidate : {directory / "nimblefix-schema-gen",
+                                  directory.parent_path() / "bin/nimblefix-schema-gen"})
         if (std::filesystem::is_regular_file(candidate))
             return candidate;
     return {};
@@ -468,10 +468,10 @@ std::filesystem::path find_generator(const Arguments &args) {
 int generate_schema(const Arguments &args) {
     const auto generator = find_generator(args);
     if (generator.empty()) {
-        std::cerr << "installed schema generator is missing; set --generator PATH\n";
+        std::cerr << "installed schema generator (nimblefix-schema-gen) is missing; set --generator PATH\n";
         return 1;
     }
-    std::vector<std::string> values{"python3",     generator.string(),
+    std::vector<std::string> values{generator.string(),
                                     "--namespace", args.name_space,
                                     "--output",    std::filesystem::absolute(args.output).string()};
     for (const auto &xml : args.xml)
@@ -481,9 +481,9 @@ int generate_schema(const Arguments &args) {
         arguments.push_back(value.data());
     arguments.push_back(nullptr);
     pid_t child{};
-    const auto spawned = ::posix_spawnp(&child, "python3", nullptr, nullptr, arguments.data(), environ);
+    const auto spawned = ::posix_spawn(&child, generator.c_str(), nullptr, nullptr, arguments.data(), environ);
     if (spawned != 0) {
-        std::cerr << "could not start Python schema generator\n";
+        std::cerr << "could not start C++ schema generator\n";
         return 1;
     }
     int status{};

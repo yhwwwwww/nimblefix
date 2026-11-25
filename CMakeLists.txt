@@ -8,7 +8,7 @@ option(NIMBLEFIX_BUILD_EXAMPLES "Build codec and TCP examples" ON)
 option(NIMBLEFIX_BUILD_BENCHMARKS "Build codec, session and TCP benchmarks" OFF)
 option(NIMBLEFIX_BUILD_SAMPLE_SCHEMA "Generate the optional sample FIX44 schema" ON)
 option(NIMBLEFIX_BUILD_STANDARD_SCHEMAS "Generate complete standard FIX bindings" ${NIMBLEFIX_BUILD_SAMPLE_SCHEMA})
-option(NIMBLEFIX_BUILD_CLI "Build TOML configuration and nimblefix CLI" ON)
+option(NIMBLEFIX_BUILD_CLI "Build optional standalone nimblefix CLI application" ON)
 option(NIMBLEFIX_ENABLE_TLS "Enable system OpenSSL nonblocking TLS" OFF)
 option(NIMBLEFIX_ENABLE_IO_URING "Enable optional Linux io_uring Proactor I/O backend via system liburing" OFF)
 option(NIMBLEFIX_ENABLE_XML "Build optional system libxml2 runtime XML component" OFF)
@@ -90,7 +90,14 @@ if(NIMBLEFIX_THREAD_SANITIZE)
     target_link_options(nimblefix_core PUBLIC -fsanitize=thread)
 endif()
 
-set(NIMBLEFIX_SCHEMA_GENERATOR "${CMAKE_CURRENT_SOURCE_DIR}/tools/schema/generate.py")
+add_executable(nimblefix-schema-gen tools/schema/generate.cpp)
+add_executable(NimbleFIX::nimblefix-schema-gen ALIAS nimblefix-schema-gen)
+target_compile_features(nimblefix-schema-gen PRIVATE cxx_std_20)
+set_target_properties(nimblefix-schema-gen PROPERTIES CXX_EXTENSIONS OFF)
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(nimblefix-schema-gen PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+set(NIMBLEFIX_SCHEMA_GENERATOR NimbleFIX::nimblefix-schema-gen)
 include(cmake/NimbleFIXSchema.cmake)
 if(NIMBLEFIX_BUILD_SAMPLE_SCHEMA)
     nimblefix_generate_schema(TARGET fix44_sample NAMESPACE nimblefix::fix44_sample
@@ -137,10 +144,7 @@ if(NIMBLEFIX_BUILD_CLI)
         target_link_libraries(nimblefix-cli PRIVATE nimblefix_xml)
         target_compile_definitions(nimblefix-cli PRIVATE NIMBLEFIX_ENABLE_XML=1)
     endif()
-    add_custom_command(TARGET nimblefix-cli POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:nimblefix-cli>/share/nimblefix/schema"
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${NIMBLEFIX_SCHEMA_GENERATOR}"
-            "$<TARGET_FILE_DIR:nimblefix-cli>/share/nimblefix/schema/generate.py")
+    add_dependencies(nimblefix-cli nimblefix-schema-gen)
     install(TARGETS nimblefix-cli RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
     install(FILES third_party/tomlplusplus/LICENSE DESTINATION "${CMAKE_INSTALL_DATADIR}/licenses/NimbleFIX/third-party")
     install(FILES third_party/tomlplusplus/LICENSE DESTINATION "${CMAKE_INSTALL_DATADIR}/nimblefix/third-party/tomlplusplus")
@@ -177,14 +181,15 @@ endif()
 
 if(NIMBLEFIX_BUILD_TESTS)
     enable_testing()
-    find_package(Python3 3.9 REQUIRED COMPONENTS Interpreter)
     add_executable(initiator-probe tests/initiator_probe.cpp)
     target_link_libraries(initiator-probe PRIVATE nimblefix)
-    add_test(NAME initiator-reconnect COMMAND "${Python3_EXECUTABLE}"
-        "${CMAKE_CURRENT_SOURCE_DIR}/tests/initiator_reconnect_test.py" --binary $<TARGET_FILE:initiator-probe>)
+    add_executable(initiator_reconnect-test tests/initiator_reconnect_test.cpp)
+    target_compile_features(initiator_reconnect-test PRIVATE cxx_std_20)
+    add_test(NAME initiator-reconnect COMMAND initiator_reconnect-test
+        --binary $<TARGET_FILE:initiator-probe> --mode inbound)
     set_tests_properties(initiator-reconnect PROPERTIES TIMEOUT 30)
-    add_test(NAME outbound-reconnect COMMAND "${Python3_EXECUTABLE}"
-        "${CMAKE_CURRENT_SOURCE_DIR}/tests/outbound_reconnect_test.py" --binary $<TARGET_FILE:initiator-probe>)
+    add_test(NAME outbound-reconnect COMMAND initiator_reconnect-test
+        --binary $<TARGET_FILE:initiator-probe> --mode outbound)
     set_tests_properties(outbound-reconnect PROPERTIES TIMEOUT 30)
     foreach(name parser message contract generated journal session session_boundary session_limits network settings journal_reader journal_rotation protocol_core protocol_session protocol_security queued_runtime sender_schema schema_codec dynamic_message engine_features producer_lane queued_shutdown sender_expiry io_backend)
         if((name STREQUAL "contract" OR name STREQUAL "generated" OR name STREQUAL "sender_schema" OR name STREQUAL "io_backend") AND NOT NIMBLEFIX_BUILD_SAMPLE_SCHEMA)
@@ -219,32 +224,43 @@ if(NIMBLEFIX_BUILD_TESTS)
         add_test(NAME runtime-xml COMMAND xml-schema-test "${CMAKE_CURRENT_SOURCE_DIR}/schemas")
     endif()
     if(NIMBLEFIX_BUILD_CLI)
-        add_test(NAME cli COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/cli_test.py"
-            --binary $<TARGET_FILE:nimblefix-cli>)
+        add_executable(cli-test tests/cli_test.cpp)
+        target_compile_features(cli-test PRIVATE cxx_std_20)
+        add_test(NAME cli COMMAND cli-test
+            --binary $<TARGET_FILE:nimblefix-cli> --root "${CMAKE_CURRENT_SOURCE_DIR}")
         set_tests_properties(cli PROPERTIES TIMEOUT 60)
-        add_test(NAME protocol-versions COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/protocol_versions_test.py"
+        add_executable(protocol_versions-test tests/protocol_versions_test.cpp)
+        target_compile_features(protocol_versions-test PRIVATE cxx_std_20)
+        add_test(NAME protocol-versions COMMAND protocol_versions-test
             --binary $<TARGET_FILE:nimblefix-cli>)
         set_tests_properties(protocol-versions PROPERTIES TIMEOUT 90)
     endif()
     add_executable(queued-crash-probe tests/queued_crash_probe.cpp)
     target_link_libraries(queued-crash-probe PRIVATE nimblefix)
-    add_test(NAME queued-crash COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/queued_crash_test.py"
+    add_executable(queued_crash-test tests/queued_crash_test.cpp)
+    target_compile_features(queued_crash-test PRIVATE cxx_std_20)
+    add_test(NAME queued-crash COMMAND queued_crash-test
         --binary $<TARGET_FILE:queued-crash-probe>)
     set_tests_properties(queued-crash PROPERTIES TIMEOUT 30)
-    add_test(NAME xmake-schema COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/xmake_schema_test.py")
+    add_executable(xmake_schema-test tests/xmake_schema_test.cpp)
+    target_compile_features(xmake_schema-test PRIVATE cxx_std_20)
+    add_test(NAME xmake-schema COMMAND xmake_schema-test
+        --rule "${CMAKE_CURRENT_SOURCE_DIR}/xmake/nimblefix-schema.lua"
+        --generator $<TARGET_FILE:nimblefix-schema-gen>
+        --include-dir "${CMAKE_CURRENT_SOURCE_DIR}/include")
     set_tests_properties(xmake-schema PROPERTIES TIMEOUT 60)
+    add_executable(install-test tests/install_test.cpp)
+    target_compile_features(install-test PRIVATE cxx_std_20)
     add_executable(engine-tls-probe tests/engine_tls_probe.cpp)
     target_link_libraries(engine-tls-probe PRIVATE nimblefix)
     if(NIMBLEFIX_ENABLE_TLS)
-        add_test(NAME engine-tls COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/engine_tls_test.py"
-            --binary $<TARGET_FILE:engine-tls-probe>)
+        add_test(NAME engine-tls COMMAND engine-tls-probe)
         set_tests_properties(engine-tls PROPERTIES TIMEOUT 60)
     endif()
     add_executable(tls-transport-test tests/tls_transport_test.cpp)
     target_link_libraries(tls-transport-test PRIVATE nimblefix)
     if(NIMBLEFIX_ENABLE_TLS)
-        add_test(NAME tls-transport COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/tls_transport_test.py"
-            --binary $<TARGET_FILE:tls-transport-test>)
+        add_test(NAME tls-transport COMMAND tls-transport-test)
         set_tests_properties(tls-transport PROPERTIES TIMEOUT 30)
     else()
         add_test(NAME tls-unavailable COMMAND tls-transport-test)
@@ -253,16 +269,21 @@ if(NIMBLEFIX_BUILD_TESTS)
         add_executable(direct-tls-initiator-test tests/direct_tls_initiator_test.cpp)
         target_link_libraries(direct-tls-initiator-test PRIVATE nimblefix_core_tls fix44_sample)
         if(NIMBLEFIX_ENABLE_TLS)
-            add_test(NAME direct-tls-initiator COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/direct_tls_initiator_test.py"
-                --binary $<TARGET_FILE:direct-tls-initiator-test>)
+            add_test(NAME direct-tls-initiator COMMAND direct-tls-initiator-test)
             set_tests_properties(direct-tls-initiator PROPERTIES TIMEOUT 30)
         else()
             add_test(NAME direct-tls-unavailable COMMAND direct-tls-initiator-test)
         endif()
     endif()
-    add_test(NAME xml-codegen COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/codegen_test.py")
-    add_test(NAME compile-fail COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/compile_fail_test.py"
-        --cxx "${CMAKE_CXX_COMPILER}")
+    add_executable(codegen-test tests/codegen_test.cpp)
+    target_compile_features(codegen-test PRIVATE cxx_std_20)
+    add_test(NAME xml-codegen COMMAND codegen-test
+        --generator $<TARGET_FILE:nimblefix-schema-gen> --root "${CMAKE_CURRENT_SOURCE_DIR}")
+    add_executable(compile_fail-test tests/compile_fail_test.cpp)
+    target_compile_features(compile_fail-test PRIVATE cxx_std_20)
+    add_test(NAME compile-fail COMMAND compile_fail-test
+        --generator $<TARGET_FILE:nimblefix-schema-gen>
+        --cxx "${CMAKE_CXX_COMPILER}" --root "${CMAKE_CURRENT_SOURCE_DIR}")
     if(NIMBLEFIX_BUILD_EXAMPLES)
         add_test(NAME codec-demo COMMAND codec-demo --self-test)
         add_test(NAME hello-fix COMMAND hello-fix --self-test --restart)
@@ -271,7 +292,9 @@ if(NIMBLEFIX_BUILD_TESTS)
             add_test(NAME hello-fix-typed COMMAND hello-fix --self-test --typed --restart)
             set_tests_properties(hello-fix-typed PROPERTIES TIMEOUT 30)
         endif()
-        add_test(NAME endpoint-examples COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/endpoint_test.py"
+        add_executable(endpoint-test tests/endpoint_test.cpp)
+        target_compile_features(endpoint-test PRIVATE cxx_std_20)
+        add_test(NAME endpoint-examples COMMAND endpoint-test
             --acceptor $<TARGET_FILE:acceptor-example> --initiator $<TARGET_FILE:initiator-example>)
         set_tests_properties(endpoint-examples PROPERTIES TIMEOUT 40)
     endif()
@@ -406,19 +429,17 @@ if(NIMBLEFIX_BUILD_BENCHMARKS)
         target_link_options(runtime-bench PRIVATE "-Wl,--wrap=${symbol}")
     endforeach()
     if(NIMBLEFIX_BUILD_TESTS)
-        add_test(NAME journal-benchmark-smoke COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/bench/journal_run.py"
-            --binary $<TARGET_FILE:journal-bench> --output "${CMAKE_CURRENT_BINARY_DIR}/bench-smoke/journal"
-            --samples 100 --runs 1 --reopens 2 --segment-bytes 8192 --max-segments 32
-            --state-parent "${CMAKE_CURRENT_BINARY_DIR}/bench-state")
+        add_executable(bench-smoke-test bench/bench_smoke_test.cpp)
+        target_compile_features(bench-smoke-test PRIVATE cxx_std_20)
+        add_test(NAME journal-benchmark-smoke COMMAND bench-smoke-test
+            --journal-bench $<TARGET_FILE:journal-bench>)
         set_tests_properties(journal-benchmark-smoke PROPERTIES TIMEOUT 60)
-        add_test(NAME runtime-benchmark-smoke COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/bench/runtime_run.py"
-            --binary $<TARGET_FILE:runtime-bench> --output "${CMAKE_CURRENT_BINARY_DIR}/bench-smoke/runtime"
-            --samples 100 --warmup 20 --state-parent "${CMAKE_CURRENT_BINARY_DIR}/bench-state")
+        add_test(NAME runtime-benchmark-smoke COMMAND bench-smoke-test
+            --runtime-bench $<TARGET_FILE:runtime-bench>)
         set_tests_properties(runtime-benchmark-smoke PROPERTIES TIMEOUT 120)
         if(NIMBLEFIX_BUILD_STANDARD_SCHEMAS)
-            add_test(NAME schema-benchmark-smoke COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/bench/schema_run.py"
-                --binary $<TARGET_FILE:schema-bench> --generated-header "${fix44_HEADER}" --output "${CMAKE_CURRENT_BINARY_DIR}/bench-smoke/schema"
-                --samples 100 --runs 1 --workset 16 --skip-size-probe --skip-perf)
+            add_test(NAME schema-benchmark-smoke COMMAND bench-smoke-test
+                --schema-bench $<TARGET_FILE:schema-bench>)
             set_tests_properties(schema-benchmark-smoke PROPERTIES TIMEOUT 60)
         endif()
     endif()
@@ -464,9 +485,11 @@ if(NIMBLEFIX_BUILD_FUZZERS)
     endforeach()
 endif()
 
-install(TARGETS nimblefix_core nimblefix_core_tls nimblefix EXPORT NimbleFIXTargets ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}")
+install(TARGETS nimblefix_core nimblefix_core_tls nimblefix nimblefix-schema-gen
+    EXPORT NimbleFIXTargets
+    ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}"
+    RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
 install(DIRECTORY include/nimblefix DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}")
-install(FILES tools/schema/generate.py DESTINATION "${CMAKE_INSTALL_DATADIR}/nimblefix/schema")
 install(FILES xmake/nimblefix-schema.lua DESTINATION "${CMAKE_INSTALL_DATADIR}/nimblefix/xmake")
 install(FILES LICENSE DESTINATION "${CMAKE_INSTALL_DATADIR}/licenses/NimbleFIX")
 install(FILES third_party/quickfix-LICENSE

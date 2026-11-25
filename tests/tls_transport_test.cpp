@@ -1,3 +1,4 @@
+#include "test_process_utils.hpp"
 #include "../src/transport/tls.hpp"
 
 #include <algorithm>
@@ -59,10 +60,18 @@ int main(int argc, char **argv) {
         CHECK(transport::TlsContext::create(server_config, true).status().code == nf::ErrorCode::unsupported);
         return 0;
     }
-    CHECK(argc == 4);
-    server_config.ca_file = argv[1];
-    server_config.certificate_file = argv[2];
-    server_config.private_key_file = argv[3];
+    std::optional<nimblefix::test_util::TempDir> auto_dir;
+    std::filesystem::path ca_p, cert_p, key_p;
+    if (argc == 4) {
+        ca_p = argv[1]; cert_p = argv[2]; key_p = argv[3];
+    } else {
+        auto_dir.emplace("nimblefix-tls-");
+        CHECK(nimblefix::test_util::generate_self_signed_cert(auto_dir->path, cert_p, key_p));
+        ca_p = cert_p;
+    }
+    server_config.ca_file = ca_p.string();
+    server_config.certificate_file = cert_p.string();
+    server_config.private_key_file = key_p.string();
     server_config.require_client_certificate = true;
     nf::TlsConfig client_config = server_config;
     client_config.require_client_certificate = false;

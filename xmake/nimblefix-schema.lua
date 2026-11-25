@@ -1,5 +1,5 @@
--- Reusable XML -> C++ rule. The generator is resolved relative to this rule,
--- or explicitly supplied by the consuming target; no network fetch occurs.
+-- Reusable XML -> C++20 schema codegen rule using the native nimblefix-schema-gen binary.
+-- Zero Python dependency; generator is resolved relative to this rule or supplied explicitly.
 local rule_directory = os.scriptdir()
 
 rule("nimblefix.schema")
@@ -15,12 +15,15 @@ rule("nimblefix.schema")
         for index, filename in ipairs(xml_files) do xml_files[index] = path.absolute(filename, os.projectdir()) end
         local generator = target:values("nimblefix.schema.generator")
         if not generator then
-            for _, candidate in ipairs({path.join(rule_directory, "..", "schema", "generate.py"),
-                    path.join(rule_directory, "..", "tools", "schema", "generate.py")}) do
+            for _, candidate in ipairs({
+                    path.join(rule_directory, "..", "..", "..", "bin", "nimblefix-schema-gen"),
+                    path.join(rule_directory, "..", "bin", "nimblefix-schema-gen")}) do
                 if os.isfile(candidate) then generator = candidate; break end
             end
         end
-        if not generator or not os.isfile(generator) then raise("set nimblefix.schema.generator to the installed generate.py") end
+        if not generator or not os.isfile(generator) then
+            raise("set nimblefix.schema.generator to the installed nimblefix-schema-gen executable")
+        end
         local output_dir = path.join(target:autogendir(), "nimblefix-schema")
         target:add("includedirs", output_dir)
         local messages = table.wrap(target:values("nimblefix.schema.messages"))
@@ -34,9 +37,9 @@ rule("nimblefix.schema")
         local msg_csv = table.concat(settings.messages or {}, ",")
         depend.on_changed(function ()
             os.mkdir(path.directory(settings.header))
-            local argv = {settings.generator, "--namespace", settings.namespace, "--output", settings.header}
+            local argv = {"--namespace", settings.namespace, "--output", settings.header}
             if #msg_csv > 0 then table.insert(argv, "--messages"); table.insert(argv, msg_csv) end
-            os.vrunv("python3", table.join(argv, settings.xml))
+            os.vrunv(settings.generator, table.join(argv, settings.xml))
         end, {dependfile = path.join(target:autogendir(), "nimblefix-schema.depend"), files = inputs,
             values = {settings.namespace, settings.header, msg_csv}, changed = not os.isfile(settings.header)})
     end)

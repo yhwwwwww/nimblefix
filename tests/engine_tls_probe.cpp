@@ -1,3 +1,4 @@
+#include "test_process_utils.hpp"
 #include <nimblefix/engine.hpp>
 #include <nimblefix/message.hpp>
 
@@ -241,14 +242,24 @@ int test_engine_handshake_timeout(const std::filesystem::path& root,
 } // namespace
 
 int main(int argc, char** argv) {
-    if (argc != 4) {
-        std::cerr << "usage: engine_tls_probe CERTIFICATE CA_FILE PRIVATE_KEY\n";
+    if (!nf::tls_available()) return 0;
+    std::optional<nimblefix::test_util::TempDir> auto_dir;
+    std::filesystem::path certificate, ca, key;
+    if (argc == 4) {
+        certificate = argv[1];
+        ca = argv[2];
+        key = argv[3];
+    } else if (argc == 1) {
+        auto_dir.emplace("nimblefix-engine-tls-");
+        if (!nimblefix::test_util::generate_self_signed_cert(auto_dir->path, certificate, key)) {
+            std::cerr << "failed to generate self-signed TLS certificate\n";
+            return 1;
+        }
+        ca = certificate;
+    } else {
+        std::cerr << "usage: engine_tls_probe [CERTIFICATE CA_FILE PRIVATE_KEY]\n";
         return 2;
     }
-    if (!nf::tls_available()) return 0;
-    const std::filesystem::path certificate = argv[1];
-    const std::filesystem::path ca = argv[2];
-    const std::filesystem::path key = argv[3];
     const auto root = temp_directory("probe");
     if (root.empty()) return 1;
     int result = test_engine_to_engine_tls(root / "exchange", certificate, ca, key);

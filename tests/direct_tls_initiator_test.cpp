@@ -1,3 +1,4 @@
+#include "test_process_utils.hpp"
 #include <nimblefix/direct_initiator.hpp>
 #include <nimblefix/direct_tls_transport.hpp>
 #include <nimblefix/fix44_sample.hpp>
@@ -276,13 +277,20 @@ int main(int argc, char** argv) {
         return g_failures == 0 ? 0 : 1;
     }
 
-    if (argc < 4) {
-        std::cerr << "usage: direct_tls_initiator-test <ca.pem> <cert.pem> <key.pem>\n";
-        return 2;
+    std::optional<nimblefix::test_util::TempDir> auto_dir;
+    std::string ca_file, cert_file, key_file;
+    if (argc >= 4) {
+        ca_file = argv[1];
+        cert_file = argv[2];
+        key_file = argv[3];
+    } else {
+        auto_dir.emplace("nimblefix-direct-tls-");
+        std::filesystem::path cp, kp;
+        CHECK(nimblefix::test_util::generate_self_signed_cert(auto_dir->path, cp, kp));
+        ca_file = cp.string();
+        cert_file = cp.string();
+        key_file = kp.string();
     }
-    const std::string ca_file = argv[1];
-    const std::string cert_file = argv[2];
-    const std::string key_file = argv[3];
 
     // 1. TLS 1.3 + mTLS full FIX 4.4 round-trips + disconnect/reconnect + restart recovery.
     {

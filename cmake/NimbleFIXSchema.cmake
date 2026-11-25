@@ -8,7 +8,13 @@ function(nimblefix_generate_schema)
     if(IS_ABSOLUTE "${NF_HEADER}" OR NF_HEADER MATCHES "(^|/)\\.\\.(/|$)")
         message(FATAL_ERROR "HEADER must be relative to the generated include directory")
     endif()
-    find_package(Python3 3.9 REQUIRED COMPONENTS Interpreter)
+    if(NOT NIMBLEFIX_SCHEMA_GENERATOR)
+        if(TARGET NimbleFIX::nimblefix-schema-gen)
+            set(NIMBLEFIX_SCHEMA_GENERATOR NimbleFIX::nimblefix-schema-gen)
+        else()
+            message(FATAL_ERROR "NIMBLEFIX_SCHEMA_GENERATOR is not defined")
+        endif()
+    endif()
     set(output_dir "${CMAKE_CURRENT_BINARY_DIR}/generated/${NF_TARGET}")
     set(output "${output_dir}/${NF_HEADER}")
     set(xml_files)
@@ -22,7 +28,7 @@ function(nimblefix_generate_schema)
         list(APPEND message_args --messages "${messages_csv}")
     endif()
     add_custom_command(OUTPUT "${output}"
-        COMMAND "${Python3_EXECUTABLE}" "${NIMBLEFIX_SCHEMA_GENERATOR}"
+        COMMAND "${NIMBLEFIX_SCHEMA_GENERATOR}"
             --namespace "${NF_NAMESPACE}" --output "${output}" ${message_args} ${xml_files}
         DEPENDS ${xml_files} "${NIMBLEFIX_SCHEMA_GENERATOR}"
         COMMENT "Generating ${NF_HEADER} from XML" VERBATIM)

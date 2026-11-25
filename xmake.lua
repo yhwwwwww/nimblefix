@@ -61,7 +61,7 @@ option_end()
 option("cli")
     set_default(true)
     set_showmenu(true)
-    set_description("Build the TOML configuration library and nimblefix CLI")
+    set_description("Build optional standalone nimblefix CLI application")
 option_end()
 
 option("standard_schemas")
@@ -124,20 +124,28 @@ target("nimblefix")
     end
 target_end()
 
+target("nimblefix-schema-gen")
+    set_kind("binary")
+    set_policy("build.fence", true)
+    add_files("tools/schema/generate.cpp")
+target_end()
+
 if has_config("standard_schemas") then
     for _, schema in ipairs({"fix42", "fix43", "fix44", "fixt11", "fix50sp2"}) do
         target(schema .. "-schema")
             set_kind("phony")
             set_policy("build.fence", true)
             set_default(false)
+            add_deps("nimblefix-schema-gen")
             on_build(function (target)
                 import("core.project.depend")
+                import("core.project.project")
+                local gen = project.target("nimblefix-schema-gen"):targetfile()
                 local output = path.join(generated_dir, "nimblefix", schema .. ".hpp")
                 local xml = path.join("schemas", "standard", schema:upper() .. ".xml")
                 depend.on_changed(function ()
-                    os.vrunv("python3", {"tools/schema/generate.py", "--output", output,
-                        "--namespace", "nimblefix::" .. schema, xml})
-                end, {files = {xml, "tools/schema/generate.py"}, values = {output},
+                    os.vrunv(gen, {"--output", output, "--namespace", "nimblefix::" .. schema, xml})
+                end, {files = {xml, gen}, values = {output},
                       changed = not os.isfile(output)})
             end)
         target_end()
@@ -178,9 +186,7 @@ if has_config("cli") then
             add_deps("nimblefix-xml")
             add_defines("NIMBLEFIX_ENABLE_XML=1")
         end
-        after_build(function (target)
-            os.cp("tools/schema/generate.py", path.join(target:targetdir(), "share", "nimblefix", "schema", "generate.py"))
-        end)
+        add_deps("nimblefix-schema-gen")
     target_end()
 end
 
@@ -197,12 +203,15 @@ target("fix44-sample")
     set_kind("phony")
     set_policy("build.fence", true)
     set_default(false)
+    add_deps("nimblefix-schema-gen")
     on_build(function ()
         import("core.project.depend")
+        import("core.project.project")
+        local gen = project.target("nimblefix-schema-gen"):targetfile()
         depend.on_changed(function ()
-            os.vrunv("python3", {"tools/schema/generate.py", "--output", sample_header,
+            os.vrunv(gen, {"--output", sample_header,
                 "--namespace", "nimblefix::fix44_sample", "schemas/fix44-sample.xml"})
-        end, {files = {"schemas/fix44-sample.xml", "tools/schema/generate.py"},
+        end, {files = {"schemas/fix44-sample.xml", gen},
               values = {sample_header}, changed = not os.isfile(sample_header)})
     end)
 target_end()
@@ -309,6 +318,13 @@ if has_config("tests") then
         add_includedirs(generated_dir)
         if not has_config("tls") then add_tests("unavailable") end
     target_end()
+
+    for _, harness in ipairs({"codegen", "compile_fail", "initiator_reconnect", "queued_crash", "cli", "protocol_versions", "endpoint", "xmake_schema", "install"}) do
+        target(harness .. "-test")
+            set_kind("binary")
+            add_files("tests/" .. harness .. "_test.cpp")
+        target_end()
+    end
 end
 
 local use_submodule_quickfix = not has_config("quickfix_dir")
@@ -522,6 +538,12 @@ if has_config("benchmarks") then
             add_ldflags("-Wl,--wrap=malloc", {force = true})
         target_end()
     end
+    if has_config("tests") then
+        target("bench-smoke-test")
+            set_kind("binary")
+            add_files("bench/bench_smoke_test.cpp")
+        target_end()
+    end
 end
 
 if has_config("fuzzers") then
@@ -546,47 +568,55 @@ if has_config("fuzzers") then
 end
 
 task("check")
-    set_menu {usage = "xmake check", description = "Build and run codec, session, TCP, XML and compile-fail contracts"}
+    set_menu {usage = "xmake check", description = "Build and run codec, session, TCP, XML and compile-fail contracts (zero Python)"}
     on_run(function ()
         import("core.project.config")
+        import("core.project.project")
         config.load()
         os.vrunv(os.programfile(), {"build"})
         os.vrunv(os.programfile(), {"test"})
-        os.vrunv("python3", {"tests/codegen_test.py"})
-        os.vrunv("python3", {"tests/compile_fail_test.py"})
+        local gen = project.target("nimblefix-schema-gen"):targetfile()
+        local root = os.projectdir()
+        local cxx = config.get("cxx") or os.getenv("CXX") or "g++"
+        os.vrunv(project.target("codegen-test"):targetfile(), {"--generator", gen, "--root", root})
+        os.vrunv(project.target("compile_fail-test"):targetfile(), {"--generator", gen, "--cxx", cxx, "--root", root})
         os.vrunv(os.programfile(), {"run", "codec-demo", "--self-test"})
         os.vrunv(os.programfile(), {"run", "hello-fix", "--self-test", "--restart"})
         os.vrunv(os.programfile(), {"run", "hello-fix", "--self-test", "--typed", "--restart"})
-        import("core.project.project")
-        local probe = project.target("initiator-probe")
-        os.vrunv("python3", {"tests/initiator_reconnect_test.py", "--binary", probe:targetfile()})
-        os.vrunv("python3", {"tests/outbound_reconnect_test.py", "--binary", probe:targetfile()})
-        os.vrunv("python3", {"tests/endpoint_test.py", "--acceptor", project.target("acceptor-example"):targetfile(),
+        local probe = project.target("initiator-probe"):targetfile()
+        local reconnect = project.target("initiator_reconnect-test"):targetfile()
+        os.vrunv(reconnect, {"--binary", probe, "--mode", "inbound"})
+        os.vrunv(reconnect, {"--binary", probe, "--mode", "outbound"})
+        os.vrunv(project.target("endpoint-test"):targetfile(), {
+            "--acceptor", project.target("acceptor-example"):targetfile(),
             "--initiator", project.target("initiator-example"):targetfile()})
-        os.vrunv("python3", {"tests/queued_crash_test.py", "--binary", project.target("queued-crash-probe"):targetfile()})
-        os.vrunv("python3", {"tests/xmake_schema_test.py"})
+        os.vrunv(project.target("queued_crash-test"):targetfile(), {
+            "--binary", project.target("queued-crash-probe"):targetfile()})
+        os.vrunv(project.target("xmake_schema-test"):targetfile(), {
+            "--rule", path.join(root, "xmake", "nimblefix-schema.lua"),
+            "--generator", gen,
+            "--include-dir", path.join(root, "include")})
         if config.get("cli") then
-            os.vrunv("python3", {"tests/cli_test.py", "--binary", project.target("nimblefix-cli"):targetfile()})
-            os.vrunv("python3", {"tests/protocol_versions_test.py", "--binary", project.target("nimblefix-cli"):targetfile()})
+            local cli = project.target("nimblefix-cli"):targetfile()
+            os.vrunv(project.target("cli-test"):targetfile(), {"--binary", cli, "--root", root})
+            os.vrunv(project.target("protocol_versions-test"):targetfile(), {"--binary", cli})
         end
         if config.get("tls") then
-            os.vrunv("python3", {"tests/engine_tls_test.py", "--binary", project.target("engine-tls-probe"):targetfile()})
-            os.vrunv("python3", {"tests/tls_transport_test.py", "--binary", project.target("tls-transport-test"):targetfile()})
-            os.vrunv("python3", {"tests/direct_tls_initiator_test.py", "--binary", project.target("direct-tls-initiator-test"):targetfile()})
+            os.vrunv(project.target("engine-tls-probe"):targetfile(), {})
+            os.vrunv(project.target("tls-transport-test"):targetfile(), {})
+            os.vrunv(project.target("direct-tls-initiator-test"):targetfile(), {})
         end
         if config.get("benchmarks") then
-            os.vrunv("python3", {"bench/journal_run.py", "--binary", project.target("journal-bench"):targetfile(),
-                "--output", "build/bench-smoke/journal", "--samples", "100", "--runs", "1",
-                "--reopens", "2", "--segment-bytes", "8192", "--max-segments", "32"})
-            os.vrunv("python3", {"bench/runtime_run.py", "--binary", project.target("runtime-bench"):targetfile(),
-                "--output", "build/bench-smoke/runtime", "--samples", "100", "--warmup", "20"})
+            local smoke = project.target("bench-smoke-test"):targetfile()
+            local smoke_args = {
+                "--journal-bench", project.target("journal-bench"):targetfile(),
+                "--runtime-bench", project.target("runtime-bench"):targetfile()}
             if config.get("standard_schemas") then
-                os.vrunv("python3", {"bench/schema_run.py", "--binary", project.target("schema-bench"):targetfile(),
-                    "--generated-header", path.join(config.get("builddir") or config.get("buildir") or "build", "generated", "nimblefix", "fix44.hpp"),
-                    "--output", "build/bench-smoke/schema", "--samples", "100", "--runs", "1",
-                    "--workset", "16", "--skip-size-probe", "--skip-perf"})
+                table.insert(smoke_args, "--schema-bench")
+                table.insert(smoke_args, project.target("schema-bench"):targetfile())
             end
+            os.vrunv(smoke, smoke_args)
         end
-        print("All codec, journal, session, TCP, schema, and compile-fail contracts passed.")
+        print("All codec, journal, session, TCP, schema, and compile-fail contracts passed (zero Python).")
     end)
 task_end()
