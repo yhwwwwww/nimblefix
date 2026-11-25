@@ -730,6 +730,130 @@ void test_subms_timestamps_and_optional_checksum_skip() {
     CHECK(field(ord_wire, 60).size() == 27);
 }
 
+// Transport that simulates selective endpoint reachability for multi-endpoint failover tests.
+struct FailoverMockTransport {
+    std::vector<std::uint16_t> allowed_ports;
+    std::vector<std::uint16_t> attempted_ports;
+    LoopbackTransport inner;
+
+    [[nodiscard]] nf::Status connect(std::string_view host, std::uint16_t port) noexcept {
+        attempted_ports.push_back(port);
+        for (const auto p : allowed_ports) {
+            if (p == port) return inner.connect(host, port);
+        }
+        return nf::Status{nf::ErrorCode::io_error};
+    }
+    [[nodiscard]] nf::Status finish_connect() noexcept { return inner.finish_connect(); }
+    [[nodiscard]] nf::TransportIoResult read(std::span<char> out) noexcept { return inner.read(out); }
+    [[nodiscard]] nf::TransportIoResult write(std::span<const char> in) noexcept { return inner.write(in); }
+    [[nodiscard]] nf::TransportIoResult write_batch(std::span<const std::span<const char>> chunks) noexcept {
+        return inner.write_batch(chunks);
+    }
+    void close() noexcept { inner.close(); }
+    [[nodiscard]] int native_fd() const noexcept { return inner.native_fd(); }
+    [[nodiscard]] bool valid() const noexcept { return inner.valid(); }
+    [[nodiscard]] bool is_connecting() const noexcept { return inner.is_connecting(); }
+};
+static_assert(nf::DirectTransport<FailoverMockTransport>);
+
+void test_multi_endpoint_failover_and_backoff() {
+    // 1. FailoverController exponential backoff, ordered reset-to-primary, round_robin, and max_retries
+    {
+        nf::detail::FailoverController fc;
+        fc.configure({{"127.0.0.1", 9001}, {"127.0.0.1", 9002}},
+                     nf::ConnectionStrategy::ordered(100, 500, 2, 0, true, true), 250);
+        CHECK(fc.current_index() == 0);
+        // Primary fails -> immediate 0 ms failover to standby (index 1)
+        CHECK(fc.on_failure_or_disconnect(1000, false) == 0);
+        CHECK(fc.current_index() == 1 && fc.next_connect_at_ms() == 1000);
+        // Standby fails -> wrap back to primary (index 0) with 100 ms backoff
+        CHECK(fc.on_failure_or_disconnect(1000, false) == 100);
+        CHECK(fc.current_index() == 0 && fc.next_connect_at_ms() == 1100);
+        // Second cycle: primary fails (0 ms -> idx 1), standby fails (200 ms -> idx 0)
+        CHECK(fc.on_failure_or_disconnect(1100, false) == 0);
+        CHECK(fc.current_index() == 1);
+        CHECK(fc.on_failure_or_disconnect(1100, false) == 200);
+        CHECK(fc.current_index() == 0 && fc.next_connect_at_ms() == 1300);
+        // Third cycle: cap at 500 ms (400 ms then 500 ms)
+        CHECK(fc.on_failure_or_disconnect(1300, false) == 0);
+        CHECK(fc.on_failure_or_disconnect(1300, false) == 400);
+        CHECK(fc.on_failure_or_disconnect(1700, false) == 0);
+        CHECK(fc.on_failure_or_disconnect(1700, false) == 500);
+
+        // Succeed on standby (index 1), then disconnect -> reset_to_primary returns to index 0 with base backoff
+        CHECK(fc.on_failure_or_disconnect(2200, false) == 0); // now at index 1
+        fc.on_session_active();
+        CHECK(fc.consecutive_failures() == 0);
+        CHECK(fc.on_failure_or_disconnect(3000, true) == 100);
+        CHECK(fc.current_index() == 0);
+    }
+
+    // Round-robin cycling + max_retries exhaustion
+    {
+        nf::detail::FailoverController fc;
+        fc.configure({{"127.0.0.1", 9001}, {"127.0.0.1", 9002}, {"127.0.0.1", 9003}},
+                     nf::ConnectionStrategy::round_robin(50, 500, 2, 3, true), 250);
+        fc.on_session_active();
+        // Disconnect from active on index 0 -> advances to index 1 with base backoff
+        CHECK(fc.on_failure_or_disconnect(100, true) == 50);
+        CHECK(fc.current_index() == 1);
+        // 3 consecutive failures -> exhausted on 3rd
+        CHECK(fc.on_failure_or_disconnect(150, false) == 0);
+        CHECK(fc.current_index() == 2 && !fc.exhausted());
+        CHECK(fc.on_failure_or_disconnect(150, false) == 0);
+        CHECK(fc.current_index() == 0 && !fc.exhausted());
+        (void)fc.on_failure_or_disconnect(150, false);
+        CHECK(fc.exhausted());
+    }
+
+    // 2. DirectInitiator end-to-end ordered failover: primary (9001) down -> immediate switch to standby (9002)
+    TempDir dir;
+    nf::DirectInitiatorConfig cfg{};
+    cfg.storage_directory = dir.path;
+    cfg.local_comp_id = "BUY";
+    cfg.remote_comp_id = "SELL";
+    cfg.heartbeat_ms = 30'000;
+    cfg.endpoints = {{"127.0.0.1", 9001}, {"127.0.0.1", 9002}};
+    cfg.connection_strategy = nf::ConnectionStrategy::ordered(200, 2000, 2, 0, true, true);
+
+    FailoverMockTransport mock{};
+    mock.allowed_ports = {9002};
+    auto opened = nf::DirectInitiator<fix::Schema, nf::NullInitiatorHandler, FailoverMockTransport>::open(
+        cfg, nf::NullInitiatorHandler{}, std::move(mock));
+    CHECK(opened.ok());
+    auto init = std::move(opened).value();
+
+    // connect() tries 9001 (fails) and immediately fails over to 9002 (succeeds)!
+    CHECK(init.connect(100, t0).ok());
+    CHECK(init.valid_transport());
+    CHECK(init.active_endpoint_index() == 1);
+    CHECK(init.active_endpoint().port == 9002);
+    CHECK(init.transport().attempted_ports.size() == 2);
+    CHECK(init.transport().attempted_ports[0] == 9001 && init.transport().attempted_ports[1] == 9002);
+
+    // Complete Logon on standby 9002
+    std::string logon_wire;
+    CHECK(init.transport().inner.pop_sent_frame(logon_wire));
+    init.transport().inner.push_from_peer(make_frame(nf::message<"A">().set<98>(0).set<108>(30),
+                                                     "SELL", "BUY", 1, t0));
+    CHECK(init.poll_once(101, t0).ok());
+    CHECK(init.is_active());
+
+    // Now primary 9001 recovers, standby 9002 drops -> ordered reset_to_primary switches back to 9001 after backoff!
+    init.transport().allowed_ports = {9001};
+    init.disconnect();
+    CHECK(!init.valid_transport());
+    CHECK(init.active_endpoint_index() == 0);
+    // Before backoff elapses, reconnect_if_due returns need_more
+    const auto due_at = init.next_reconnect_at_ms();
+    CHECK(init.reconnect_if_due(due_at - 1, t1).code == nf::ErrorCode::need_more);
+    // Once backoff elapses, reconnect_if_due reconnects to primary 9001!
+    CHECK(init.reconnect_if_due(due_at, t1).ok());
+    CHECK(init.valid_transport());
+    CHECK(init.active_endpoint_index() == 0);
+    CHECK(init.active_endpoint().port == 9001);
+}
+
 } // namespace
 
 int main() {
@@ -739,6 +863,7 @@ int main() {
     test_restart_recovery_resend_replay_and_gapfill();
     test_sigkill_crash_recovery_redelivers_uncommitted_delivery();
     test_subms_timestamps_and_optional_checksum_skip();
+    test_multi_endpoint_failover_and_backoff();
     if (failures != 0) {
         std::cerr << failures << " direct initiator test(s) failed\n";
         return 1;

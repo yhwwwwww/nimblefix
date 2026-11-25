@@ -32,8 +32,9 @@ Goal: Push both outbound encoding and inbound strict parsing/validation firmly i
 
 ## Phase 2: Multi-Core Scalability, Resilience & Observability
 
-### 5. Initiator Multi-Endpoint Failover (`ConnectionStrategy`)
-- Support an ordered list of counterparty endpoints (`host:port`) on both `DirectInitiator` and `Engine` initiators with configurable reconnection policies (`ordered` primary-first, `round_robin`, backoff, and retry caps) for active/standby venue gateways.
+### 5. [Done] Initiator Multi-Endpoint Failover (`ConnectionStrategy`)
+- **Status**: Implemented and verified across Layer 0 `DirectInitiator`, Layer 1/2 `Engine` initiators, and TOML configuration (`endpoints = [...]` + `[sessions.connection_strategy]`).
+- **Capabilities**: Shared deterministic `FailoverController` supporting `FailoverPolicy::ordered` (primary-first with `reset_to_primary_on_success`) and `FailoverPolicy::round_robin`, `immediate_failover` (0 ms switch to standby before wrap-around), exponential backoff (`initial_backoff_ms`, `max_backoff_ms`, `backoff_multiplier`), and `max_retries` exhaustion.
 
 ### 6. Sharded Reactor Multi-Core Scaling & Core Affinity
 - Implement the **Sharded Reactor** model outlined in [architecture.md](architecture.md): `K` independent `IoBackend` (`epoll` / `busy_poll` / `io_uring`) worker shards with static session-to-shard pinning, preserving strict single-writer lock-free `SessionCore` and mmap Journal ownership per shard.

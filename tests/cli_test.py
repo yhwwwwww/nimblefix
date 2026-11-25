@@ -79,6 +79,29 @@ def test(binary, root):
     assert (config_dir / "acceptor.toml").read_bytes() == original
     assert json.loads(execute(binary, root, "validate", "--config", config_dir / "acceptor.toml", "--json").stdout)["valid"]
     assert not (config_dir / "state").exists(), "offline validate opened the store"
+
+    failover_toml = config_dir / "failover_initiator.toml"
+    failover_toml.write_text('''version = 1
+[engine]
+dispatch = "inline"
+[engine.storage]
+directory = "state-failover"
+[[sessions]]
+name = "venue"
+role = "initiator"
+sender_comp_id = "BUY"
+target_comp_id = "SELL"
+endpoints = ["127.0.0.1:19876", "127.0.0.1:19877"]
+[sessions.connection_strategy]
+policy = "ordered"
+initial_backoff_ms = 100
+max_backoff_ms = 5000
+backoff_multiplier = 2
+max_retries = 10
+reset_to_primary_on_success = true
+immediate_failover = true
+''')
+    assert json.loads(execute(binary, root, "validate", "--config", failover_toml, "--json").stdout)["valid"]
     if doctor.get("fix44"):
         typed = config_dir / "typed.toml"
         typed_content = original.decode().replace('schema = "none"', 'schema = "fix44"')

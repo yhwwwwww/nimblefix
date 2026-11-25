@@ -20,6 +20,7 @@
 #include <vector>
 
 #include <nimblefix/codec.hpp>
+#include <nimblefix/connection_strategy.hpp>
 #include <nimblefix/detail/session_core.hpp>
 #include <nimblefix/direct_queue.hpp>
 #include <nimblefix/execution.hpp>
@@ -66,6 +67,10 @@ struct DirectInitiatorConfig {
     std::uint64_t max_sending_time_skew_ms{120'000};
     TimestampPrecision timestamp_precision{TimestampPrecision::milliseconds};
     bool verify_checksum{true};
+    // Optional ordered failover endpoint list (up to 16 entries). When non-empty,
+    // overrides host/port and follows connection_strategy.
+    std::vector<TcpEndpoint> endpoints{};
+    ConnectionStrategy connection_strategy{};
 };
 
 // Default no-op handler for tests or send-only initiators.
@@ -356,7 +361,9 @@ public:
             config.max_pending_messages < 4 || config.journal_capacity_bytes == 0 ||
             config.journal_max_records == 0 || begin_string(config.version).empty() ||
             (config.version == FixVersion::fixt11 && !valid_appl_ver_id(config.default_appl_ver_id)) ||
-            (config.request_sequence_reset && !config.allow_sequence_reset)) {
+            (config.request_sequence_reset && !config.allow_sequence_reset) ||
+            !config.connection_strategy.validate().ok() ||
+            config.endpoints.size() > 16) {
             return Status{ErrorCode::invalid_config};
         }
         if (config.session_key.empty()) {
@@ -407,7 +414,9 @@ public:
         return Status{ErrorCode::io_error};
     }
 
-    // Initiates nonblocking TCP connection. Call poll_once() to complete handshake & I/O.
+    // Initiates nonblocking TCP connection to the active endpoint in the failover list.
+    // On immediate transport refusal with immediate_failover enabled, advances to standby
+    // endpoints within the same pass before applying backoff.
     [[nodiscard]] Status connect() noexcept {
         return connect(clock_.now_ms(), now_wall_time());
     }
@@ -415,12 +424,44 @@ public:
     [[nodiscard]] Status connect(std::uint64_t now_ms, std::string_view wall_time) noexcept {
         if (fatal_) return last_status_.ok() ? Status{ErrorCode::engine_stopped} : last_status_;
         if (transport_.valid()) return Status{ErrorCode::not_ready};
-        const auto st = transport_.connect(config_.host, config_.port);
-        if (!st.ok()) return st;
-        if (!transport_.is_connecting()) {
-            return on_transport_connected(now_ms, wall_time);
+        if (failover_.exhausted()) return Status{ErrorCode::connection_closed};
+        const std::size_t max_immediate = std::max<std::size_t>(1, failover_.size());
+        Status last_err{ErrorCode::io_error};
+        for (std::size_t attempt = 0; attempt < max_immediate; ++attempt) {
+            const auto& ep = failover_.current_endpoint();
+            const std::size_t idx = failover_.current_index();
+            if constexpr (requires { handler_.on_endpoint_selected(ep, idx); }) {
+                try { handler_.on_endpoint_selected(ep, idx); } catch (...) {}
+            }
+            const auto st = transport_.connect(ep.host, ep.port);
+            if (st.ok()) {
+                if (!transport_.is_connecting()) {
+                    return on_transport_connected(now_ms, wall_time);
+                }
+                return Status::success();
+            }
+            last_err = st;
+            (void)failover_.on_failure_or_disconnect(now_ms, false);
+            if (failover_.exhausted() || failover_.next_connect_at_ms() > now_ms) {
+                return last_err;
+            }
         }
-        return Status::success();
+        return last_err;
+    }
+
+    // Attempts reconnection when disconnected, not fatal, not exhausted, and backoff elapsed.
+    // Returns Status::success() when already connected or when a connection was initiated,
+    // ErrorCode::need_more while waiting for backoff, or the transport/exhaustion error.
+    [[nodiscard]] Status reconnect_if_due() noexcept {
+        return reconnect_if_due(clock_.now_ms(), now_wall_time());
+    }
+
+    [[nodiscard]] Status reconnect_if_due(std::uint64_t now_ms, std::string_view wall_time) noexcept {
+        if (fatal_) return last_status_.ok() ? Status{ErrorCode::engine_stopped} : last_status_;
+        if (transport_.valid()) return Status::success();
+        if (failover_.exhausted()) return Status{ErrorCode::connection_closed};
+        if (now_ms < failover_.next_connect_at_ms()) return Status{ErrorCode::need_more};
+        return connect(now_ms, wall_time);
     }
 
     // Single nonblocking iteration: finish connect -> read & dispatch frames ->
@@ -687,6 +728,11 @@ public:
     [[nodiscard]] std::string_view now_wall_time() noexcept {
         return clock_.wall_time(config_.timestamp_precision);
     }
+    [[nodiscard]] const TcpEndpoint& active_endpoint() const noexcept { return failover_.current_endpoint(); }
+    [[nodiscard]] std::size_t active_endpoint_index() const noexcept { return failover_.current_index(); }
+    [[nodiscard]] bool failover_exhausted() const noexcept { return failover_.exhausted(); }
+    [[nodiscard]] std::uint64_t next_reconnect_at_ms() const noexcept { return failover_.next_connect_at_ms(); }
+    [[nodiscard]] std::uint32_t consecutive_connect_failures() const noexcept { return failover_.consecutive_failures(); }
     [[nodiscard]] int native_fd() const noexcept { return transport_.native_fd(); }
     [[nodiscard]] bool valid_transport() const noexcept { return transport_.valid(); }
     [[nodiscard]] bool is_connecting() const noexcept { return transport_.is_connecting(); }
@@ -765,6 +811,11 @@ private:
           replay_ring_(config_.max_pending_messages),
           recovery_ids_() {
         (void)session_prefix_.init(config_.version, config_.local_comp_id, config_.remote_comp_id);
+        std::vector<TcpEndpoint> eps = config_.endpoints;
+        if (eps.empty()) {
+            eps.push_back(TcpEndpoint{config_.host, config_.port});
+        }
+        failover_.configure(std::move(eps), config_.connection_strategy, 0);
         const auto retained_floor = journal_.lowest_retained_outbound_seq();
         const auto current_epoch = journal_.checkpoint().epoch;
         const auto max_out = journal_.next_outbound_seq() == 0 ? 0 : journal_.next_outbound_seq() - 1;
@@ -858,6 +909,7 @@ private:
     }
 
     void handle_disconnect(Status reason, std::uint64_t now_ms) noexcept {
+        const bool was_active = (core_.state() == SessionState::active);
         transport_.close();
         rx_head_ = rx_tail_ = 0;
         tx_head_ = tx_count_ = 0;
@@ -877,6 +929,7 @@ private:
         ev.kind = detail::CoreEventKind::disconnected;
         ev.now_ms = now_ms;
         (void)core_.process(ev);
+        (void)failover_.on_failure_or_disconnect(now_ms, was_active);
         if constexpr (requires { handler_.on_disconnected(reason); }) {
             try { handler_.on_disconnected(reason); } catch (...) {}
         }
@@ -1648,6 +1701,7 @@ private:
                 if (const auto st = queue_replay(a.first, a.last, inbound_id); !st.ok()) return fail(st);
                 break;
             case detail::CoreActionKind::become_active: {
+                failover_.on_session_active();
                 Status act{};
                 try {
                     if constexpr (requires { handler_.on_active(*this); }) act = handler_.on_active(*this);
@@ -1940,6 +1994,7 @@ private:
     detail::SessionCore core_;
     detail::FastUtcClock clock_{};
     detail::StaticSessionPrefix session_prefix_{};
+    detail::FailoverController failover_{};
 
     std::vector<char> rx_buf_;
     std::size_t rx_head_{};

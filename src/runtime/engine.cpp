@@ -1445,6 +1445,7 @@ struct SessionControl {
     std::atomic<std::size_t> pending_messages{0}, pending_bytes{0};
     std::atomic<std::size_t> pending_inbound_messages{0}, pending_inbound_bytes{0};
     std::atomic<bool> read_paused{false};
+    std::atomic<std::size_t> active_endpoint_index{0};
     std::uint64_t callback_started_ms{};
     bool active_callback_pending{};
     std::uint64_t active_pending_generation{};
@@ -1514,6 +1515,8 @@ struct EngineRuntime::Impl {
         std::shared_ptr<SessionControl> session;
         std::uint64_t generation{};
         TcpEndpoint endpoint;
+        detail::FailoverController failover;
+        bool reached_active{};
         std::size_t acceptor_index{no_index};
         Connection connection{Connection::disconnected};
         TcpStream stream;
@@ -2672,7 +2675,10 @@ struct EngineRuntime::Impl {
                 peer->local_comp_id = declaration.sender_comp_id;
                 peer->remote_comp_id = declaration.target_comp_id;
                 peer->session = initiator_sessions[i];
-                peer->endpoint = declaration.endpoint;
+                std::vector<TcpEndpoint> eps = declaration.endpoints;
+                if (eps.empty()) eps.push_back(declaration.endpoint);
+                peer->endpoint = eps.front();
+                peer->failover.configure(std::move(eps), declaration.connection_strategy, config.reconnect_delay_ms);
                 peer->settings = declaration.settings;
                 peer->tls_config = declaration.tls;
                 if (declaration.tls.enabled) {
@@ -2734,6 +2740,11 @@ struct EngineRuntime::Impl {
     [[nodiscard]] Status begin_connect(Peer& peer, std::uint64_t now) noexcept {
         if (!peer.initiator || peer.connection != Connection::disconnected ||
             peer.closed || peer.disabled || now < peer.reconnect_at) return Status::success();
+        if (peer.failover.exhausted()) {
+            peer.disabled = true;
+            if (peer.session) peer.session->state.store(SessionState::failed, std::memory_order_release);
+            return Status::success();
+        }
         if (!peer.settings.schedule.contains(std::chrono::system_clock::now())) {
             peer.reconnect_at = now + 1000;
             return Status::success();
@@ -2748,19 +2759,38 @@ struct EngineRuntime::Impl {
             }
             now = monotonic_ms();
         }
-        bool in_progress = false;
-        auto connected = TcpStream::connect(peer.endpoint.host, peer.endpoint.port, in_progress);
-        if (!connected.ok()) {
-            report_error(peer.name, connected.status());
-            peer.reconnect_at = now + config.reconnect_delay_ms;
-            return connected.status();
+        const std::size_t max_immediate = std::max<std::size_t>(1, peer.failover.size());
+        Status last_error{ErrorCode::io_error};
+        for (std::size_t attempt = 0; attempt < max_immediate; ++attempt) {
+            peer.endpoint = peer.failover.current_endpoint();
+            if (peer.session) {
+                peer.session->active_endpoint_index.store(
+                    peer.failover.current_index(), std::memory_order_release);
+            }
+            bool in_progress = false;
+            auto connected = TcpStream::connect(peer.endpoint.host, peer.endpoint.port, in_progress);
+            if (connected.ok()) {
+                peer.clear_receive();
+                peer.stream = std::move(connected).value();
+                peer.connection = in_progress ? Connection::connecting : Connection::connected;
+                peer.connect_deadline = now + config.connect_timeout_ms;
+                if (!in_progress) return connected_peer(peer, now);
+                return Status::success();
+            }
+            last_error = connected.status();
+            report_error(peer.name, last_error);
+            (void)peer.failover.on_failure_or_disconnect(now, false);
+            peer.reconnect_at = peer.failover.next_connect_at_ms();
+            if (peer.failover.exhausted()) {
+                peer.disabled = true;
+                if (peer.session) peer.session->state.store(SessionState::failed, std::memory_order_release);
+                return last_error;
+            }
+            if (peer.reconnect_at > now) {
+                return last_error;
+            }
         }
-        peer.clear_receive();
-        peer.stream = std::move(connected).value();
-        peer.connection = in_progress ? Connection::connecting : Connection::connected;
-        peer.connect_deadline = now + config.connect_timeout_ms;
-        if (!in_progress) return connected_peer(peer, now);
-        return Status::success();
+        return last_error;
     }
 
     [[nodiscard]] Status connected_peer(Peer& peer, std::uint64_t now) noexcept {
@@ -2861,7 +2891,18 @@ struct EngineRuntime::Impl {
             peer.session->state.store(SessionState::failed, std::memory_order_release);
         }
         if (peer.initiator) {
-            peer.reconnect_at = now + config.reconnect_delay_ms;
+            if (!peer.disabled) {
+                (void)peer.failover.on_failure_or_disconnect(now, peer.reached_active);
+                peer.reached_active = false;
+                peer.reconnect_at = peer.failover.next_connect_at_ms();
+                if (peer.failover.exhausted()) {
+                    peer.disabled = true;
+                    if (peer.session) peer.session->state.store(SessionState::failed, std::memory_order_release);
+                }
+            } else {
+                peer.reached_active = false;
+                peer.reconnect_at = now + config.reconnect_delay_ms;
+            }
         } else {
             peer.closed = true;
             if (peer.acceptor_index < acceptors.size() &&
@@ -3043,6 +3084,10 @@ struct EngineRuntime::Impl {
             if (peer.session) {
                 const auto state = peer.driver->state();
                 peer.session->state.store(state, std::memory_order_release);
+                if (state == SessionState::active && peer.initiator && !peer.reached_active) {
+                    peer.reached_active = true;
+                    peer.failover.on_session_active();
+                }
                 if (state != SessionState::active) peer.session->sender->set_active(false);
             }
         }
@@ -3399,6 +3444,10 @@ struct EngineRuntime::Impl {
             if (peer.session) {
                 const auto state = peer.driver->state();
                 peer.session->state.store(state, std::memory_order_release);
+                if (state == SessionState::active && peer.initiator && !peer.reached_active) {
+                    peer.reached_active = true;
+                    peer.failover.on_session_active();
+                }
                 if (state != SessionState::active) peer.session->sender->set_active(false);
             }
             if (peer.driver->should_close()) {
@@ -3953,10 +4002,19 @@ Result<SessionHandle> EngineRuntime::add_initiator(InitiatorConfig config) noexc
         !plain_identifier(config.sender_comp_id, 64) ||
         !plain_identifier(config.target_comp_id, 64) ||
         config.sender_comp_id == config.target_comp_id ||
-        !is_numeric_host(config.endpoint.host) ||
-        config.endpoint.port == 0 ||
+        !config.connection_strategy.validate().ok() ||
+        config.endpoints.size() > 16 ||
         impl_->initiators.size() + impl_->acceptors.size() >= impl_->config.max_sessions)
         return Status{ErrorCode::invalid_config};
+    if (config.endpoints.empty()) {
+        if (!is_numeric_host(config.endpoint.host) || config.endpoint.port == 0)
+            return Status{ErrorCode::invalid_config};
+    } else {
+        for (const auto& ep : config.endpoints) {
+            if (!is_numeric_host(ep.host) || ep.port == 0)
+                return Status{ErrorCode::invalid_config};
+        }
+    }
     for (const auto& current : impl_->initiators)
         if (current.name == config.name ||
             (current.sender_comp_id == config.sender_comp_id &&
@@ -4152,6 +4210,7 @@ Result<SessionSnapshot> EngineRuntime::snapshot(std::string_view name) const noe
             result.pending_inbound_messages = session->pending_inbound_messages.load(std::memory_order_relaxed);
             result.pending_inbound_bytes = session->pending_inbound_bytes.load(std::memory_order_relaxed);
             result.read_paused = session->read_paused.load(std::memory_order_relaxed);
+            result.active_endpoint_index = session->active_endpoint_index.load(std::memory_order_acquire);
             return result;
         }
         return Status{ErrorCode::invalid_value};

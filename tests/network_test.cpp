@@ -332,6 +332,113 @@ bool test_burst_before_eof(const std::filesystem::path& directory, bool half_clo
     return run_status.ok();
 }
 
+bool test_initiator_multi_endpoint_failover(const std::filesystem::path& directory) {
+    // Bind and immediately close a port to get a guaranteed-closed primary port,
+    // while keeping a real live Engine acceptor listening on the standby port.
+    auto closed_fd = ::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (closed_fd < 0) return false;
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = 0;
+    if (::bind(closed_fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
+        ::close(closed_fd);
+        return false;
+    }
+    socklen_t len = sizeof(addr);
+    if (::getsockname(closed_fd, reinterpret_cast<sockaddr*>(&addr), &len) != 0) {
+        ::close(closed_fd);
+        return false;
+    }
+    const std::uint16_t closed_port = ntohs(addr.sin_port);
+    ::close(closed_fd);
+
+    // 1. Start standby Acceptor Engine on ephemeral loopback port.
+    nf::EngineConfig acc_cfg;
+    acc_cfg.storage.directory = directory / "standby";
+    acc_cfg.logout_timeout_ms = 300;
+    auto acc_created = nf::Engine<>::create(std::move(acc_cfg));
+    if (!acc_created.ok()) return false;
+    auto standby = std::move(acc_created).value();
+    if (!standby.on_message([](auto&, const auto&) { return nf::Status::success(); }).ok()) return false;
+    if (!standby.add_listener({.name = "main", .endpoint = {"127.0.0.1", 0}}).ok()) return false;
+    nf::AcceptorConfig acfg{.name = "acc", .listener = "main", .local_comp_id = "SELL", .remote_comp_id = "BUY"};
+    acfg.settings.check_sending_time = false;
+    if (!standby.add_acceptor(std::move(acfg)).ok()) return false;
+
+    nf::Status standby_run{};
+    std::thread standby_thread([&] { standby_run = standby.run(); });
+    nf::TcpEndpoint standby_ep{};
+    for (int i = 0; i < 200; ++i) {
+        const auto ep = standby.listener_endpoint("main");
+        if (ep.ok() && ep.value().port != 0) { standby_ep = ep.value(); break; }
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    if (standby_ep.port == 0) { standby.request_stop(); standby_thread.join(); return false; }
+
+    // 2. Start Initiator Engine configured with [closed_primary, live_standby] using ordered immediate failover.
+    nf::EngineConfig init_cfg;
+    init_cfg.storage.directory = directory / "initiator";
+    init_cfg.reconnect_delay_ms = 50;
+    init_cfg.logout_timeout_ms = 300;
+    auto init_created = nf::Engine<>::create(std::move(init_cfg));
+    if (!init_created.ok()) { standby.request_stop(); standby_thread.join(); return false; }
+    auto initiator = std::move(init_created).value();
+    std::atomic<bool> active{false};
+    if (!initiator.on_message([](auto&, const auto&) { return nf::Status::success(); }).ok()) return false;
+    if (!initiator.on_session_active([&](auto&) { active.store(true, std::memory_order_release); return nf::Status::success(); }).ok())
+        return false;
+    nf::InitiatorConfig icfg{};
+    icfg.name = "venue";
+    icfg.sender_comp_id = "BUY";
+    icfg.target_comp_id = "SELL";
+    icfg.endpoints = {{"127.0.0.1", closed_port}, standby_ep};
+    icfg.connection_strategy = nf::ConnectionStrategy::ordered(50, 500, 2, 0, true, true);
+    icfg.settings.check_sending_time = false;
+    if (!initiator.add_initiator(std::move(icfg)).ok()) return false;
+
+    nf::Status init_run{};
+    std::thread init_thread([&] { init_run = initiator.run(); });
+    for (int i = 0; i < 400 && !active.load(std::memory_order_acquire); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    const auto snap = initiator.snapshot("venue");
+    const bool ok = active.load(std::memory_order_acquire) && snap.ok() &&
+                    snap.value().state == nf::SessionState::active &&
+                    snap.value().active_endpoint_index == 1;
+    initiator.request_stop();
+    standby.request_stop();
+    init_thread.join();
+    standby_thread.join();
+    if (!ok || !init_run.ok() || !standby_run.ok()) return false;
+
+    // 3. Verify max_retries exhaustion transitions session to failed cleanly.
+    nf::EngineConfig ex_cfg;
+    ex_cfg.storage.directory = directory / "exhausted";
+    ex_cfg.reconnect_delay_ms = 10;
+    auto ex_created = nf::Engine<>::create(std::move(ex_cfg));
+    if (!ex_created.ok()) return false;
+    auto ex_engine = std::move(ex_created).value();
+    if (!ex_engine.on_message([](auto&, const auto&) { return nf::Status::success(); }).ok()) return false;
+    nf::InitiatorConfig ex_icfg{};
+    ex_icfg.name = "dead";
+    ex_icfg.sender_comp_id = "BUY2";
+    ex_icfg.target_comp_id = "SELL2";
+    ex_icfg.endpoints = {{"127.0.0.1", closed_port}};
+    ex_icfg.connection_strategy = nf::ConnectionStrategy::ordered(10, 20, 2, 2, true, true);
+    if (!ex_engine.add_initiator(std::move(ex_icfg)).ok()) return false;
+    std::thread ex_thread([&] { (void)ex_engine.run(); });
+    bool failed_state = false;
+    for (int i = 0; i < 200; ++i) {
+        const auto s = ex_engine.snapshot("dead");
+        if (s.ok() && s.value().state == nf::SessionState::failed) { failed_state = true; break; }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    ex_engine.request_stop();
+    ex_thread.join();
+    return failed_state;
+}
+
 } // namespace
 
 int main() {
@@ -696,5 +803,6 @@ int main() {
     if (!test_shutdown_during_existing_logout(directory / "logout-eof", false, true)) return 57;
     if (!test_burst_before_eof(directory / "half-close", true)) return 54;
     if (!test_burst_before_eof(directory / "full-close", false)) return 55;
+    if (!test_initiator_multi_endpoint_failover(directory / "failover")) return 58;
     return 0;
 }

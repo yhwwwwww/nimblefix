@@ -12,6 +12,7 @@
 #include <utility>
 
 #include <nimblefix/codec.hpp>
+#include <nimblefix/connection_strategy.hpp>
 #include <nimblefix/execution.hpp>
 #include <nimblefix/io_backend.hpp>
 #include <nimblefix/schema.hpp>
@@ -22,13 +23,6 @@
 #include <nimblefix/tls.hpp>
 
 namespace nimblefix {
-
-struct TcpEndpoint {
-    // Stage 3 accepts numeric IPv4/IPv6 addresses. An empty listener host binds
-    // all interfaces; initiator hosts must be nonempty numeric addresses.
-    std::string host;
-    std::uint16_t port{};
-};
 
 struct StorageConfig {
     std::filesystem::path directory;
@@ -74,6 +68,10 @@ struct InitiatorConfig {
     TcpEndpoint endpoint;
     SessionSettings settings{};
     TlsConfig tls{};
+    // Optional ordered failover endpoint list (up to 16 entries). When non-empty,
+    // overrides the single `endpoint` field and uses `connection_strategy`.
+    std::vector<TcpEndpoint> endpoints{};
+    ConnectionStrategy connection_strategy{};
 };
 
 struct ListenerConfig {
@@ -148,6 +146,7 @@ struct SessionSnapshot {
     std::size_t pending_inbound_messages{};
     std::size_t pending_inbound_bytes{};
     bool read_paused{};
+    std::size_t active_endpoint_index{};
 };
 
 struct ErrorEvent {

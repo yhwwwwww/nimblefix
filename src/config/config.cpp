@@ -205,6 +205,38 @@ class Loader {
         return {std::move(host), static_cast<std::uint16_t>(number)};
     }
 
+    ConnectionStrategy connection_strategy(const toml::table &session, std::string_view prefix) {
+        ConnectionStrategy strategy;
+        const auto *value = table(session, "connection_strategy", prefix);
+        if (value == nullptr)
+            return strategy;
+        const auto p = std::string{prefix} + ".connection_strategy";
+        keys(*value, p,
+             {"policy", "initial_backoff_ms", "max_backoff_ms", "backoff_multiplier", "max_retries",
+              "reset_to_primary_on_success", "immediate_failover"});
+        const auto policy = string(*value, "policy", p, "ordered");
+        if (policy == "ordered")
+            strategy.policy = FailoverPolicy::ordered;
+        else if (policy == "round_robin")
+            strategy.policy = FailoverPolicy::round_robin;
+        else
+            error(value->get("policy"), p + ".policy", "ordered or round_robin");
+        strategy.initial_backoff_ms =
+            static_cast<std::uint32_t>(integer(*value, "initial_backoff_ms", p, 0, 0, 86'400'000));
+        strategy.max_backoff_ms =
+            static_cast<std::uint32_t>(integer(*value, "max_backoff_ms", p, 30'000, 0, 86'400'000));
+        strategy.backoff_multiplier =
+            static_cast<std::uint32_t>(integer(*value, "backoff_multiplier", p, 1, 1, 16));
+        strategy.max_retries =
+            static_cast<std::uint32_t>(integer(*value, "max_retries", p, 0, 0, 1'000'000));
+        strategy.reset_to_primary_on_success =
+            boolean(*value, "reset_to_primary_on_success", p, true);
+        strategy.immediate_failover = boolean(*value, "immediate_failover", p, true);
+        if (!strategy.validate().ok())
+            error(value, p, "valid connection_strategy (initial_backoff_ms <= max_backoff_ms, multiplier >= 1)");
+        return strategy;
+    }
+
     TlsConfig tls(const toml::table &parent, std::string_view prefix) {
         TlsConfig config;
         const auto *value = table(parent, "tls", prefix);
@@ -552,6 +584,8 @@ class Loader {
                           "remote_comp_id",
                           "listener",
                           "endpoint",
+                          "endpoints",
+                          "connection_strategy",
                           "transport",
                           "qualifier",
                           "default_appl_ver_id",
@@ -572,7 +606,29 @@ class Loader {
                         value.name = string(*session, "name", p, {}, true);
                         value.sender_comp_id = string(*session, "sender_comp_id", p, {}, true);
                         value.target_comp_id = string(*session, "target_comp_id", p, {}, true);
-                        value.endpoint = endpoint(*session, "endpoint", p, false);
+                        if (const auto *eps = session->get("endpoints")) {
+                            if (session->contains("endpoint"))
+                                error(session->get("endpoint"), p + ".endpoint",
+                                      "specify either endpoint or endpoints, not both");
+                            const auto *array = eps->as_array();
+                            if (array == nullptr || array->empty() || array->size() > 16)
+                                error(eps, p + ".endpoints", "a non-empty array of at most 16 host:port endpoints");
+                            else {
+                                for (std::size_t ei = 0; ei < array->size(); ++ei) {
+                                    const auto text = array->get(ei)->value<std::string>();
+                                    if (!text) {
+                                        error(array->get(ei), p + ".endpoints", "numeric-IP:port string");
+                                        continue;
+                                    }
+                                    toml::table tmp;
+                                    tmp.insert("ep", *text);
+                                    value.endpoints.push_back(endpoint(tmp, "ep", p + ".endpoints", false));
+                                }
+                            }
+                        } else {
+                            value.endpoint = endpoint(*session, "endpoint", p, false);
+                        }
+                        value.connection_strategy = connection_strategy(*session, p);
                         value.settings = settings(*session, p, false);
                         value.tls = tls(*session, p);
                         document.initiators.push_back(std::move(value));
@@ -582,6 +638,12 @@ class Loader {
                         value.local_comp_id = string(*session, "local_comp_id", p, {}, true);
                         value.remote_comp_id = string(*session, "remote_comp_id", p, {}, true);
                         value.listener = string(*session, "listener", p, {}, true);
+                        if (session->contains("endpoints"))
+                            error(session->get("endpoints"), p + ".endpoints",
+                                  "endpoints is only valid on initiator sessions");
+                        if (session->contains("connection_strategy"))
+                            error(session->get("connection_strategy"), p + ".connection_strategy",
+                                  "connection_strategy is only valid on initiator sessions");
                         value.settings = settings(*session, p, true);
                         if (session->contains("tls"))
                             error(session->get("tls"), p + ".tls",
