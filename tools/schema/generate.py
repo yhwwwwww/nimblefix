@@ -17,7 +17,9 @@ from typing import Iterable
 
 MAX_INPUT_BYTES = 4 * 1024 * 1024
 MAX_TOTAL_INPUT_BYTES = 16 * 1024 * 1024
+MAX_LOG_BYTES = 64 * 1024 * 1024
 MAX_INPUT_FILES = 32
+ADMIN_MSG_TYPES = frozenset({"0", "1", "2", "3", "4", "5", "A"})
 MAX_XML_DEPTH = 64
 MAX_XML_ITEMS = 50_000
 MAX_FIX_TAG = 999_999_999
@@ -799,6 +801,201 @@ def filter_schema_messages(schema: Schema, requested: list[str]) -> Schema:
     return subset
 
 
+def scan_fix_logs(log_paths: list[Path]) -> dict[str, set[int]]:
+    """Scan raw SOH (\\x01) or pipe (|) FIX log files (including .nfxj journals)
+    and return a mapping of observed MsgType -> set of observed integer tags."""
+    observed: dict[str, set[int]] = {}
+    for path in log_paths:
+        try:
+            with path.open("rb") as stream:
+                data = stream.read(MAX_LOG_BYTES + 1)
+        except OSError as exc:
+            raise SchemaError(f"cannot read FIX log {path}: {exc.strerror or exc}") from exc
+        if len(data) > MAX_LOG_BYTES:
+            raise SchemaError(f"FIX log {path} exceeds {MAX_LOG_BYTES} byte limit")
+
+        start = 0
+        size = len(data)
+        while True:
+            pos = data.find(b"8=FIX", start)
+            if pos < 0:
+                break
+            # Detect delimiter (SOH or '|') after BeginString (e.g. 8=FIX.4.4\x01 or 8=FIXT.1.1|).
+            delim_pos = -1
+            delim_byte = 0
+            limit = min(size, pos + 20)
+            for idx in range(pos + 5, limit):
+                b = data[idx]
+                if b == 0x01 or b == 0x7C:
+                    delim_pos = idx
+                    delim_byte = b
+                    break
+                if b in (0x0A, 0x0D):
+                    break
+            if delim_pos < 0:
+                start = pos + 5
+                continue
+
+            msg_type: str | None = None
+            tags: set[int] = set()
+            cursor = delim_pos + 1
+            while cursor < size:
+                # Stop at newline for pipe-delimited text logs.
+                if delim_byte == 0x7C and data[cursor] in (0x0A, 0x0D):
+                    break
+                eq = data.find(b"=", cursor, min(size, cursor + 16))
+                if eq < 0:
+                    break
+                tag_bytes = data[cursor:eq]
+                if not tag_bytes or not tag_bytes.isdigit():
+                    break
+                tag = int(tag_bytes)
+                if tag <= 0 or tag > MAX_FIX_TAG:
+                    break
+                end = data.find(delim_byte, eq + 1)
+                if delim_byte == 0x7C:
+                    nl = data.find(b"\n", eq + 1)
+                    if nl >= 0 and (end < 0 or nl < end):
+                        end = nl
+                if end < 0:
+                    end = size
+                if tag == 35:
+                    val = data[eq + 1:end].decode("ascii", errors="ignore").strip()
+                    if val:
+                        msg_type = val
+                tags.add(tag)
+                cursor = end + 1
+                if tag == 10:
+                    break
+            if msg_type is not None:
+                observed.setdefault(msg_type, set()).update(tags)
+            start = max(pos + 5, cursor)
+    return observed
+
+
+def prune_schema_from_observations(
+    schema: Schema,
+    observed: dict[str, set[int]],
+    keep_all_fields: bool = False,
+) -> tuple[Schema, dict[str, int]]:
+    """Prune a loaded schema to only observed business messages (plus admin messages)
+    and, unless keep_all_fields is True, prune unobserved optional fields/groups while
+    preserving all required members, group delimiters, Header/Trailer, and LENGTH/DATA pairs."""
+    if not observed:
+        raise SchemaError("no FIX messages found in --from-fix-log input(s)")
+
+    by_type = {msg.msg_type: msg for msg in schema.messages_by_name.values()}
+    selected_messages: dict[str, MessageDef] = {}
+    for mt in observed:
+        msg = by_type.get(mt)
+        if msg is not None:
+            selected_messages[msg.name] = msg
+    for msg in schema.messages_by_name.values():
+        if msg.category == "admin" or msg.msg_type in ADMIN_MSG_TYPES:
+            selected_messages[msg.name] = msg
+    if not selected_messages:
+        raise SchemaError("--from-fix-log matched no messages in schema")
+
+    # Build bidirectional LENGTH <-> DATA partner map by tag number.
+    def _pair_name_variants(name: str) -> tuple[str, ...]:
+        compact = name.replace("Security", "Sec")
+        expanded = name.replace("Sec", "Security") if "Security" not in name else name
+        return (name, compact, expanded)
+
+    partner_by_tag: dict[int, int] = {}
+    for fdef in schema.fields_by_name.values():
+        if fdef.field_type in {"DATA", "XMLDATA"}:
+            for base in _pair_name_variants(fdef.name):
+                for suffix in ("Length", "Len"):
+                    cand = schema.fields_by_name.get(base + suffix)
+                    if cand is not None and cand.field_type == "LENGTH":
+                        partner_by_tag[fdef.number] = cand.number
+                        partner_by_tag[cand.number] = fdef.number
+                        break
+
+    def _group_has_observed(members: tuple[MemberDef, ...], obs_tags: set[int]) -> bool:
+        for m in members:
+            if schema.fields_by_name[m.field_name].number in obs_tags:
+                return True
+            if m.kind == "group" and _group_has_observed(m.members, obs_tags):
+                return True
+        return False
+
+    def _prune_members(
+        members: tuple[MemberDef, ...],
+        obs_tags: set[int],
+        is_group_body: bool = False,
+    ) -> tuple[MemberDef, ...]:
+        kept: list[MemberDef] = []
+        for idx, member in enumerate(members):
+            tag = schema.fields_by_name[member.field_name].number
+            must_keep = member.required or (is_group_body and idx == 0)
+            if member.kind == "field":
+                if must_keep or tag in obs_tags:
+                    kept.append(member)
+            else:
+                if must_keep or tag in obs_tags or _group_has_observed(member.members, obs_tags):
+                    pruned_children = _prune_members(member.members, obs_tags, is_group_body=True)
+                    kept.append(dataclasses.replace(member, members=pruned_children))
+        return tuple(kept)
+
+    used_fields: set[str] = set()
+
+    def _collect_fields(members: tuple[MemberDef, ...]) -> None:
+        for member in members:
+            used_fields.add(member.field_name)
+            if member.kind == "group":
+                _collect_fields(member.members)
+
+    selected_components: dict[str, ComponentDef] = {}
+    selected_expanded_components: dict[str, tuple[MemberDef, ...]] = {}
+    for comp_name in ("Header", "Trailer"):
+        if comp_name in schema.components_by_name:
+            selected_components[comp_name] = schema.components_by_name[comp_name]
+            selected_expanded_components[comp_name] = schema._expanded_components[comp_name]
+            _collect_fields(selected_expanded_components[comp_name])
+
+    selected_expanded_messages: dict[str, tuple[MemberDef, ...]] = {}
+    for name, msg in selected_messages.items():
+        expanded = schema._expanded_messages[name]
+        is_admin = msg.category == "admin" or msg.msg_type in ADMIN_MSG_TYPES
+        if keep_all_fields or is_admin or msg.msg_type not in observed:
+            pruned = expanded
+        else:
+            obs_tags = set(observed[msg.msg_type])
+            # Ensure LENGTH/DATA partners stay together whenever either tag is seen.
+            for t in list(obs_tags):
+                if t in partner_by_tag:
+                    obs_tags.add(partner_by_tag[t])
+            pruned = _prune_members(expanded, obs_tags, is_group_body=False)
+        selected_expanded_messages[name] = pruned
+        _collect_fields(pruned)
+
+    # Ensure paired LENGTH fields for any selected DATA/XMLDATA field are kept.
+    for fname in list(used_fields):
+        fdef = schema.fields_by_name[fname]
+        if fdef.field_type in {"DATA", "XMLDATA"}:
+            partner_tag = partner_by_tag.get(fdef.number)
+            if partner_tag is not None:
+                for cand in schema.fields_by_name.values():
+                    if cand.number == partner_tag:
+                        used_fields.add(cand.name)
+                        break
+
+    selected_fields = {name: schema.fields_by_name[name] for name in used_fields if name in schema.fields_by_name}
+    subset = Schema(schema.identity, selected_fields, selected_messages, selected_components)
+    subset._expanded_messages = selected_expanded_messages
+    subset._expanded_components = selected_expanded_components
+    stats = {
+        "messages_before": len(schema.messages_by_name),
+        "messages_after": len(selected_messages),
+        "fields_before": len(schema.fields_by_name),
+        "fields_after": len(selected_fields),
+        "observed_msg_types": len(observed),
+    }
+    return subset, stats
+
+
 def _cpp_string(value: str) -> str:
     escaped = ['"']
     for byte in value.encode("utf-8"):
@@ -1522,9 +1719,9 @@ def render_header(schema: Schema, namespace: str) -> str:
             f"            return {{::nimblefix::ErrorCode::invalid_value, {delim_tag}, cursor < fields.size() ? fields[cursor].offset : 0}};",
         ]
         if seen_words == 1:
-            lines.append("        std::uint64_t seen = 1ULL;")
+            lines.append("        std::uint64_t seen = 1ULL; (void)seen;")
         else:
-            lines.append(f"        std::uint64_t seen[{seen_words}]{{}}; seen[0] = 1ULL;")
+            lines.append(f"        std::uint64_t seen[{seen_words}]{{}}; seen[0] = 1ULL; (void)seen;")
         lines += [
             "        ::nimblefix::Status entry_dup_err{};",
             "        ::nimblefix::Status entry_scalar_err{};",
@@ -1675,9 +1872,9 @@ def render_header(schema: Schema, namespace: str) -> str:
             "    };",
         ]
         if seen_words == 1:
-            lines.append("    std::uint64_t seen = 0;")
+            lines.append("    std::uint64_t seen = 0; (void)seen;")
         else:
-            lines.append(f"    std::uint64_t seen[{seen_words}]{{}};")
+            lines.append(f"    std::uint64_t seen[{seen_words}]{{}}; (void)seen;")
         lines += [
             "    ::nimblefix::Status first_content_err{};",
             "    ::nimblefix::Status first_unknown_err{};",
@@ -2325,10 +2522,25 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--namespace", required=True, help="C++ namespace for generated types")
     parser.add_argument("--messages", default="",
         help="optional comma-separated subset of message names or MsgTypes to generate")
+    parser.add_argument("--from-fix-log", action="append", default=[], type=Path,
+        help="scan sample FIX log(s) (SOH, pipe '|', or .nfxj) and prune to observed messages/fields")
+    parser.add_argument("--keep-all-fields", action="store_true",
+        help="when using --from-fix-log, prune only messages and keep all optional fields/groups")
     parser.add_argument("xml", nargs="+", type=Path, help="FIX XML schema input(s)")
     args = parser.parse_args(argv)
     try:
         schema = load_schema(args.xml)
+        if args.from_fix_log:
+            observed = scan_fix_logs(args.from_fix_log)
+            schema, stats = prune_schema_from_observations(
+                schema, observed, keep_all_fields=args.keep_all_fields
+            )
+            print(
+                f"schema codegen: pruned from FIX log: "
+                f"{stats['messages_before']}->{stats['messages_after']} messages, "
+                f"{stats['fields_before']}->{stats['fields_after']} fields",
+                file=sys.stderr,
+            )
         if args.messages:
             schema = filter_schema_messages(schema, args.messages.split(","))
         header = render_header(schema, args.namespace)

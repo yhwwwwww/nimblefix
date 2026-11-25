@@ -420,8 +420,10 @@ Status inspect_frame(std::string_view input,
                                  static_cast<unsigned>(input[checksum_offset + 4] - '0') * 10U +
                                  static_cast<unsigned>(input[checksum_offset + 5] - '0');
     if (check_value > 255U) return {ErrorCode::invalid_checksum, 10, checksum_offset + 3};
-    const unsigned computed = detail::fast_checksum_bytes(input.data(), checksum_offset);
-    if (computed != check_value) return {ErrorCode::invalid_checksum, 10, checksum_offset + 3};
+    if (limits.verify_checksum) {
+        const unsigned computed = detail::fast_checksum_bytes(input.data(), checksum_offset);
+        if (computed != check_value) return {ErrorCode::invalid_checksum, 10, checksum_offset + 3};
+    }
 
     output.bytes = input.substr(0, frame_size);
     output.consumed = frame_size;

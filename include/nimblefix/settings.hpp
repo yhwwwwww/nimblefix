@@ -95,6 +95,8 @@ struct SessionSettings {
     bool emit_last_processed_seq{true};
     bool check_sending_time{true};
     std::uint32_t max_sending_time_skew_ms{120'000};
+    TimestampPrecision timestamp_precision{TimestampPrecision::milliseconds};
+    bool verify_checksum{true};
 };
 
 [[nodiscard]] Status validate_session_settings(const SessionSettings &settings, bool acceptor,

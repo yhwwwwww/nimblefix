@@ -430,6 +430,40 @@ void test_replay_binary_and_header_contract() {
     CHECK(duplicate.status().code == ErrorCode::duplicate_field && duplicate.status().tag == 122);
 }
 
+void test_optional_checksum_skip() {
+    std::string valid = make_frame("35=0\00149=BUY\00156=SELL\00134=1\00152=20261027-00:00:00.000\001");
+    std::string bad_csum = valid;
+    // Flip the checksum digits to another valid 3-digit value <= 255 (e.g. 000 vs 001).
+    const std::size_t csum_pos = bad_csum.size() - 4;
+    bad_csum[csum_pos] = '0';
+    bad_csum[csum_pos + 1] = '0';
+    bad_csum[csum_pos + 2] = (valid[csum_pos + 2] == '0') ? '1' : '0';
+
+    FrameView frame{};
+    // Default verify_checksum == true MUST reject bad checksum.
+    CHECK(nimblefix::inspect_frame(bad_csum, frame).code == ErrorCode::invalid_checksum);
+    // Explicit opt-out verify_checksum == false accepts valid 10=ddd<SOH> framing.
+    CodecLimits skip_limits{};
+    skip_limits.verify_checksum = false;
+    CHECK(nimblefix::inspect_frame(bad_csum, frame, {}, skip_limits).ok());
+    CHECK(frame.consumed == bad_csum.size());
+    std::array<FieldView, 16> scratch{};
+    FlatMessageView msg{};
+    CHECK(nimblefix::parse_flat(frame, scratch, msg, {}, skip_limits).ok());
+    CHECK(msg.msg_type() == "0");
+
+    // Even with verify_checksum == false, malformed 10= framing and values > 255 MUST still be rejected.
+    std::string over255 = valid;
+    over255[csum_pos] = '9';
+    over255[csum_pos + 1] = '9';
+    over255[csum_pos + 2] = '9';
+    CHECK(nimblefix::inspect_frame(over255, frame, {}, skip_limits).code == ErrorCode::invalid_checksum);
+
+    std::string non_digit = valid;
+    non_digit[csum_pos + 1] = 'X';
+    CHECK(nimblefix::inspect_frame(non_digit, frame, {}, skip_limits).code == ErrorCode::invalid_checksum);
+}
+
 } // namespace
 
 int main() {
@@ -443,6 +477,7 @@ int main() {
     test_deterministic_malformed_buffer_sweep();
     test_replay_binary_and_header_contract();
     test_supported_versions_measurement_and_369();
+    test_optional_checksum_skip();
     if (failures != 0) {
         std::cerr << failures << " parser test(s) failed\n";
         return 1;

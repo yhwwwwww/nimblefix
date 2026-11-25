@@ -442,6 +442,82 @@ class SchemaCodegenTests(unittest.TestCase):
         self.assertEqual(first.st_mtime_ns, second.st_mtime_ns)
         self.assertNotIn(str(source.resolve()), output.read_text(encoding="utf-8"))
 
+    def test_from_fix_log_prunes_messages_and_optional_fields_safely(self):
+        fix44 = ROOT / "schemas" / "standard" / "FIX44.xml"
+        if not fix44.exists():
+            self.skipTest("standard FIX44.xml not present")
+
+        # Mix pipe-delimited text log and raw SOH binary frame (including a repeating group
+        # and a DATA/LENGTH pair tag 355 without explicit 354 to verify partner preservation).
+        pipe_log = self.write(
+            "venue.log",
+            "2026-11-25 08:00:00 OUT 8=FIX.4.4|9=140|35=D|49=BUY|56=SELL|34=2|52=20261125-08:00:00.000|"
+            "11=ORD-1|55=AAPL|54=1|60=20261125-08:00:00.000|38=100|40=2|44=185.25|"
+            "453=1|448=CLIENT1|447=D|452=1|10=000|\n",
+        )
+        soh_log = self.directory / "session.nfxj"
+        soh_log.write_bytes(
+            b"\x00\x01HEADER_NOISE"
+            b"8=FIX.4.4\x019=90\x0135=8\x0149=SELL\x0156=BUY\x0134=2\x0152=20261125-08:00:00.001\x01"
+            b"37=EX1\x0117=E1\x01150=0\x0139=0\x0155=AAPL\x0154=1\x01151=100\x0114=0\x016=0\x01"
+            b"355=raw\x0110=000\x01"
+        )
+
+        observed = codegen.scan_fix_logs([pipe_log, soh_log])
+        self.assertIn("D", observed)
+        self.assertIn("8", observed)
+        self.assertIn(44, observed["D"])
+        self.assertIn(448, observed["D"])
+        self.assertIn(355, observed["8"])
+
+        full_schema = codegen.load_schema([fix44])
+        pruned, stats = codegen.prune_schema_from_observations(full_schema, observed)
+        self.assertLess(stats["messages_after"], 15)
+        self.assertLess(stats["fields_after"], 200)
+        self.assertIn("NewOrderSingle", pruned.messages_by_name)
+        self.assertIn("ExecutionReport", pruned.messages_by_name)
+        self.assertIn("Logon", pruned.messages_by_name)  # Admin messages always preserved
+        self.assertNotIn("QuoteRequest", pruned.messages_by_name)
+
+        nos_members = pruned._expanded_messages["NewOrderSingle"]
+        nos_tags = {pruned.fields_by_name[m.field_name].number for m in nos_members}
+        # Observed fields + required fields + observed repeating group kept
+        self.assertTrue({11, 55, 54, 60, 38, 40, 44, 453}.issubset(nos_tags))
+        # Unobserved optional field (e.g. Account=1, CashOrderQty=152) pruned
+        self.assertNotIn(1, nos_tags)
+        self.assertNotIn(152, nos_tags)
+
+        # Paired LENGTH tag 354 preserved alongside observed DATA tag 355 on ExecutionReport
+        er_tags = {pruned.fields_by_name[m.field_name].number for m in pruned._expanded_messages["ExecutionReport"]}
+        self.assertIn(355, er_tags)
+        self.assertIn(354, er_tags)
+
+        # Generated C++ header renders cleanly and deterministically via CLI
+        out = self.directory / "pruned_venue.hpp"
+        rc = codegen.main([
+            "--output", str(out),
+            "--namespace", "venue::pruned",
+            "--from-fix-log", str(pipe_log),
+            "--from-fix-log", str(soh_log),
+            str(fix44),
+        ])
+        self.assertEqual(0, rc)
+        text = out.read_text(encoding="utf-8")
+        self.assertIn("struct NewOrderSingle", text)
+        self.assertIn("struct ExecutionReport", text)
+        self.assertNotIn("struct QuoteRequest", text)
+        self.assertIn("fast_validate_message", text)
+
+        # --keep-all-fields keeps all optional fields on observed messages
+        pruned_all, _ = codegen.prune_schema_from_observations(
+            full_schema, observed, keep_all_fields=True
+        )
+        nos_all_tags = {
+            pruned_all.fields_by_name[m.field_name].number
+            for m in pruned_all._expanded_messages["NewOrderSingle"]
+        }
+        self.assertIn(1, nos_all_tags)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1318,7 +1318,7 @@ std::array<char, 32> wall_timestamp() noexcept {
         cached_sec = ts.tv_sec;
         std::tm utc{};
         if (::gmtime_r(&ts.tv_sec, &utc) == nullptr) {
-            std::memcpy(cached_buf.data(), "19700101-00:00:00.000", 22);
+            std::memcpy(cached_buf.data(), "19700101-00:00:00.000000000", 28);
         } else {
             auto w2 = [](char* o, unsigned v) noexcept {
                 o[0] = static_cast<char>('0' + (v / 10U) % 10U);
@@ -1340,18 +1340,28 @@ std::array<char, 32> wall_timestamp() noexcept {
             cached_buf[14] = ':';
             w2(cached_buf.data() + 15, static_cast<unsigned>(utc.tm_sec));
             cached_buf[17] = '.';
-            cached_buf[21] = '\0';
+            cached_buf[27] = '\0';
         }
     }
-    const auto ms = static_cast<unsigned>(ts.tv_nsec / 1'000'000L);
-    cached_buf[18] = static_cast<char>('0' + (ms / 100U) % 10U);
-    cached_buf[19] = static_cast<char>('0' + (ms / 10U) % 10U);
-    cached_buf[20] = static_cast<char>('0' + ms % 10U);
+    const auto nsec = static_cast<unsigned>(ts.tv_nsec);
+    const unsigned ms = nsec / 1'000'000U;
+    const unsigned rem_us = nsec - ms * 1'000'000U;
+    const unsigned us = rem_us / 1'000U;
+    const unsigned ns = rem_us - us * 1'000U;
+    auto w3 = [](char* o, unsigned v) noexcept {
+        o[0] = static_cast<char>('0' + (v / 100U) % 10U);
+        o[1] = static_cast<char>('0' + (v / 10U) % 10U);
+        o[2] = static_cast<char>('0' + v % 10U);
+    };
+    w3(cached_buf.data() + 18, ms);
+    w3(cached_buf.data() + 21, us);
+    w3(cached_buf.data() + 24, ns);
     return cached_buf;
 }
 
-constexpr std::string_view timestamp_view(const std::array<char, 32>& value) noexcept {
-    return {value.data(), 21};
+constexpr std::string_view timestamp_view(const std::array<char, 32>& value,
+    TimestampPrecision precision = TimestampPrecision::milliseconds) noexcept {
+    return {value.data(), timestamp_length(precision)};
 }
 
 bool plain_identifier(std::string_view value, std::size_t max_size) noexcept {
@@ -2216,10 +2226,12 @@ struct EngineRuntime::Impl {
             } else if (active_callback_command && command.generation != peer.generation) {
                 accepted = Status{ErrorCode::connection_closed};
             } else if (command.dependency == 0) {
-                accepted = peer.driver->send(message, admission_now, timestamp_view(wall));
+                accepted = peer.driver->send(message, admission_now,
+                    timestamp_view(wall, peer.settings.timestamp_precision));
             } else {
                 const bool recovery = command.recovery || command.generation != peer.generation;
-                accepted = peer.driver->send_dependent(message, admission_now, timestamp_view(wall),
+                accepted = peer.driver->send_dependent(message, admission_now,
+                    timestamp_view(wall, peer.settings.timestamp_precision),
                     command.dependency, command.dependency_ordinal, recovery);
             }
             if (!accepted.ok() && accepted.status().code == ErrorCode::queue_full) {
@@ -2277,7 +2289,8 @@ struct EngineRuntime::Impl {
                 ++processed;
                 continue;
             }
-            auto accepted = peer.driver->send(message, admission_now, timestamp_view(wall));
+            auto accepted = peer.driver->send(message, admission_now,
+                timestamp_view(wall, peer.settings.timestamp_precision));
             if (!accepted.ok() && accepted.status().code == ErrorCode::queue_full) {
                 sender.block_commands();
                 break;
@@ -2776,7 +2789,7 @@ struct EngineRuntime::Impl {
         peer.read_pause_since = 0;
         const auto wall = wall_timestamp();
         const auto status = peer.driver
-            ? peer.driver->connected(now, timestamp_view(wall))
+            ? peer.driver->connected(now, timestamp_view(wall, peer.settings.timestamp_precision))
             : Status{ErrorCode::invalid_config};
         if (!status.ok()) {
             drop_peer(peer, status, now, false);
@@ -2975,7 +2988,8 @@ struct EngineRuntime::Impl {
             const auto connected_status = connected_peer(stored, now);
             if (!connected_status.ok()) return connected_status;
             const auto wall = wall_timestamp();
-            const auto received = stored.driver->receive(first_wire, now, timestamp_view(wall));
+            const auto received = stored.driver->receive(first_wire, now,
+                timestamp_view(wall, stored.settings.timestamp_precision));
             if (!received.ok()) {
                 drop_peer(stored, received, now, false);
                 return received;
@@ -3006,14 +3020,15 @@ struct EngineRuntime::Impl {
                peer.unread_size() != 0 && processed < frame_budget && peer.driver->can_receive()) {
             FrameView frame{};
             const auto status = inspect_frame(peer.unread_view(), frame, {},
-                CodecLimits{config.max_frame_bytes});
+                CodecLimits{config.max_frame_bytes, peer.settings.verify_checksum});
             if (status.code == ErrorCode::need_more) return Status::success();
             if (!status.ok()) {
                 drop_peer(peer, status, now, true);
                 return status;
             }
             const auto wall = wall_timestamp();
-            const auto received = peer.driver->receive_verified(frame, now, timestamp_view(wall));
+            const auto received = peer.driver->receive_verified(frame, now,
+                timestamp_view(wall, peer.settings.timestamp_precision));
             if (received.code == ErrorCode::queue_full) return Status::success();
             if (peer.session) {
                 peer.session->received_frames.fetch_add(1, std::memory_order_relaxed);
@@ -3039,7 +3054,7 @@ struct EngineRuntime::Impl {
             peer.unread_size() == 0 || !peer.driver || !peer.driver->can_receive()) return false;
         FrameView frame{};
         return inspect_frame(peer.unread_view(), frame, wire_hints,
-            CodecLimits{config.max_frame_bytes}).ok();
+            CodecLimits{config.max_frame_bytes, peer.settings.verify_checksum}).ok();
     }
 
     [[nodiscard]] Status process_pending_buffer(Pending& connection,
@@ -3357,7 +3372,8 @@ struct EngineRuntime::Impl {
             if (!peer.settings.schedule.contains(std::chrono::system_clock::now()) &&
                 !peer.schedule_logout_sent && peer.driver->state() == SessionState::active) {
                 peer.schedule_logout_sent = true;
-                (void)peer.driver->logout("session schedule closed", now, timestamp_view(wall));
+                (void)peer.driver->logout("session schedule closed", now,
+                    timestamp_view(wall, peer.settings.timestamp_precision));
             }
             const auto flow = peer.settings.flow_control.value_or(FlowControlConfig{});
             if (!peer.driver->can_receive()) {
@@ -3373,7 +3389,8 @@ struct EngineRuntime::Impl {
                 drop_peer(peer, Status{ErrorCode::backlog_timeout}, now, true);
                 continue;
             }
-            const auto status = peer.driver->tick(now, timestamp_view(wall));
+            const auto status = peer.driver->tick(now,
+                timestamp_view(wall, peer.settings.timestamp_precision));
             if (!status.ok()) {
                 if (shutdown_started && shutdown_status.ok()) shutdown_status = status;
                 drop_peer(peer, status, now, false);
@@ -3463,7 +3480,8 @@ struct EngineRuntime::Impl {
                 const auto state = peer.driver->state();
                 if (state != SessionState::active &&
                     state != SessionState::awaiting_logon) continue;
-                const auto status = peer.driver->logout("engine shutdown", now, timestamp_view(wall));
+                const auto status = peer.driver->logout("engine shutdown", now,
+                    timestamp_view(wall, peer.settings.timestamp_precision));
                 peer.shutdown_logout_sent = true;
                 if (!status.ok()) {
                     if (shutdown_status.ok()) shutdown_status = status;
@@ -3561,7 +3579,8 @@ struct EngineRuntime::Impl {
                 const auto size = peer->session->sender->take_logout(std::span<char>{reason, sizeof(reason)});
                 if (size) {
                     const auto wall = wall_timestamp();
-                    const auto result = peer->driver->logout({reason, *size}, now, timestamp_view(wall));
+                    const auto result = peer->driver->logout({reason, *size}, now,
+                        timestamp_view(wall, peer->settings.timestamp_precision));
                     if (!result.ok()) report_error(peer->name, result);
                 }
             }

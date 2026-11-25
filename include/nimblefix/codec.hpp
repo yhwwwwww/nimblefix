@@ -19,6 +19,7 @@ inline constexpr std::size_t max_wire_hint_pairs = 128;
 
 struct CodecLimits {
     std::size_t max_frame_bytes{default_max_frame_bytes};
+    bool verify_checksum{true};
 };
 
 struct LengthDataPair {

@@ -36,4 +36,29 @@ enum class FixVersion : std::uint8_t { fix42, fix43, fix44, fixt11 };
     return value == "4" || value == "5" || value == "6" || value == "7" || value == "8" || value == "9";
 }
 
+enum class TimestampPrecision : std::uint8_t {
+    milliseconds,
+    microseconds,
+    nanoseconds,
+};
+
+[[nodiscard]] constexpr std::size_t timestamp_length(TimestampPrecision precision) noexcept {
+    switch (precision) {
+    case TimestampPrecision::milliseconds:
+        return 21;
+    case TimestampPrecision::microseconds:
+        return 24;
+    case TimestampPrecision::nanoseconds:
+        return 27;
+    }
+    return 21;
+}
+
+[[nodiscard]] inline Result<TimestampPrecision> parse_timestamp_precision(std::string_view text) noexcept {
+    if (text == "ms" || text == "milliseconds") return TimestampPrecision::milliseconds;
+    if (text == "us" || text == "microseconds") return TimestampPrecision::microseconds;
+    if (text == "ns" || text == "nanoseconds") return TimestampPrecision::nanoseconds;
+    return Status{ErrorCode::invalid_config};
+}
+
 } // namespace nimblefix

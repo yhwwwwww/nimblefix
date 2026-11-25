@@ -246,6 +246,14 @@ class Loader {
         result.check_sending_time = boolean(session, "check_sending_time", prefix, true);
         result.max_sending_time_skew_ms = static_cast<std::uint32_t>(
             integer(session, "max_sending_time_skew_ms", prefix, 120'000, 0, 86'400'000));
+        const auto precision_text = string(session, "timestamp_precision", prefix, "ms");
+        const auto parsed_precision = parse_timestamp_precision(precision_text);
+        if (!parsed_precision.ok())
+            error(session.get("timestamp_precision"), std::string{prefix} + ".timestamp_precision",
+                  "ms, us, ns (or milliseconds, microseconds, nanoseconds)");
+        else
+            result.timestamp_precision = parsed_precision.value();
+        result.verify_checksum = boolean(session, "verify_checksum", prefix, true);
         if (const auto *logon = table(session, "logon", prefix)) {
             const auto p = std::string{prefix} + ".logon";
             keys(*logon, p, {"username", "password_env", "reset_sequence", "fields"});
@@ -550,6 +558,8 @@ class Loader {
                           "allow_sequence_reset",
                           "check_sending_time",
                           "max_sending_time_skew_ms",
+                          "timestamp_precision",
+                          "verify_checksum",
                           "emit_last_processed_seq",
                           "logon",
                           "authentication",

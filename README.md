@@ -99,14 +99,21 @@ auto init = nf::DirectInitiator<fix::Schema, MyHandler, nf::DirectTlsTransport>:
     std::move(cfg), MyHandler{}, std::move(transport)).value();
 ```
 
-### Subset Schema Codegen (`--messages`)
+### Subset & Log-Driven Schema Codegen (`--messages` / `--from-fix-log`)
 
 Trim generated headers and compile times to only the business messages you trade (admin messages and referenced groups/components are kept automatically):
 
 ```sh
+# Explicit message subset:
 python3 tools/schema/generate.py --output generated/venue.hpp --namespace venue \
   --messages NewOrderSingle,OrderCancelRequest,ExecutionReport schemas/standard/FIX44.xml
+
+# Or auto-prune messages + optional fields/groups directly from sample FIX logs (.log / .fix / .nfxj):
+python3 tools/schema/generate.py --output generated/venue.hpp --namespace venue \
+  --from-fix-log ./logs/venue.log schemas/standard/FIX44.xml
 ```
+
+Per-session sub-millisecond timestamps (`timestamp_precision = TimestampPrecision::microseconds | nanoseconds`, TOML `"ms" | "us" | "ns"`) and explicit opt-in inbound checksum skip (`verify_checksum = false`, `true` by default) are configurable on both `DirectInitiatorConfig` and `SessionSettings`.
 
 Arbitrary custom/venue tags across the full FIX range (`1..999,999,999`, e.g. `8899` or `900001`) are supported natively with zero bitset bloat — all slot tables and deduplication bitsets are indexed by compact per-message member index, never by raw tag number.
 

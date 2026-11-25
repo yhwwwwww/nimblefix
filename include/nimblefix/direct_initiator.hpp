@@ -64,6 +64,8 @@ struct DirectInitiatorConfig {
     bool emit_last_processed_seq{true};
     bool check_sending_time{};
     std::uint64_t max_sending_time_skew_ms{120'000};
+    TimestampPrecision timestamp_precision{TimestampPrecision::milliseconds};
+    bool verify_checksum{true};
 };
 
 // Default no-op handler for tests or send-only initiators.
@@ -75,8 +77,8 @@ struct NullInitiatorHandler {
 
 namespace detail {
 
-// Fast cached UTC wall clock ("YYYYMMDD-HH:MM:SS.mmm") + monotonic milliseconds.
-// Calls gmtime_r at most once per whole second; hot-path calls update only 3 ms digits.
+// Fast cached UTC wall clock ("YYYYMMDD-HH:MM:SS.mmm[uuu[nnn]]") + monotonic milliseconds.
+// Calls gmtime_r at most once per whole second; hot-path calls update only fractional digits.
 class FastUtcClock {
 public:
     [[nodiscard]] std::uint64_t now_ms() const noexcept {
@@ -86,7 +88,8 @@ public:
                static_cast<std::uint64_t>(ts.tv_nsec / 1'000'000L);
     }
 
-    [[nodiscard]] std::string_view wall_time() noexcept {
+    [[nodiscard]] std::string_view wall_time(
+        TimestampPrecision precision = TimestampPrecision::milliseconds) noexcept {
         timespec ts{};
         ::clock_gettime(CLOCK_REALTIME, &ts);
         if (ts.tv_sec != cached_sec_) {
@@ -104,17 +107,31 @@ public:
             write_2(buf_.data() + 15, static_cast<unsigned>(utc.tm_sec));
             buf_[17] = '.';
         }
-        const auto ms = static_cast<unsigned>(ts.tv_nsec / 1'000'000L);
-        buf_[18] = static_cast<char>('0' + (ms / 100U) % 10U);
-        buf_[19] = static_cast<char>('0' + (ms / 10U) % 10U);
-        buf_[20] = static_cast<char>('0' + ms % 10U);
-        return {buf_.data(), 21};
+        const auto nsec = static_cast<unsigned>(ts.tv_nsec);
+        const unsigned ms = nsec / 1'000'000U;
+        write_3(buf_.data() + 18, ms);
+        if (precision == TimestampPrecision::milliseconds) {
+            return {buf_.data(), 21};
+        }
+        const unsigned rem_us = nsec - ms * 1'000'000U;
+        const unsigned us = rem_us / 1'000U;
+        write_3(buf_.data() + 21, us);
+        if (precision == TimestampPrecision::microseconds) {
+            return {buf_.data(), 24};
+        }
+        write_3(buf_.data() + 24, rem_us - us * 1'000U);
+        return {buf_.data(), 27};
     }
 
 private:
     static void write_2(char* out, unsigned v) noexcept {
         out[0] = static_cast<char>('0' + (v / 10U) % 10U);
         out[1] = static_cast<char>('0' + v % 10U);
+    }
+    static void write_3(char* out, unsigned v) noexcept {
+        out[0] = static_cast<char>('0' + (v / 100U) % 10U);
+        out[1] = static_cast<char>('0' + (v / 10U) % 10U);
+        out[2] = static_cast<char>('0' + v % 10U);
     }
     static void write_4(char* out, unsigned v) noexcept {
         out[0] = static_cast<char>('0' + (v / 1000U) % 10U);
@@ -124,7 +141,7 @@ private:
     }
 
     std::time_t cached_sec_{-1};
-    std::array<char, 24> buf_{};
+    std::array<char, 28> buf_{};
 };
 
 inline void direct_secure_clear(std::span<char> bytes) noexcept {
@@ -392,7 +409,7 @@ public:
 
     // Initiates nonblocking TCP connection. Call poll_once() to complete handshake & I/O.
     [[nodiscard]] Status connect() noexcept {
-        return connect(clock_.now_ms(), clock_.wall_time());
+        return connect(clock_.now_ms(), now_wall_time());
     }
 
     [[nodiscard]] Status connect(std::uint64_t now_ms, std::string_view wall_time) noexcept {
@@ -410,7 +427,7 @@ public:
     // flush pending outbound/replay -> process heartbeat/timeout timers.
     // Performs zero heap allocations, zero mutex locks, and zero fsync on steady state.
     [[nodiscard]] Status poll_once() noexcept {
-        return poll_once(clock_.now_ms(), clock_.wall_time());
+        return poll_once(clock_.now_ms(), now_wall_time());
     }
 
     [[nodiscard]] Status poll_once(std::uint64_t now_ms, std::string_view wall_time) noexcept {
@@ -501,7 +518,7 @@ public:
     template <class Message>
         requires requires(const Message& m) { m.view(); }
     [[nodiscard]] Result<std::uint64_t> send(const Message& message) noexcept {
-        return send(message, clock_.now_ms(), clock_.wall_time());
+        return send(message, clock_.now_ms(), now_wall_time());
     }
 
     template <class Message>
@@ -523,7 +540,7 @@ public:
     template <class Message>
         requires requires(const Message& m) { m.view(); }
     [[nodiscard]] Result<std::uint64_t> enqueue(const Message& message) noexcept {
-        return enqueue(message, clock_.now_ms(), clock_.wall_time());
+        return enqueue(message, clock_.now_ms(), now_wall_time());
     }
 
     template <class Message>
@@ -547,7 +564,7 @@ public:
     template <class Message, class Fn>
         requires detail::streamable_message<Message>
     [[nodiscard]] Result<std::uint64_t> send_stream(Fn&& fn) noexcept {
-        return send_stream<Message>(std::forward<Fn>(fn), clock_.now_ms(), clock_.wall_time());
+        return send_stream<Message>(std::forward<Fn>(fn), clock_.now_ms(), now_wall_time());
     }
 
     template <class Message, class Fn>
@@ -569,7 +586,7 @@ public:
     template <class Message, class Fn>
         requires detail::streamable_message<Message>
     [[nodiscard]] Result<std::uint64_t> enqueue_stream(Fn&& fn) noexcept {
-        return enqueue_stream<Message>(std::forward<Fn>(fn), clock_.now_ms(), clock_.wall_time());
+        return enqueue_stream<Message>(std::forward<Fn>(fn), clock_.now_ms(), now_wall_time());
     }
 
     template <class Message, class Fn>
@@ -601,7 +618,7 @@ public:
     // stamp FIX MsgSeqNum/SendingTime, commit to mmap Journal, and flush in a single writev/sendmsg.
     [[nodiscard]] Result<std::size_t> drain(DirectSendQueue& queue,
                                             std::size_t max_batch = 64) noexcept {
-        return drain(queue, max_batch, clock_.now_ms(), clock_.wall_time());
+        return drain(queue, max_batch, clock_.now_ms(), now_wall_time());
     }
 
     [[nodiscard]] Result<std::size_t> drain(DirectSendQueue& queue,
@@ -643,7 +660,7 @@ public:
     }
 
     [[nodiscard]] Status logout(std::string_view reason = {}) noexcept {
-        return logout(reason, clock_.now_ms(), clock_.wall_time());
+        return logout(reason, clock_.now_ms(), now_wall_time());
     }
 
     [[nodiscard]] Status logout(std::string_view reason, std::uint64_t now_ms,
@@ -667,6 +684,9 @@ public:
         handle_disconnect(reason, clock_.now_ms());
     }
 
+    [[nodiscard]] std::string_view now_wall_time() noexcept {
+        return clock_.wall_time(config_.timestamp_precision);
+    }
     [[nodiscard]] int native_fd() const noexcept { return transport_.native_fd(); }
     [[nodiscard]] bool valid_transport() const noexcept { return transport_.valid(); }
     [[nodiscard]] bool is_connecting() const noexcept { return transport_.is_connecting(); }
@@ -812,7 +832,8 @@ private:
         if (bytes.size() > config_.max_frame_bytes) return Status{ErrorCode::too_large};
         FrameView fv{};
         constexpr auto hints = detail::direct_schema_wire_hints<Schema>();
-        if (const auto st = inspect_frame(bytes, fv, hints, CodecLimits{config_.max_frame_bytes}); !st.ok())
+        if (const auto st = inspect_frame(bytes, fv, hints,
+                CodecLimits{config_.max_frame_bytes, config_.verify_checksum}); !st.ok())
             return st;
         if (fv.consumed != bytes.size()) return Status{ErrorCode::invalid_frame};
         if (const auto st = parse_flat_verified(fv, parse_fields_, out, hints); !st.ok()) return st;
@@ -1475,7 +1496,8 @@ private:
         while (rx_head_ < rx_tail_ && !fatal_ && !should_close_) {
             const std::string_view avail{rx_buf_.data() + rx_head_, rx_tail_ - rx_head_};
             FrameView fv{};
-            const auto st = inspect_frame(avail, fv, hints, CodecLimits{config_.max_frame_bytes});
+            const auto st = inspect_frame(avail, fv, hints,
+                CodecLimits{config_.max_frame_bytes, config_.verify_checksum});
             if (st.code == ErrorCode::need_more) break;
             if (!st.ok()) return fail(st);
             rx_head_ += fv.consumed;

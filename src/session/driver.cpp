@@ -1080,8 +1080,9 @@ struct SessionDriver::Impl {
     [[nodiscard]] Status parse_frame(std::string_view bytes, FlatMessageView& message) noexcept {
         if (bytes.size() > config.max_frame_bytes) return Status{ErrorCode::too_large};
         FrameView frame{};
+        const bool check_csum = !config.settings || config.settings->verify_checksum;
         if (const auto status = inspect_frame(bytes, frame, callbacks.wire_hints,
-                CodecLimits{config.max_frame_bytes}); !status.ok()) {
+                CodecLimits{config.max_frame_bytes, check_csum}); !status.ok()) {
             return status;
         }
         if (frame.consumed != bytes.size()) return Status{ErrorCode::invalid_frame};

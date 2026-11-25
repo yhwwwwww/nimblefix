@@ -20,12 +20,13 @@ Goal: Push both outbound encoding and inbound strict parsing/validation firmly i
 - **Status**: Implemented and verified across Layer 0/1/2 (`encode_stream`, `encode_fix44_stream`, `encode_body_stream`, `DirectInitiator::send_stream`/`enqueue_stream`, `DirectSendQueue::try_push_stream`, `SessionContext`/`SessionDriver`/`Sender`/`ProducerLane::send_stream`); legacy `make()` and `Draft` builders removed (`Fixed` preserved).
 - **Measured Result**: Typical `NewOrderSingle` down to **130 ns p50** (0 alloc), `NewOrderSingle + NoPartyIDs[1]` **140–211 ns** (**6.9M msgs/s**, **7.9–8.6× faster than QuickFIX 1.16.0**), `DirectInitiator::send_stream` + mmap Journal **281 ns p50** (**3.47M msgs/s**), 32-order TCP burst **1.33M–1.43M ord/s** (**12.69× lower CO-Free p50 than QuickFIX**).
 
-### 3. Sub-Millisecond Timestamps (`µs` / `ns`) & Optional Checksum Bypass
-- **Timestamps**: Extend `FastUtcClock` and session configuration to support per-session **millisecond (`ms`), microsecond (`µs`), and nanosecond (`ns`)** precision for `SendingTime (52)` / `TransactTime (60)` (required by MiFID II and modern low-latency venues; parser/validator already accepts all 4 FIX precisions).
-- **Optional Checksum Skip**: Allow explicit per-session opt-in to skip inbound FIX `CheckSum (10)` verification on trusted internal/dedicated links (saving `~150–200 ns` per frame; enabled by default for safety).
+### 3. [Done] Sub-Millisecond Timestamps (`µs` / `ns`) & Optional Checksum Bypass
+- **Status**: Implemented and verified across `TimestampPrecision` (`milliseconds` / `microseconds` / `nanoseconds`), `FastUtcClock` & `Engine` wall clock, `CodecLimits::verify_checksum` (`true` by default), `DirectInitiatorConfig`, `SessionSettings`, and TOML configuration (`timestamp_precision = "ms" | "us" | "ns"`, `verify_checksum = true | false`).
+- **Safety**: Even when `verify_checksum = false` is explicitly opted into on trusted links, `10=ddd<SOH>` framing syntax and `000..255` range remain strictly enforced.
 
-### 4. Log-Driven Schema Optimization Tooling
-- Extend `tools/schema/generate.py` (building on existing `--messages` subset pruning) with a log-analyzer helper that scans sample production FIX logs and generates a minimal venue schema containing only observed messages, fields, and groups to maximize L1/L2 cache density.
+### 4. [Done] Log-Driven Schema Optimization Tooling (`--from-fix-log`)
+- **Status**: Implemented in `tools/schema/generate.py` with `--from-fix-log <path>` (repeatable) and `--keep-all-fields`.
+- **Capabilities**: Scans raw SOH (`\x01`), pipe-delimited (`|`), or binary `.nfxj` journal files to prune unobserved business messages and optional fields/groups while automatically preserving admin messages, required fields, repeating group delimiters, `Header`/`Trailer`, and paired `LENGTH`/`DATA` tags.
 
 ---
 

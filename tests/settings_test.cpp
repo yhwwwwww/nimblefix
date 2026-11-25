@@ -75,5 +75,17 @@ int main() {
           nf::ErrorCode::authentication_failed);
     CHECK(nf::parse_fix_version("FIX.4.2").value() == nf::FixVersion::fix42);
     CHECK(nf::parse_fix_version("FIX.9.9").status().code == nf::ErrorCode::unsupported_protocol);
+    CHECK(nf::parse_timestamp_precision("ms").value() == nf::TimestampPrecision::milliseconds);
+    CHECK(nf::parse_timestamp_precision("milliseconds").value() == nf::TimestampPrecision::milliseconds);
+    CHECK(nf::parse_timestamp_precision("us").value() == nf::TimestampPrecision::microseconds);
+    CHECK(nf::parse_timestamp_precision("microseconds").value() == nf::TimestampPrecision::microseconds);
+    CHECK(nf::parse_timestamp_precision("ns").value() == nf::TimestampPrecision::nanoseconds);
+    CHECK(nf::parse_timestamp_precision("nanoseconds").value() == nf::TimestampPrecision::nanoseconds);
+    CHECK(nf::parse_timestamp_precision("sec").status().code == nf::ErrorCode::invalid_config);
+    CHECK(nf::timestamp_length(nf::TimestampPrecision::milliseconds) == 21);
+    CHECK(nf::timestamp_length(nf::TimestampPrecision::microseconds) == 24);
+    CHECK(nf::timestamp_length(nf::TimestampPrecision::nanoseconds) == 27);
+    CHECK(settings.verify_checksum == true);
+    CHECK(settings.timestamp_precision == nf::TimestampPrecision::milliseconds);
     std::cout << "UTC schedule, settings validation and credential authentication passed\n";
 }

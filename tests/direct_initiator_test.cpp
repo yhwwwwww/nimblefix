@@ -673,6 +673,63 @@ void test_named_fixed_enqueue_batch_and_spsc_queue() {
     CHECK(field(wire, 11) == "Q-STREAM" && field(wire, 55) == "MSFT");
 }
 
+void test_subms_timestamps_and_optional_checksum_skip() {
+    // 1. FastUtcClock millisecond, microsecond, nanosecond precision formats
+    nf::detail::FastUtcClock clk{};
+    const auto ts_ms = clk.wall_time(nf::TimestampPrecision::milliseconds);
+    CHECK(ts_ms.size() == 21 && nf::detail::is_valid_utc_timestamp(ts_ms));
+    const auto ts_us = clk.wall_time(nf::TimestampPrecision::microseconds);
+    CHECK(ts_us.size() == 24 && nf::detail::is_valid_utc_timestamp(ts_us));
+    const auto ts_ns = clk.wall_time(nf::TimestampPrecision::nanoseconds);
+    CHECK(ts_ns.size() == 27 && nf::detail::is_valid_utc_timestamp(ts_ns));
+
+    // 2. DirectInitiator configured with nanosecond timestamps and verify_checksum = false
+    TempDir dir;
+    nf::DirectInitiatorConfig cfg{};
+    cfg.host = "127.0.0.1";
+    cfg.port = 9999;
+    cfg.storage_directory = dir.path;
+    cfg.local_comp_id = "BUY";
+    cfg.remote_comp_id = "SELL";
+    cfg.heartbeat_ms = 30'000;
+    cfg.timestamp_precision = nf::TimestampPrecision::nanoseconds;
+    cfg.verify_checksum = false;
+
+    auto opened = nf::DirectInitiator<fix::Schema, nf::NullInitiatorHandler, LoopbackTransport>::open(cfg);
+    CHECK(opened.ok());
+    auto init = std::move(opened).value();
+    CHECK(init.connect().ok());
+
+    std::string logon_wire;
+    CHECK(init.transport().pop_sent_frame(logon_wire));
+    const auto logon_ts = field(logon_wire, 52);
+    CHECK(logon_ts.size() == 27 && nf::detail::is_valid_utc_timestamp(logon_ts));
+
+    // Feed peer Logon with intentionally wrong (but syntactically valid 000..255) checksum
+    std::string peer_logon = make_frame(nf::message<"A">().set<98>(0).set<108>(30),
+                                        "SELL", "BUY", 1, init.now_wall_time());
+    const std::size_t cpos = peer_logon.size() - 4;
+    peer_logon[cpos] = '0';
+    peer_logon[cpos + 1] = '0';
+    peer_logon[cpos + 2] = (peer_logon[cpos + 2] == '0') ? '1' : '0';
+    init.transport().push_from_peer(peer_logon);
+    CHECK(init.poll_once().ok());
+    CHECK(init.is_active());
+
+    // Send a NewOrderSingle using the default clock (27-byte nanosecond 52= and 60=)
+    const auto wt = init.now_wall_time();
+    CHECK(wt.size() == 27);
+    const auto sent = init.send_stream<fix::NewOrderSingle>([&](auto& w) {
+        w.cl_ord_id("NS-ORD-1").symbol("AAPL").side('1')
+         .transact_time(wt).order_qty(nf::Decimal{10, 0}).ord_type('1');
+    });
+    CHECK(sent.ok());
+    std::string ord_wire;
+    CHECK(init.transport().pop_sent_frame(ord_wire));
+    CHECK(field(ord_wire, 52).size() == 27);
+    CHECK(field(ord_wire, 60).size() == 27);
+}
+
 } // namespace
 
 int main() {
@@ -681,6 +738,7 @@ int main() {
     test_zero_alloc_zero_lock_zero_fsync_steady_state();
     test_restart_recovery_resend_replay_and_gapfill();
     test_sigkill_crash_recovery_redelivers_uncommitted_delivery();
+    test_subms_timestamps_and_optional_checksum_skip();
     if (failures != 0) {
         std::cerr << failures << " direct initiator test(s) failed\n";
         return 1;

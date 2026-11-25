@@ -132,6 +132,8 @@ password = "SHOULD-NEVER-APPEAR"
     config = config_dir / "acceptor.toml"
     content = original.decode().replace("127.0.0.1:9876", "127.0.0.1:0")
     content += '''
+timestamp_precision = "us"
+verify_checksum = true
 [sessions.authentication]
 method = "credentials"
 username = "demo"
@@ -156,7 +158,9 @@ require_tls = false
         with socket.create_connection(("127.0.0.1", event["port"]), timeout=3) as peer:
             peer.sendall(raw_path.read_bytes())
             reader = Reader(peer)
-            assert reader.read()[b"35"] == b"A"
+            logon_reply = reader.read()
+            assert logon_reply[b"35"] == b"A"
+            assert len(logon_reply[b"52"]) == 24, f"expected microsecond 52=, got {logon_reply[b'52']!r}"
             peer.sendall(frame(2, "D", ((11, "CLI-ORDER"), (55, "AAPL"), (54, 1), (38, 100), (40, 1))))
             observed = events.read()
             while observed.get("event") != "message": observed = events.read()
