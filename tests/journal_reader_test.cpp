@@ -1,14 +1,19 @@
 #include "nimblefix/journal.hpp"
+#include "nimblefix/replay.hpp"
 
+#include <arpa/inet.h>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <iostream>
 #include <memory>
+#include <netinet/in.h>
 #include <string>
+#include <sys/socket.h>
 #include <thread>
 #include <unistd.h>
+#include <vector>
 
 namespace {
 using namespace nimblefix;
@@ -274,6 +279,145 @@ void test_reader_calls_race_safely_with_journal_teardown() {
     }
 }
 
+std::string make_replay_fix_frame(std::string_view msg_type, std::uint64_t seq,
+                                  std::string_view sending_time, std::string_view extra = {}) {
+    std::string body = "35=" + std::string{msg_type} + "\x01"
+                       "49=BUY\x01"
+                       "56=SELL\x01"
+                       "34=" + std::to_string(seq) + "\x01"
+                       "52=" + std::string{sending_time} + "\x01";
+    body.append(extra);
+    std::string raw = "8=FIX.4.4\x01" "9=" + std::to_string(body.size()) + "\x01" + body;
+    unsigned sum = 0;
+    for (unsigned char c : raw) sum += c;
+    sum %= 256U;
+    char csum[8];
+    csum[0] = '1'; csum[1] = '0'; csum[2] = '=';
+    csum[3] = static_cast<char>('0' + (sum / 100U));
+    csum[4] = static_cast<char>('0' + ((sum / 10U) % 10U));
+    csum[5] = static_cast<char>('0' + (sum % 10U));
+    csum[6] = '\x01';
+    raw.append(csum, 7);
+    return raw;
+}
+
+void test_deterministic_journal_replayer_offline_timing_and_tcp() {
+    // 1. Verify UTC timestamp nanosecond parser
+    std::uint64_t t1_ns = 0, t2_ns = 0;
+    CHECK(detail::parse_utc_timestamp_ns("20261125-12:00:00.000", t1_ns));
+    CHECK(detail::parse_utc_timestamp_ns("20261125-12:00:00.050000123", t2_ns));
+    CHECK(t2_ns > t1_ns && (t2_ns - t1_ns) == 50'000'123ULL);
+
+    // 2. Populate a real segmented mmap journal with inbound + outbound admin & business frames
+    TempStore store;
+    const std::string f_logon = make_replay_fix_frame("A", 1, "20261125-12:00:00.000", "98=0\x01" "108=30\x01");
+    const std::string f_ord1  = make_replay_fix_frame("D", 2, "20261125-12:00:00.040", "11=O1\x01" "55=AAPL\x01");
+    const std::string f_ord2  = make_replay_fix_frame("D", 3, "20261125-12:00:00.080", "11=O2\x01" "55=MSFT\x01");
+    const std::string f_in1   = make_replay_fix_frame("8", 1, "20261125-12:00:00.045", "37=E1\x01");
+    {
+        auto opened = Journal::open(store.config());
+        CHECK(opened.ok());
+        if (!opened.ok()) return;
+        auto& j = opened.value();
+        CHECK(j.append(RecordKind::outbound, 1, 1, 0, f_logon).ok());
+        CHECK(j.append(RecordKind::outbound, 2, 2, 0, f_ord1).ok());
+        auto in_rec = j.append(RecordKind::inbound, 1, 0, 0, f_in1);
+        CHECK(in_rec.ok());
+        CHECK(j.append(RecordKind::delivery, 1, 0, in_rec.value().id, {}).ok());
+        CHECK(j.append(RecordKind::outbound, 3, 3, 0, f_ord2).ok());
+
+        // Live-journal concurrent replay with skip_admin + seq range
+        ReplayOptions live_opts{};
+        live_opts.direction = ReplayDirection::outbound;
+        live_opts.skip_admin = true;
+        live_opts.seq_from = 1;
+        live_opts.seq_to = 3;
+        std::vector<std::string> live_frames;
+        auto live_res = JournalReplayer::replay(j, live_opts,
+            [&](const JournalRecord& rec, const FlatMessageView* parsed) noexcept -> Status {
+                CHECK(parsed != nullptr);
+                live_frames.emplace_back(rec.payload);
+                return Status::success();
+            });
+        CHECK(live_res.ok());
+        if (live_res.ok()) {
+            CHECK(live_res.value().replayed_frames == 2);
+            CHECK(live_res.value().first_seq == 2 && live_res.value().last_seq == 3);
+        }
+        CHECK(live_frames.size() == 2 && live_frames[0] == f_ord1 && live_frames[1] == f_ord2);
+    }
+
+    // 3. Disk reopen with auto-detected session_key + scaled timing (4x faster => 80ms / 4 = 20ms sleep)
+    {
+        ReplayOptions opts{};
+        opts.journal_path = store.path;
+        // Intentionally leave session_key empty to verify auto-detection from v2 manifest!
+        opts.direction = ReplayDirection::outbound;
+        opts.timing = ReplayTiming::scaled;
+        opts.speed_multiplier = 4.0;
+        std::vector<std::string> replayed;
+        auto res = JournalReplayer::replay(opts,
+            [&](const JournalRecord& rec, const FlatMessageView*) noexcept -> Status {
+                replayed.emplace_back(rec.payload);
+                return Status::success();
+            });
+        CHECK(res.ok());
+        if (res.ok()) {
+            CHECK(res.value().replayed_frames == 3);
+            CHECK(res.value().total_sleep_ns == 20'000'000ULL);
+            CHECK(res.value().elapsed_ns >= 15'000'000ULL);
+        }
+        CHECK(replayed.size() == 3 && replayed[0] == f_logon && replayed[2] == f_ord2);
+    }
+
+    // 4. Real loopback TCP replay verifying exact byte-for-byte wire arrival
+    {
+        const int srv = ::socket(AF_INET, SOCK_STREAM, 0);
+        CHECK(srv >= 0);
+        int opt = 1;
+        ::setsockopt(srv, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+        sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_addr.s_addr = ::htonl(INADDR_LOOPBACK);
+        addr.sin_port = 0;
+        CHECK(::bind(srv, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0);
+        socklen_t len = sizeof(addr);
+        CHECK(::getsockname(srv, reinterpret_cast<sockaddr*>(&addr), &len) == 0);
+        const std::uint16_t port = ::ntohs(addr.sin_port);
+        CHECK(::listen(srv, 1) == 0);
+
+        std::string received_wire;
+        std::thread receiver([&] {
+            const int cli = ::accept(srv, nullptr, nullptr);
+            if (cli >= 0) {
+                char buf[4096];
+                for (;;) {
+                    const ssize_t n = ::recv(cli, buf, sizeof(buf), 0);
+                    if (n <= 0) break;
+                    received_wire.append(buf, static_cast<std::size_t>(n));
+                }
+                ::close(cli);
+            }
+            ::close(srv);
+        });
+
+        ReplayOptions tcp_opts{};
+        tcp_opts.journal_path = store.path;
+        tcp_opts.session_key = "FIX.4.4|local=SELL|remote=BUY";
+        tcp_opts.direction = ReplayDirection::outbound;
+        tcp_opts.skip_admin = true;
+        auto tcp_res = JournalReplayer::replay_to_tcp(tcp_opts, TcpEndpoint{"127.0.0.1", port});
+        receiver.join();
+
+        CHECK(tcp_res.ok());
+        if (tcp_res.ok()) {
+            CHECK(tcp_res.value().replayed_frames == 2);
+            CHECK(tcp_res.value().total_bytes == f_ord1.size() + f_ord2.size());
+        }
+        CHECK(received_wire == f_ord1 + f_ord2);
+    }
+}
+
 } // namespace
 
 int main() {
@@ -282,6 +426,7 @@ int main() {
     test_reader_and_legacy_pin_keep_payload_views_alive();
     test_reader_calls_race_safely_with_retention_and_teardown();
     test_reader_calls_race_safely_with_journal_teardown();
+    test_deterministic_journal_replayer_offline_timing_and_tcp();
     if (failures != 0) {
         std::cerr << failures << " journal reader test(s) failed\n";
         return 1;

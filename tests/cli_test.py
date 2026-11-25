@@ -219,6 +219,40 @@ require_tls = false
         tel_prom = execute(binary, root, "telemetry", "--path", telemetry_file, "--prometheus").stdout
         assert "nimblefix_session_business_deliveries_total" in tel_prom
         assert 'stage="parse",quantile="0.99"' in tel_prom
+
+        # Item 8: deterministic historical replay (offline + TCP) from the journal created above
+        journals = sorted((config_dir / "state").rglob("session.nfxj"))
+        assert len(journals) == 1, f"expected 1 session.nfxj, found {journals}"
+        rep_off = json.loads(execute(
+            binary, root, "replay", "--path", journals[0],
+            "--direction", "inbound", "--skip-admin", "--json").stdout)
+        assert rep_off["mode"] == "offline" and rep_off["replayed_frames"] == 1 and rep_off["invalid_frames"] == 0
+
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sink_srv:
+            sink_srv.bind(("127.0.0.1", 0))
+            sink_srv.listen(1)
+            sink_port = sink_srv.getsockname()[1]
+            sink_srv.settimeout(5)
+            rep_proc = subprocess.Popen(
+                [str(binary), "replay", "--path", str(journals[0]),
+                 "--direction", "inbound", "--skip-admin",
+                 "--endpoint", f"127.0.0.1:{sink_port}", "--json"],
+                cwd=root, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            conn, _ = sink_srv.accept()
+            with conn:
+                conn.settimeout(5)
+                chunks = []
+                while True:
+                    data = conn.recv(4096)
+                    if not data:
+                        break
+                    chunks.append(data)
+                replayed_wire = b"".join(chunks)
+            rep_out, rep_err = rep_proc.communicate(timeout=10)
+            assert rep_proc.returncode == 0, (rep_proc.returncode, rep_out, rep_err)
+            rep_tcp = json.loads(rep_out)
+            assert rep_tcp["mode"] == "tcp" and rep_tcp["replayed_frames"] == 1
+            assert b"11=CLI-ORDER\x01" in replayed_wire and b"35=D\x01" in replayed_wire
     finally:
         if server.poll() is None: server.kill(); server.communicate()
 

@@ -46,8 +46,9 @@ Goal: Push both outbound encoding and inbound strict parsing/validation firmly i
 - **Status**: Implemented and verified via `<nimblefix/telemetry.hpp>` (`TelemetryWriter`, `TelemetryReader`, lock-free 433-bucket HDR log-linear nanosecond `TelemetryHistogram`), `DirectInitiator`, `Engine`, `ShardedEngine` (shared single `.nfxt` across all shards), TOML configuration (`telemetry_path`, `telemetry_stage_probes`), and `nimblefix telemetry --path <file.nfxt> [--json | --prometheus]`.
 - **Verified Contract**: Per-session state, counters, and 5 stage latency histograms (`read`, `parse`, `validate`, `journal`, `write` with `p50/p90/p99/p99.9/p99.99`) run with **0 steady-state heap allocations, 0 mutex locks, and 0 fsync** on `DirectInitiator`, and are readable out-of-band via read-only `O_RDONLY`/`PROT_READ` mmap from external sidecar tools or Prometheus exporters.
 
-### 8. Deterministic Historical Replay (`nimblefix-cli replay`)
-- Build on the existing lease-protected mmap Journal reader to replay recorded FIX sessions (original timing or full-speed) into a target endpoint or offline test harness for deterministic bug reproduction and regression benchmarking.
+### 8. [Done] Deterministic Historical Replay (`JournalReplayer` & `nimblefix replay`)
+- **Status**: Implemented and verified via `<nimblefix/replay.hpp>` (`JournalReplayer::replay`, `JournalReplayer::replay_to_tcp`, `ReplayOptions`, `ReplayDirection`, `ReplayTiming`, `ReplayStats`) and `nimblefix replay --path <session.nfxj> [--session-key KEY] [--direction inbound|outbound|both] [--timing full|original|scaled] [--speed FACTOR] [--seq-from N] [--seq-to M] [--epoch N] [--skip-admin] [--endpoint HOST:PORT] [--json]`.
+- **Capabilities**: Uses the lease-protected mmap `JournalReader` (`create_reader()`) for both live concurrent replay and offline disk replay (auto-detecting manifest geometry & session identity), supports nanosecond `52=SendingTime` original/scaled timing or full-speed playback, optional admin filtering and strict frame verification, and direct streaming to either an in-process callback sink or a real TCP endpoint.
 
 ### 9. Heterogeneous Multi-Schema Engine & `UnexpectedFieldPolicy`
 - Allow sessions within the same multi-session `Engine` to bind distinct compiled or runtime schemas.

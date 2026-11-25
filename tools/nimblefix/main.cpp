@@ -1,5 +1,6 @@
 #include <nimblefix/config.hpp>
 #include <nimblefix/journal.hpp>
+#include <nimblefix/replay.hpp>
 #include <nimblefix/telemetry.hpp>
 #include <nimblefix/tls.hpp>
 
@@ -79,6 +80,14 @@ struct Arguments {
     std::uint32_t duration_ms{};
     std::uint32_t samples{10'000};
     std::string bench_case{"encode"};
+    std::string replay_direction{"outbound"};
+    std::string replay_timing{"full"};
+    double replay_speed{1.0};
+    std::uint64_t replay_seq_from{1};
+    std::uint64_t replay_seq_to{0};
+    std::uint32_t replay_epoch{0};
+    std::string replay_endpoint;
+    bool skip_admin{};
     bool json{};
     bool prometheus{};
     bool help{};
@@ -98,6 +107,9 @@ void help() {
                  "  inspect frame --path PATH [--json]\n"
                  "  inspect journal --path PATH --session-key KEY [--json]\n"
                  "  telemetry --path PATH [--json | --prometheus]\n"
+                 "  replay --path PATH [--session-key KEY] [--direction inbound|outbound|both]\n"
+                 "         [--timing full|original|scaled] [--speed FACTOR] [--seq-from N] [--seq-to M]\n"
+                 "         [--epoch N] [--skip-admin] [--endpoint HOST:PORT] [--json]\n"
                  "  doctor [--config PATH] [--json]\n"
                  "  bench --case encode|parse [--samples N] [--json] (optional benchmark build)\n"
                  "  --help | --version\n";
@@ -132,6 +144,10 @@ bool parse(int argc, char **argv, Arguments &args) {
             args.force = true;
             continue;
         }
+        if (value == "--skip-admin") {
+            args.skip_admin = true;
+            continue;
+        }
         if (!value.starts_with('-') && args.command.empty()) {
             args.command = value;
             continue;
@@ -162,6 +178,47 @@ bool parse(int argc, char **argv, Arguments &args) {
             args.name_space = next;
         else if (value == "--session-key")
             args.session_key = next;
+        else if (value == "--direction")
+            args.replay_direction = next;
+        else if (value == "--timing")
+            args.replay_timing = next;
+        else if (value == "--speed") {
+            try {
+                std::size_t idx = 0;
+                const double val = std::stod(std::string{next}, &idx);
+                if (idx != next.size() || !std::isfinite(val) || val <= 0.0) {
+                    std::cerr << "--speed must be a positive number\n";
+                    return false;
+                }
+                args.replay_speed = val;
+            } catch (...) {
+                std::cerr << "--speed must be a positive number\n";
+                return false;
+            }
+        }
+        else if (value == "--seq-from") {
+            std::uint64_t number{};
+            const auto result = std::from_chars(next.data(), next.data() + next.size(), number);
+            if (result.ec != std::errc{} || result.ptr != next.data() + next.size() || number == 0)
+                return false;
+            args.replay_seq_from = number;
+        }
+        else if (value == "--seq-to") {
+            std::uint64_t number{};
+            const auto result = std::from_chars(next.data(), next.data() + next.size(), number);
+            if (result.ec != std::errc{} || result.ptr != next.data() + next.size())
+                return false;
+            args.replay_seq_to = number;
+        }
+        else if (value == "--epoch") {
+            std::uint32_t number{};
+            const auto result = std::from_chars(next.data(), next.data() + next.size(), number);
+            if (result.ec != std::errc{} || result.ptr != next.data() + next.size())
+                return false;
+            args.replay_epoch = number;
+        }
+        else if (value == "--endpoint")
+            args.replay_endpoint = next;
         else if (value == "--case") args.bench_case = next;
         else if (value == "--samples") {
             std::uint32_t number{};
@@ -192,6 +249,9 @@ bool parse(int argc, char **argv, Arguments &args) {
     else if (args.command == "validate" || args.command == "doctor") allowed.insert("--config");
     else if (args.command == "inspect") allowed.insert({"--path", "--session-key"});
     else if (args.command == "telemetry") allowed.insert({"--path", "--prometheus"});
+    else if (args.command == "replay") allowed.insert({
+        "--path", "--session-key", "--direction", "--timing", "--speed",
+        "--seq-from", "--seq-to", "--epoch", "--skip-admin", "--endpoint"});
     else if (args.command == "schema") {
         allowed.insert("--xml");
         if (args.operation == "generate") allowed.insert({"--output", "--namespace", "--generator"});
@@ -212,6 +272,15 @@ bool parse(int argc, char **argv, Arguments &args) {
                (args.operation == "frame" || (args.operation == "journal" && !args.session_key.empty()));
     if (args.command == "telemetry")
         return !args.path.empty();
+    if (args.command == "replay") {
+        const bool dir_ok = args.replay_direction == "inbound" ||
+                            args.replay_direction == "outbound" ||
+                            args.replay_direction == "both";
+        const bool timing_ok = args.replay_timing == "full" ||
+                               args.replay_timing == "original" ||
+                               args.replay_timing == "scaled";
+        return !args.path.empty() && dir_ok && timing_ok;
+    }
     if (args.command == "schema")
         return !args.xml.empty() && (args.operation == "check" || args.operation == "summary" ||
                                      (args.operation == "generate" && !args.output.empty()));
@@ -611,6 +680,77 @@ int show_telemetry(const Arguments &args) {
     return 0;
 }
 
+int replay_journal(const Arguments &args) {
+    nf::ReplayOptions opts{};
+    opts.journal_path = std::filesystem::absolute(args.path);
+    opts.session_key = args.session_key;
+    if (args.replay_direction == "inbound") opts.direction = nf::ReplayDirection::inbound;
+    else if (args.replay_direction == "both") opts.direction = nf::ReplayDirection::both;
+    else opts.direction = nf::ReplayDirection::outbound;
+
+    if (args.replay_timing == "original") opts.timing = nf::ReplayTiming::original;
+    else if (args.replay_timing == "scaled") opts.timing = nf::ReplayTiming::scaled;
+    else opts.timing = nf::ReplayTiming::full_speed;
+    opts.speed_multiplier = args.replay_speed;
+    opts.seq_from = args.replay_seq_from;
+    opts.seq_to = args.replay_seq_to;
+    opts.epoch_filter = args.replay_epoch;
+    opts.skip_admin = args.skip_admin;
+
+    nf::Result<nf::ReplayStats> res{nf::Status{nf::ErrorCode::invalid_config}};
+    if (!args.replay_endpoint.empty()) {
+        std::string host;
+        std::uint16_t port = 0;
+        const std::string_view ep = args.replay_endpoint;
+        const auto colon = ep.rfind(':');
+        if (colon == std::string_view::npos || colon == 0 || colon + 1 >= ep.size()) {
+            return problem(args, {nf::ErrorCode::invalid_config}, "endpoint must be HOST:PORT or [IPv6]:PORT");
+        }
+        std::string_view host_sv = ep.substr(0, colon);
+        if (host_sv.size() >= 2 && host_sv.front() == '[' && host_sv.back() == ']') {
+            host_sv = host_sv.substr(1, host_sv.size() - 2);
+        }
+        host.assign(host_sv);
+        const auto port_sv = ep.substr(colon + 1);
+        std::uint32_t port_num = 0;
+        const auto pr = std::from_chars(port_sv.data(), port_sv.data() + port_sv.size(), port_num);
+        if (pr.ec != std::errc{} || pr.ptr != port_sv.data() + port_sv.size() || port_num == 0 || port_num > 65535) {
+            return problem(args, {nf::ErrorCode::invalid_config}, "invalid port in --endpoint");
+        }
+        port = static_cast<std::uint16_t>(port_num);
+        res = nf::JournalReplayer::replay_to_tcp(opts, nf::TcpEndpoint{host, port});
+    } else {
+        res = nf::JournalReplayer::replay(opts, [](const nf::JournalRecord &, const nf::FlatMessageView *) noexcept {
+            return nf::Status::success();
+        });
+    }
+
+    if (!res.ok()) {
+        return problem(args, res.status(), "journal replay failed", 1);
+    }
+    const auto &s = res.value();
+    if (args.json) {
+        std::cout << "{\"mode\":" << quote(args.replay_endpoint.empty() ? "offline" : "tcp")
+                  << ",\"direction\":" << quote(args.replay_direction)
+                  << ",\"timing\":" << quote(args.replay_timing)
+                  << ",\"scanned_records\":" << s.scanned_records
+                  << ",\"replayed_frames\":" << s.replayed_frames
+                  << ",\"skipped_records\":" << s.skipped_records
+                  << ",\"invalid_frames\":" << s.invalid_frames
+                  << ",\"total_bytes\":" << s.total_bytes
+                  << ",\"first_seq\":" << s.first_seq
+                  << ",\"last_seq\":" << s.last_seq
+                  << ",\"elapsed_ns\":" << s.elapsed_ns
+                  << ",\"total_sleep_ns\":" << s.total_sleep_ns << "}\n";
+    } else {
+        std::cout << "Replayed " << s.replayed_frames << " frame(s) (" << s.total_bytes
+                  << " bytes, seq " << s.first_seq << ".." << s.last_seq
+                  << ", scanned=" << s.scanned_records << ", skipped=" << s.skipped_records
+                  << ", elapsed=" << (s.elapsed_ns / 1000ULL) << "us)\n";
+    }
+    return 0;
+}
+
 int inspect_journal(const Arguments &args) {
     nf::JournalConfig config;
     const auto path = std::filesystem::absolute(args.path).string();
@@ -879,6 +1019,7 @@ int main(int argc, char **argv) {
         if (args.command == "inspect")
             return args.operation == "frame" ? inspect_frame(args) : inspect_journal(args);
         if (args.command == "telemetry") return show_telemetry(args);
+        if (args.command == "replay") return replay_journal(args);
         if (args.command == "schema") return check_schema(args);
         const auto loaded = nf::load_config(args.config);
         if (!loaded.ok())

@@ -104,3 +104,11 @@ To avoid introducing monitoring jitter onto trading threads, NimbleFIX provides 
 - **Single-Writer Lock-Free Design**: Each session owns one cache-line-aligned `TelemetrySessionSlot` written exclusively by its protocol-owner thread using relaxed load+store updates (no `lock` RMW prefix, no mutex, no heap allocation, no syscall). `ShardedEngine` shares a single `.nfxt` mapping across all `K` shards so external monitors inspect one file.
 - **5 Stage HDR Histograms**: When `telemetry_stage_probes = true`, `read`, `parse`, `validate`, `journal`, and `write` durations are recorded into 433-bucket log-linear nanosecond histograms (`[0, 256 ns)` in 16 ns bins + 26 octaves × 16 sub-buckets up to 17.1 s), exporting `min/p50/p90/p99/p99.9/p99.99/max`.
 - **Read-Only Sidecar Export**: `TelemetryReader::open(path)` maps the region `O_RDONLY` / `PROT_READ` with zero writes or locks on the trading process, powering both embedded monitors and `nimblefix telemetry --path <file.nfxt> [--json | --prometheus]`.
+
+---
+
+## 7. Deterministic Historical Replay
+
+Built directly on top of the lease-protected mmap `JournalReader` (`<nimblefix/replay.hpp>`), `JournalReplayer` and `nimblefix replay` enable deterministic offline or TCP playback of recorded FIX sessions:
+- **Live or Offline Playback**: `JournalReplayer::replay(Journal&, ...)` attaches a lease-protected `JournalReader` to a live journal; `JournalReplayer::replay(ReplayOptions, ...)` auto-probes the v2 `.nfxj` manifest header on disk (geometry + session key) and streams matching records verbatim.
+- **Filtering & Pacing**: Supports direction (`inbound`, `outbound`, `both`), sequence range (`seq_from..seq_to`), epoch filter, optional admin skip, strict wire verification, and nanosecond `52=SendingTime` original / scaled (`speed_multiplier`) / full-speed pacing into either an in-process sink or a real TCP endpoint (`replay_to_tcp` / `--endpoint HOST:PORT`).

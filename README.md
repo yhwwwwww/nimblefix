@@ -216,12 +216,14 @@ xmake run acceptor-example --state ./state/sell --port 9876
 xmake run initiator-example --state ./state/buy --port 9876
 ```
 
-Or use the TOML CLI:
+Or use the TOML CLI (including out-of-band mmap telemetry & deterministic historical replay):
 
 ```sh
 xmake run nimblefix-cli init --directory ./demo
 xmake run nimblefix-cli validate --config ./demo/acceptor.toml --json
 xmake run nimblefix-cli run --config ./demo/acceptor.toml
+xmake run nimblefix-cli telemetry --path ./demo/telemetry.nfxt --prometheus
+xmake run nimblefix-cli replay --path ./demo/state/.../session.nfxj --direction inbound --timing original --endpoint 127.0.0.1:9876
 ```
 
 ---
