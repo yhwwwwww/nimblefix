@@ -120,16 +120,15 @@ if(NIMBLEFIX_ENABLE_XML)
 endif()
 
 if(NIMBLEFIX_BUILD_CLI)
-    add_library(nimblefix_config STATIC src/config/config.cpp)
-    target_include_directories(nimblefix_config PRIVATE third_party/tomlplusplus)
-    target_link_libraries(nimblefix_config PUBLIC nimblefix)
-    add_library(NimbleFIX::nimblefix_config ALIAS nimblefix_config)
-    add_executable(nimblefix-cli tools/nimblefix/main.cpp)
+    add_executable(nimblefix-cli
+        tools/nimblefix/main.cpp
+        tools/nimblefix/config.cpp)
+    target_include_directories(nimblefix-cli PRIVATE tools/nimblefix third_party/tomlplusplus)
     set_target_properties(nimblefix-cli PROPERTIES OUTPUT_NAME nimblefix)
     if(NIMBLEFIX_BUILD_BENCHMARKS)
         target_compile_definitions(nimblefix-cli PRIVATE NIMBLEFIX_ENABLE_BENCH=1)
     endif()
-    target_link_libraries(nimblefix-cli PRIVATE nimblefix_config)
+    target_link_libraries(nimblefix-cli PRIVATE nimblefix)
     if(NIMBLEFIX_BUILD_STANDARD_SCHEMAS)
         target_link_libraries(nimblefix-cli PRIVATE fix44)
         target_compile_definitions(nimblefix-cli PRIVATE NIMBLEFIX_BUILTIN_FIX44=1)
@@ -142,8 +141,9 @@ if(NIMBLEFIX_BUILD_CLI)
         COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:nimblefix-cli>/share/nimblefix/schema"
         COMMAND ${CMAKE_COMMAND} -E copy_if_different "${NIMBLEFIX_SCHEMA_GENERATOR}"
             "$<TARGET_FILE_DIR:nimblefix-cli>/share/nimblefix/schema/generate.py")
-    install(TARGETS nimblefix_config EXPORT NimbleFIXTargets ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}")
     install(TARGETS nimblefix-cli RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
+    install(FILES third_party/tomlplusplus/LICENSE DESTINATION "${CMAKE_INSTALL_DATADIR}/licenses/NimbleFIX/third-party")
+    install(FILES third_party/tomlplusplus/LICENSE DESTINATION "${CMAKE_INSTALL_DATADIR}/nimblefix/third-party/tomlplusplus")
 endif()
 
 if(NIMBLEFIX_BUILD_EXAMPLES)
@@ -469,11 +469,10 @@ install(DIRECTORY include/nimblefix DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}")
 install(FILES tools/schema/generate.py DESTINATION "${CMAKE_INSTALL_DATADIR}/nimblefix/schema")
 install(FILES xmake/nimblefix-schema.lua DESTINATION "${CMAKE_INSTALL_DATADIR}/nimblefix/xmake")
 install(FILES LICENSE DESTINATION "${CMAKE_INSTALL_DATADIR}/licenses/NimbleFIX")
-install(FILES third_party/quickfix-LICENSE third_party/tomlplusplus/LICENSE
+install(FILES third_party/quickfix-LICENSE
     DESTINATION "${CMAKE_INSTALL_DATADIR}/licenses/NimbleFIX/third-party")
 install(FILES third_party/README.md DESTINATION "${CMAKE_INSTALL_DATADIR}/nimblefix/third-party")
 install(FILES third_party/quickfix-LICENSE DESTINATION "${CMAKE_INSTALL_DATADIR}/nimblefix/third-party")
-install(FILES third_party/tomlplusplus/LICENSE DESTINATION "${CMAKE_INSTALL_DATADIR}/nimblefix/third-party/tomlplusplus")
 install(DIRECTORY schemas/standard DESTINATION "${CMAKE_INSTALL_DATADIR}/nimblefix/schemas")
 install(EXPORT NimbleFIXTargets NAMESPACE NimbleFIX:: DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/NimbleFIX")
 configure_package_config_file(cmake/NimbleFIXConfig.cmake.in

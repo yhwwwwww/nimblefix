@@ -1,4 +1,4 @@
-#include <nimblefix/config.hpp>
+#include "config.hpp"
 #include <nimblefix/journal.hpp>
 #include <nimblefix/replay.hpp>
 #include <nimblefix/telemetry.hpp>

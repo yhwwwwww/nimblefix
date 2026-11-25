@@ -161,19 +161,14 @@ if has_config("xml") then
 end
 
 if has_config("cli") then
-    target("nimblefix-config")
-        set_kind("static")
-        add_files("src/config/config.cpp")
-        add_includedirs("third_party/tomlplusplus")
-        add_deps("nimblefix")
-    target_end()
     target("nimblefix-cli")
         set_kind("binary")
         set_basename("nimblefix")
         set_rundir("$(projectdir)")
-        add_files("tools/nimblefix/main.cpp")
+        add_files("tools/nimblefix/main.cpp", "tools/nimblefix/config.cpp")
+        add_includedirs("tools/nimblefix", "third_party/tomlplusplus")
         if has_config("benchmarks") then add_defines("NIMBLEFIX_ENABLE_BENCH=1") end
-        add_deps("nimblefix-config")
+        add_deps("nimblefix")
         if has_config("standard_schemas") then
             add_deps("fix44-schema")
             add_includedirs(generated_dir)

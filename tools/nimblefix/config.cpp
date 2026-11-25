@@ -1,4 +1,4 @@
-#include <nimblefix/config.hpp>
+#include "config.hpp"
 
 #include <algorithm>
 #include <charconv>
