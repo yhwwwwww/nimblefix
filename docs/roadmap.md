@@ -1,6 +1,6 @@
 # NimbleFIX Roadmap
 
-This document tracks the planned engineering priorities for NimbleFIX after `0.3`, focusing on **single-core hot-path latency** first, followed by **multi-core scalability, operational resilience, and zero-overhead observability**, while keeping the 3-layer pay-only-for-what-you-need C++20 core lean and embeddable.
+This document tracks the planned engineering priorities for NimbleFIX, focusing on **single-core hot-path latency** first, followed by **multi-core scalability, operational resilience, and zero-overhead observability**, while keeping the three-layer C++20 core lean and embeddable.
 
 ---
 
