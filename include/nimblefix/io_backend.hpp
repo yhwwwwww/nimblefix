@@ -44,8 +44,11 @@ struct IoBackendConfig {
     [[nodiscard]] static constexpr IoBackendConfig io_uring(
         std::uint32_t queue_depth = 256,
         bool sqpoll = false,
-        std::uint32_t sqpoll_idle_ms = 500) noexcept {
-        return {IoBackendKind::io_uring, queue_depth, sqpoll, sqpoll_idle_ms, IdleStrategy::sleep, 10'000, 1'000};
+        std::uint32_t sqpoll_idle_ms = 500,
+        IdleStrategy idle = IdleStrategy::sleep,
+        std::uint32_t spin_iters = 10'000,
+        std::uint32_t yield_iters = 1'000) noexcept {
+        return {IoBackendKind::io_uring, queue_depth, sqpoll, sqpoll_idle_ms, idle, spin_iters, yield_iters};
     }
 };
 

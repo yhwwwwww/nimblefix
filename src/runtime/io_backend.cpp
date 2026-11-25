@@ -212,6 +212,9 @@ public:
     }
 
     [[nodiscard]] Status init(const IoBackendConfig& config) noexcept {
+        idle_strategy_ = config.idle_strategy;
+        spin_iters_ = config.idle_spin_iterations;
+        yield_iters_ = config.idle_yield_iterations;
         const std::uint32_t depth = std::clamp<std::uint32_t>(config.uring_queue_depth, 32U, 4096U);
         io_uring_params params{};
         if (config.uring_sqpoll) {
@@ -223,9 +226,12 @@ public:
             return Status::success();
         }
         // Prefer low-latency single-issuer + deferred taskrun on Linux 6.1+.
+        // IORING_SETUP_TASKRUN_FLAG tells the kernel to raise IORING_SQ_TASKRUN in sq.kflags
+        // whenever deferred task_work is pending, enabling zero-syscall userspace polling.
         // Use IORING_SETUP_R_DISABLED so Engine::create() can run on one thread
         // and Engine::run() can bind the ring to its dedicated owner thread.
-        params.flags = IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN | IORING_SETUP_R_DISABLED;
+        params.flags = IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN |
+                       IORING_SETUP_TASKRUN_FLAG | IORING_SETUP_R_DISABLED;
         int rc = io_uring_queue_init_params(depth, &ring_, &params);
         if (rc == 0) {
             needs_enable_ = true;
@@ -234,11 +240,14 @@ public:
             return Status::success();
         }
         std::memset(&params, 0, sizeof(params));
-        params.flags = IORING_SETUP_COOP_TASKRUN;
+        params.flags = IORING_SETUP_COOP_TASKRUN | IORING_SETUP_TASKRUN_FLAG;
         rc = io_uring_queue_init_params(depth, &ring_, &params);
-        if (rc < 0) {
-            rc = io_uring_queue_init(depth, &ring_, 0);
+        if (rc == 0) {
+            defer_taskrun_ = true;
+            initialized_ = true;
+            return Status::success();
         }
+        rc = io_uring_queue_init(depth, &ring_, 0);
         if (rc < 0) return Status{ErrorCode::io_error, 0, static_cast<std::size_t>(-rc)};
         initialized_ = true;
         return Status::success();
@@ -327,7 +336,25 @@ public:
             return -1;
         }
 
-        if (wait_ms == 0) {
+        bool spinning = false;
+        bool yielding = false;
+        std::uint32_t effective_wait_ms = wait_ms;
+        if (idle_strategy_ == IdleStrategy::busy_spin) {
+            effective_wait_ms = 0;
+            spinning = true;
+        } else if (idle_strategy_ == IdleStrategy::hybrid_backoff) {
+            if (idle_count_ < spin_iters_) {
+                effective_wait_ms = 0;
+                spinning = true;
+            } else if (idle_count_ < spin_iters_ + yield_iters_) {
+                effective_wait_ms = 0;
+                yielding = true;
+            }
+        }
+
+        if (pending_sqes_ == 0 && io_uring_cq_ready(&ring_) > 0) {
+            // CQEs already present in the shared userspace ring: reap with zero syscalls.
+        } else if (effective_wait_ms == 0) {
             if (pending_sqes_ != 0) {
                 const int sub = defer_taskrun_
                     ? io_uring_submit_and_get_events(&ring_)
@@ -338,7 +365,7 @@ public:
                     return -1;
                 }
             } else if (defer_taskrun_ && io_uring_cq_ready(&ring_) == 0 &&
-                       (IO_URING_READ_ONCE(*ring_.sq.kflags) & IORING_SQ_TASKRUN) != 0) {
+                       (IO_URING_READ_ONCE(*ring_.sq.kflags) & (IORING_SQ_TASKRUN | IORING_SQ_CQ_OVERFLOW)) != 0) {
                 const int rc = io_uring_get_events(&ring_);
                 if (rc < 0 && rc != -EINTR) {
                     errno = -rc;
@@ -348,8 +375,8 @@ public:
         } else {
             io_uring_cqe* first = nullptr;
             __kernel_timespec ts{};
-            ts.tv_sec = static_cast<long long>(wait_ms / 1000U);
-            ts.tv_nsec = static_cast<long long>((wait_ms % 1000U) * 1'000'000ULL);
+            ts.tv_sec = static_cast<long long>(effective_wait_ms / 1000U);
+            ts.tv_nsec = static_cast<long long>((effective_wait_ms % 1000U) * 1'000'000ULL);
             const int rc = io_uring_submit_and_wait_timeout(&ring_, &first, 1U, &ts, nullptr);
             pending_sqes_ = 0;
             if (rc < 0 && rc != -ETIME && rc != -EINTR) {
@@ -395,6 +422,19 @@ public:
             }
         }
         if (consumed != 0) io_uring_cq_advance(&ring_, consumed);
+        if (count == 0) {
+            if (wait_ms > 0) {
+                if (spinning) {
+                    cpu_relax();
+                    if (idle_strategy_ == IdleStrategy::hybrid_backoff) ++idle_count_;
+                } else if (yielding) {
+                    ::sched_yield();
+                    ++idle_count_;
+                }
+            }
+        } else {
+            idle_count_ = 0;
+        }
         return static_cast<int>(count);
     }
 
@@ -424,6 +464,10 @@ private:
     bool needs_enable_{false};
     bool defer_taskrun_{false};
     std::uint32_t pending_sqes_{0};
+    IdleStrategy idle_strategy_{IdleStrategy::sleep};
+    std::uint32_t spin_iters_{10'000};
+    std::uint32_t yield_iters_{1'000};
+    std::uint64_t idle_count_{0};
 };
 
 #endif // NIMBLEFIX_ENABLE_IO_URING

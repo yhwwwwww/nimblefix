@@ -3542,16 +3542,16 @@ struct EngineRuntime::Impl {
         }
         const auto processed = process_peer_buffer(peer, now);
         if (!processed.ok() || peer.closed) return;
+        const bool has_buffered = peer.unread_size() != 0 && has_complete_buffered_frame(peer);
         if (peer.driver && peer.driver->can_receive() &&
-            !has_complete_buffered_frame(peer) && peer.unread_size() >= config.max_frame_bytes) {
+            !has_buffered && peer.unread_size() >= config.max_frame_bytes) {
             drop_peer(peer, Status{ErrorCode::too_large}, now, true);
             return;
         }
         if (!peer.closed && peer.driver && peer.driver->needs_write()) {
             (void)proactor_kick_send(peer, now);
         }
-        if (!peer.closed && peer.driver && peer.driver->can_receive() &&
-            !has_complete_buffered_frame(peer)) {
+        if (!peer.closed && peer.driver && peer.driver->can_receive() && !has_buffered) {
             proactor_arm_recv(peer);
         }
     }
@@ -3880,11 +3880,15 @@ struct EngineRuntime::Impl {
                     process_sender_commands(*peer, now);
                     if (!peer->session->sender->producer_lanes.empty())
                         process_producer_lanes(*peer, now);
-                    // Flush newly queued outbound frames immediately (via write_batch/sendmsg)
+                    // Flush newly queued outbound frames immediately (via proactor send or write_batch/sendmsg)
                     // instead of round-tripping through epoll_ctl(+EPOLLOUT) + epoll_wait.
                     if (!peer->closed && peer->driver && peer->driver->needs_write() &&
                         !(peer->tls && peer->tls->write_wants_read())) {
-                        (void)write_peer(*peer, now);
+                        if (io_backend && io_backend->supports_proactor() && !peer->tls) {
+                            (void)proactor_kick_send(*peer, now);
+                        } else {
+                            (void)write_peer(*peer, now);
+                        }
                         if (!peer->closed && peer->driver && peer->session) {
                             peer->session->sender->sync_receipts(*peer->driver);
                             for (const auto& lane : peer->session->sender->producer_lanes)

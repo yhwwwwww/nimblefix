@@ -299,14 +299,9 @@ void test_abrupt_disconnect_and_reconnect(nf::IoBackendKind backend_kind) {
     if (g_failures == 0) std::cout << "[PASS] disconnect/reconnect lifecycle on backend\n";
 }
 
-void test_core_affinity_idle_strategy_and_sharded_reactor() {
-    // 1. CPU affinity helper contract
-    CHECK(nf::pin_current_thread(-1).ok());
-    CHECK(nf::pin_current_thread(0).ok());
-    CHECK(nf::pin_current_thread(99999).code == nf::ErrorCode::invalid_config);
-
-    // 2. ShardedEngine: 4 shards (with core affinity + hybrid_backoff), 1 shared port,
-    //    8 Acceptor sessions & 8 Sharded Initiator sessions across 4 shards.
+void test_sharded_reactor(nf::IoBackendConfig backend_cfg, const char* label) {
+    // ShardedEngine: 4 shards (with core affinity + idle strategy), 1 shared port,
+    // 8 Acceptor sessions & 8 Sharded Initiator sessions across 4 shards.
     TempDir dir_acc;
     TempDir dir_ini;
     const std::uint16_t port = pick_free_port();
@@ -326,7 +321,7 @@ void test_core_affinity_idle_strategy_and_sharded_reactor() {
     acc_scfg.base.storage.journal_capacity_bytes = 2U * 1024U * 1024U;
     acc_scfg.base.storage.segment_bytes = 256U * 1024U;
     acc_scfg.base.storage.journal_max_records = 4096;
-    acc_scfg.base.io_backend = nf::IoBackendConfig::hybrid(200, 50);
+    acc_scfg.base.io_backend = backend_cfg;
 
     const std::filesystem::path acc_tel = std::filesystem::path{dir_acc.path} / "acceptor.nfxt";
     acc_scfg.base.telemetry_path = acc_tel;
@@ -467,8 +462,18 @@ void test_core_affinity_idle_strategy_and_sharded_reactor() {
     if (g_failures == 0) {
         std::cout << "[PASS] ShardedEngine (" << kShards << " shards pinned, "
                   << kSessions << " sessions x " << kOrdersPerSession
-                  << " orders, hybrid_backoff, 1 shared port)\n";
+                  << " orders, " << label << ", 1 shared port)\n";
     }
+}
+
+void test_core_affinity_idle_strategy_and_sharded_reactor() {
+    // 1. CPU affinity helper contract
+    CHECK(nf::pin_current_thread(-1).ok());
+    CHECK(nf::pin_current_thread(0).ok());
+    CHECK(nf::pin_current_thread(99999).code == nf::ErrorCode::invalid_config);
+
+    // 2. ShardedEngine on epoll + hybrid_backoff
+    test_sharded_reactor(nf::IoBackendConfig::hybrid(200, 50), "epoll+hybrid_backoff");
 }
 
 } // namespace
@@ -483,6 +488,9 @@ int main() {
         run_backend_roundtrip<nf::Inline>(nf::IoBackendKind::io_uring, 1, 50, "io_uring Inline 1-session");
         run_backend_roundtrip<nf::Inline>(nf::IoBackendKind::io_uring, 4, 25, "io_uring Inline 4-session");
         run_backend_roundtrip<nf::Queued>(nf::IoBackendKind::io_uring, 2, 25, "io_uring Queued 2-session");
+        test_sharded_reactor(
+            nf::IoBackendConfig::io_uring(256, false, 500, nf::IdleStrategy::hybrid_backoff, 200, 50),
+            "io_uring+hybrid_backoff");
         test_abrupt_disconnect_and_reconnect(nf::IoBackendKind::io_uring);
     } else {
         TempDir dir;

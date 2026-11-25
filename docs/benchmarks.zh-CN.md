@@ -104,25 +104,30 @@ xmake build acceptor-bench
 ./build/linux/x86_64/release/acceptor-bench 2000 20000 8 all
 ```
 
-### Acceptor 分层（`epoll` 与 `busy_poll`）
-| 层级 | p50 | p95 | p99 | 吞吐 |
+### Acceptor 分层与单核 `IoBackend` 对比（`epoll` / `busy_poll` / `io_uring`）
+
+| 层级 / `IoBackend` | 单会话 p50 / p99 | 单会话吞吐 | 8 会话 p50 / p99 | 8 会话总吞吐 |
 | :--- | ---: | ---: | ---: | ---: |
-| **Tier 1：Pre-TCP Acceptor**（收帧 -> 912 字段校验 -> `send_stream` 回 ER -> mmap 日志 -> flush） | **912 ns** | 962 ns | **1.13 µs** | **1,043,558 ord/s** |
-| **Tier 2：单会话 TCP（`epoll`）**（`Engine<fix44::Schema, Inline>`，单线程） | **11.19 µs** | 13.99 µs | 18.50 µs | **80,606 ord/s** |
-| **Tier 2：单会话 TCP（`busy_poll`）**（`Engine<fix44::Schema, Inline>`，单线程） | **9.35 µs** | 12.53 µs | **15.73 µs** | **94,160 ord/s** |
-| **Tier 3：8 并发会话 TCP（`epoll`）**（`Engine<fix44::Schema, Inline>`，单线程） | **32.45 µs** | 68.56 µs | 76.04 µs | **180,535 ord/s** |
+| **Tier 1：Pre-TCP Acceptor**（`SessionDriver`，912 字段校验 + `send_stream` ER + mmap 日志 + flush） | **912 ns** / **1.13 µs** | **1,043,558 ord/s** | — | — |
+| **Tier 2/3：`epoll`**（默认，空闲休眠） | 15.03 µs / 22.33 µs | 63,046 ord/s | 38.90 µs / 90.91 µs | 150,318 ord/s |
+| **Tier 2/3：`busy_poll`**（零休眠忙轮询） | **11.86 µs** / **17.20 µs** | **76,962 ord/s** | **38.94 µs** / 94.13 µs | 149,713 ord/s |
+| **Tier 2/3：`io_uring`**（Proactor `RECV`/`SEND`，空闲休眠） | 14.12 µs / 23.44 µs | 64,537 ord/s | 44.06 µs / **78.13 µs** | **166,477 ord/s**（+11%） |
 
 ### 多核 `ShardedEngine` 扩展性（`acceptor-bench 1000 10000 8/16 sharded`）
-*（全量 912 字段 `FIX44.xml` 严格校验 + `NoPartyIDs[1]` + `StreamWriter` 回报 + 真实 mmap 日志，单监听端口，1-in-flight TCP Ping-Pong。）*
+*（全量 912 字段 `FIX44.xml` 严格校验 + `NoPartyIDs[1]` + `StreamWriter` 回报 + 真实 mmap 日志，单监听端口，1-in-flight TCP Ping-Pong；同一并发会话数下各行均在同一轮测试中同口径采集。）*
 
 | 配置 | 并发会话数 | p50 | p99 | p99.9 | 总吞吐 | 相对单核加速 |
 | :--- | ---: | ---: | ---: | ---: | ---: | ---: |
-| **单核 `Engine` (`epoll`)** | 8 | 32.01 µs | 75.70 µs | 233.57 µs | 180,564 ord/s | 1.00× |
-| **4 分片 `ShardedEngine` (`epoll`，绑核)** | 8 | 15.73 µs | 21.97 µs | 34.98 µs | 456,296 ord/s | **2.53×**（p99 降低 **3.45×**） |
-| **4 分片 `ShardedEngine` (`hybrid_backoff`，绑核)** | 8 | **15.52 µs** | **20.28 µs** | **30.32 µs** | **462,905 ord/s** | **2.56×**（p99.9 降低 **7.70×**） |
-| **单核 `Engine` (`epoll`)** | 16 | 73.69 µs | 161.47 µs | 400.03 µs | 179,777 ord/s | 1.00× |
-| **4 分片 `ShardedEngine` (`epoll`，绑核)** | 16 | 29.99 µs | **48.17 µs** | 66.46 µs | 496,186 ord/s | **2.76×**（p99 降低 **3.35×**） |
-| **4 分片 `ShardedEngine` (`hybrid_backoff`，绑核)** | 16 | **29.82 µs** | 48.55 µs | **64.47 µs** | **503,230 ord/s** | **2.80×**（p99.9 降低 **6.20×**） |
+| **单核 `Engine` (`epoll`)** | 8 | 39.25 µs | 92.68 µs | 181.70 µs | 148,915 ord/s | 1.00× |
+| **4 分片 `ShardedEngine` (`epoll`，绑核)** | 8 | 19.14 µs | 26.28 µs | 39.48 µs | 384,232 ord/s | **2.58×**（p99 降低 **3.53×**） |
+| **4 分片 `ShardedEngine` (`epoll` + `hybrid_backoff`，绑核)** | 8 | 18.93 µs | 24.81 µs | **36.31 µs** | 387,252 ord/s | **2.60×**（p99.9 降低 **5.00×**） |
+| **4 分片 `ShardedEngine` (`io_uring` + `hybrid_backoff`，绑核)** | 8 | **18.20 µs** | **24.18 µs** | 37.11 µs | **401,841 ord/s** | **2.70×**（p99 降低 **3.83×**） |
+| **单核 `Engine` (`epoll`)** | 16 | 88.89 µs | 196.25 µs | 400.98 µs | 149,731 ord/s | 1.00× |
+| **4 分片 `ShardedEngine` (`epoll`，绑核)** | 16 | 36.72 µs | 58.93 µs | **115.40 µs** | 408,981 ord/s | **2.73×**（p99 降低 **3.33×**） |
+| **4 分片 `ShardedEngine` (`epoll` + `hybrid_backoff`，绑核)** | 16 | 36.79 µs | 77.84 µs | 363.66 µs | 391,162 ord/s | **2.61×** |
+| **4 分片 `ShardedEngine` (`io_uring` + `hybrid_backoff`，绑核)** | 16 | **34.51 µs** | **52.01 µs** | 121.52 µs | **430,573 ord/s** | **2.88×**（p99 降低 **3.77×**） |
+
+> **选型建议**：`epoll` 零外部依赖且通用；`busy_poll` 适合独占核追求单会话最低延迟；`io_uring` 通过批量提交异步 `RECV`/`SEND` 显著提升多会话吞吐、降低 p99 尾延迟且空闲不空烧 CPU（配合 `IdleStrategy::hybrid_backoff` 与 `IORING_SETUP_TASKRUN_FLAG` 在多核 `ShardedEngine` 上表现最佳）。
 
 ---
 

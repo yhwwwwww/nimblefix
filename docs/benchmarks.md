@@ -104,25 +104,30 @@ xmake build acceptor-bench
 ./build/linux/x86_64/release/acceptor-bench 2000 20000 8 all
 ```
 
-### Acceptor Tiers (`epoll` & `busy_poll`)
-| Tier | p50 | p95 | p99 | Throughput |
+### Acceptor Tiers & Single-Core `IoBackend` Comparison (`epoll` / `busy_poll` / `io_uring`)
+
+| Tier / `IoBackend` | 1-Session p50 / p99 | 1-Session Rate | 8-Session p50 / p99 | 8-Session Aggregate |
 | :--- | ---: | ---: | ---: | ---: |
-| **Tier 1: Pre-TCP Acceptor** (`SessionDriver` wire-in -> 912-field Schema -> `send_stream` ER -> mmap journal -> flush) | **912 ns** | 962 ns | **1.13 µs** | **1,043,558 ord/s** |
-| **Tier 2: 1-Session TCP (`epoll`)** (`Engine<fix44::Schema, Inline>`, 1 thread) | **11.19 µs** | 13.99 µs | 18.50 µs | **80,606 ord/s** |
-| **Tier 2: 1-Session TCP (`busy_poll`)** (`Engine<fix44::Schema, Inline>`, 1 thread) | **9.35 µs** | 12.53 µs | **15.73 µs** | **94,160 ord/s** |
-| **Tier 3: 8 Concurrent Sessions TCP (`epoll`)** (`Engine<fix44::Schema, Inline>`, 1 thread) | **32.45 µs** | 68.56 µs | 76.04 µs | **180,535 ord/s** |
+| **Tier 1: Pre-TCP Acceptor** (`SessionDriver`, 912-field Schema + `send_stream` ER + mmap journal + flush) | **912 ns** / **1.13 µs** | **1,043,558 ord/s** | — | — |
+| **Tier 2/3: `epoll`** (default, sleeping) | 15.03 µs / 22.33 µs | 63,046 ord/s | 38.90 µs / 90.91 µs | 150,318 ord/s |
+| **Tier 2/3: `busy_poll`** (zero-sleep spin) | **11.86 µs** / **17.20 µs** | **76,962 ord/s** | **38.94 µs** / 94.13 µs | 149,713 ord/s |
+| **Tier 2/3: `io_uring`** (Proactor `RECV`/`SEND`, sleeping) | 14.12 µs / 23.44 µs | 64,537 ord/s | 44.06 µs / **78.13 µs** | **166,477 ord/s** (+11%) |
 
 ### Multi-Core `ShardedEngine` Scaling (`acceptor-bench 1000 10000 8/16 sharded`)
-*(Full 912-field `FIX44.xml` strict validation + `NoPartyIDs[1]` + `StreamWriter` `ExecutionReport` + real mmap journal, 1 shared listening port, strict 1-in-flight TCP ping-pong on 8C/16T host shared with client threads.)*
+*(Full 912-field `FIX44.xml` strict validation + `NoPartyIDs[1]` + `StreamWriter` `ExecutionReport` + real mmap journal, 1 shared listening port, strict 1-in-flight TCP ping-pong on 8C/16T host shared with client threads. All rows within each session count are captured in the same run.)*
 
 | Configuration | Sessions | p50 | p99 | p99.9 | Aggregate Throughput | Speedup vs 1-Core |
 | :--- | ---: | ---: | ---: | ---: | ---: | ---: |
-| **1-core `Engine` (`epoll`)** | 8 | 32.01 µs | 75.70 µs | 233.57 µs | 180,564 ord/s | 1.00× |
-| **4-shard `ShardedEngine` (`epoll`, pinned)** | 8 | 15.73 µs | 21.97 µs | 34.98 µs | 456,296 ord/s | **2.53×** (**3.45×** lower p99) |
-| **4-shard `ShardedEngine` (`hybrid_backoff`, pinned)** | 8 | **15.52 µs** | **20.28 µs** | **30.32 µs** | **462,905 ord/s** | **2.56×** (**7.70×** lower p99.9) |
-| **1-core `Engine` (`epoll`)** | 16 | 73.69 µs | 161.47 µs | 400.03 µs | 179,777 ord/s | 1.00× |
-| **4-shard `ShardedEngine` (`epoll`, pinned)** | 16 | 29.99 µs | **48.17 µs** | 66.46 µs | 496,186 ord/s | **2.76×** (**3.35×** lower p99) |
-| **4-shard `ShardedEngine` (`hybrid_backoff`, pinned)** | 16 | **29.82 µs** | 48.55 µs | **64.47 µs** | **503,230 ord/s** | **2.80×** (**6.20×** lower p99.9) |
+| **1-core `Engine` (`epoll`)** | 8 | 39.25 µs | 92.68 µs | 181.70 µs | 148,915 ord/s | 1.00× |
+| **4-shard `ShardedEngine` (`epoll`, pinned)** | 8 | 19.14 µs | 26.28 µs | 39.48 µs | 384,232 ord/s | **2.58×** (**3.53×** lower p99) |
+| **4-shard `ShardedEngine` (`epoll` + `hybrid_backoff`, pinned)** | 8 | 18.93 µs | 24.81 µs | **36.31 µs** | 387,252 ord/s | **2.60×** (**5.00×** lower p99.9) |
+| **4-shard `ShardedEngine` (`io_uring` + `hybrid_backoff`, pinned)** | 8 | **18.20 µs** | **24.18 µs** | 37.11 µs | **401,841 ord/s** | **2.70×** (**3.83×** lower p99) |
+| **1-core `Engine` (`epoll`)** | 16 | 88.89 µs | 196.25 µs | 400.98 µs | 149,731 ord/s | 1.00× |
+| **4-shard `ShardedEngine` (`epoll`, pinned)** | 16 | 36.72 µs | 58.93 µs | **115.40 µs** | 408,981 ord/s | **2.73×** (**3.33×** lower p99) |
+| **4-shard `ShardedEngine` (`epoll` + `hybrid_backoff`, pinned)** | 16 | 36.79 µs | 77.84 µs | 363.66 µs | 391,162 ord/s | **2.61×** |
+| **4-shard `ShardedEngine` (`io_uring` + `hybrid_backoff`, pinned)** | 16 | **34.51 µs** | **52.01 µs** | 121.52 µs | **430,573 ord/s** | **2.88×** (**3.77×** lower p99) |
+
+> **Selection Guide**: `epoll` is the zero-dependency default; `busy_poll` minimizes 1-session RTT on a dedicated core; `io_uring` batches `RECV`/`SEND` syscalls to boost multi-session throughput and cut p99 tail latency without spinning when idle (and supports `IdleStrategy::hybrid_backoff` with `IORING_SETUP_TASKRUN_FLAG` for the highest multi-core `ShardedEngine` throughput).
 
 ---
 

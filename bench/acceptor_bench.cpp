@@ -118,35 +118,6 @@ struct ReusablePartyOrder {
     }
 };
 
-using ErShape = nf::Fields<
-    nf::Field<37, nf::FieldKind::string>,
-    nf::Field<11, nf::FieldKind::string>,
-    nf::Field<17, nf::FieldKind::string>,
-    nf::Field<150, nf::FieldKind::character>,
-    nf::Field<39, nf::FieldKind::character>,
-    nf::Field<54, nf::FieldKind::character>,
-    nf::Field<38, nf::FieldKind::decimal>,
-    nf::Field<151, nf::FieldKind::decimal>,
-    nf::Field<14, nf::FieldKind::decimal>,
-    nf::Field<6, nf::FieldKind::decimal>,
-    nf::Field<55, nf::FieldKind::string>>;
-
-inline nf::Status populate_er(fix::ExecutionReportFixed<ErShape, 128>& er,
-                              std::string_view cl_ord_id) noexcept {
-    er.reset();
-    if (const auto s = er.order_id("ORDER-1"); !s.ok()) return s;
-    if (const auto s = er.cl_ord_id(cl_ord_id); !s.ok()) return s;
-    if (const auto s = er.exec_id("EXEC-1"); !s.ok()) return s;
-    if (const auto s = er.exec_type('0'); !s.ok()) return s;
-    if (const auto s = er.ord_status('0'); !s.ok()) return s;
-    if (const auto s = er.side('1'); !s.ok()) return s;
-    if (const auto s = er.order_qty(nf::Decimal{100, 0}); !s.ok()) return s;
-    if (const auto s = er.leaves_qty(nf::Decimal{100, 0}); !s.ok()) return s;
-    if (const auto s = er.cum_qty(nf::Decimal{0, 0}); !s.ok()) return s;
-    if (const auto s = er.avg_px(nf::Decimal{0, 0}); !s.ok()) return s;
-    return er.symbol("AAPL");
-}
-
 struct LatencyStats {
     double p50_ns{};
     double p95_ns{};
@@ -565,12 +536,16 @@ bool run_engine_acceptor_tcp(std::size_t session_count, std::size_t warmup, std:
         return false;
     }
 
-    fix::ExecutionReportFixed<ErShape, 128> er;
-    if (!engine.on<fix::NewOrderSingle>([&](nf::SessionContext& ctx, const fix::NewOrderSingleView& req) noexcept {
+    if (!engine.on<fix::NewOrderSingle>([](nf::SessionContext& ctx, const fix::NewOrderSingleView& req) noexcept {
             const auto cid = req.cl_ord_id();
             const std::string_view id = cid.ok() ? cid.value() : std::string_view{"ORD-000001"};
-            if (const auto st = populate_er(er, id); !st.ok()) return st;
-            return ctx.send(er).status();
+            return ctx.send_stream<fix::ExecutionReport>([&](auto& w) noexcept {
+                w.order_id("ORDER-1").cl_ord_id(id).exec_id("EXEC-1")
+                 .exec_type('0').ord_status('0').side('1')
+                 .order_qty(nf::Decimal{100, 0}).leaves_qty(nf::Decimal{100, 0})
+                 .cum_qty(nf::Decimal{0, 0}).avg_px(nf::Decimal{0, 0})
+                 .symbol("AAPL");
+            }).status();
         }).ok()) {
         std::filesystem::remove_all(dir);
         return false;
@@ -778,6 +753,15 @@ int main(int argc, char** argv) {
                 nf::IoBackendConfig::epoll(), "Sharded [epoll, 4 shards]", s4, r4)) return 7;
         if (!run_sharded_acceptor_tcp(4, multi_sessions, w, samples,
                 nf::IoBackendConfig::hybrid(), "Sharded [hybrid_backoff, 4 shards]", s8, r8)) return 8;
+        LatencyStats su{};
+        double ru = 0.0;
+        bool has_uring = false;
+        if (nf::io_uring_available()) {
+            if (!run_sharded_acceptor_tcp(4, multi_sessions, w, samples,
+                    nf::IoBackendConfig::io_uring(256, false, 500, nf::IdleStrategy::hybrid_backoff),
+                    "Sharded [io_uring + hybrid_backoff, 4 shards]", su, ru)) return 9;
+            has_uring = true;
+        }
         std::cout << "\n--- Sharded Scaling Summary (" << multi_sessions << " concurrent sessions, 1 shared port) ---\n"
                   << "  1-core epoll           : p50=" << std::fixed << std::setprecision(2) << s1.p50_ns / 1000.0
                   << " us | p99=" << s1.p99_ns / 1000.0 << " us | agg=" << static_cast<std::uint64_t>(r1) << " ord/s\n"
@@ -787,6 +771,11 @@ int main(int argc, char** argv) {
                   << "  4-shard hybrid_backoff : p50=" << s8.p50_ns / 1000.0
                   << " us | p99=" << s8.p99_ns / 1000.0 << " us | agg=" << static_cast<std::uint64_t>(r8)
                   << " ord/s (" << std::setprecision(2) << (r8 / r1) << "x)\n";
+        if (has_uring) {
+            std::cout << "  4-shard io_uring+hyb   : p50=" << su.p50_ns / 1000.0
+                      << " us | p99=" << su.p99_ns / 1000.0 << " us | agg=" << static_cast<std::uint64_t>(ru)
+                      << " ord/s (" << std::setprecision(2) << (ru / r1) << "x)\n";
+        }
         return 0;
     }
 
