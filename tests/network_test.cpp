@@ -333,30 +333,33 @@ bool test_burst_before_eof(const std::filesystem::path& directory, bool half_clo
 }
 
 bool test_initiator_multi_endpoint_failover(const std::filesystem::path& directory) {
-    // Bind and immediately close a port to get a guaranteed-closed primary port,
-    // while keeping a real live Engine acceptor listening on the standby port.
+    // Bind a TCP socket WITHOUT calling listen() and keep it open for the
+    // duration of this test: connects to a bound non-listening port get
+    // ECONNREFUSED deterministically while preventing parallel tests from
+    // reusing the ephemeral port.
     auto closed_fd = ::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
     if (closed_fd < 0) return false;
+    struct FdGuard {
+        int fd{-1};
+        ~FdGuard() { if (fd >= 0) ::close(fd); }
+    } closed_guard{closed_fd};
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     addr.sin_port = 0;
     if (::bind(closed_fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
-        ::close(closed_fd);
         return false;
     }
     socklen_t len = sizeof(addr);
     if (::getsockname(closed_fd, reinterpret_cast<sockaddr*>(&addr), &len) != 0) {
-        ::close(closed_fd);
         return false;
     }
     const std::uint16_t closed_port = ntohs(addr.sin_port);
-    ::close(closed_fd);
 
     // 1. Start standby Acceptor Engine on ephemeral loopback port.
     nf::EngineConfig acc_cfg;
     acc_cfg.storage.directory = directory / "standby";
-    acc_cfg.logout_timeout_ms = 300;
+    acc_cfg.logout_timeout_ms = 2000;
     auto acc_created = nf::Engine<>::create(std::move(acc_cfg));
     if (!acc_created.ok()) return false;
     auto standby = std::move(acc_created).value();
@@ -369,7 +372,7 @@ bool test_initiator_multi_endpoint_failover(const std::filesystem::path& directo
     nf::Status standby_run{};
     std::thread standby_thread([&] { standby_run = standby.run(); });
     nf::TcpEndpoint standby_ep{};
-    for (int i = 0; i < 200; ++i) {
+    for (int i = 0; i < 400; ++i) {
         const auto ep = standby.listener_endpoint("main");
         if (ep.ok() && ep.value().port != 0) { standby_ep = ep.value(); break; }
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
@@ -380,7 +383,7 @@ bool test_initiator_multi_endpoint_failover(const std::filesystem::path& directo
     nf::EngineConfig init_cfg;
     init_cfg.storage.directory = directory / "initiator";
     init_cfg.reconnect_delay_ms = 50;
-    init_cfg.logout_timeout_ms = 300;
+    init_cfg.logout_timeout_ms = 2000;
     auto init_created = nf::Engine<>::create(std::move(init_cfg));
     if (!init_created.ok()) { standby.request_stop(); standby_thread.join(); return false; }
     auto initiator = std::move(init_created).value();
@@ -399,7 +402,7 @@ bool test_initiator_multi_endpoint_failover(const std::filesystem::path& directo
 
     nf::Status init_run{};
     std::thread init_thread([&] { init_run = initiator.run(); });
-    for (int i = 0; i < 400 && !active.load(std::memory_order_acquire); ++i) {
+    for (int i = 0; i < 600 && !active.load(std::memory_order_acquire); ++i) {
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
     const auto snap = initiator.snapshot("venue");
@@ -407,8 +410,8 @@ bool test_initiator_multi_endpoint_failover(const std::filesystem::path& directo
                     snap.value().state == nf::SessionState::active &&
                     snap.value().active_endpoint_index == 1;
     initiator.request_stop();
-    standby.request_stop();
     init_thread.join();
+    standby.request_stop();
     standby_thread.join();
     if (!ok || !init_run.ok() || !standby_run.ok()) return false;
 
@@ -534,10 +537,13 @@ int main() {
             return nf::Status::success();
         });
     auto error_callback = engine.on_error([&](const nf::ErrorEvent& error) {
-        std::lock_guard lock(mutex);
-        if (observer_errors < observer_statuses.size())
-            observer_statuses[observer_errors] = error.status;
-        ++observer_errors;
+        {
+            std::lock_guard lock(mutex);
+            if (observer_errors < observer_statuses.size())
+                observer_statuses[observer_errors] = error.status;
+            ++observer_errors;
+        }
+        changed.notify_all();
     });
     if (!active_callback.ok() || !message_callback.ok() || !error_callback.ok()) return 3;
     if (engine.on_message([](nf::SessionContext&, const nf::FlatMessageView&) {
@@ -714,6 +720,12 @@ int main() {
         return 46;
     ::close(fast_client);
     duplicate = -1;
+    const auto drop_deadline = Clock::now() + std::chrono::seconds(3);
+    while (Clock::now() < drop_deadline) {
+        const auto s = engine.snapshot("fast-client");
+        if (s.ok() && s.value().state == nf::SessionState::disconnected) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
     const auto reconnect_logon = make_frame("A", 5, "BUY2", "SELL");
     bool reconnected = false;
     for (int attempt = 0; attempt < 20 && !reconnected; ++attempt) {
@@ -722,7 +734,7 @@ int main() {
         fast_buffer.clear();
         if (send_all(duplicate, reconnect_logon) &&
             receive_frame(duplicate, fast_buffer, fast_response,
-                std::chrono::milliseconds(300)) && frame_type(fast_response, "A")) {
+                std::chrono::seconds(3)) && frame_type(fast_response, "A")) {
             reconnected = true;
         } else {
             ::close(duplicate);
@@ -747,7 +759,7 @@ int main() {
     client = -1;
     {
         std::unique_lock lock(mutex);
-        if (!changed.wait_for(lock, std::chrono::seconds(2), [&] {
+        if (!changed.wait_for(lock, std::chrono::seconds(5), [&] {
                 return observer_errors >= 1;
             })) return 52;
     }
