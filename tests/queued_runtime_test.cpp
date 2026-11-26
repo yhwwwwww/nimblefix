@@ -1,4 +1,5 @@
 #include <nimblefix/engine.hpp>
+#include <nimblefix/journal.hpp>
 #include <nimblefix/message.hpp>
 
 #include <algorithm>
@@ -106,6 +107,131 @@ bool receive_frame(int fd, std::string& buffered, std::string& result,
 bool is_type(std::string_view bytes, std::string_view type) {
     const auto marker = std::string{"35="} + std::string{type} + '\x01';
     return bytes.find(marker) != std::string_view::npos;
+}
+
+bool test_graceful_logout_during_callback_return() {
+    char path[] = "/tmp/nimblefix-queued-logout-race-XXXXXX";
+    const auto* directory = ::mkdtemp(path);
+    if (directory == nullptr) return false;
+    const std::filesystem::path root{directory};
+    int client = -1;
+    std::thread owner;
+    auto created = nf::Engine<nf::FlatSchema, nf::Queued>::create({
+        .storage = {.directory = root / "journal"}, .logout_timeout_ms = 1000});
+    if (!created.ok()) {
+        std::filesystem::remove_all(root);
+        return false;
+    }
+    auto engine = std::move(created).value();
+
+    std::mutex mutex;
+    std::condition_variable cv;
+    bool release_return = false;
+    std::atomic<unsigned> error_count{};
+
+    if (!engine.on_message([&](nf::SessionContext& context, const nf::FlatMessageView& message) {
+            const auto type = message.find_unique(35);
+            if (!type.ok() || type.value().value != "D") return nf::Status::success();
+            auto reply = nf::message<"8">().set<11>("INBOUND").set<17>("EXEC-RACE");
+            const auto sent = context.send(reply);
+            if (!sent.ok()) return sent.status();
+            // Deliberately hold the worker thread AFTER context.send() returns so
+            // the client receives 35=8, sends Logout (35=5), receives Logout (35=5),
+            // closes its socket, and triggers request_stop() before this callback returns.
+            std::unique_lock lock(mutex);
+            if (!cv.wait_for(lock, 5s, [&] { return release_return; }))
+                return nf::Status{nf::ErrorCode::callback_failed};
+            return nf::Status::success();
+        }).ok()) {
+        std::filesystem::remove_all(root);
+        return false;
+    }
+    if (!engine.on_error([&](const nf::ErrorEvent& ev) {
+            std::cerr << "graceful_logout_during_callback_return: unexpected on_error: "
+                      << ev.status.message() << "\n";
+            error_count.fetch_add(1, std::memory_order_relaxed);
+        }).ok()) {
+        std::filesystem::remove_all(root);
+        return false;
+    }
+    if (!engine.add_listener({.name = "loopback", .endpoint = {"127.0.0.1", 0}}).ok() ||
+        !engine.add_acceptor({.name = "peer", .listener = "loopback",
+            .local_comp_id = "SELL", .remote_comp_id = "BUY"}).ok()) {
+        std::filesystem::remove_all(root);
+        return false;
+    }
+
+    nf::Status run_status{};
+    owner = std::thread([&] { run_status = engine.run(); });
+    auto endpoint = nf::Result<nf::TcpEndpoint>{nf::Status{nf::ErrorCode::need_more}};
+    const auto endpoint_deadline = std::chrono::steady_clock::now() + 3s;
+    while (!endpoint.ok() && std::chrono::steady_clock::now() < endpoint_deadline) {
+        endpoint = engine.listener_endpoint("loopback");
+        if (!endpoint.ok()) std::this_thread::sleep_for(2ms);
+    }
+
+    bool ok = false;
+    std::string buffered, wire;
+    if (endpoint.ok()) {
+        client = connect_loopback(endpoint.value().port);
+        if (client >= 0 &&
+            send_all(client, frame("A", 1, "BUY", "SELL")) &&
+            receive_frame(client, buffered, wire) && is_type(wire, "A") &&
+            send_all(client, frame("D", 2, "BUY", "SELL")) &&
+            receive_frame(client, buffered, wire) && is_type(wire, "8") &&
+            send_all(client, frame("5", 3, "BUY", "SELL")) &&
+            receive_frame(client, buffered, wire) && is_type(wire, "5")) {
+            ::close(client);
+            client = -1;
+            engine.request_stop();
+            std::this_thread::sleep_for(15ms);
+            {
+                std::lock_guard lock(mutex);
+                release_return = true;
+            }
+            cv.notify_all();
+            owner.join();
+
+            bool saw_inbound = false;
+            bool saw_delivery = false;
+            nf::RecordId inbound_id = 0;
+            for (const auto& entry : std::filesystem::recursive_directory_iterator(root / "journal")) {
+                if (entry.path().extension() != ".nfxj") continue;
+                const auto jpath = entry.path().string();
+                auto tailer = nf::JournalTailer::open({.path = jpath});
+                if (!tailer.ok()) break;
+                nf::JournalRecord rec{};
+                while (tailer.value().next(rec).ok()) {
+                    if (rec.kind == nf::RecordKind::inbound && rec.seq == 2) {
+                        saw_inbound = true;
+                        inbound_id = rec.id;
+                    } else if (rec.kind == nf::RecordKind::delivery && rec.seq == 2 &&
+                               inbound_id != 0 && rec.dependency == inbound_id) {
+                        saw_delivery = true;
+                    }
+                }
+            }
+            ok = run_status.ok() && error_count.load() == 0 && saw_inbound && saw_delivery;
+            if (!ok) {
+                std::cerr << "graceful_logout_during_callback_return failed: run="
+                          << run_status.message() << " errors=" << error_count.load()
+                          << " saw_inbound=" << saw_inbound
+                          << " saw_delivery=" << saw_delivery << "\n";
+            }
+        }
+    }
+
+    {
+        std::lock_guard lock(mutex);
+        release_return = true;
+    }
+    cv.notify_all();
+    engine.request_stop();
+    if (client >= 0) ::close(client);
+    if (owner.joinable()) owner.join();
+    std::error_code ignored;
+    std::filesystem::remove_all(root, ignored);
+    return ok;
 }
 
 } // namespace
@@ -297,7 +423,8 @@ int main() {
             client = -1;
         }
         owner.join();
-        const bool passed = run_status.ok() && error_count.load() == 0;
+        const bool passed = run_status.ok() && error_count.load() == 0 &&
+            test_graceful_logout_during_callback_return();
         std::filesystem::remove_all(root);
         if (!passed) std::cerr << "queued owner/worker or MPSC behavior failed\n";
         else std::cout << "queued callbacks, dependent replies, and MPSC sender passed\n";

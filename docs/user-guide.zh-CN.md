@@ -546,18 +546,18 @@ for (const auto& s : reader.snapshot()) {
 #include <nimblefix/journal.hpp>
 
 nimblefix::JournalTailerConfig tcfg{};
-tcfg.journal_path = "./state/buy/FIX.4.4_BUY_SELL.nfxj";
+tcfg.path = "./state/buy/FIX.4.4_BUY_SELL.nfxj";
 tcfg.start = nimblefix::JournalTailStart::beginning; // 或 ::end / ::from_id
 tcfg.verify_crc = true;
 
 auto tailer = nimblefix::JournalTailer::open(tcfg).value();
+nimblefix::JournalRecord rec{};
 for (;;) {
-    auto rec = tailer.poll(); // 非阻塞：追到队尾返回 std::nullopt
-    if (!rec.ok()) break;     // 如滞后超出已回收分段返回 ErrorCode::reader_expired
-    if (rec.value().has_value()) {
-        const auto& view = *rec.value(); // 零拷贝负载视图，下次 poll() 前有效
-        (void)view.header; (void)view.payload;
-    }
+    const auto st = tailer.next(rec); // 非阻塞：追到队尾返回 ErrorCode::need_more
+    if (st.code == nimblefix::ErrorCode::need_more) continue;
+    if (!st.ok()) break;              // 如滞后超出已回收分段返回 ErrorCode::reader_expired
+    // rec.payload 为零拷贝视图，下次调用 next() 前有效
+    (void)rec.seq; (void)rec.kind; (void)rec.payload;
 }
 ```
 

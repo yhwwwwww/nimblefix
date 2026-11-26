@@ -549,18 +549,18 @@ for (const auto& s : reader.snapshot()) {
 #include <nimblefix/journal.hpp>
 
 nimblefix::JournalTailerConfig tcfg{};
-tcfg.journal_path = "./state/buy/FIX.4.4_BUY_SELL.nfxj";
+tcfg.path = "./state/buy/FIX.4.4_BUY_SELL.nfxj";
 tcfg.start = nimblefix::JournalTailStart::beginning; // or ::end / ::from_id
 tcfg.verify_crc = true;
 
 auto tailer = nimblefix::JournalTailer::open(tcfg).value();
+nimblefix::JournalRecord rec{};
 for (;;) {
-    auto rec = tailer.poll(); // non-blocking: returns std::nullopt when caught up to head
-    if (!rec.ok()) break;     // e.g. ErrorCode::reader_expired if writer pruned lagged segments
-    if (rec.value().has_value()) {
-        const auto& view = *rec.value(); // zero-copy payload view valid until next poll()
-        (void)view.header; (void)view.payload;
-    }
+    const auto st = tailer.next(rec); // non-blocking: returns ErrorCode::need_more at live head
+    if (st.code == nimblefix::ErrorCode::need_more) continue;
+    if (!st.ok()) break;              // e.g. ErrorCode::reader_expired if writer pruned lagged segments
+    // rec.payload is a zero-copy view valid until the next tailer.next() call
+    (void)rec.seq; (void)rec.kind; (void)rec.payload;
 }
 ```
 

@@ -2429,7 +2429,9 @@ struct EngineRuntime::Impl {
             const bool same_delivery = peer != nullptr && peer->generation == completion.generation &&
                 peer->driver && (completion.active_callback
                     ? peer->deferred_delivery_id == 0 &&
-                        session->state.load(std::memory_order_acquire) == SessionState::active
+                        (session->state.load(std::memory_order_acquire) == SessionState::active ||
+                         peer->driver->state() == SessionState::closed ||
+                         peer->driver->state() == SessionState::logout_pending)
                     : peer->deferred_delivery_id == completion.info.record_id);
             if (same_delivery) {
                 if (session->callback_commands_processed < completion.accepted_sends) continue;
@@ -2968,6 +2970,24 @@ struct EngineRuntime::Impl {
         return Status::success();
     }
 
+    [[nodiscard]] static bool peer_waiting_graceful_callback(const Peer& peer) noexcept {
+        return peer.driver && peer.driver->state() == SessionState::closed &&
+            peer.driver->should_close() && peer.session &&
+            peer.session->callback_in_flight.load(std::memory_order_acquire);
+    }
+
+    void detach_closed_transport(Peer& peer) noexcept {
+        io_remove(peer.io_tag);
+        cancel_peer_proactor(peer);
+        if (peer.tls) {
+            peer.tls->close();
+            peer.tls.reset();
+        }
+        peer.stream.close();
+        peer.clear_receive();
+        if (peer.session) peer.session->sender->set_active(false);
+    }
+
     void drop_peer(Peer& peer, Status reason, std::uint64_t now,
                    bool report) noexcept {
         const bool graceful_eof = reason.code == ErrorCode::connection_closed &&
@@ -3284,6 +3304,7 @@ struct EngineRuntime::Impl {
     }
 
     [[nodiscard]] Status read_peer(Peer& peer, std::uint64_t now) noexcept {
+        if (!peer.stream.valid()) return Status::success();
         char scratch[read_chunk_size];
         std::size_t total = 0;
         while (!peer.closed && peer.driver && peer.driver->can_receive() && total < io_byte_budget) {
@@ -3316,6 +3337,10 @@ struct EngineRuntime::Impl {
                 return io.status;
             }
             if (io.peer_closed) {
+                if (peer_waiting_graceful_callback(peer)) {
+                    detach_closed_transport(peer);
+                    return Status::success();
+                }
                 drop_peer(peer, Status{ErrorCode::connection_closed}, now, false);
                 return Status::success();
             }
@@ -3453,6 +3478,9 @@ struct EngineRuntime::Impl {
             return status;
         }
         if (peer.session) peer.session->sender->unblock_commands();
+        if (peer_waiting_graceful_callback(peer)) {
+            detach_closed_transport(peer);
+        }
         return Status::success();
     }
 
@@ -3531,6 +3559,10 @@ struct EngineRuntime::Impl {
         peer.uring_rx_in_flight = false;
         if (peer.closed || peer.connection != Connection::connected || !peer.driver) return;
         if (res == 0) {
+            if (peer_waiting_graceful_callback(peer)) {
+                detach_closed_transport(peer);
+                return;
+            }
             drop_peer(peer, Status{ErrorCode::connection_closed}, now, false);
             return;
         }
@@ -3655,6 +3687,10 @@ struct EngineRuntime::Impl {
         peer.uring_tx_offset = 0;
         if (peer.session) peer.session->sender->unblock_commands();
         if (peer.driver->should_close()) {
+            if (peer_waiting_graceful_callback(peer)) {
+                detach_closed_transport(peer);
+                return;
+            }
             drop_peer(peer, Status{ErrorCode::connection_closed}, now, false);
             return;
         }
@@ -3714,6 +3750,10 @@ struct EngineRuntime::Impl {
                 if (state != SessionState::active) peer.session->sender->set_active(false);
             }
             if (peer.driver->should_close()) {
+                if (peer_waiting_graceful_callback(peer)) {
+                    detach_closed_transport(peer);
+                    continue;
+                }
                 drop_peer(peer, Status{ErrorCode::connection_closed}, now, false);
             }
         }
@@ -4204,6 +4244,10 @@ struct EngineRuntime::Impl {
                 }
                 if (peer->connection != Connection::connected) continue;
                 if (events & io_event_error) {
+                    if (peer_waiting_graceful_callback(*peer)) {
+                        detach_closed_transport(*peer);
+                        continue;
+                    }
                     drop_peer(*peer, Status{ErrorCode::io_error}, now, true);
                     continue;
                 }
