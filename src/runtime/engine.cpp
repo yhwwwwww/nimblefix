@@ -408,7 +408,8 @@ void copy_owned_message(std::span<char> destination, const MessageView& source,
 class ProducerLaneSharedState {
 public:
     ProducerLaneSharedState(std::string requested_local, std::string requested_remote,
-        std::string requested_schema_fingerprint, ProducerLaneConfig requested_config,
+        std::string requested_schema_fingerprint, bool requested_allow_flat_sender,
+        ProducerLaneConfig requested_config,
         std::size_t requested_max_frame,
         std::shared_ptr<std::atomic<EngineLife>> requested_life,
         std::shared_ptr<WakeControl> requested_wake, FixVersion requested_version,
@@ -416,6 +417,7 @@ public:
         : local_comp_id(std::move(requested_local)),
           remote_comp_id(std::move(requested_remote)),
           schema_fingerprint(std::move(requested_schema_fingerprint)),
+          allow_flat_sender(requested_allow_flat_sender),
           slots(requested_config.capacity_messages),
           arena(align_up(requested_config.capacity_bytes, alignof(std::max_align_t))),
           receipts(requested_config.receipt_capacity), pending_indices(requested_config.receipt_capacity), max_frame_bytes(requested_max_frame),
@@ -426,6 +428,11 @@ public:
     std::string local_comp_id;
     std::string remote_comp_id;
     std::string schema_fingerprint;
+    bool allow_flat_sender{false};
+
+    [[nodiscard]] bool fingerprint_matches(std::string_view expected) const noexcept {
+        return expected == schema_fingerprint || (allow_flat_sender && expected.empty());
+    }
     std::vector<ProducerLaneCommandSlot> slots;
     std::vector<char> arena;
     std::vector<ProducerLaneReceiptSlot> receipts;
@@ -477,7 +484,7 @@ public:
     [[nodiscard]] Result<SendReceipt> enqueue(MessageView message,
         std::string_view expected_schema_fingerprint) noexcept {
         if (life_stopped()) return Status{ErrorCode::engine_stopped};
-        if (expected_schema_fingerprint != schema_fingerprint)
+        if (!fingerprint_matches(expected_schema_fingerprint))
             return Status{ErrorCode::schema_mismatch};
         if (!producer_thread_ok()) return Status{ErrorCode::wrong_thread};
         if (!active.load(std::memory_order_acquire)) return Status{ErrorCode::not_ready};
@@ -812,6 +819,7 @@ class SenderSharedState {
 public:
     SenderSharedState(std::string requested_name, std::string requested_local,
         std::string requested_remote, std::string requested_schema_fingerprint,
+        bool requested_allow_flat_sender,
         std::size_t message_capacity,
         std::size_t byte_capacity, std::size_t receipt_capacity,
         std::size_t requested_max_frame,
@@ -821,7 +829,8 @@ public:
         bool requested_last_processed, std::uint32_t requested_max_pending_age_ms)
         : name(std::move(requested_name)), local_comp_id(std::move(requested_local)),
           remote_comp_id(std::move(requested_remote)),
-          schema_fingerprint(std::move(requested_schema_fingerprint)), slots(message_capacity),
+          schema_fingerprint(std::move(requested_schema_fingerprint)),
+          allow_flat_sender(requested_allow_flat_sender), slots(message_capacity),
           arena(align_up(byte_capacity, alignof(std::max_align_t))),
           receipts(receipt_capacity), pending_indices(receipt_capacity), max_frame_bytes(requested_max_frame),
           max_producer_lanes(requested_max_producer_lanes), max_producer_lane_bytes(byte_capacity),
@@ -835,6 +844,11 @@ public:
     std::string local_comp_id;
     std::string remote_comp_id;
     std::string schema_fingerprint;
+    bool allow_flat_sender{false};
+
+    [[nodiscard]] bool fingerprint_matches(std::string_view expected) const noexcept {
+        return expected == schema_fingerprint || (allow_flat_sender && expected.empty());
+    }
     std::vector<SenderCommandSlot> slots;
     std::vector<char> arena;
     std::vector<SenderReceiptSlot> receipts;
@@ -921,7 +935,7 @@ public:
         const auto current_life = life ? life->load(std::memory_order_acquire) : EngineLife::stopped;
         if (current_life == EngineLife::stopping || current_life == EngineLife::stopped ||
             stopped.load(std::memory_order_acquire)) return Status{ErrorCode::engine_stopped};
-        if (expected_schema_fingerprint != schema_fingerprint)
+        if (!fingerprint_matches(expected_schema_fingerprint))
             return Status{ErrorCode::schema_mismatch};
         if (!active.load(std::memory_order_acquire)) return Status{ErrorCode::not_ready};
         auto measured = measure_owned_message(message, max_frame_bytes, local_comp_id, remote_comp_id, version, emit_last_processed);
@@ -932,7 +946,7 @@ public:
         const auto locked_life = life ? life->load(std::memory_order_acquire) : EngineLife::stopped;
         if (locked_life == EngineLife::stopping || locked_life == EngineLife::stopped ||
             stopped.load(std::memory_order_acquire)) return Status{ErrorCode::engine_stopped};
-        if (expected_schema_fingerprint != schema_fingerprint)
+        if (!fingerprint_matches(expected_schema_fingerprint))
             return Status{ErrorCode::schema_mismatch};
         if (!active.load(std::memory_order_acquire)) return Status{ErrorCode::not_ready};
         if (slots.empty() || receipts.empty() || arena.empty()) return Status{ErrorCode::invalid_config};
@@ -1238,7 +1252,7 @@ Result<std::shared_ptr<ProducerLaneSharedState>> SenderSharedState::create_produ
             return Status{ErrorCode::engine_stopped};
         if (current_life != EngineLife::configured || producer_lanes_frozen)
             return Status{ErrorCode::invalid_config};
-        if (expected_schema_fingerprint != schema_fingerprint)
+        if (!fingerprint_matches(expected_schema_fingerprint))
             return Status{ErrorCode::schema_mismatch};
         if (requested.capacity_messages == 0 || requested.capacity_bytes == 0 ||
             requested.receipt_capacity == 0 || requested.capacity_bytes > max_producer_lane_bytes ||
@@ -1247,7 +1261,7 @@ Result<std::shared_ptr<ProducerLaneSharedState>> SenderSharedState::create_produ
             return Status{ErrorCode::invalid_config};
         if (producer_lanes.size() >= max_producer_lanes) return Status{ErrorCode::capacity_exceeded};
         auto lane = std::make_shared<ProducerLaneSharedState>(local_comp_id, remote_comp_id,
-            schema_fingerprint, requested, max_frame_bytes, life, wake_control, version,
+            schema_fingerprint, allow_flat_sender, requested, max_frame_bytes, life, wake_control, version,
             emit_last_processed, max_pending_age_ms);
         producer_lanes.push_back(lane);
         return lane;
@@ -1277,7 +1291,7 @@ Result<SendReceipt> query_producer_lane_receipt(
 
 bool producer_lane_can_send(const std::shared_ptr<ProducerLaneSharedState>& state,
     std::string_view schema_fingerprint) noexcept {
-    return state && state->schema_fingerprint == schema_fingerprint && state->can_enqueue();
+    return state && state->fingerprint_matches(schema_fingerprint) && state->can_enqueue();
 }
 
 bool producer_lane_stopped(const std::shared_ptr<ProducerLaneSharedState>& state) noexcept {
@@ -1305,7 +1319,7 @@ Result<SendReceipt> query_sender_receipt(const std::shared_ptr<SenderSharedState
 
 bool sender_can_send(const std::shared_ptr<SenderSharedState>& state,
     std::string_view schema_fingerprint) noexcept {
-    return state && state->schema_fingerprint == schema_fingerprint && state->can_enqueue();
+    return state && state->fingerprint_matches(schema_fingerprint) && state->can_enqueue();
 }
 
 bool sender_stopped(const std::shared_ptr<SenderSharedState>& state) noexcept {
@@ -1472,7 +1486,10 @@ struct SessionControl {
     std::atomic<std::size_t> pending_inbound_messages{0}, pending_inbound_bytes{0};
     std::atomic<bool> read_paused{false};
     std::atomic<std::size_t> active_endpoint_index{0};
+    std::atomic<std::uint64_t> unexpected_fields{0};
     TelemetrySessionSlot* telemetry_slot{nullptr};
+    bool prestart_admin_reset{};
+    std::string prestart_admin_reset_reason;
     std::uint64_t callback_started_ms{};
     bool active_callback_pending{};
     std::uint64_t active_pending_generation{};
@@ -1537,6 +1554,32 @@ struct EngineRuntime::Impl {
         std::size_t listener_index{no_index};
         Peer* active{};
         std::shared_ptr<SessionControl> session;
+        std::int64_t last_schedule_window_id{0};
+        bool pending_offline_reset{false};
+        std::string pending_offline_reset_reason;
+    };
+
+    enum class AdminCommandKind : std::uint8_t {
+        logout,
+        reconnect,
+        sequence_reset,
+        adjust_sequences,
+    };
+
+    struct AdminReply {
+        std::mutex mutex;
+        std::condition_variable cv;
+        bool done{false};
+        Status status{};
+    };
+
+    struct AdminCommand {
+        AdminCommandKind kind{AdminCommandKind::logout};
+        std::string session_name;
+        std::string reason;
+        std::uint64_t next_inbound{0};
+        std::uint64_t next_outbound{0};
+        std::shared_ptr<AdminReply> reply;
     };
 
     enum class Connection : std::uint8_t { disconnected, connecting, handshaking, connected };
@@ -1559,6 +1602,12 @@ struct EngineRuntime::Impl {
         std::uint64_t generation{};
         TcpEndpoint endpoint;
         detail::FailoverController failover;
+        SocketOptions socket_options{};
+        std::vector<LengthDataPair> wire_hint_pairs;
+        WireHints wire_hints{};
+        std::int64_t last_schedule_window_id{0};
+        bool pending_admin_reset{false};
+        std::string pending_admin_reset_reason;
         bool reached_active{};
         std::size_t acceptor_index{no_index};
         Connection connection{Connection::disconnected};
@@ -1610,6 +1659,9 @@ struct EngineRuntime::Impl {
         void clear_receive() noexcept {
             receive_buffer.clear();
             receive_head = 0;
+        }
+        [[nodiscard]] WireHints effective_wire_hints(WireHints fallback) const noexcept {
+            return wire_hint_pairs.empty() ? fallback : wire_hints;
         }
     };
 
@@ -1668,6 +1720,7 @@ struct EngineRuntime::Impl {
     }
 
     ~Impl() {
+        fail_pending_admin_commands(Status{ErrorCode::engine_stopped});
         stop_workers();
         discard_stopped_worker_state();
         stop_diagnostics();
@@ -1677,6 +1730,28 @@ struct EngineRuntime::Impl {
         io_backend.reset();
         if (wake_control) wake_control->close();
         wake_fd = -1;
+    }
+
+    [[nodiscard]] std::chrono::system_clock::time_point current_schedule_time() const noexcept {
+        return config.schedule_clock != nullptr ? config.schedule_clock() : std::chrono::system_clock::now();
+    }
+
+    void fail_pending_admin_commands(Status reason) noexcept {
+        std::vector<AdminCommand> batch;
+        {
+            std::lock_guard lock(admin_mutex);
+            batch.swap(admin_commands);
+            has_admin_commands.store(false, std::memory_order_release);
+        }
+        for (auto& cmd : batch) {
+            if (!cmd.reply) continue;
+            {
+                std::lock_guard rlock(cmd.reply->mutex);
+                cmd.reply->status = reason;
+                cmd.reply->done = true;
+            }
+            cmd.reply->cv.notify_all();
+        }
     }
 
     void io_remove(IoTag& tag) noexcept {
@@ -1792,9 +1867,34 @@ struct EngineRuntime::Impl {
             (config.storage.segment_bytes < 8192 ||
              config.storage.segment_bytes > config.storage.journal_capacity_bytes))
             return {ErrorCode::invalid_config};
+        auto check_session_wire_hints = [this](WireHints hints) noexcept -> Status {
+            const auto pairs = hints.length_data_pairs;
+            for (std::size_t i = 0; i < pairs.size(); ++i) {
+                const auto left = pairs[i];
+                if (left.length_tag == 0 || left.data_tag == 0 || left.length_tag == left.data_tag)
+                    return {ErrorCode::invalid_config};
+                for (const auto& right : wire_hint_pairs) {
+                    const bool conflict =
+                        (left.length_tag == right.length_tag && left.data_tag != right.data_tag) ||
+                        (left.data_tag == right.data_tag && left.length_tag != right.length_tag) ||
+                        (left.length_tag == right.data_tag && left.data_tag != right.length_tag) ||
+                        (left.data_tag == right.length_tag && left.length_tag != right.data_tag);
+                    if (conflict) return {ErrorCode::invalid_config};
+                }
+            }
+            return Status::success();
+        };
         for (const auto& item : initiators) {
-            if (schema && !schema->matches_session(item.settings.version, item.settings.default_appl_ver_id))
-                return {ErrorCode::unsupported_protocol, 8};
+            const SchemaDescriptor* eff_schema = item.settings.schema != nullptr ? item.settings.schema : schema;
+            if (eff_schema != nullptr) {
+                if (eff_schema->messages.empty()) return {ErrorCode::schema_mismatch};
+                if (!eff_schema->matches_session(item.settings.version, item.settings.default_appl_ver_id))
+                    return {ErrorCode::unsupported_protocol, 8};
+            }
+            if (const auto hst = check_session_wire_hints(item.settings.schema_wire_hints); !hst.ok()) return hst;
+            if (!item.socket_options.local_bind_ip.empty() &&
+                !is_numeric_host(item.socket_options.local_bind_ip, true))
+                return {ErrorCode::invalid_config};
             const auto status = validate_session_settings(item.settings, false, item.tls.enabled);
             if (!status.ok()) return status;
             if (item.settings.flow_control &&
@@ -1806,13 +1906,24 @@ struct EngineRuntime::Impl {
                 if (!context.ok()) return context.status();
             }
         }
-        for (const auto& item : listeners) if (item.config.tls.enabled) {
-            const auto context = TlsContext::create(item.config.tls, true);
-            if (!context.ok()) return context.status();
+        for (const auto& item : listeners) {
+            if (!item.config.socket_options.local_bind_ip.empty() &&
+                !is_numeric_host(item.config.socket_options.local_bind_ip, true))
+                return {ErrorCode::invalid_config};
+            if (item.config.tls.enabled) {
+                const auto context = TlsContext::create(item.config.tls, true);
+                if (!context.ok()) return context.status();
+            }
         }
         for (const auto& item : acceptors) {
-            if (schema && !schema->matches_session(item.config.settings.version, item.config.settings.default_appl_ver_id))
-                return {ErrorCode::unsupported_protocol, 8};
+            const SchemaDescriptor* eff_schema = item.config.settings.schema != nullptr
+                ? item.config.settings.schema : schema;
+            if (eff_schema != nullptr) {
+                if (eff_schema->messages.empty()) return {ErrorCode::schema_mismatch};
+                if (!eff_schema->matches_session(item.config.settings.version, item.config.settings.default_appl_ver_id))
+                    return {ErrorCode::unsupported_protocol, 8};
+            }
+            if (const auto hst = check_session_wire_hints(item.config.settings.schema_wire_hints); !hst.ok()) return hst;
             if (item.listener_index >= listeners.size()) return {ErrorCode::invalid_config};
             const auto status = validate_session_settings(item.config.settings, true,
                 listeners[item.listener_index].config.tls.enabled);
@@ -1837,9 +1948,11 @@ struct EngineRuntime::Impl {
         control->name = name;
         const auto max_pending_age_ms = settings.flow_control
             ? settings.flow_control->max_pending_age_ms : config.max_pending_age_ms;
+        const SchemaDescriptor* eff_schema = settings.schema != nullptr ? settings.schema : schema;
         control->sender = std::make_shared<SenderSharedState>(name,
             std::move(local_comp), std::move(remote_comp),
-            schema == nullptr ? std::string{} : std::string{schema->fingerprint},
+            eff_schema == nullptr ? std::string{} : std::string{eff_schema->fingerprint},
+            schema == nullptr,
             config.max_pending_sender_messages, config.max_pending_sender_bytes,
             config.sender_receipt_capacity, config.max_frame_bytes,
             config.max_producer_lanes_per_session, life, wake_control,
@@ -2599,6 +2712,8 @@ struct EngineRuntime::Impl {
                                            std::memory_order_relaxed);
                 slot->active_endpoint_index.store(session.active_endpoint_index.load(std::memory_order_relaxed),
                                                   std::memory_order_relaxed);
+                slot->unexpected_fields.store(session.unexpected_fields.load(std::memory_order_relaxed),
+                                              std::memory_order_relaxed);
                 slot->last_update_ns.store(telemetry_now_ns(), std::memory_order_relaxed);
             }
         }
@@ -2648,10 +2763,28 @@ struct EngineRuntime::Impl {
     [[nodiscard]] Status open_driver(Peer& peer, SessionRole role) noexcept {
         try {
             peer.telemetry_probes = config.telemetry_stage_probes;
+            peer.wire_hint_pairs.clear();
+            const auto session_hints = peer.settings.schema_wire_hints.length_data_pairs;
+            if (!session_hints.empty()) {
+                peer.wire_hint_pairs.reserve(wire_hint_pairs.size() + session_hints.size());
+                peer.wire_hint_pairs.insert(peer.wire_hint_pairs.end(), wire_hint_pairs.begin(), wire_hint_pairs.end());
+                for (const auto& pair : session_hints) {
+                    const bool exists = std::any_of(peer.wire_hint_pairs.begin(), peer.wire_hint_pairs.end(),
+                        [&pair](const LengthDataPair& item) {
+                            return item.length_tag == pair.length_tag && item.data_tag == pair.data_tag;
+                        });
+                    if (!exists) peer.wire_hint_pairs.push_back(pair);
+                }
+                peer.wire_hints = WireHints{peer.wire_hint_pairs};
+            } else {
+                peer.wire_hints = WireHints{};
+            }
+            const SchemaDescriptor* effective_schema =
+                peer.settings.schema != nullptr ? peer.settings.schema : schema;
             SessionCallbacks callbacks;
             callbacks.deferred_delivery = queued;
             {
-                callbacks.validate_message = [this, peer_ptr = &peer](const FlatMessageView& message) {
+                callbacks.validate_message = [this, peer_ptr = &peer, effective_schema](const FlatMessageView& message) {
                     const std::uint64_t v_t0 = (peer_ptr->telemetry_probes && peer_ptr->session &&
                                                 peer_ptr->session->telemetry_slot)
                         ? telemetry_now_ns() : 0ULL;
@@ -2664,7 +2797,7 @@ struct EngineRuntime::Impl {
                     };
                     std::string_view msg_type{};
                     std::size_t msg_type_offset = 0;
-                    if (schema != nullptr) {
+                    if (effective_schema != nullptr) {
                         const auto fields = message.fields();
                         if (fields.size() >= 3 && fields[2].tag == 35) {
                             msg_type = fields[2].value;
@@ -2675,10 +2808,20 @@ struct EngineRuntime::Impl {
                             msg_type = type.value().value;
                             msg_type_offset = type.value().offset;
                         }
+                        const auto policy = peer_ptr->settings.unexpected_field_policy;
+                        std::uint64_t unexpected_count = 0;
                         const auto schema_status = validate_schema_message_for_type(
-                            *schema, msg_type, msg_type_offset, fields, ValidationLevel::strict,
-                            message.parsed_index());
+                            *effective_schema, msg_type, msg_type_offset, fields, ValidationLevel::strict,
+                            message.parsed_index(), policy,
+                            policy == UnexpectedFieldPolicy::ignore_with_metric ? &unexpected_count : nullptr);
                         if (!schema_status.ok()) return finish(schema_status);
+                        if (unexpected_count != 0 && peer_ptr->session) {
+                            peer_ptr->session->unexpected_fields.fetch_add(
+                                unexpected_count, std::memory_order_relaxed);
+                            if (peer_ptr->session->telemetry_slot != nullptr) {
+                                peer_ptr->session->telemetry_slot->inc_unexpected_fields(unexpected_count);
+                            }
+                        }
                     }
                     if (config.message_validator) {
                         const auto checked = config.message_validator(message);
@@ -2705,7 +2848,7 @@ struct EngineRuntime::Impl {
                     return finish(Status::success());
                 };
             }
-            callbacks.wire_hints = wire_hints;
+            callbacks.wire_hints = peer.effective_wire_hints(wire_hints);
             callbacks.deferred_active = queued && static_cast<bool>(active_callback);
             if (callbacks.deferred_active) {
                 callbacks.on_deferred_active = [this, peer_ptr = &peer]() -> Status {
@@ -2814,7 +2957,15 @@ struct EngineRuntime::Impl {
                 if (eps.empty()) eps.push_back(declaration.endpoint);
                 peer->endpoint = eps.front();
                 peer->failover.configure(std::move(eps), declaration.connection_strategy, config.reconnect_delay_ms);
+                peer->socket_options = declaration.socket_options;
                 peer->settings = declaration.settings;
+                peer->last_schedule_window_id = peer->settings.schedule.window_id(current_schedule_time());
+                if (peer->session && peer->session->prestart_admin_reset) {
+                    peer->pending_admin_reset = true;
+                    peer->pending_admin_reset_reason = peer->session->prestart_admin_reset_reason;
+                    peer->session->prestart_admin_reset = false;
+                    peer->session->prestart_admin_reset_reason.clear();
+                }
                 peer->tls_config = declaration.tls;
                 if (declaration.tls.enabled) {
                     auto context = TlsContext::create(declaration.tls, false);
@@ -2846,7 +2997,8 @@ struct EngineRuntime::Impl {
                 listener.tls_context = std::move(context).value();
             }
             auto bound = TcpListener::bind(listener.config.endpoint.host,
-                listener.config.endpoint.port, static_cast<int>(listener.config.backlog));
+                listener.config.endpoint.port, static_cast<int>(listener.config.backlog),
+                listener.config.socket_options);
             if (!bound.ok()) return bound.status();
             listener.socket.emplace(std::move(bound).value());
             auto endpoint = listener.socket->local_endpoint();
@@ -2881,7 +3033,8 @@ struct EngineRuntime::Impl {
             if (peer.session) peer.session->state.store(SessionState::failed, std::memory_order_release);
             return Status::success();
         }
-        if (!peer.settings.schedule.contains(std::chrono::system_clock::now())) {
+        const auto now_sys = current_schedule_time();
+        if (!peer.settings.schedule.contains(now_sys)) {
             peer.reconnect_at = now + 1000;
             return Status::success();
         }
@@ -2895,6 +3048,33 @@ struct EngineRuntime::Impl {
             }
             now = monotonic_ms();
         }
+        if (peer.settings.schedule.reset_on_schedule_boundary) {
+            const auto cur_win = peer.settings.schedule.window_id(now_sys);
+            if (cur_win != 0) {
+                if (peer.last_schedule_window_id != 0 && cur_win != peer.last_schedule_window_id) {
+                    const auto armed = peer.driver->arm_one_shot_sequence_reset("schedule boundary auto-reset");
+                    if (!armed.ok()) {
+                        report_error(peer.name, armed);
+                        peer.disabled = true;
+                        if (peer.session) peer.session->state.store(SessionState::failed, std::memory_order_release);
+                        return armed;
+                    }
+                }
+                peer.last_schedule_window_id = cur_win;
+            }
+        }
+        if (peer.pending_admin_reset) {
+            const std::string_view reason = peer.pending_admin_reset_reason.empty()
+                ? std::string_view{"admin sequence reset"}
+                : std::string_view{peer.pending_admin_reset_reason};
+            const auto armed = peer.driver->arm_one_shot_sequence_reset(reason);
+            peer.pending_admin_reset = false;
+            peer.pending_admin_reset_reason.clear();
+            if (!armed.ok()) {
+                report_error(peer.name, armed);
+                return armed;
+            }
+        }
         const std::size_t max_immediate = std::max<std::size_t>(1, peer.failover.size());
         Status last_error{ErrorCode::io_error};
         for (std::size_t attempt = 0; attempt < max_immediate; ++attempt) {
@@ -2904,7 +3084,8 @@ struct EngineRuntime::Impl {
                     peer.failover.current_index(), std::memory_order_release);
             }
             bool in_progress = false;
-            auto connected = TcpStream::connect(peer.endpoint.host, peer.endpoint.port, in_progress);
+            auto connected = TcpStream::connect(peer.endpoint.host, peer.endpoint.port,
+                in_progress, peer.socket_options);
             if (connected.ok()) {
                 peer.clear_receive();
                 peer.stream = std::move(connected).value();
@@ -3059,9 +3240,18 @@ struct EngineRuntime::Impl {
             }
         } else {
             peer.closed = true;
-            if (peer.acceptor_index < acceptors.size() &&
-                acceptors[peer.acceptor_index].active == &peer)
-                acceptors[peer.acceptor_index].active = nullptr;
+            if (peer.acceptor_index < acceptors.size()) {
+                auto& acc = acceptors[peer.acceptor_index];
+                if (acc.active == &peer) acc.active = nullptr;
+                if (acc.pending_offline_reset) {
+                    const std::string reason = acc.pending_offline_reset_reason.empty()
+                        ? std::string{"admin sequence reset"} : acc.pending_offline_reset_reason;
+                    acc.pending_offline_reset = false;
+                    acc.pending_offline_reset_reason.clear();
+                    const auto rst = apply_offline_acceptor_reset(acc, reason);
+                    if (!rst.ok()) report_error(acc.config.name, rst);
+                }
+            }
         }
     }
 
@@ -3166,7 +3356,8 @@ struct EngineRuntime::Impl {
             }
             auto& acceptor = acceptors[acceptor_index];
             error_name = acceptor.config.name;
-            if (!acceptor.config.settings.schedule.contains(std::chrono::system_clock::now()))
+            const auto now_sys = current_schedule_time();
+            if (!acceptor.config.settings.schedule.contains(now_sys))
                 return {ErrorCode::schedule_closed};
             const auto authenticated = authenticate_logon(acceptor.config.settings.authentication,
                 message, source.tls && source.tls->handshake_complete());
@@ -3177,6 +3368,8 @@ struct EngineRuntime::Impl {
                 identity_rejected = true;
                 return {ErrorCode::protocol_error, 49};
             }
+            std::string_view reset_flag_val{};
+            const bool peer_sent_141_y = field_value(message, 141, reset_flag_val).ok() && reset_flag_val == "Y";
 
             auto peer = std::make_unique<Peer>();
             peer->name = acceptor.config.name;
@@ -3197,6 +3390,33 @@ struct EngineRuntime::Impl {
             peer->receive_buffer.reserve(config.max_frame_bytes + read_chunk_size);
             auto opened = open_driver(*peer, SessionRole::acceptor);
             if (!opened.ok()) return opened;
+            const auto cur_win = acceptor.config.settings.schedule.window_id(now_sys);
+            bool need_offline_reset = acceptor.pending_offline_reset ||
+                (acceptor.session && acceptor.session->prestart_admin_reset);
+            std::string offline_reset_reason = acceptor.pending_offline_reset
+                ? acceptor.pending_offline_reset_reason
+                : (acceptor.session ? acceptor.session->prestart_admin_reset_reason : std::string{});
+            if (acceptor.config.settings.schedule.reset_on_schedule_boundary &&
+                cur_win != 0 && acceptor.last_schedule_window_id != 0 &&
+                cur_win != acceptor.last_schedule_window_id) {
+                need_offline_reset = true;
+                if (offline_reset_reason.empty()) offline_reset_reason = "schedule boundary auto-reset";
+            }
+            if (need_offline_reset && !peer_sent_141_y) {
+                const std::string_view r = offline_reset_reason.empty()
+                    ? std::string_view{"admin sequence reset"}
+                    : std::string_view{offline_reset_reason};
+                const auto rst = peer->driver->reset_epoch_offline(r);
+                if (!rst.ok()) return rst;
+            }
+            acceptor.pending_offline_reset = false;
+            acceptor.pending_offline_reset_reason.clear();
+            if (acceptor.session) {
+                acceptor.session->prestart_admin_reset = false;
+                acceptor.session->prestart_admin_reset_reason.clear();
+            }
+            if (cur_win != 0) acceptor.last_schedule_window_id = cur_win;
+            peer->last_schedule_window_id = cur_win;
             now = monotonic_ms();
             peers.push_back(std::move(peer));
             auto& stored = *peers.back();
@@ -3240,7 +3460,7 @@ struct EngineRuntime::Impl {
             FrameView frame{};
             const bool probe = peer.telemetry_probes && peer.session && peer.session->telemetry_slot;
             const std::uint64_t p_t0 = probe ? telemetry_now_ns() : 0ULL;
-            const auto status = inspect_frame(peer.unread_view(), frame, wire_hints,
+            const auto status = inspect_frame(peer.unread_view(), frame, peer.effective_wire_hints(wire_hints),
                 CodecLimits{config.max_frame_bytes, peer.settings.verify_checksum});
             if (status.code == ErrorCode::need_more) return Status::success();
             if (!status.ok()) {
@@ -3285,7 +3505,7 @@ struct EngineRuntime::Impl {
         if (peer.closed || peer.connection != Connection::connected ||
             peer.unread_size() == 0 || !peer.driver || !peer.driver->can_receive()) return false;
         FrameView frame{};
-        return inspect_frame(peer.unread_view(), frame, wire_hints,
+        return inspect_frame(peer.unread_view(), frame, peer.effective_wire_hints(wire_hints),
             CodecLimits{config.max_frame_bytes, peer.settings.verify_checksum}).ok();
     }
 
@@ -3713,11 +3933,25 @@ struct EngineRuntime::Impl {
                 continue;
             }
             if (peer.connection != Connection::connected || !peer.driver) continue;
-            if (!peer.settings.schedule.contains(std::chrono::system_clock::now()) &&
-                !peer.schedule_logout_sent && peer.driver->state() == SessionState::active) {
-                peer.schedule_logout_sent = true;
-                (void)peer.driver->logout("session schedule closed", now,
-                    timestamp_view(wall, peer.settings.timestamp_precision));
+            const auto now_sys = current_schedule_time();
+            if (!peer.settings.schedule.contains(now_sys)) {
+                if (!peer.schedule_logout_sent && peer.driver->state() == SessionState::active) {
+                    peer.schedule_logout_sent = true;
+                    (void)peer.driver->logout("session schedule closed", now,
+                        timestamp_view(wall, peer.settings.timestamp_precision));
+                }
+            } else if (peer.settings.schedule.reset_on_schedule_boundary) {
+                const auto cur_win = peer.settings.schedule.window_id(now_sys);
+                if (cur_win != 0) {
+                    if (peer.last_schedule_window_id == 0) {
+                        peer.last_schedule_window_id = cur_win;
+                    } else if (cur_win != peer.last_schedule_window_id &&
+                               !peer.schedule_logout_sent && peer.driver->state() == SessionState::active) {
+                        peer.schedule_logout_sent = true;
+                        (void)peer.driver->logout("schedule boundary reset", now,
+                            timestamp_view(wall, peer.settings.timestamp_precision));
+                    }
+                }
             }
             const auto flow = peer.settings.flow_control.value_or(FlowControlConfig{});
             if (!peer.driver->can_receive()) {
@@ -3984,12 +4218,228 @@ struct EngineRuntime::Impl {
         }
     }
 
+    [[nodiscard]] Status apply_offline_session_config(std::string_view session_name,
+        SessionConfig& out_cfg, std::shared_ptr<SessionControl>& out_ctrl) const noexcept {
+        for (std::size_t i = 0; i < initiators.size(); ++i) {
+            if (initiators[i].name != session_name) continue;
+            const auto& decl = initiators[i];
+            Peer tmp{};
+            tmp.name = decl.name;
+            tmp.local_comp_id = decl.sender_comp_id;
+            tmp.remote_comp_id = decl.target_comp_id;
+            tmp.settings = decl.settings;
+            out_cfg = make_session_config(tmp, SessionRole::initiator);
+            out_cfg.tls_verified = decl.tls.enabled;
+            out_ctrl = initiator_sessions[i];
+            return Status::success();
+        }
+        for (const auto& acc : acceptors) {
+            if (acc.config.name != session_name) continue;
+            Peer tmp{};
+            tmp.name = acc.config.name;
+            tmp.local_comp_id = acc.config.local_comp_id;
+            tmp.remote_comp_id = acc.config.remote_comp_id;
+            tmp.settings = acc.config.settings;
+            out_cfg = make_session_config(tmp, SessionRole::acceptor);
+            out_cfg.tls_verified = acc.listener_index < listeners.size() &&
+                listeners[acc.listener_index].config.tls.enabled;
+            out_ctrl = acc.session;
+            return Status::success();
+        }
+        return Status{ErrorCode::invalid_value};
+    }
+
+    [[nodiscard]] Status apply_offline_acceptor_reset(Acceptor& acc, std::string_view reason) noexcept {
+        if (const auto dir_st = create_storage_directory(); !dir_st.ok()) return dir_st;
+        Peer tmp{};
+        tmp.name = acc.config.name;
+        tmp.local_comp_id = acc.config.local_comp_id;
+        tmp.remote_comp_id = acc.config.remote_comp_id;
+        tmp.settings = acc.config.settings;
+        auto cfg = make_session_config(tmp, SessionRole::acceptor);
+        cfg.tls_verified = acc.listener_index < listeners.size() &&
+            listeners[acc.listener_index].config.tls.enabled;
+        auto opened = SessionDriver::create(std::move(cfg));
+        if (!opened.ok()) return opened.status();
+        const auto st = opened.value().reset_epoch_offline(reason);
+        if (st.ok() && acc.session) {
+            acc.session->next_inbound_seq.store(opened.value().next_inbound_seq(), std::memory_order_relaxed);
+            acc.session->next_outbound_seq.store(opened.value().next_outbound_seq(), std::memory_order_relaxed);
+        }
+        return st;
+    }
+
+    [[nodiscard]] Status execute_admin_command(const AdminCommand& cmd, std::uint64_t now) noexcept {
+        Peer* initiator_peer = nullptr;
+        Acceptor* target_acceptor = nullptr;
+        for (auto& p : peers) {
+            if (p && !p->closed && p->initiator && p->name == cmd.session_name) {
+                initiator_peer = p.get();
+                break;
+            }
+        }
+        if (initiator_peer == nullptr) {
+            for (auto& acc : acceptors) {
+                if (acc.config.name == cmd.session_name) {
+                    target_acceptor = &acc;
+                    break;
+                }
+            }
+        }
+        if (initiator_peer == nullptr && target_acceptor == nullptr)
+            return Status{ErrorCode::invalid_value};
+
+        const auto wall = wall_timestamp();
+        switch (cmd.kind) {
+        case AdminCommandKind::logout: {
+            Peer* active = initiator_peer != nullptr ? initiator_peer : target_acceptor->active;
+            if (active == nullptr || active->closed || active->connection != Connection::connected || !active->driver)
+                return Status{ErrorCode::not_ready};
+            const auto st = active->driver->logout(cmd.reason, now,
+                timestamp_view(wall, active->settings.timestamp_precision));
+            if (st.ok() && active->driver->needs_write()) (void)write_peer(*active, now);
+            return st;
+        }
+        case AdminCommandKind::reconnect: {
+            if (initiator_peer != nullptr) {
+                if (initiator_peer->connection != Connection::disconnected) {
+                    drop_peer(*initiator_peer, Status{ErrorCode::connection_closed}, now, false);
+                }
+                initiator_peer->disabled = false;
+                initiator_peer->failover.on_session_active();
+                initiator_peer->reconnect_at = now;
+                if (initiator_peer->session &&
+                    initiator_peer->session->state.load(std::memory_order_acquire) == SessionState::failed) {
+                    initiator_peer->session->state.store(SessionState::disconnected, std::memory_order_release);
+                }
+                return Status::success();
+            }
+            if (target_acceptor->active != nullptr && !target_acceptor->active->closed) {
+                drop_peer(*target_acceptor->active, Status{ErrorCode::connection_closed}, now, false);
+            }
+            return Status::success();
+        }
+        case AdminCommandKind::sequence_reset: {
+            const std::string_view reason = cmd.reason.empty()
+                ? std::string_view{"admin sequence reset"} : std::string_view{cmd.reason};
+            if (initiator_peer != nullptr) {
+                if (!initiator_peer->settings.allow_sequence_reset)
+                    return Status{ErrorCode::sequence_reset_denied, 141};
+                initiator_peer->pending_admin_reset = true;
+                initiator_peer->pending_admin_reset_reason = std::string{reason};
+                if (initiator_peer->connection == Connection::connected && initiator_peer->driver) {
+                    const auto st = initiator_peer->driver->state();
+                    if (st == SessionState::active || st == SessionState::awaiting_logon) {
+                        (void)initiator_peer->driver->logout(reason, now,
+                            timestamp_view(wall, initiator_peer->settings.timestamp_precision));
+                        if (initiator_peer->driver->needs_write()) (void)write_peer(*initiator_peer, now);
+                    }
+                } else if (initiator_peer->connection == Connection::disconnected) {
+                    initiator_peer->disabled = false;
+                    initiator_peer->reconnect_at = now;
+                }
+                return Status::success();
+            }
+            if (!target_acceptor->config.settings.allow_sequence_reset)
+                return Status{ErrorCode::sequence_reset_denied, 141};
+            if (target_acceptor->active != nullptr && !target_acceptor->active->closed &&
+                target_acceptor->active->connection == Connection::connected &&
+                target_acceptor->active->driver) {
+                target_acceptor->pending_offline_reset = true;
+                target_acceptor->pending_offline_reset_reason = std::string{reason};
+                const auto st = target_acceptor->active->driver->state();
+                if (st == SessionState::active || st == SessionState::awaiting_logon) {
+                    (void)target_acceptor->active->driver->logout(reason, now,
+                        timestamp_view(wall, target_acceptor->active->settings.timestamp_precision));
+                    if (target_acceptor->active->driver->needs_write())
+                        (void)write_peer(*target_acceptor->active, now);
+                }
+                return Status::success();
+            }
+            return apply_offline_acceptor_reset(*target_acceptor, reason);
+        }
+        case AdminCommandKind::adjust_sequences: {
+            const std::string_view reason = cmd.reason.empty()
+                ? std::string_view{"admin sequence adjust"} : std::string_view{cmd.reason};
+            if (initiator_peer != nullptr) {
+                if (initiator_peer->connection != Connection::disconnected)
+                    return Status{ErrorCode::not_ready};
+                if (initiator_peer->driver) {
+                    const auto st = initiator_peer->driver->adjust_sequences(
+                        cmd.next_inbound, cmd.next_outbound, reason);
+                    if (st.ok() && initiator_peer->session) {
+                        initiator_peer->session->next_inbound_seq.store(
+                            initiator_peer->driver->next_inbound_seq(), std::memory_order_relaxed);
+                        initiator_peer->session->next_outbound_seq.store(
+                            initiator_peer->driver->next_outbound_seq(), std::memory_order_relaxed);
+                    }
+                    return st;
+                }
+                SessionConfig cfg{};
+                std::shared_ptr<SessionControl> ctrl;
+                if (const auto st = apply_offline_session_config(cmd.session_name, cfg, ctrl); !st.ok()) return st;
+                auto opened = SessionDriver::create(std::move(cfg));
+                if (!opened.ok()) return opened.status();
+                const auto st = opened.value().adjust_sequences(cmd.next_inbound, cmd.next_outbound, reason);
+                if (st.ok() && ctrl) {
+                    ctrl->next_inbound_seq.store(opened.value().next_inbound_seq(), std::memory_order_relaxed);
+                    ctrl->next_outbound_seq.store(opened.value().next_outbound_seq(), std::memory_order_relaxed);
+                }
+                return st;
+            }
+            if (target_acceptor->active != nullptr && !target_acceptor->active->closed)
+                return Status{ErrorCode::not_ready};
+            SessionConfig cfg{};
+            std::shared_ptr<SessionControl> ctrl;
+            if (const auto st = apply_offline_session_config(cmd.session_name, cfg, ctrl); !st.ok()) return st;
+            auto opened = SessionDriver::create(std::move(cfg));
+            if (!opened.ok()) return opened.status();
+            const auto st = opened.value().adjust_sequences(cmd.next_inbound, cmd.next_outbound, reason);
+            if (st.ok() && ctrl) {
+                ctrl->next_inbound_seq.store(opened.value().next_inbound_seq(), std::memory_order_relaxed);
+                ctrl->next_outbound_seq.store(opened.value().next_outbound_seq(), std::memory_order_relaxed);
+            }
+            return st;
+        }
+        }
+        return Status{ErrorCode::invalid_value};
+    }
+
+    void drain_admin_commands(std::uint64_t now) noexcept {
+        std::vector<AdminCommand> batch;
+        {
+            std::lock_guard lock(admin_mutex);
+            if (admin_commands.empty()) {
+                has_admin_commands.store(false, std::memory_order_release);
+                return;
+            }
+            batch.swap(admin_commands);
+            has_admin_commands.store(false, std::memory_order_release);
+        }
+        for (auto& cmd : batch) {
+            const auto st = execute_admin_command(cmd, now);
+            if (cmd.reply) {
+                {
+                    std::lock_guard rlock(cmd.reply->mutex);
+                    cmd.reply->status = st;
+                    cmd.reply->done = true;
+                }
+                cmd.reply->cv.notify_all();
+            } else if (!st.ok()) {
+                report_error(cmd.session_name, st);
+            }
+        }
+    }
+
     [[nodiscard]] Status owner_iteration(std::uint32_t maximum_wait_ms) {
         std::array<char, sizeof(std::uint64_t)> wake_bytes{};
             if (wake_control) (void)wake_control->consume_wake_pending();
             auto now = monotonic_ms();
             if (has_pending_handoffs.load(std::memory_order_acquire)) {
                 drain_handoffs(now);
+            }
+            if (has_admin_commands.load(std::memory_order_acquire)) {
+                drain_admin_commands(now);
             }
             expire_pending_commands(now);
             for (auto& peer : peers) {
@@ -4162,6 +4612,7 @@ struct EngineRuntime::Impl {
                 wake_control->set_sleeping(true);
                 bool woke_early = wake_control->consume_wake_pending() ||
                     has_pending_handoffs.load(std::memory_order_acquire) ||
+                    has_admin_commands.load(std::memory_order_acquire) ||
                     stopping.load(std::memory_order_acquire);
                 if (!woke_early) {
                     for (const auto& peer : peers) {
@@ -4309,6 +4760,9 @@ struct EngineRuntime::Impl {
     std::mutex handoff_mutex;
     std::vector<HandoffItem> incoming_handoffs;
     std::atomic<bool> has_pending_handoffs{false};
+    std::mutex admin_mutex;
+    std::vector<AdminCommand> admin_commands;
+    std::atomic<bool> has_admin_commands{false};
     std::vector<Acceptor> acceptors;
     std::vector<std::shared_ptr<SessionControl>> sessions;
     std::size_t pending_expiry_session_cursor{};
@@ -4446,6 +4900,9 @@ Result<SessionHandle> EngineRuntime::add_initiator(InitiatorConfig config) noexc
         config.endpoints.size() > 16 ||
         impl_->initiators.size() + impl_->acceptors.size() >= impl_->config.max_sessions)
         return Status{ErrorCode::invalid_config};
+    if (!config.socket_options.local_bind_ip.empty() &&
+        !is_numeric_host(config.socket_options.local_bind_ip, true))
+        return Status{ErrorCode::invalid_config};
     if (config.endpoints.empty()) {
         if (!is_numeric_host(config.endpoint.host) || config.endpoint.port == 0)
             return Status{ErrorCode::invalid_config};
@@ -4482,6 +4939,8 @@ Result<SessionHandle> EngineRuntime::add_initiator(InitiatorConfig config) noexc
 Result<ListenerHandle> EngineRuntime::add_listener(ListenerConfig config) noexcept {
     if (!impl_ || impl_->has_run.load(std::memory_order_acquire) ||
         !plain_identifier(config.name, 128) || !is_numeric_host(config.endpoint.host, true) ||
+        (!config.socket_options.local_bind_ip.empty() &&
+         !is_numeric_host(config.socket_options.local_bind_ip, true)) ||
         config.backlog == 0 || config.backlog > static_cast<std::size_t>(std::numeric_limits<int>::max()) ||
         impl_->listeners.size() >= impl_->config.max_sessions)
         return Status{ErrorCode::invalid_config};
@@ -4499,6 +4958,8 @@ Result<ListenerHandle> EngineRuntime::add_listener(ListenerConfig config) noexce
 Result<ListenerHandle> EngineRuntime::add_handoff_listener(ListenerConfig config) noexcept {
     if (!impl_ || impl_->has_run.load(std::memory_order_acquire) ||
         !plain_identifier(config.name, 128) || !is_numeric_host(config.endpoint.host, true) ||
+        (!config.socket_options.local_bind_ip.empty() &&
+         !is_numeric_host(config.socket_options.local_bind_ip, true)) ||
         config.backlog == 0 || config.backlog > static_cast<std::size_t>(std::numeric_limits<int>::max()) ||
         impl_->listeners.size() >= impl_->config.max_sessions)
         return Status{ErrorCode::invalid_config};
@@ -4573,7 +5034,7 @@ Result<SessionHandle> EngineRuntime::add_acceptor(AcceptorConfig config) noexcep
         impl_->acceptors.reserve(impl_->acceptors.size() + 1);
         impl_->sessions.reserve(impl_->sessions.size() + 1);
         auto control = impl_->make_session_control(name, config.local_comp_id, config.remote_comp_id, config.settings);
-        impl_->acceptors.push_back(Impl::Acceptor{std::move(config), listener_index, nullptr, control});
+        impl_->acceptors.push_back(Impl::Acceptor{std::move(config), listener_index, nullptr, control, 0, false, {}});
         return SessionHandle{name, control->sender};
     } catch (...) { return Status{ErrorCode::capacity_exceeded}; }
 }
@@ -4652,6 +5113,7 @@ Status EngineRuntime::poll_once(std::uint32_t max_wait_ms) noexcept {
         if (!already_reported) impl_->report_error({}, impl_->final_status);
     }
     impl_->life->store(EngineLife::stopping, std::memory_order_release);
+    impl_->fail_pending_admin_commands(Status{ErrorCode::engine_stopped});
     impl_->stop_workers();
     impl_->discard_stopped_worker_state();
     impl_->publish_snapshots();
@@ -4703,6 +5165,7 @@ Result<SessionSnapshot> EngineRuntime::snapshot(std::string_view name) const noe
             result.pending_inbound_bytes = session->pending_inbound_bytes.load(std::memory_order_relaxed);
             result.read_paused = session->read_paused.load(std::memory_order_relaxed);
             result.active_endpoint_index = session->active_endpoint_index.load(std::memory_order_acquire);
+            result.unexpected_fields = session->unexpected_fields.load(std::memory_order_relaxed);
             return result;
         }
         return Status{ErrorCode::invalid_value};
@@ -4720,6 +5183,180 @@ void EngineRuntime::request_stop() noexcept {
     (void)impl_->life->compare_exchange_strong(expected, EngineLife::stopping,
         std::memory_order_acq_rel);
     impl_->wake();
+}
+
+Status EngineRuntime::request_logout(std::string_view session_name,
+    std::string_view reason) noexcept {
+    if (!impl_ || session_name.empty()) return Status{ErrorCode::invalid_value};
+    if (reason.size() > 200 || (!reason.empty() && !detail::is_valid_text(reason)))
+        return Status{ErrorCode::invalid_value, 58};
+    const auto current_life = impl_->life->load(std::memory_order_acquire);
+    if (current_life != EngineLife::running) return Status{ErrorCode::not_ready};
+    bool found = false;
+    for (const auto& s : impl_->sessions) {
+        if (s && s->name == session_name) { found = true; break; }
+    }
+    if (!found) return Status{ErrorCode::invalid_value};
+    try {
+        Impl::AdminCommand cmd{};
+        cmd.kind = Impl::AdminCommandKind::logout;
+        cmd.session_name = std::string{session_name};
+        cmd.reason = std::string{reason};
+        if (std::this_thread::get_id() == impl_->owner_thread) {
+            return impl_->execute_admin_command(cmd, monotonic_ms());
+        }
+        {
+            std::lock_guard lock(impl_->admin_mutex);
+            impl_->admin_commands.push_back(std::move(cmd));
+            impl_->has_admin_commands.store(true, std::memory_order_release);
+        }
+        impl_->wake();
+        return Status::success();
+    } catch (...) {
+        return Status{ErrorCode::capacity_exceeded};
+    }
+}
+
+Status EngineRuntime::request_reconnect(std::string_view session_name) noexcept {
+    if (!impl_ || session_name.empty()) return Status{ErrorCode::invalid_value};
+    const auto current_life = impl_->life->load(std::memory_order_acquire);
+    if (current_life != EngineLife::running) return Status{ErrorCode::not_ready};
+    bool found = false;
+    for (const auto& s : impl_->sessions) {
+        if (s && s->name == session_name) { found = true; break; }
+    }
+    if (!found) return Status{ErrorCode::invalid_value};
+    try {
+        Impl::AdminCommand cmd{};
+        cmd.kind = Impl::AdminCommandKind::reconnect;
+        cmd.session_name = std::string{session_name};
+        if (std::this_thread::get_id() == impl_->owner_thread) {
+            return impl_->execute_admin_command(cmd, monotonic_ms());
+        }
+        {
+            std::lock_guard lock(impl_->admin_mutex);
+            impl_->admin_commands.push_back(std::move(cmd));
+            impl_->has_admin_commands.store(true, std::memory_order_release);
+        }
+        impl_->wake();
+        return Status::success();
+    } catch (...) {
+        return Status{ErrorCode::capacity_exceeded};
+    }
+}
+
+Status EngineRuntime::request_sequence_reset(std::string_view session_name,
+    std::string_view reason) noexcept {
+    if (!impl_ || session_name.empty()) return Status{ErrorCode::invalid_value};
+    if (reason.empty() || reason.size() > 200 || !detail::is_valid_text(reason))
+        return Status{ErrorCode::invalid_value, 58};
+    bool found = false;
+    bool allowed = false;
+    std::shared_ptr<SessionControl> ctrl;
+    for (std::size_t i = 0; i < impl_->initiators.size(); ++i) {
+        if (impl_->initiators[i].name == session_name) {
+            found = true;
+            allowed = impl_->initiators[i].settings.allow_sequence_reset;
+            ctrl = impl_->initiator_sessions[i];
+            break;
+        }
+    }
+    if (!found) {
+        for (const auto& acc : impl_->acceptors) {
+            if (acc.config.name == session_name) {
+                found = true;
+                allowed = acc.config.settings.allow_sequence_reset;
+                ctrl = acc.session;
+                break;
+            }
+        }
+    }
+    if (!found) return Status{ErrorCode::invalid_value};
+    if (!allowed) return Status{ErrorCode::sequence_reset_denied, 141};
+    const auto current_life = impl_->life->load(std::memory_order_acquire);
+    try {
+        if (current_life == EngineLife::configured) {
+            if (ctrl) {
+                ctrl->prestart_admin_reset = true;
+                ctrl->prestart_admin_reset_reason = std::string{reason};
+            }
+            return Status::success();
+        }
+        if (current_life != EngineLife::running) return Status{ErrorCode::engine_stopped};
+        Impl::AdminCommand cmd{};
+        cmd.kind = Impl::AdminCommandKind::sequence_reset;
+        cmd.session_name = std::string{session_name};
+        cmd.reason = std::string{reason};
+        if (std::this_thread::get_id() == impl_->owner_thread) {
+            return impl_->execute_admin_command(cmd, monotonic_ms());
+        }
+        {
+            std::lock_guard lock(impl_->admin_mutex);
+            impl_->admin_commands.push_back(std::move(cmd));
+            impl_->has_admin_commands.store(true, std::memory_order_release);
+        }
+        impl_->wake();
+        return Status::success();
+    } catch (...) {
+        return Status{ErrorCode::capacity_exceeded};
+    }
+}
+
+Status EngineRuntime::adjust_sequences(std::string_view session_name,
+    std::uint64_t next_inbound, std::uint64_t next_outbound,
+    std::string_view reason) noexcept {
+    if (!impl_ || session_name.empty()) return Status{ErrorCode::invalid_value};
+    if (next_inbound == 0 || next_outbound == 0) return Status{ErrorCode::invalid_value, 34};
+    if (reason.empty() || reason.size() > 200 || !detail::is_valid_text(reason))
+        return Status{ErrorCode::invalid_value, 58};
+    const auto current_life = impl_->life->load(std::memory_order_acquire);
+    try {
+        if (current_life == EngineLife::configured || current_life == EngineLife::stopped) {
+            SessionConfig cfg{};
+            std::shared_ptr<SessionControl> ctrl;
+            if (const auto st = impl_->apply_offline_session_config(session_name, cfg, ctrl); !st.ok())
+                return st;
+            if (const auto dir_st = impl_->create_storage_directory(); !dir_st.ok()) return dir_st;
+            auto opened = SessionDriver::create(std::move(cfg));
+            if (!opened.ok()) return opened.status();
+            const auto st = opened.value().adjust_sequences(next_inbound, next_outbound, reason);
+            if (st.ok() && ctrl) {
+                ctrl->next_inbound_seq.store(opened.value().next_inbound_seq(), std::memory_order_relaxed);
+                ctrl->next_outbound_seq.store(opened.value().next_outbound_seq(), std::memory_order_relaxed);
+            }
+            return st;
+        }
+        if (current_life != EngineLife::running) return Status{ErrorCode::engine_stopped};
+        bool found = false;
+        for (const auto& s : impl_->sessions) {
+            if (s && s->name == session_name) { found = true; break; }
+        }
+        if (!found) return Status{ErrorCode::invalid_value};
+        Impl::AdminCommand cmd{};
+        cmd.kind = Impl::AdminCommandKind::adjust_sequences;
+        cmd.session_name = std::string{session_name};
+        cmd.reason = std::string{reason};
+        cmd.next_inbound = next_inbound;
+        cmd.next_outbound = next_outbound;
+        if (std::this_thread::get_id() == impl_->owner_thread) {
+            return impl_->execute_admin_command(cmd, monotonic_ms());
+        }
+        auto reply = std::make_shared<Impl::AdminReply>();
+        cmd.reply = reply;
+        {
+            std::lock_guard lock(impl_->admin_mutex);
+            if (impl_->life->load(std::memory_order_acquire) != EngineLife::running)
+                return Status{ErrorCode::engine_stopped};
+            impl_->admin_commands.push_back(std::move(cmd));
+            impl_->has_admin_commands.store(true, std::memory_order_release);
+        }
+        impl_->wake();
+        std::unique_lock rlock(reply->mutex);
+        reply->cv.wait(rlock, [&] { return reply->done; });
+        return reply->status;
+    } catch (...) {
+        return Status{ErrorCode::capacity_exceeded};
+    }
 }
 
 Result<TcpEndpoint> EngineRuntime::listener_endpoint(std::string_view name) const noexcept {

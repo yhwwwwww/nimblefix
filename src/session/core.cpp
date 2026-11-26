@@ -423,6 +423,16 @@ CoreOutput SessionCore::process(const CoreEvent& event) noexcept {
         test_deadline_ = resend_end_ = resend_target_ = 0;
         failure_ = Status::success();
         break;
+
+    case CoreEventKind::adjust_sequences:
+        if (connected_ || state_ != SessionState::disconnected ||
+            event.first == 0 || event.last == 0) {
+            output.status = Status{ErrorCode::not_ready};
+            break;
+        }
+        next_inbound_ = event.first;
+        next_outbound_ = event.last;
+        break;
     }
     return output;
 }

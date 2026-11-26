@@ -7,6 +7,7 @@
 #include <string_view>
 #include <utility>
 
+#include <nimblefix/connection_strategy.hpp>
 #include <nimblefix/status.hpp>
 
 namespace nimblefix::detail {
@@ -40,7 +41,8 @@ public:
 
     [[nodiscard]] static Result<TcpStream> connect(std::string_view host,
                                                     std::uint16_t port,
-                                                    bool& in_progress) noexcept;
+                                                    bool& in_progress,
+                                                    const SocketOptions& options = {}) noexcept;
 
     [[nodiscard]] SocketIoResult read(std::span<char> output) noexcept;
     [[nodiscard]] SocketIoResult write(std::span<const char> input) noexcept;
@@ -66,7 +68,8 @@ public:
 
     [[nodiscard]] static Result<TcpListener> bind(std::string_view host,
                                                    std::uint16_t port,
-                                                   int backlog = 128) noexcept;
+                                                   int backlog = 128,
+                                                   const SocketOptions& options = {}) noexcept;
     [[nodiscard]] Result<TcpStream> accept() noexcept;
     [[nodiscard]] Result<BoundEndpoint> local_endpoint() const noexcept;
     [[nodiscard]] int native_handle() const noexcept { return fd_; }
@@ -75,8 +78,10 @@ public:
     void close() noexcept;
 
 private:
-    explicit TcpListener(int fd) noexcept : fd_(fd) {}
+    explicit TcpListener(int fd, SocketOptions options = {}) noexcept
+        : fd_(fd), options_(std::move(options)) {}
     int fd_{-1};
+    SocketOptions options_{};
 };
 
 } // namespace nimblefix::detail

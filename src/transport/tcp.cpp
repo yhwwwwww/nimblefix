@@ -12,6 +12,7 @@
 #include <unistd.h>
 
 #include <array>
+#include <limits>
 #include <string>
 #include <utility>
 
@@ -25,6 +26,75 @@ namespace {
 bool set_nodelay(int fd) noexcept {
     const int enabled = 1;
     return ::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &enabled, sizeof(enabled)) == 0;
+}
+
+void apply_socket_options(int fd, const SocketOptions& options) noexcept {
+    if (options.send_buffer_bytes != 0) {
+        const int sz = static_cast<int>(std::min<std::size_t>(
+            options.send_buffer_bytes, static_cast<std::size_t>(std::numeric_limits<int>::max())));
+        (void)::setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &sz, sizeof(sz));
+    }
+    if (options.recv_buffer_bytes != 0) {
+        const int sz = static_cast<int>(std::min<std::size_t>(
+            options.recv_buffer_bytes, static_cast<std::size_t>(std::numeric_limits<int>::max())));
+        (void)::setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &sz, sizeof(sz));
+    }
+#ifdef TCP_QUICKACK
+    if (options.tcp_quickack) {
+        const int enabled = 1;
+        (void)::setsockopt(fd, IPPROTO_TCP, TCP_QUICKACK, &enabled, sizeof(enabled));
+    }
+#endif
+#ifdef SO_BUSY_POLL
+    if (options.so_busy_poll_us != 0) {
+        const int usec = static_cast<int>(std::min<std::uint32_t>(
+            options.so_busy_poll_us, static_cast<std::uint32_t>(std::numeric_limits<int>::max())));
+        (void)::setsockopt(fd, SOL_SOCKET, SO_BUSY_POLL, &usec, sizeof(usec));
+    }
+#endif
+}
+
+[[nodiscard]] bool bind_local_source(int fd, int family, const SocketOptions& options,
+                                     int& out_errno) noexcept {
+    if (options.local_bind_ip.empty() && options.local_bind_port == 0) return true;
+    if (options.local_bind_port != 0) {
+        const int one = 1;
+        (void)::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+    }
+    if (family == AF_INET) {
+        sockaddr_in local{};
+        local.sin_family = AF_INET;
+        local.sin_port = htons(options.local_bind_port);
+        if (options.local_bind_ip.empty()) {
+            local.sin_addr.s_addr = htonl(INADDR_ANY);
+        } else if (::inet_pton(AF_INET, options.local_bind_ip.c_str(), &local.sin_addr) != 1) {
+            out_errno = EINVAL;
+            return false;
+        }
+        if (::bind(fd, reinterpret_cast<const sockaddr*>(&local), sizeof(local)) != 0) {
+            out_errno = errno;
+            return false;
+        }
+        return true;
+    }
+    if (family == AF_INET6) {
+        sockaddr_in6 local{};
+        local.sin6_family = AF_INET6;
+        local.sin6_port = htons(options.local_bind_port);
+        if (options.local_bind_ip.empty()) {
+            local.sin6_addr = in6addr_any;
+        } else if (::inet_pton(AF_INET6, options.local_bind_ip.c_str(), &local.sin6_addr) != 1) {
+            out_errno = EINVAL;
+            return false;
+        }
+        if (::bind(fd, reinterpret_cast<const sockaddr*>(&local), sizeof(local)) != 0) {
+            out_errno = errno;
+            return false;
+        }
+        return true;
+    }
+    out_errno = EAFNOSUPPORT;
+    return false;
 }
 
 } // namespace
@@ -54,9 +124,12 @@ TcpStream::~TcpStream() {
 }
 
 Result<TcpStream> TcpStream::connect(std::string_view host, std::uint16_t port,
-                                    bool& in_progress) noexcept {
+                                    bool& in_progress,
+                                    const SocketOptions& options) noexcept {
     in_progress = false;
     if (!is_numeric_host(host) || port == 0) return Status{ErrorCode::invalid_value};
+    if (!options.local_bind_ip.empty() && !is_numeric_host(options.local_bind_ip))
+        return Status{ErrorCode::invalid_value};
     try {
         const std::string host_string{host};
         const auto service = std::to_string(port);
@@ -79,6 +152,11 @@ Result<TcpStream> TcpStream::connect(std::string_view host, std::uint16_t port,
             }
             if (!set_nodelay(fd)) {
                 last_error = errno;
+                (void)::close(fd);
+                continue;
+            }
+            apply_socket_options(fd, options);
+            if (!bind_local_source(fd, address->ai_family, options, last_error)) {
                 (void)::close(fd);
                 continue;
             }
@@ -172,12 +250,14 @@ void TcpStream::close() noexcept {
     fd_ = -1;
 }
 
-TcpListener::TcpListener(TcpListener&& other) noexcept : fd_(std::exchange(other.fd_, -1)) {}
+TcpListener::TcpListener(TcpListener&& other) noexcept
+    : fd_(std::exchange(other.fd_, -1)), options_(std::move(other.options_)) {}
 
 TcpListener& TcpListener::operator=(TcpListener&& other) noexcept {
     if (this == &other) return *this;
     close();
     fd_ = std::exchange(other.fd_, -1);
+    options_ = std::move(other.options_);
     return *this;
 }
 
@@ -186,7 +266,8 @@ TcpListener::~TcpListener() {
 }
 
 Result<TcpListener> TcpListener::bind(std::string_view host, std::uint16_t port,
-                                      int backlog) noexcept {
+                                      int backlog,
+                                      const SocketOptions& options) noexcept {
     if (backlog <= 0 || !is_numeric_host(host, true)) return Status{ErrorCode::invalid_value};
     try {
         const std::string host_string{host};
@@ -212,10 +293,11 @@ Result<TcpListener> TcpListener::bind(std::string_view host, std::uint16_t port,
             }
             const int enabled = 1;
             (void)::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &enabled, sizeof(enabled));
+            apply_socket_options(fd, options);
             if (::bind(fd, address->ai_addr, address->ai_addrlen) == 0 &&
                 ::listen(fd, backlog) == 0) {
                 ::freeaddrinfo(addresses);
-                return TcpListener{fd};
+                return TcpListener{fd, options};
             }
             last_error = errno;
             (void)::close(fd);
@@ -244,6 +326,7 @@ Result<TcpStream> TcpListener::accept() noexcept {
             errno = saved_errno;
             return socket_error();
         }
+        apply_socket_options(fd, options_);
         return TcpStream{fd};
     }
     if (errno == EAGAIN || errno == EWOULDBLOCK) return Status{ErrorCode::need_more};
@@ -281,13 +364,15 @@ namespace nimblefix {
 
 TcpTransport::TcpTransport(TcpTransport&& other) noexcept
     : fd_(std::exchange(other.fd_, -1)),
-      connecting_(std::exchange(other.connecting_, false)) {}
+      connecting_(std::exchange(other.connecting_, false)),
+      options_(std::move(other.options_)) {}
 
 TcpTransport& TcpTransport::operator=(TcpTransport&& other) noexcept {
     if (this == &other) return *this;
     close();
     fd_ = std::exchange(other.fd_, -1);
     connecting_ = std::exchange(other.connecting_, false);
+    options_ = std::move(other.options_);
     return *this;
 }
 
@@ -296,9 +381,14 @@ TcpTransport::~TcpTransport() {
 }
 
 Status TcpTransport::connect(std::string_view host, std::uint16_t port) noexcept {
+    return connect(host, port, options_);
+}
+
+Status TcpTransport::connect(std::string_view host, std::uint16_t port,
+                             const SocketOptions& options) noexcept {
     close();
     bool in_progress = false;
-    auto stream = detail::TcpStream::connect(host, port, in_progress);
+    auto stream = detail::TcpStream::connect(host, port, in_progress, options);
     if (!stream.ok()) return stream.status();
     fd_ = stream.value().release_handle();
     connecting_ = in_progress;

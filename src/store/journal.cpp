@@ -216,8 +216,13 @@ Result<ReservedRecord> Journal::reserve(RecordKind kind,
             return Status{ErrorCode::invalid_config, 0, used_total_bytes_};
     } else if (kind == RecordKind::outbound) {
         if (seq != next_outbound_seq_) return Status{ErrorCode::sequence_gap, 0, used_total_bytes_};
-        if (seq == std::numeric_limits<std::uint64_t>::max() || next_inbound != 0 || max_payload_bytes == 0)
+        if (seq == std::numeric_limits<std::uint64_t>::max() || max_payload_bytes == 0)
             return Status{ErrorCode::invalid_config, 0, used_total_bytes_};
+        if (next_inbound != 0) {
+            if (next_inbound <= seq || receipt != 0 || dependency != 0)
+                return Status{ErrorCode::invalid_config, 0, used_total_bytes_};
+            persisted_next = next_inbound;
+        }
         if (dependency != 0) {
             const auto* inbound = find_record(dependency);
             if (inbound == nullptr || inbound->kind != RecordKind::inbound)
@@ -368,7 +373,8 @@ Result<JournalRecord> Journal::commit(const ReservedRecord& reserved,
     segment->write_offset += total_size;
     used_total_bytes_ += total_size;
     if (reserved.kind == RecordKind::inbound) next_inbound_seq_ = reserved.persisted_next;
-    if (reserved.kind == RecordKind::outbound) next_outbound_seq_ = reserved.seq + 1;
+    if (reserved.kind == RecordKind::outbound)
+        next_outbound_seq_ = reserved.persisted_next != 0 ? reserved.persisted_next : (reserved.seq + 1);
     if (reserved.kind == RecordKind::epoch_reset) {
         current_epoch_ = static_cast<std::uint32_t>(reserved.persisted_next);
         next_inbound_seq_ = 1;
@@ -678,7 +684,9 @@ Status Journal::set_retention_floor(std::uint64_t lowest_outbound_seq,
                         [&record](const auto& item) { return item.reset_record_id == record.id; });
                     if (!audited) { safe = false; break; }
                 }
-                if (record.kind == RecordKind::outbound && record.seq >= lowest_outbound_seq &&
+                const auto outbound_end_seq = record.next_seq > record.seq
+                    ? record.next_seq - 1 : record.seq;
+                if (record.kind == RecordKind::outbound && outbound_end_seq >= lowest_outbound_seq &&
                     record.epoch >= current_epoch_) {
                     safe = false; break;
                 }
@@ -961,16 +969,23 @@ Result<JournalLease> Journal::pin_record(RecordId id) const noexcept {
 
 const JournalRecord* Journal::find_outbound(std::uint64_t seq) const noexcept {
     if (outbound_index_.empty()) return nullptr;
+    auto covers = [seq](const JournalRecord& rec) noexcept {
+        return rec.seq == seq || (rec.next_seq > rec.seq && seq > rec.seq && seq < rec.next_seq);
+    };
     const auto& back = records_[outbound_index_.back()];
-    if (back.seq == seq) return &back;
+    if (covers(back)) return &back;
     if (back.seq < seq) return nullptr;
     const auto& front = records_[outbound_index_.front()];
-    if (front.seq == seq) return &front;
+    if (covers(front)) return &front;
     if (front.seq > seq) return nullptr;
     const auto found = std::lower_bound(outbound_index_.begin(), outbound_index_.end(), seq,
         [this](std::size_t index, std::uint64_t value) { return records_[index].seq < value; });
-    if (found == outbound_index_.end() || records_[*found].seq != seq) return nullptr;
-    return &records_[*found];
+    if (found != outbound_index_.end() && records_[*found].seq == seq) return &records_[*found];
+    if (found != outbound_index_.begin()) {
+        const auto& prev = records_[*(found - 1)];
+        if (covers(prev)) return &prev;
+    }
+    return nullptr;
 }
 
 bool Journal::has_delivery(RecordId inbound_id) const noexcept {

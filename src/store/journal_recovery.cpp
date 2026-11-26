@@ -502,9 +502,11 @@ Result<Journal> Journal::open(JournalConfig config) noexcept try {
             } else if (kind == RecordKind::outbound) {
                 if (seq == 0 || seq == std::numeric_limits<std::uint64_t>::max() ||
                     (saw_outbound && seq != expected_outbound) ||
-                    (!saw_outbound && require_one_out && seq != 1) || next_seq != 0 || payload.empty())
+                    (!saw_outbound && require_one_out && seq != 1) ||
+                    (next_seq != 0 && (next_seq <= seq || receipt != 0 || dependency != 0)) ||
+                    payload.empty())
                     return fail(Status{ErrorCode::corrupt_store, 0, static_cast<std::size_t>(id)});
-                expected_outbound = seq + 1;
+                expected_outbound = next_seq != 0 ? next_seq : (seq + 1);
                 saw_outbound = true;
                 require_one_out = false;
                 if (dependency != 0) {
@@ -977,7 +979,9 @@ JournalInspection Journal::inspect_snapshot(JournalConfig config) noexcept try {
                 next_in = next; saw_in = true; require_one_in = false; ++snapshot.inbound_records;
             } else if (raw_kind == static_cast<std::uint32_t>(RecordKind::outbound)) {
                 if ((saw_out && seq != next_out) || (!saw_out && require_one_out && seq != 1) ||
-                    seq == std::numeric_limits<std::uint64_t>::max() || next != 0 || payload == 0) {
+                    seq == std::numeric_limits<std::uint64_t>::max() ||
+                    (next != 0 && (next <= seq || receipt != 0 || dependency != 0)) ||
+                    payload == 0) {
                     snapshot.diagnostic = {ErrorCode::corrupt_store, 0, static_cast<std::size_t>(id)};
                     break;
                 }
@@ -989,7 +993,7 @@ JournalInspection Journal::inspect_snapshot(JournalConfig config) noexcept try {
                         break;
                     }
                 }
-                next_out = seq + 1; saw_out = true; require_one_out = false; ++snapshot.outbound_records;
+                next_out = next != 0 ? next : (seq + 1); saw_out = true; require_one_out = false; ++snapshot.outbound_records;
                 outbound_index.emplace_back(seq, id);
             } else if (raw_kind == static_cast<std::uint32_t>(RecordKind::delivery)) {
                 if (seq == 0 || receipt != 0 || next != 0 || payload != 0 || dependency == 0 || dependency >= id) {

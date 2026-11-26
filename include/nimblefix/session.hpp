@@ -251,6 +251,19 @@ public:
     [[nodiscard]] Status logout(std::string_view reason, std::uint64_t now_ms,
         std::string_view wall_time) noexcept;
 
+    // Runtime admin controls (owner thread only):
+    // - arm_one_shot_sequence_reset: arms a single ResetSeqNumFlag=Y epoch reset on the
+    //   next initiator connected() call (requires allow_sequence_reset).
+    // - reset_epoch_offline: starts a fresh durable epoch (1/1) while disconnected.
+    // - adjust_sequences: durably adjusts next_inbound / next_outbound while disconnected.
+    [[nodiscard]] Status arm_one_shot_sequence_reset(
+        std::string_view reason = "admin sequence reset") noexcept;
+    [[nodiscard]] Status reset_epoch_offline(
+        std::string_view reason = "admin epoch reset") noexcept;
+    [[nodiscard]] Status adjust_sequences(std::uint64_t next_inbound,
+        std::uint64_t next_outbound,
+        std::string_view reason = "admin sequence adjust") noexcept;
+
     // The message is encoded and journaled before this call returns. Rejected
     // sends do not consume or retain the caller's message.
     [[nodiscard]] Result<SendReceipt> send(detail::MessageView message,

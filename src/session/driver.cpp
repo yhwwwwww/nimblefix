@@ -9,6 +9,7 @@
 #include <chrono>
 #include <charconv>
 #include <cstring>
+#include <ctime>
 #include <filesystem>
 #include <limits>
 #include <new>
@@ -509,6 +510,9 @@ struct SessionDriver::Impl {
     bool deferred_active_callback{};
     bool peer_reset_requested{};
     bool local_epoch_reset_started{};
+    bool one_shot_sequence_reset{};
+    bool one_shot_reset_active{};
+    std::string one_shot_reset_reason{};
     bool staged_tx_active{};
     bool staged_tx_is_replay{};
     std::size_t staged_tx_bytes{};
@@ -940,8 +944,8 @@ struct SessionDriver::Impl {
             (static_cast<std::uint64_t>(effective_hb_ms) + 999) / 1000);
         add_safe(AdminField{108, FieldKind::unsigned_integer, seconds, {}});
 
-        const bool request_reset = config.role == SessionRole::initiator && config.settings &&
-            config.settings->logon.request_sequence_reset;
+        const bool request_reset = config.role == SessionRole::initiator &&
+            ((config.settings && config.settings->logon.request_sequence_reset) || one_shot_reset_active);
         const bool agree_reset = config.role == SessionRole::acceptor && peer_reset_requested;
         if (request_reset || agree_reset)
             add_safe(AdminField{141, FieldKind::character, static_cast<unsigned char>('Y'), {}});
@@ -1286,13 +1290,16 @@ struct SessionDriver::Impl {
                     (ack_value != 0 && !(config.role == SessionRole::initiator && ack_value == 1)))
                     return Status{ErrorCode::sequence_reset_denied, 369};
             }
+            const bool local_requested_reset =
+                config.settings->logon.request_sequence_reset || one_shot_reset_active;
             if (config.role == SessionRole::initiator &&
-                (!config.settings->logon.request_sequence_reset || !local_epoch_reset_started))
+                (!local_requested_reset || !local_epoch_reset_started))
                 return Status{ErrorCode::sequence_reset_denied, 141};
             if (config.role == SessionRole::acceptor && core.state() != SessionState::awaiting_logon)
                 return Status{ErrorCode::sequence_reset_denied, 141};
-        } else if (config.role == SessionRole::initiator && config.settings &&
-            config.settings->logon.request_sequence_reset && core.state() == SessionState::awaiting_logon) {
+        } else if (config.role == SessionRole::initiator &&
+            ((config.settings && config.settings->logon.request_sequence_reset) || one_shot_reset_active) &&
+            core.state() == SessionState::awaiting_logon) {
             return Status{ErrorCode::sequence_reset_denied, 141};
         }
         return Status::success();
@@ -1386,7 +1393,8 @@ struct SessionDriver::Impl {
             }
 
             const auto gap_begin = replay_next;
-            auto gap_end = replay_next + 1;
+            auto gap_end = std::max(replay_next + 1,
+                record->next_seq > record->seq ? record->next_seq : record->seq + 1);
             std::string_view original_time{};
             const auto* first_time = unique_field(parsed, 52, duplicate);
             if (duplicate || first_time == nullptr) return Status{ErrorCode::corrupt_store, 52};
@@ -1401,7 +1409,9 @@ struct SessionDriver::Impl {
                 const auto* next_type = unique_field(next_parsed, 35, duplicate);
                 if (duplicate || next_type == nullptr) return Status{ErrorCode::corrupt_store, 35};
                 if (!is_session_admin(next_type->value)) break;
-                ++gap_end;
+                const auto adv = next_record->next_seq > next_record->seq
+                    ? next_record->next_seq : next_record->seq + 1;
+                gap_end = std::max(gap_end + 1, adv);
             }
             std::array<AdminField, 2> gap_fields{
                 AdminField{123, FieldKind::character, static_cast<unsigned char>('Y'), {}},
@@ -2167,6 +2177,7 @@ struct SessionDriver::Impl {
         deferred_logon_pending = false;
         peer_reset_requested = false;
         local_epoch_reset_started = false;
+        one_shot_reset_active = false;
         staged_tx_active = false;
         staged_tx_is_replay = false;
         staged_tx_bytes = 0;
@@ -2187,10 +2198,16 @@ struct SessionDriver::Impl {
         callback_now_ms = now_ms;
         clear_transmit_state();
         last_status = Status::success();
-        if (config.role == SessionRole::initiator && config.settings &&
-            config.settings->logon.request_sequence_reset && !local_epoch_reset_started) {
-            if (!config.settings->allow_sequence_reset) return fail(Status{ErrorCode::sequence_reset_denied, 141});
-            const auto reset = journal.begin_epoch("local Logon ResetSeqNumFlag=Y");
+        const bool want_reset = config.role == SessionRole::initiator &&
+            ((config.settings && config.settings->logon.request_sequence_reset) || one_shot_sequence_reset);
+        if (want_reset && !local_epoch_reset_started) {
+            if (config.settings && !config.settings->allow_sequence_reset)
+                return fail(Status{ErrorCode::sequence_reset_denied, 141});
+            const std::string_view reset_reason =
+                (one_shot_sequence_reset && !one_shot_reset_reason.empty())
+                    ? std::string_view{one_shot_reset_reason}
+                    : std::string_view{"local Logon ResetSeqNumFlag=Y"};
+            const auto reset = journal.begin_epoch(reset_reason);
             if (!reset.ok()) return fail(reset);
             detail::CoreEvent reset_core{};
             reset_core.kind = detail::CoreEventKind::reset_epoch;
@@ -2198,6 +2215,10 @@ struct SessionDriver::Impl {
             if (!reset_output.status.ok()) return fail(reset_output.status);
             peer_ack_seq = 0;
             local_epoch_reset_started = true;
+            if (one_shot_sequence_reset) {
+                one_shot_sequence_reset = false;
+                one_shot_reset_active = true;
+            }
             last_retention_outbound_segment = 0;
             last_appended_outbound_segment = 0;
             if (const auto status = update_retention_floor(true); !status.ok()) return fail(status);
@@ -3002,6 +3023,154 @@ struct SessionDriver::Impl {
         staged_tx_bytes = 0;
     }
 
+    static std::array<char, 24> format_current_utc() noexcept {
+        std::array<char, 24> buf{};
+        timespec ts{};
+        ::clock_gettime(CLOCK_REALTIME, &ts);
+        std::tm utc{};
+        if (::gmtime_r(&ts.tv_sec, &utc) == nullptr) {
+            std::memcpy(buf.data(), "19700101-00:00:00.000", 21);
+            return buf;
+        }
+        auto w2 = [](char* o, unsigned v) noexcept {
+            o[0] = static_cast<char>('0' + (v / 10U) % 10U);
+            o[1] = static_cast<char>('0' + v % 10U);
+        };
+        auto w3 = [](char* o, unsigned v) noexcept {
+            o[0] = static_cast<char>('0' + (v / 100U) % 10U);
+            o[1] = static_cast<char>('0' + (v / 10U) % 10U);
+            o[2] = static_cast<char>('0' + v % 10U);
+        };
+        auto w4 = [](char* o, unsigned v) noexcept {
+            o[0] = static_cast<char>('0' + (v / 1000U) % 10U);
+            o[1] = static_cast<char>('0' + (v / 100U) % 10U);
+            o[2] = static_cast<char>('0' + (v / 10U) % 10U);
+            o[3] = static_cast<char>('0' + v % 10U);
+        };
+        w4(buf.data() + 0, static_cast<unsigned>(utc.tm_year + 1900));
+        w2(buf.data() + 4, static_cast<unsigned>(utc.tm_mon + 1));
+        w2(buf.data() + 6, static_cast<unsigned>(utc.tm_mday));
+        buf[8] = '-';
+        w2(buf.data() + 9, static_cast<unsigned>(utc.tm_hour));
+        buf[11] = ':';
+        w2(buf.data() + 12, static_cast<unsigned>(utc.tm_min));
+        buf[14] = ':';
+        w2(buf.data() + 15, static_cast<unsigned>(utc.tm_sec));
+        buf[17] = '.';
+        w3(buf.data() + 18, static_cast<unsigned>(ts.tv_nsec / 1'000'000L));
+        return buf;
+    }
+
+    [[nodiscard]] Status on_arm_one_shot_sequence_reset(std::string_view reason) noexcept {
+        if (fatal) return last_status.ok() ? Status{ErrorCode::engine_stopped} : last_status;
+        if (config.role != SessionRole::initiator) return Status{ErrorCode::sequence_reset_denied, 141};
+        if (config.settings && !config.settings->allow_sequence_reset)
+            return Status{ErrorCode::sequence_reset_denied, 141};
+        if (reason.empty() || reason.size() > 200 || !detail::is_valid_text(reason))
+            return Status{ErrorCode::invalid_value, 58};
+        try {
+            one_shot_reset_reason.assign(reason.data(), reason.size());
+            one_shot_sequence_reset = true;
+            return Status::success();
+        } catch (...) {
+            return Status{ErrorCode::capacity_exceeded};
+        }
+    }
+
+    [[nodiscard]] Status on_reset_epoch_offline(std::string_view reason) noexcept {
+        if (fatal) return last_status.ok() ? Status{ErrorCode::engine_stopped} : last_status;
+        if (core.state() != SessionState::disconnected) return Status{ErrorCode::not_ready};
+        if (config.settings && !config.settings->allow_sequence_reset)
+            return Status{ErrorCode::sequence_reset_denied, 141};
+        if (reason.empty() || reason.size() > 200 || !detail::is_valid_text(reason))
+            return Status{ErrorCode::invalid_value, 58};
+        const auto reset = journal.begin_epoch(reason);
+        if (!reset.ok()) return reset;
+        detail::CoreEvent rc{};
+        rc.kind = detail::CoreEventKind::reset_epoch;
+        const auto rout = core.process(rc);
+        if (!rout.status.ok()) return rout.status;
+        peer_ack_seq = 0;
+        last_retention_outbound_segment = 0;
+        last_appended_outbound_segment = 0;
+        return update_retention_floor(true);
+    }
+
+    [[nodiscard]] Status on_adjust_sequences(std::uint64_t next_inbound,
+        std::uint64_t next_outbound, std::string_view reason) noexcept {
+        if (fatal) return last_status.ok() ? Status{ErrorCode::engine_stopped} : last_status;
+        if (core.state() != SessionState::disconnected) return Status{ErrorCode::not_ready};
+        if (next_inbound == 0 || next_outbound == 0) return Status{ErrorCode::invalid_value, 34};
+        if (reason.empty() || reason.size() > 200 || !detail::is_valid_text(reason))
+            return Status{ErrorCode::invalid_value, 58};
+        if (next_inbound == core.next_inbound() && next_outbound == core.next_outbound())
+            return Status::success();
+        if (next_inbound < core.next_inbound() || next_outbound < core.next_outbound()) {
+            if (config.settings && !config.settings->allow_sequence_reset)
+                return Status{ErrorCode::sequence_reset_denied, 141};
+            const auto reset = journal.begin_epoch(reason);
+            if (!reset.ok()) return reset;
+            detail::CoreEvent rc{};
+            rc.kind = detail::CoreEventKind::reset_epoch;
+            const auto rout = core.process(rc);
+            if (!rout.status.ok()) return rout.status;
+            peer_ack_seq = 0;
+            last_retention_outbound_segment = 0;
+            last_appended_outbound_segment = 0;
+        }
+        const auto utc_buf = format_current_utc();
+        const std::string_view wt = wall_time_size != 0
+            ? std::string_view{wall_time_storage.data(), wall_time_size}
+            : std::string_view{utc_buf.data(), 21};
+
+        if (next_inbound > core.next_inbound()) {
+            const auto cur_in = core.next_inbound();
+            std::array<AdminField, 3> fields{
+                AdminField{123, FieldKind::character, static_cast<unsigned char>('N'), {}},
+                AdminField{36, FieldKind::unsigned_integer, next_inbound, {}},
+                AdminField{58, FieldKind::string, 0, reason},
+            };
+            AdminMessageStorage storage{};
+            if (const auto st = make_admin_view("4", fields, storage, admin_arena); !st.ok()) return st;
+            SessionHeader hdr{config.remote_comp_id, config.local_comp_id, cur_in, wt};
+            hdr.version = fix_version();
+            const auto enc = encode_fix(storage.view, hdr, encode_buffer);
+            if (!enc.ok()) return enc.status();
+            const auto app = journal.append(RecordKind::inbound, cur_in, 0, 0,
+                std::string_view{encode_buffer.data(), enc.value()}, next_inbound);
+            if (!app.ok()) return app.status();
+            if (!journal.has_delivery(app.value().id)) {
+                if (const auto del = append_delivery(app.value().id, cur_in); !del.ok()) return del;
+            }
+        }
+        if (next_outbound > core.next_outbound()) {
+            const auto cur_out = core.next_outbound();
+            std::array<AdminField, 3> fields{
+                AdminField{123, FieldKind::character, static_cast<unsigned char>('Y'), {}},
+                AdminField{36, FieldKind::unsigned_integer, next_outbound, {}},
+                AdminField{58, FieldKind::string, 0, reason},
+            };
+            AdminMessageStorage storage{};
+            if (const auto st = make_admin_view("4", fields, storage, admin_arena); !st.ok()) return st;
+            SessionHeader hdr{config.local_comp_id, config.remote_comp_id, cur_out, wt, true, wt};
+            hdr.version = fix_version();
+            const auto enc = encode_fix(storage.view, hdr, encode_buffer);
+            if (!enc.ok()) return enc.status();
+            const std::uint64_t persisted_next = next_outbound > cur_out + 1 ? next_outbound : 0;
+            const auto app = journal.append(RecordKind::outbound, cur_out, 0, 0,
+                std::string_view{encode_buffer.data(), enc.value()}, persisted_next);
+            if (!app.ok()) return app.status();
+            last_appended_outbound_segment = std::max(last_appended_outbound_segment, segment_index(app.value().id));
+        }
+        detail::CoreEvent adj{};
+        adj.kind = detail::CoreEventKind::adjust_sequences;
+        adj.first = next_inbound;
+        adj.last = next_outbound;
+        const auto aout = core.process(adj);
+        if (!aout.status.ok()) return aout.status;
+        return update_retention_floor(true);
+    }
+
 };
 
 SessionDriver::SessionDriver(std::unique_ptr<Impl> impl) noexcept : impl_(std::move(impl)) {
@@ -3145,6 +3314,25 @@ Status SessionDriver::logout(std::string_view reason, std::uint64_t now_ms,
     if (!impl_) return Status{ErrorCode::engine_stopped};
     if (const auto status = impl_->claim_owner(); !status.ok()) return status;
     return impl_->on_logout(reason, now_ms, wall_time);
+}
+
+Status SessionDriver::arm_one_shot_sequence_reset(std::string_view reason) noexcept {
+    if (!impl_) return Status{ErrorCode::engine_stopped};
+    if (const auto status = impl_->claim_owner(); !status.ok()) return status;
+    return impl_->on_arm_one_shot_sequence_reset(reason);
+}
+
+Status SessionDriver::reset_epoch_offline(std::string_view reason) noexcept {
+    if (!impl_) return Status{ErrorCode::engine_stopped};
+    if (const auto status = impl_->claim_owner(); !status.ok()) return status;
+    return impl_->on_reset_epoch_offline(reason);
+}
+
+Status SessionDriver::adjust_sequences(std::uint64_t next_inbound,
+    std::uint64_t next_outbound, std::string_view reason) noexcept {
+    if (!impl_) return Status{ErrorCode::engine_stopped};
+    if (const auto status = impl_->claim_owner(); !status.ok()) return status;
+    return impl_->on_adjust_sequences(next_inbound, next_outbound, reason);
 }
 
 Result<SendReceipt> SessionDriver::send(detail::MessageView message,

@@ -19,6 +19,24 @@ struct TcpEndpoint {
     std::uint16_t port{};
 };
 
+// Optional low-latency TCP socket tuning and local interface/source binding.
+// All fields default to OS defaults (zero overhead when unused).
+struct SocketOptions {
+    // Optional numeric IPv4/IPv6 local source address to bind before connect()
+    // (for multi-NIC hosts routing exchange traffic over dedicated lines).
+    std::string local_bind_ip{};
+    // Optional local source port to bind before connect() (0 = OS ephemeral port).
+    std::uint16_t local_bind_port{};
+    // Optional Linux SO_BUSY_POLL timeout in microseconds (0 = disabled).
+    // Best-effort: ignored gracefully if EPERM/ENOPROTOOPT in unprivileged containers.
+    std::uint32_t so_busy_poll_us{};
+    // Enable TCP_QUICKACK on connected/accepted sockets (best-effort on Linux).
+    bool tcp_quickack{false};
+    // Optional SO_SNDBUF / SO_RCVBUF sizes in bytes (0 = OS default).
+    std::size_t send_buffer_bytes{};
+    std::size_t recv_buffer_bytes{};
+};
+
 enum class FailoverPolicy : std::uint8_t {
     ordered,      // Primary-first: try endpoints[0], [1], ... in order; optionally reset to primary after an active session.
     round_robin,  // Advance cyclically across endpoints on every connect failure or disconnect.

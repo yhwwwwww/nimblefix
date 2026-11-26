@@ -6,6 +6,7 @@
 #include <span>
 #include <string_view>
 
+#include <nimblefix/connection_strategy.hpp>
 #include <nimblefix/status.hpp>
 
 namespace nimblefix {
@@ -43,7 +44,12 @@ public:
     TcpTransport& operator=(TcpTransport&& other) noexcept;
     ~TcpTransport();
 
+    void set_socket_options(SocketOptions options) noexcept { options_ = std::move(options); }
+    [[nodiscard]] const SocketOptions& socket_options() const noexcept { return options_; }
+
     [[nodiscard]] Status connect(std::string_view host, std::uint16_t port) noexcept;
+    [[nodiscard]] Status connect(std::string_view host, std::uint16_t port,
+                                 const SocketOptions& options) noexcept;
     [[nodiscard]] Status finish_connect() noexcept;
     [[nodiscard]] TransportIoResult read(std::span<char> output) noexcept;
     [[nodiscard]] TransportIoResult write(std::span<const char> input) noexcept;
@@ -57,6 +63,7 @@ public:
 private:
     int fd_{-1};
     bool connecting_{};
+    SocketOptions options_{};
 };
 
 static_assert(DirectTransport<TcpTransport>);

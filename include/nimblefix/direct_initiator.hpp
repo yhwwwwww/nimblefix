@@ -78,6 +78,10 @@ struct DirectInitiatorConfig {
     // Bounded TCP/TLS connect+handshake timeout and outbound write-stall deadline (0 disables).
     std::uint32_t connect_timeout_ms{10'000};
     std::uint32_t write_stall_ms{30'000};
+    // Policy for schema-unknown inbound fields (reject = zero hot-path overhead default).
+    UnexpectedFieldPolicy unexpected_field_policy{UnexpectedFieldPolicy::reject};
+    // Optional local source IP/port binding & low-latency socket tuning.
+    SocketOptions socket_options{};
 };
 
 // Default no-op handler for tests or send-only initiators.
@@ -208,17 +212,25 @@ template <class Schema>
 }
 
 template <class Schema>
-[[nodiscard]] inline Status direct_schema_validate(const FlatMessageView& message,
-                                                   std::string_view known_msg_type = {},
-                                                   std::size_t msg_type_offset = 0) noexcept {
-    if constexpr (requires { Schema::validate(message); }) return Schema::validate(message);
-    else if constexpr (requires { Schema::descriptor(); }) {
+[[nodiscard]] inline Status direct_schema_validate(
+    const FlatMessageView& message,
+    std::string_view known_msg_type = {},
+    std::size_t msg_type_offset = 0,
+    UnexpectedFieldPolicy policy = UnexpectedFieldPolicy::reject,
+    std::uint64_t* unexpected_count = nullptr) noexcept {
+    if constexpr (requires { Schema::descriptor(); }) {
         if (!known_msg_type.empty()) {
             return validate_schema_message_for_type(Schema::descriptor(), known_msg_type,
-                msg_type_offset, message.fields(), ValidationLevel::strict, message.parsed_index());
+                msg_type_offset, message.fields(), ValidationLevel::strict,
+                message.parsed_index(), policy, unexpected_count);
         }
-        return validate_schema_message(Schema::descriptor(), message, ValidationLevel::strict);
-    } else return Status::success();
+        return validate_schema_message(Schema::descriptor(), message,
+            ValidationLevel::strict, policy, unexpected_count);
+    } else if constexpr (requires { Schema::validate(message); }) {
+        return Schema::validate(message);
+    } else {
+        return Status::success();
+    }
 }
 
 struct DirectAdminField {
@@ -370,7 +382,10 @@ public:
             (config.version == FixVersion::fixt11 && !valid_appl_ver_id(config.default_appl_ver_id)) ||
             (config.request_sequence_reset && !config.allow_sequence_reset) ||
             !config.connection_strategy.validate().ok() ||
-            config.endpoints.size() > 16) {
+            config.endpoints.size() > 16 ||
+            (config.unexpected_field_policy != UnexpectedFieldPolicy::reject &&
+             config.unexpected_field_policy != UnexpectedFieldPolicy::ignore_with_metric &&
+             config.unexpected_field_policy != UnexpectedFieldPolicy::passthrough)) {
             return Status{ErrorCode::invalid_config};
         }
         if (config.session_key.empty()) {
@@ -450,6 +465,9 @@ public:
             }
             if constexpr (requires { handler_.on_endpoint_selected(ep, idx); }) {
                 try { handler_.on_endpoint_selected(ep, idx); } catch (...) {}
+            }
+            if constexpr (requires { transport_.set_socket_options(config_.socket_options); }) {
+                transport_.set_socket_options(config_.socket_options);
             }
             const auto st = transport_.connect(ep.host, ep.port);
             if (st.ok()) {
@@ -835,6 +853,99 @@ public:
         handle_disconnect(reason, clock_.now_ms());
     }
 
+    // Arms a one-shot ResetSeqNumFlag=Y (141=Y) epoch reset for the next connect().
+    // Requires DirectInitiatorConfig::allow_sequence_reset == true.
+    [[nodiscard]] Status request_sequence_reset(
+        std::string_view reason = "admin sequence reset") noexcept {
+        if (fatal_) return last_status_.ok() ? Status{ErrorCode::engine_stopped} : last_status_;
+        if (!config_.allow_sequence_reset) return Status{ErrorCode::sequence_reset_denied, 141};
+        if (reason.empty() || reason.size() > 200 || !detail::is_valid_text(reason))
+            return Status{ErrorCode::invalid_value, 58};
+        try {
+            one_shot_reset_reason_.assign(reason.data(), reason.size());
+            one_shot_sequence_reset_ = true;
+            return Status::success();
+        } catch (...) {
+            return Status{ErrorCode::capacity_exceeded};
+        }
+    }
+
+    // Durably adjusts next_inbound / next_outbound sequences while disconnected.
+    // Lowering below current sequences requires allow_sequence_reset == true and
+    // records an audited epoch reset before advancing to the target pair.
+    [[nodiscard]] Status adjust_sequences(std::uint64_t next_inbound,
+                                          std::uint64_t next_outbound,
+                                          std::string_view reason = "admin sequence adjust") noexcept {
+        if (fatal_) return last_status_.ok() ? Status{ErrorCode::engine_stopped} : last_status_;
+        if (transport_.valid() || core_.state() != SessionState::disconnected)
+            return Status{ErrorCode::not_ready};
+        if (next_inbound == 0 || next_outbound == 0) return Status{ErrorCode::invalid_value, 34};
+        if (reason.empty() || reason.size() > 200 || !detail::is_valid_text(reason))
+            return Status{ErrorCode::invalid_value, 58};
+        if (next_inbound == core_.next_inbound() && next_outbound == core_.next_outbound())
+            return Status::success();
+        if (next_inbound < core_.next_inbound() || next_outbound < core_.next_outbound()) {
+            if (!config_.allow_sequence_reset) return Status{ErrorCode::sequence_reset_denied, 141};
+            const auto rs = journal_.begin_epoch(reason);
+            if (!rs.ok()) return rs;
+            detail::CoreEvent rc{};
+            rc.kind = detail::CoreEventKind::reset_epoch;
+            const auto rout = core_.process(rc);
+            if (!rout.status.ok()) return rout.status;
+            peer_ack_seq_ = 0;
+        }
+        const std::string_view wt = now_wall_time();
+        if (next_inbound > core_.next_inbound()) {
+            const auto cur_in = core_.next_inbound();
+            std::array<detail::DirectAdminField, 3> fields{
+                detail::DirectAdminField{123, FieldKind::character, static_cast<unsigned char>('N'), {}},
+                detail::DirectAdminField{36, FieldKind::unsigned_integer, next_inbound, {}},
+                detail::DirectAdminField{58, FieldKind::string, 0, reason},
+            };
+            detail::DirectAdminStorage stg{};
+            if (const auto st = detail::direct_build_admin("4", fields, stg, admin_arena_); !st.ok()) return st;
+            SessionHeader hdr{config_.remote_comp_id, config_.local_comp_id, cur_in, wt};
+            hdr.version = config_.version;
+            const auto enc = encode_fix(stg.view, hdr, encode_buf_);
+            if (!enc.ok()) return enc.status();
+            const auto app = journal_.append(RecordKind::inbound, cur_in, 0, 0,
+                std::string_view{encode_buf_.data(), enc.value()}, next_inbound);
+            if (!app.ok()) return app.status();
+            if (!journal_.has_delivery(app.value().id)) {
+                if (const auto del = append_delivery(app.value().id, cur_in); !del.ok()) return del;
+            }
+        }
+        if (next_outbound > core_.next_outbound()) {
+            const auto cur_out = core_.next_outbound();
+            std::array<detail::DirectAdminField, 3> fields{
+                detail::DirectAdminField{123, FieldKind::character, static_cast<unsigned char>('Y'), {}},
+                detail::DirectAdminField{36, FieldKind::unsigned_integer, next_outbound, {}},
+                detail::DirectAdminField{58, FieldKind::string, 0, reason},
+            };
+            detail::DirectAdminStorage stg{};
+            if (const auto st = detail::direct_build_admin("4", fields, stg, admin_arena_); !st.ok()) return st;
+            SessionHeader hdr{config_.local_comp_id, config_.remote_comp_id, cur_out, wt, true, wt};
+            hdr.version = config_.version;
+            const auto enc = encode_fix(stg.view, hdr, encode_buf_);
+            if (!enc.ok()) return enc.status();
+            const std::uint64_t persisted_next = next_outbound > cur_out + 1 ? next_outbound : 0;
+            const auto app = journal_.append(RecordKind::outbound, cur_out, 0, 0,
+                std::string_view{encode_buf_.data(), enc.value()}, persisted_next);
+            if (!app.ok()) return app.status();
+        }
+        detail::CoreEvent adj{};
+        adj.kind = detail::CoreEventKind::adjust_sequences;
+        adj.first = next_inbound;
+        adj.last = next_outbound;
+        const auto aout = core_.process(adj);
+        if (!aout.status.ok()) return aout.status;
+        update_retention_floor();
+        sync_telemetry_state();
+        return Status::success();
+    }
+
+    [[nodiscard]] std::uint64_t unexpected_fields_count() const noexcept { return unexpected_fields_; }
+
     [[nodiscard]] std::string_view now_wall_time() noexcept {
         return clock_.wall_time(config_.timestamp_precision);
     }
@@ -1084,6 +1195,7 @@ private:
         deferred_logon_seq_ = 0;
         deferred_logon_pending_ = false;
         local_epoch_reset_started_ = false;
+        one_shot_reset_active_ = false;
         connect_deadline_ = 0;
         write_timer_active_ = false;
         stall_logout_attempted_ = false;
@@ -1107,8 +1219,13 @@ private:
         if (const auto ts = set_wall_time(wt); !ts.ok()) return ts;
         now_ms_ = now_ms;
         last_status_ = Status::success();
-        if (config_.request_sequence_reset && !local_epoch_reset_started_) {
-            const auto rs = journal_.begin_epoch("local Logon ResetSeqNumFlag=Y");
+        const bool want_reset = config_.request_sequence_reset || one_shot_sequence_reset_;
+        if (want_reset && !local_epoch_reset_started_) {
+            if (!config_.allow_sequence_reset) return fail(Status{ErrorCode::sequence_reset_denied, 141});
+            const std::string_view rs_reason = (one_shot_sequence_reset_ && !one_shot_reset_reason_.empty())
+                ? std::string_view{one_shot_reset_reason_}
+                : std::string_view{"local Logon ResetSeqNumFlag=Y"};
+            const auto rs = journal_.begin_epoch(rs_reason);
             if (!rs.ok()) return fail(rs);
             detail::CoreEvent rc{};
             rc.kind = detail::CoreEventKind::reset_epoch;
@@ -1116,6 +1233,10 @@ private:
             if (!rout.status.ok()) return fail(rout.status);
             peer_ack_seq_ = 0;
             local_epoch_reset_started_ = true;
+            if (one_shot_sequence_reset_) {
+                one_shot_sequence_reset_ = false;
+                one_shot_reset_active_ = true;
+            }
         }
         detail::CoreEvent ev{};
         ev.kind = detail::CoreEventKind::connected;
@@ -1643,7 +1764,7 @@ private:
         add({98, FieldKind::unsigned_integer, 0, {}});
         const auto hb_sec = std::max<std::uint64_t>(1, (static_cast<std::uint64_t>(config_.heartbeat_ms) + 999) / 1000);
         add({108, FieldKind::unsigned_integer, hb_sec, {}});
-        if (config_.request_sequence_reset)
+        if (config_.request_sequence_reset || one_shot_reset_active_)
             add({141, FieldKind::character, static_cast<unsigned char>('Y'), {}});
         if (config_.version == FixVersion::fixt11)
             add({1137, FieldKind::string, 0, config_.default_appl_ver_id});
@@ -1803,7 +1924,8 @@ private:
             }
             // Coalesce consecutive admin messages into SequenceReset-GapFill (35=4, 123=Y).
             const auto gap_begin = replay_next_;
-            auto gap_end = replay_next_ + 1;
+            auto gap_end = std::max(replay_next_ + 1,
+                rec->next_seq > rec->seq ? rec->next_seq : rec->seq + 1);
             while (gap_end <= replay_end_) {
                 const auto* nr = journal_.find_outbound(gap_end);
                 if (nr == nullptr || nr->payload.empty()) return Status{ErrorCode::corrupt_store, 34};
@@ -1812,7 +1934,8 @@ private:
                 const auto nt = detail::direct_extract_tags(np);
                 if (nt.msg_type == nullptr) return Status{ErrorCode::corrupt_store, 35};
                 if (!detail::direct_is_admin(nt.msg_type->value)) break;
-                ++gap_end;
+                const auto adv = nr->next_seq > nr->seq ? nr->next_seq : nr->seq + 1;
+                gap_end = std::max(gap_end + 1, adv);
             }
             std::array<detail::DirectAdminField, 2> gf{
                 detail::DirectAdminField{123, FieldKind::character, static_cast<unsigned char>('Y'), {}},
@@ -2076,7 +2199,22 @@ private:
                                             std::size_t msg_type_offset = 0) noexcept {
         const std::uint64_t v_t0 = (telemetry_slot_ != nullptr && config_.telemetry_stage_probes)
             ? telemetry_now_ns() : 0ULL;
-        const auto valid = detail::direct_schema_validate<Schema>(msg, known_msg_type, msg_type_offset);
+        const auto policy = config_.unexpected_field_policy;
+        Status valid{};
+        if (policy == UnexpectedFieldPolicy::reject) [[likely]] {
+            valid = detail::direct_schema_validate<Schema>(msg, known_msg_type, msg_type_offset);
+        } else {
+            std::uint64_t unexpected_count = 0;
+            valid = detail::direct_schema_validate<Schema>(
+                msg, known_msg_type, msg_type_offset, policy,
+                policy == UnexpectedFieldPolicy::ignore_with_metric ? &unexpected_count : nullptr);
+            if (unexpected_count != 0) {
+                unexpected_fields_ += unexpected_count;
+                if (telemetry_slot_ != nullptr) {
+                    telemetry_slot_->inc_unexpected_fields(unexpected_count);
+                }
+            }
+        }
         if (v_t0 != 0ULL) {
             telemetry_slot_->record_stage(TelemetryStage::validate, telemetry_now_ns() - v_t0);
         }
@@ -2367,7 +2505,8 @@ private:
                 return fail(Status{ErrorCode::invalid_value, 141});
             if (peer_reset && (!config_.allow_sequence_reset || !local_epoch_reset_started_ || sequence != 1))
                 return fail(Status{ErrorCode::sequence_reset_denied, 141});
-            if (!peer_reset && config_.request_sequence_reset && core_.state() == SessionState::awaiting_logon)
+            const bool expected_reset = config_.request_sequence_reset || one_shot_reset_active_;
+            if (!peer_reset && expected_reset && core_.state() == SessionState::awaiting_logon)
                 return fail(Status{ErrorCode::sequence_reset_denied, 141});
         } else if (msg_type == "2") {
             if (tags.begin_seq == nullptr || !detail::direct_parse_u64(tags.begin_seq->value, resend_begin) ||
@@ -2654,6 +2793,10 @@ private:
     std::uint64_t deferred_logon_seq_{};
     bool deferred_logon_pending_{};
     bool local_epoch_reset_started_{};
+    bool one_shot_sequence_reset_{};
+    bool one_shot_reset_active_{};
+    std::string one_shot_reset_reason_{};
+    std::uint64_t unexpected_fields_{};
 
     std::array<char, 32> wall_time_buf_{};
     std::size_t wall_time_size_{};

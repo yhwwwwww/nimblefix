@@ -23,6 +23,7 @@ enum class CoreEventKind : std::uint8_t {
     local_logout,
     sequence_reset_committed,
     reset_epoch,
+    adjust_sequences,
 };
 
 enum class CoreActionKind : std::uint8_t {

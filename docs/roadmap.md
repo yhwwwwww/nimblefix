@@ -50,9 +50,18 @@ Goal: Push both outbound encoding and inbound strict parsing/validation firmly i
 - **Status**: Implemented and verified via `<nimblefix/journal.hpp>` (`JournalTailer`, `JournalTailerConfig`, `JournalTailStart`), `<nimblefix/replay.hpp>` (`JournalReplayer::replay`, `JournalReplayer::replay_to_tcp`, `ReplayOptions` including `wire_hints`, `ReplayDirection`, `ReplayTiming`, `ReplayStats`) and `nimblefix replay --path <session.nfxj> [--session-key KEY] [--direction inbound|outbound|both] [--timing full|original|scaled] [--speed FACTOR] [--seq-from N] [--seq-to M] [--epoch N] [--skip-admin] [--endpoint HOST:PORT] [--json]`.
 - **Capabilities**: Lock-free cross-process read-only SPMC `JournalTailer` (`O_RDONLY`/`PROT_READ`, zero `LOCK_EX` contention, zero writer hot-path overhead, non-blocking segment rotation) powers DropCopy/risk/compliance sidecars as well as live/offline path-based `JournalReplayer` playback (alongside the in-process lease-protected `JournalReader` overload), with nanosecond `52=SendingTime` original/scaled timing or full-speed playback, optional admin/wire-hint filtering and strict frame verification, and direct streaming to either an in-process callback sink or a real TCP endpoint.
 
-### 9. Heterogeneous Multi-Schema Engine & `UnexpectedFieldPolicy`
-- Allow sessions within the same multi-session `Engine` to bind distinct compiled or runtime schemas.
-- Add per-session `UnexpectedFieldPolicy` (`reject`, `ignore_with_metric`, `passthrough`) to handle unannounced venue/custom tags gracefully without downtime.
+### 9. [Done] Heterogeneous Multi-Schema Engine & `UnexpectedFieldPolicy`
+- **Status**: Implemented and verified across `schema.hpp`, `settings.hpp` (`SessionSettings::schema`, `schema_wire_hints`, `use_schema<Schema>()` / `use_schema(desc, hints)`, `UnexpectedFieldPolicy`), `Engine`, `ShardedEngine`, `DirectInitiator`, `SessionSnapshot`, and `TelemetrySessionSlot` / Prometheus exposition.
+- **Capabilities**:
+  - Sessions within the same multi-session `Engine<FlatSchema>` (or typed `Engine`) can bind distinct compiled or runtime `SchemaDescriptor`s with merged per-session `WireHints` and independent sender fingerprint verification.
+  - Per-session `UnexpectedFieldPolicy` (`reject` [default, zero hot-path overhead via `fast_validate`], `ignore_with_metric`, `passthrough`) accepts unannounced venue/custom tags while preserving strict required-field, enum, type, ordering, and repeating-group validation.
+
+### 10. [Done] Operational Production Controls & Low-Latency Socket Tuning
+- **Status**: Implemented and verified across `SessionSchedule`, `SessionDriver`, `DirectInitiator`, `Engine`, `ShardedEngine`, `TcpStream`, `TcpListener`, and `TcpTransport`.
+- **Capabilities**:
+  - Opt-in schedule-boundary EOD/BOD sequence reset (`SessionSchedule::reset_on_schedule_boundary`, `window_id()`) with audited `epoch_reset` transitions.
+  - Thread-safe runtime session admin controls (`request_logout`, `request_reconnect`, `request_sequence_reset`, durable O(1) `adjust_sequences` with GapFill replay support across adjusted ranges) on `Engine`, `ShardedEngine`, `SessionDriver`, and `DirectInitiator`.
+  - Local source IP/port binding & low-latency socket tuning (`SocketOptions`: `local_bind_ip`, `local_bind_port`, best-effort `so_busy_poll_us`, `tcp_quickack`, `send_buffer_bytes`, `recv_buffer_bytes`).
 
 ---
 

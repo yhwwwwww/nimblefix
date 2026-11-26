@@ -40,8 +40,35 @@ Status validate_session_settings(const SessionSettings &settings, bool acceptor,
         !plain(settings.logon.username) || !plain(settings.logon.password) ||
         settings.logon.username.size() > 256 || settings.logon.password.size() > 4096 ||
         settings.logon.extra_fields.size() > 16 ||
-        (settings.logon.request_sequence_reset && !settings.allow_sequence_reset))
+        (settings.logon.request_sequence_reset && !settings.allow_sequence_reset) ||
+        (settings.schedule.reset_on_schedule_boundary &&
+         (!settings.schedule.enabled || !settings.allow_sequence_reset)))
         return {ErrorCode::invalid_config};
+    if (settings.unexpected_field_policy != UnexpectedFieldPolicy::reject &&
+        settings.unexpected_field_policy != UnexpectedFieldPolicy::ignore_with_metric &&
+        settings.unexpected_field_policy != UnexpectedFieldPolicy::passthrough)
+        return {ErrorCode::invalid_config};
+    if (settings.schema != nullptr) {
+        if (settings.schema->messages.empty())
+            return {ErrorCode::schema_mismatch};
+        if (!settings.schema->matches_session(settings.version, settings.default_appl_ver_id))
+            return {ErrorCode::unsupported_protocol, 8};
+    }
+    const auto session_hints = settings.schema_wire_hints.length_data_pairs;
+    for (std::size_t i = 0; i < session_hints.size(); ++i) {
+        const auto left = session_hints[i];
+        if (left.length_tag == 0 || left.data_tag == 0 || left.length_tag == left.data_tag)
+            return {ErrorCode::invalid_config};
+        for (std::size_t j = i + 1; j < session_hints.size(); ++j) {
+            const auto right = session_hints[j];
+            const bool conflict =
+                (left.length_tag == right.length_tag && left.data_tag != right.data_tag) ||
+                (left.data_tag == right.data_tag && left.length_tag != right.length_tag) ||
+                (left.length_tag == right.data_tag && left.data_tag != right.length_tag) ||
+                (left.data_tag == right.length_tag && left.length_tag != right.data_tag);
+            if (conflict) return {ErrorCode::invalid_config};
+        }
+    }
     for (std::size_t i = 0; i < settings.logon.extra_fields.size(); ++i) {
         const auto &field = settings.logon.extra_fields[i];
         if (field.tag == 0 || field.tag > 999'999'999 || managed(field.tag) || field.value.empty() ||

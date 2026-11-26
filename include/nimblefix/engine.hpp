@@ -67,6 +67,8 @@ struct EngineConfig {
     bool telemetry_stage_probes{false};
     // Internal shared writer used by ShardedEngine so all shards publish into one mmap file.
     std::shared_ptr<TelemetryWriter> shared_telemetry{};
+    // Optional deterministic wall-clock hook for SessionSchedule evaluation (nullptr = system_clock::now).
+    std::chrono::system_clock::time_point (*schedule_clock)() noexcept{nullptr};
 };
 
 struct InitiatorConfig {
@@ -80,6 +82,8 @@ struct InitiatorConfig {
     // overrides the single `endpoint` field and uses `connection_strategy`.
     std::vector<TcpEndpoint> endpoints{};
     ConnectionStrategy connection_strategy{};
+    // Optional local source IP/port binding & low-latency socket tuning.
+    SocketOptions socket_options{};
 };
 
 struct ListenerConfig {
@@ -87,6 +91,8 @@ struct ListenerConfig {
     TcpEndpoint endpoint;
     std::size_t backlog{128};
     TlsConfig tls{};
+    // Optional low-latency socket tuning applied to listening & accepted sockets.
+    SocketOptions socket_options{};
 };
 
 struct AcceptorConfig {
@@ -155,6 +161,7 @@ struct SessionSnapshot {
     std::size_t pending_inbound_bytes{};
     bool read_paused{};
     std::size_t active_endpoint_index{};
+    std::uint64_t unexpected_fields{};
 };
 
 struct ErrorEvent {
@@ -214,6 +221,14 @@ public:
     [[nodiscard]] Result<SessionSnapshot> snapshot(std::string_view session_name) const noexcept;
     [[nodiscard]] std::uint64_t dropped_diagnostics() const noexcept;
     void request_stop() noexcept;
+    [[nodiscard]] Status request_logout(std::string_view session_name,
+        std::string_view reason = {}) noexcept;
+    [[nodiscard]] Status request_reconnect(std::string_view session_name) noexcept;
+    [[nodiscard]] Status request_sequence_reset(std::string_view session_name,
+        std::string_view reason = "admin sequence reset") noexcept;
+    [[nodiscard]] Status adjust_sequences(std::string_view session_name,
+        std::uint64_t next_inbound, std::uint64_t next_outbound,
+        std::string_view reason = "admin sequence adjust") noexcept;
     [[nodiscard]] Result<TcpEndpoint> listener_endpoint(std::string_view name) const noexcept;
 
 private:
@@ -383,6 +398,24 @@ public:
         return runtime_->dropped_diagnostics();
     }
     void request_stop() noexcept { runtime_->request_stop(); }
+
+    // Thread-safe runtime session admin controls.
+    [[nodiscard]] Status request_logout(std::string_view session_name,
+        std::string_view reason = {}) noexcept {
+        return runtime_->request_logout(session_name, reason);
+    }
+    [[nodiscard]] Status request_reconnect(std::string_view session_name) noexcept {
+        return runtime_->request_reconnect(session_name);
+    }
+    [[nodiscard]] Status request_sequence_reset(std::string_view session_name,
+        std::string_view reason = "admin sequence reset") noexcept {
+        return runtime_->request_sequence_reset(session_name, reason);
+    }
+    [[nodiscard]] Status adjust_sequences(std::string_view session_name,
+        std::uint64_t next_inbound, std::uint64_t next_outbound,
+        std::string_view reason = "admin sequence adjust") noexcept {
+        return runtime_->adjust_sequences(session_name, next_inbound, next_outbound, reason);
+    }
 
     // Returns need_more until run() has bound the listener and published the
     // OS-selected address, which lets tests and embedders use port 0 safely.

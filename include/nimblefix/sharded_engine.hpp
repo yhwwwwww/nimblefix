@@ -341,6 +341,34 @@ public:
         return shards_[shard]->snapshot(name);
     }
 
+    [[nodiscard]] Status request_logout(std::string_view session_name,
+        std::string_view reason = {}) noexcept {
+        const std::size_t shard = session_shard(session_name);
+        if (shard == auto_shard || shard >= shards_.size()) return Status{ErrorCode::invalid_value};
+        return shards_[shard]->request_logout(session_name, reason);
+    }
+
+    [[nodiscard]] Status request_reconnect(std::string_view session_name) noexcept {
+        const std::size_t shard = session_shard(session_name);
+        if (shard == auto_shard || shard >= shards_.size()) return Status{ErrorCode::invalid_value};
+        return shards_[shard]->request_reconnect(session_name);
+    }
+
+    [[nodiscard]] Status request_sequence_reset(std::string_view session_name,
+        std::string_view reason = "admin sequence reset") noexcept {
+        const std::size_t shard = session_shard(session_name);
+        if (shard == auto_shard || shard >= shards_.size()) return Status{ErrorCode::invalid_value};
+        return shards_[shard]->request_sequence_reset(session_name, reason);
+    }
+
+    [[nodiscard]] Status adjust_sequences(std::string_view session_name,
+        std::uint64_t next_inbound, std::uint64_t next_outbound,
+        std::string_view reason = "admin sequence adjust") noexcept {
+        const std::size_t shard = session_shard(session_name);
+        if (shard == auto_shard || shard >= shards_.size()) return Status{ErrorCode::invalid_value};
+        return shards_[shard]->adjust_sequences(session_name, next_inbound, next_outbound, reason);
+    }
+
     [[nodiscard]] Result<TcpEndpoint> listener_endpoint(std::string_view name) const noexcept {
         if (shards_.empty()) return Status{ErrorCode::invalid_value};
         return shards_[0]->listener_endpoint(name);

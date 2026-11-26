@@ -116,6 +116,12 @@ enum class ValidationLevel : std::uint8_t {
     strict,
 };
 
+enum class UnexpectedFieldPolicy : std::uint8_t {
+    reject = 0,
+    ignore_with_metric = 1,
+    passthrough = 2,
+};
+
 using FastValidateFn = Status (*)(std::string_view msg_type,
                                   std::size_t msg_type_offset,
                                   std::span<const FieldView> fields,
@@ -803,7 +809,9 @@ private:
 [[nodiscard]] inline Status validate_members_fast(const SchemaDescriptor& schema,
     const MemberLevel& level, std::span<const std::uint32_t> required_members,
     std::span<const FieldView> fields, ValidationLevel validation_level,
-    const AncestorStack& ancestors, std::size_t depth) noexcept {
+    const AncestorStack& ancestors, std::size_t depth,
+    UnexpectedFieldPolicy unexpected_policy = UnexpectedFieldPolicy::reject,
+    std::uint64_t* unexpected_count = nullptr) noexcept {
     if (depth > max_schema_group_depth) return {ErrorCode::invalid_value};
 
     const bool top_level = (depth == 0);
@@ -975,8 +983,12 @@ private:
             }
         }
         if (!allowed_envelope) {
-            if (validation_level == ValidationLevel::strict && first_unknown_error.ok()) {
-                first_unknown_error = {ErrorCode::invalid_value, static_cast<int>(tag), fields[cursor].offset};
+            if (unexpected_policy == UnexpectedFieldPolicy::reject) {
+                if (validation_level == ValidationLevel::strict && first_unknown_error.ok()) {
+                    first_unknown_error = {ErrorCode::invalid_value, static_cast<int>(tag), fields[cursor].offset};
+                }
+            } else if (unexpected_count != nullptr) {
+                ++(*unexpected_count);
             }
             ++cursor;
         }
@@ -1052,7 +1064,7 @@ private:
                 cursor = entry_scan.end;
                 const auto status = validate_members_fast(schema, group_level, group->required_members,
                     fields.subspan(entry_start, cursor - entry_start), validation_level,
-                    child_ancestors, depth + 1);
+                    child_ancestors, depth + 1, unexpected_policy, unexpected_count);
                 if (!status.ok()) return status;
             }
         }
@@ -1218,7 +1230,9 @@ template <class T>
 // call validate_schema_message_for_type after validating session header fields themselves.
 [[nodiscard]] inline Status validate_header_session_tags(const SchemaDescriptor& schema,
     const ComponentDescriptor& header, const ComponentDescriptor* trailer,
-    std::span<const FieldView> fields, ValidationLevel level) noexcept {
+    std::span<const FieldView> fields, ValidationLevel level,
+    UnexpectedFieldPolicy unexpected_policy = UnexpectedFieldPolicy::reject,
+    std::uint64_t* unexpected_count = nullptr) noexcept {
     constexpr std::uint16_t kBit8    = 1u << 0;
     constexpr std::uint16_t kBit9    = 1u << 1;
     constexpr std::uint16_t kBit35   = 1u << 2;
@@ -1311,8 +1325,12 @@ template <class T>
             const MemberLevel hlevel{header.members, header.members_by_tag};
             const auto* m = find_member_in_level(schema, hlevel, 1128u);
             if (m == nullptr) {
-                if (level == ValidationLevel::strict && first_unknown_err.ok())
-                    first_unknown_err = {ErrorCode::invalid_value, 1128, f.offset};
+                if (unexpected_policy == UnexpectedFieldPolicy::reject) {
+                    if (level == ValidationLevel::strict && first_unknown_err.ok())
+                        first_unknown_err = {ErrorCode::invalid_value, 1128, f.offset};
+                } else if (unexpected_count != nullptr) {
+                    ++(*unexpected_count);
+                }
             } else if (first_content_err.ok()) {
                 const auto* fd = descriptor_field(schema, *m);
                 if (fd != nullptr) {
@@ -1394,13 +1412,14 @@ template <class T>
     return detail::enum_values_accept(field, value);
 }
 
-[[nodiscard]] inline Status validate_schema_message_for_type(const SchemaDescriptor& schema,
+namespace detail {
+[[gnu::noinline, gnu::cold]] [[nodiscard]] inline Status validate_schema_message_for_type_slow(
+    const SchemaDescriptor& schema,
     std::string_view msg_type, std::size_t msg_type_offset,
-    std::span<const FieldView> fields, ValidationLevel level = ValidationLevel::strict,
-    detail::ParsedFieldIndex* out_index = nullptr) noexcept {
-    if (schema.fast_validate != nullptr) {
-        return schema.fast_validate(msg_type, msg_type_offset, fields, level, out_index);
-    }
+    std::span<const FieldView> fields, ValidationLevel level,
+    detail::ParsedFieldIndex* out_index,
+    UnexpectedFieldPolicy unexpected_policy,
+    std::uint64_t* unexpected_count) noexcept {
     if (out_index != nullptr) out_index->invalidate();
     const auto* descriptor = schema.find_message(msg_type);
     if (descriptor == nullptr) return {ErrorCode::unsupported, 35, msg_type_offset};
@@ -1408,26 +1427,47 @@ template <class T>
     ancestors.trailer = detail::find_trailer_component(schema);
     const detail::MemberLevel root_level{descriptor->members, descriptor->members_by_tag};
     return detail::validate_members_fast(schema, root_level, descriptor->required_members,
-        fields, level, ancestors, 0);
+        fields, level, ancestors, 0, unexpected_policy, unexpected_count);
+}
+} // namespace detail
+
+[[nodiscard]] inline Status validate_schema_message_for_type(const SchemaDescriptor& schema,
+    std::string_view msg_type, std::size_t msg_type_offset,
+    std::span<const FieldView> fields, ValidationLevel level = ValidationLevel::strict,
+    detail::ParsedFieldIndex* out_index = nullptr,
+    UnexpectedFieldPolicy unexpected_policy = UnexpectedFieldPolicy::reject,
+    std::uint64_t* unexpected_count = nullptr) noexcept {
+    if (schema.fast_validate != nullptr) [[likely]] {
+        const auto fast = schema.fast_validate(msg_type, msg_type_offset, fields, level, out_index);
+        if (fast.ok() || unexpected_policy == UnexpectedFieldPolicy::reject ||
+            fast.code != ErrorCode::invalid_value) [[likely]] {
+            return fast;
+        }
+    }
+    return detail::validate_schema_message_for_type_slow(
+        schema, msg_type, msg_type_offset, fields, level, out_index, unexpected_policy, unexpected_count);
 }
 
 [[nodiscard]] inline Status validate_schema_message(const SchemaDescriptor& schema,
-    const FlatMessageView& message, ValidationLevel level = ValidationLevel::strict) noexcept {
+    const FlatMessageView& message, ValidationLevel level = ValidationLevel::strict,
+    UnexpectedFieldPolicy unexpected_policy = UnexpectedFieldPolicy::reject,
+    std::uint64_t* unexpected_count = nullptr) noexcept {
     const auto fields = message.fields();
     Status st{};
     if (fields.size() >= 3 && fields[2].tag == 35) {
         st = validate_schema_message_for_type(schema, fields[2].value, fields[2].offset,
-            fields, level, message.parsed_index());
+            fields, level, message.parsed_index(), unexpected_policy, unexpected_count);
     } else {
         const auto msg_type = message.find_unique(35);
         if (!msg_type.ok()) return msg_type.status();
         st = validate_schema_message_for_type(schema, msg_type.value().value, msg_type.value().offset,
-            fields, level, message.parsed_index());
+            fields, level, message.parsed_index(), unexpected_policy, unexpected_count);
     }
     if (!st.ok()) return st;
     if (const auto* header = detail::find_header_component(schema); header != nullptr) {
         const auto hst = detail::validate_header_session_tags(
-            schema, *header, detail::find_trailer_component(schema), fields, level);
+            schema, *header, detail::find_trailer_component(schema), fields, level,
+            unexpected_policy, unexpected_count);
         if (!hst.ok()) {
             if (message.parsed_index() != nullptr) message.parsed_index()->invalidate();
             return hst;

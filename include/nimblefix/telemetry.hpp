@@ -181,6 +181,7 @@ struct alignas(64) TelemetrySessionSlot {
     std::atomic<std::uint64_t> inbound_bytes{0};
     std::atomic<std::uint64_t> outbound_bytes{0};
     std::atomic<std::uint64_t> error_count{0};
+    std::atomic<std::uint64_t> unexpected_fields{0};
     std::atomic<std::uint64_t> active_endpoint_index{0};
     std::atomic<std::uint64_t> last_update_ns{0};
 
@@ -207,6 +208,12 @@ struct alignas(64) TelemetrySessionSlot {
 
     void inc_error() noexcept {
         error_count.store(error_count.load(std::memory_order_relaxed) + 1ULL, std::memory_order_relaxed);
+    }
+
+    void inc_unexpected_fields(std::uint64_t count = 1) noexcept {
+        if (count == 0) return;
+        unexpected_fields.store(
+            unexpected_fields.load(std::memory_order_relaxed) + count, std::memory_order_relaxed);
     }
 };
 
@@ -238,6 +245,7 @@ struct TelemetrySessionSnapshot {
     std::uint64_t inbound_bytes{};
     std::uint64_t outbound_bytes{};
     std::uint64_t error_count{};
+    std::uint64_t unexpected_fields{};
     std::uint64_t active_endpoint_index{};
     std::uint64_t last_update_ns{};
     std::array<StageLatencySummary, static_cast<std::size_t>(TelemetryStage::count)> stages{};
@@ -458,6 +466,7 @@ public:
             snap.inbound_bytes = slot.inbound_bytes.load(std::memory_order_relaxed);
             snap.outbound_bytes = slot.outbound_bytes.load(std::memory_order_relaxed);
             snap.error_count = slot.error_count.load(std::memory_order_relaxed);
+            snap.unexpected_fields = slot.unexpected_fields.load(std::memory_order_relaxed);
             snap.active_endpoint_index = slot.active_endpoint_index.load(std::memory_order_relaxed);
             snap.last_update_ns = slot.last_update_ns.load(std::memory_order_relaxed);
             for (std::size_t s = 0; s < static_cast<std::size_t>(TelemetryStage::count); ++s) {
@@ -482,6 +491,8 @@ public:
            << "# TYPE nimblefix_session_business_deliveries_total counter\n"
            << "# HELP nimblefix_session_errors_total Total session errors recorded.\n"
            << "# TYPE nimblefix_session_errors_total counter\n"
+           << "# HELP nimblefix_session_unexpected_fields_total Total unexpected schema fields ignored with metric.\n"
+           << "# TYPE nimblefix_session_unexpected_fields_total counter\n"
            << "# HELP nimblefix_stage_latency_ns Stage latency quantiles in nanoseconds.\n"
            << "# TYPE nimblefix_stage_latency_ns summary\n";
         for (const auto& s : snaps) {
@@ -492,6 +503,7 @@ public:
             os << "nimblefix_session_outbound_frames_total{" << labels << "} " << s.outbound_frames << '\n';
             os << "nimblefix_session_business_deliveries_total{" << labels << "} " << s.business_deliveries << '\n';
             os << "nimblefix_session_errors_total{" << labels << "} " << s.error_count << '\n';
+            os << "nimblefix_session_unexpected_fields_total{" << labels << "} " << s.unexpected_fields << '\n';
             for (std::size_t st = 0; st < static_cast<std::size_t>(TelemetryStage::count); ++st) {
                 const auto& h = s.stages[st];
                 if (h.count == 0) continue;
