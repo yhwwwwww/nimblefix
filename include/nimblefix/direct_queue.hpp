@@ -5,7 +5,9 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <span>
+#include <stdexcept>
 #include <string_view>
 #include <type_traits>
 #include <vector>
@@ -28,11 +30,11 @@ public:
 
     explicit DirectSendQueue(std::size_t requested_capacity = 256,
                              std::size_t max_body_bytes = 512)
-        : capacity_(next_power_of_two(requested_capacity < 2 ? 2 : requested_capacity)),
+        : capacity_(validated_capacity(requested_capacity)),
           mask_(capacity_ - 1),
-          slot_stride_(align_up_64(sizeof(SlotHeader) + (max_body_bytes < 64 ? 64 : max_body_bytes))),
+          slot_stride_(validated_slot_stride(max_body_bytes)),
           max_body_bytes_(max_body_bytes < 64 ? 64 : max_body_bytes),
-          storage_(capacity_ * slot_stride_) {}
+          storage_(validated_storage_bytes(capacity_, slot_stride_)) {}
 
     DirectSendQueue(const DirectSendQueue&) = delete;
     DirectSendQueue& operator=(const DirectSendQueue&) = delete;
@@ -147,9 +149,35 @@ private:
         std::array<char, max_msg_type_bytes> msg_type{};
     };
 
+    static constexpr std::size_t max_capacity = std::size_t{1} << 30U;
+
+    static std::size_t validated_capacity(std::size_t requested) {
+        if (requested > max_capacity) {
+            throw std::invalid_argument("DirectSendQueue capacity exceeds maximum");
+        }
+        return next_power_of_two(requested < 2 ? 2 : requested);
+    }
+
+    static std::size_t validated_slot_stride(std::size_t max_body_bytes) {
+        const std::size_t effective = max_body_bytes < 64 ? 64 : max_body_bytes;
+        constexpr std::size_t max_u32 = std::numeric_limits<std::uint32_t>::max();
+        constexpr std::size_t max_size = std::numeric_limits<std::size_t>::max();
+        if (effective > max_u32 || effective > max_size - sizeof(SlotHeader) - 63U) {
+            throw std::invalid_argument("DirectSendQueue max_body_bytes overflow");
+        }
+        return align_up_64(sizeof(SlotHeader) + effective);
+    }
+
+    static std::size_t validated_storage_bytes(std::size_t cap, std::size_t stride) {
+        if (stride == 0 || cap > std::numeric_limits<std::size_t>::max() / stride) {
+            throw std::invalid_argument("DirectSendQueue storage byte size overflow");
+        }
+        return cap * stride;
+    }
+
     static constexpr std::size_t next_power_of_two(std::size_t n) noexcept {
         std::size_t p = 1;
-        while (p < n && p < (std::size_t{1} << 30U)) p <<= 1U;
+        while (p < n && p < max_capacity) p <<= 1U;
         return p;
     }
 

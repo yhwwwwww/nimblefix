@@ -912,6 +912,7 @@ private:
         std::uint64_t begin{};
         std::uint64_t end{};
         RecordId dependency{};
+        std::vector<RecordId> merged_deps{};
     };
 
     DirectInitiator(DirectInitiatorConfig cfg, Handler h, Transport tr, Journal j,
@@ -1071,8 +1072,13 @@ private:
         rx_head_ = rx_tail_ = 0;
         tx_head_ = tx_count_ = 0;
         replay_head_ = replay_count_ = 0;
+        replay_origin_begin_ = 0;
         replay_active_ = replay_prepared_ = false;
         replay_offset_ = replay_bytes_ = 0;
+        replay_dep_ = 0;
+        replay_merged_deps_.clear();
+        for (auto& slot : replay_ring_) slot.merged_deps.clear();
+        retention_deferred_ = false;
         logon_tx_size_ = 0;
         deferred_logon_size_ = 0;
         deferred_logon_seq_ = 0;
@@ -1217,6 +1223,7 @@ private:
             for (std::size_t i = 0; i < out.action_count; ++i)
                 if (out.actions[i].kind == detail::CoreActionKind::close_transport) should_close_ = true;
         }
+        if (retention_deferred_) [[unlikely]] update_retention_floor();
         return Status::success();
     }
 
@@ -1677,6 +1684,20 @@ private:
         return core_.process(ev).status;
     }
 
+    [[nodiscard]] bool attach_merged_replay_dep(std::vector<RecordId>& merged,
+                                                RecordId primary, RecordId dep) const noexcept {
+        if (dep == 0 || dep == primary) return true;
+        if (std::find(merged.begin(), merged.end(), dep) != merged.end()) return true;
+        const std::size_t cap = std::max<std::size_t>(replay_ring_.size() * 4U, 256U);
+        if (merged.size() >= cap) return false;
+        try {
+            merged.push_back(dep);
+            return true;
+        } catch (...) {
+            return false;
+        }
+    }
+
     [[nodiscard]] Status queue_replay(std::uint64_t begin, std::uint64_t end, RecordId dep) noexcept {
         const auto next_out = journal_.next_outbound_seq();
         const auto max_out = next_out == 0 ? 0 : next_out - 1;
@@ -1684,15 +1705,53 @@ private:
             return fail(Status{ErrorCode::history_unavailable, 7, static_cast<std::size_t>(begin)});
         if (end == 0 || end > max_out) end = max_out;
         if (max_out == 0 || begin > end) {
-            if (dep != 0) return append_delivery(dep, journal_.find_record(dep)->seq);
+            if (dep != 0) {
+                const auto* in = journal_.find_record(dep);
+                if (in == nullptr || in->kind != RecordKind::inbound)
+                    return Status{ErrorCode::corrupt_store};
+                return append_delivery(dep, in->seq);
+            }
             return Status::success();
+        }
+        // Merge/deduplicate overlapping or adjacent ResendRequests against active replay.
+        if (replay_active_) {
+            const std::uint64_t active_cover_begin =
+                (dep == replay_dep_) ? replay_next_ : replay_origin_begin_;
+            const std::uint64_t active_adj_end =
+                replay_end_ + (replay_end_ != std::numeric_limits<std::uint64_t>::max());
+            if (begin >= active_cover_begin && begin <= active_adj_end &&
+                end >= active_cover_begin) {
+                if (!attach_merged_replay_dep(replay_merged_deps_, replay_dep_, dep))
+                    return Status{ErrorCode::queue_full};
+                if (end > replay_end_) replay_end_ = end;
+                return Status::success();
+            }
+        }
+        // Merge overlapping or adjacent queued replay ranges.
+        for (std::size_t i = replay_count_; i > 0; --i) {
+            auto& slot = replay_ring_[(replay_head_ + i - 1) % replay_ring_.size()];
+            const std::uint64_t slot_adj_end =
+                slot.end + (slot.end != std::numeric_limits<std::uint64_t>::max());
+            const std::uint64_t req_adj_end =
+                end + (end != std::numeric_limits<std::uint64_t>::max());
+            if (begin <= slot_adj_end && req_adj_end >= slot.begin) {
+                if (!attach_merged_replay_dep(slot.merged_deps, slot.dependency, dep))
+                    return Status{ErrorCode::queue_full};
+                slot.begin = std::min(slot.begin, begin);
+                slot.end = std::max(slot.end, end);
+                return Status::success();
+            }
         }
         if (replay_count_ >= replay_ring_.size()) return Status{ErrorCode::queue_full};
         if (!write_timer_active_) {
             last_byte_progress_ms_ = now_ms_;
             write_timer_active_ = true;
         }
-        replay_ring_[(replay_head_ + replay_count_) % replay_ring_.size()] = ReplayRange{begin, end, dep};
+        auto& target = replay_ring_[(replay_head_ + replay_count_) % replay_ring_.size()];
+        target.begin = begin;
+        target.end = end;
+        target.dependency = dep;
+        target.merged_deps.clear();
         ++replay_count_;
         start_next_replay();
         if (!wants_write()) {
@@ -1705,12 +1764,15 @@ private:
 
     void start_next_replay() noexcept {
         if (replay_active_ || replay_count_ == 0) return;
-        const auto r = replay_ring_[replay_head_];
-        replay_head_ = (replay_head_ + 1) % replay_ring_.size();
-        --replay_count_;
+        auto& r = replay_ring_[replay_head_];
+        replay_origin_begin_ = r.begin;
         replay_next_ = r.begin;
         replay_end_ = r.end;
         replay_dep_ = r.dependency;
+        replay_merged_deps_ = std::move(r.merged_deps);
+        r.merged_deps.clear();
+        replay_head_ = (replay_head_ + 1) % replay_ring_.size();
+        --replay_count_;
         replay_active_ = true;
         replay_prepared_ = false;
     }
@@ -1775,15 +1837,24 @@ private:
 
     [[nodiscard]] Status finish_replay_range() noexcept {
         const auto dep = replay_dep_;
+        auto merged = std::move(replay_merged_deps_);
+        replay_merged_deps_.clear();
+        replay_origin_begin_ = 0;
         replay_active_ = replay_prepared_ = false;
         replay_offset_ = replay_bytes_ = 0;
         replay_dep_ = 0;
-        if (dep != 0) {
-            const auto* in = journal_.find_record(dep);
+        auto complete_dep = [&](RecordId dep_id) noexcept -> Status {
+            if (dep_id == 0) return Status::success();
+            const auto* in = journal_.find_record(dep_id);
             if (in == nullptr || in->kind != RecordKind::inbound) return Status{ErrorCode::corrupt_store};
-            if (const auto st = append_delivery(dep, in->seq); !st.ok()) return st;
+            return append_delivery(dep_id, in->seq);
+        };
+        if (const auto st = complete_dep(dep); !st.ok()) return st;
+        for (const auto extra : merged) {
+            if (const auto st = complete_dep(extra); !st.ok()) return st;
         }
         start_next_replay();
+        if (retention_deferred_) [[unlikely]] update_retention_floor();
         if (!wants_write()) {
             write_timer_active_ = false;
             stall_logout_attempted_ = false;
@@ -1818,6 +1889,8 @@ private:
                             chunks[n_chunks++] = {logon_tx_buf_.data() + entry.offset, logon_tx_size_ - entry.offset};
                         } else {
                             const auto* rec = journal_.find_record(entry.record_id);
+                            if (rec == nullptr && entry.record_id < journal_.lowest_retained_record_id())
+                                return fail(Status{ErrorCode::history_unavailable});
                             if (rec == nullptr || rec->payload.size() != entry.size)
                                 return fail(Status{ErrorCode::corrupt_store});
                             chunks[n_chunks++] = {rec->payload.data() + entry.offset, entry.size - entry.offset};
@@ -1863,6 +1936,8 @@ private:
                 slice = {logon_tx_buf_.data() + q->offset, logon_tx_size_ - q->offset};
             } else {
                 const auto* rec = journal_.find_record(q->record_id);
+                if (rec == nullptr && q->record_id < journal_.lowest_retained_record_id())
+                    return fail(Status{ErrorCode::history_unavailable});
                 if (rec == nullptr || rec->payload.size() != q->size)
                     return fail(Status{ErrorCode::corrupt_store});
                 slice = {rec->payload.data() + q->offset, q->size - q->offset};
@@ -1954,14 +2029,41 @@ private:
         return Status::success();
     }
 
+    [[nodiscard]] std::uint64_t min_in_flight_outbound_seq() const noexcept {
+        std::uint64_t bound = journal_.next_outbound_seq();
+        if (tx_count_ != 0) {
+            bound = std::min(bound, tx_ring_[tx_head_].seq);
+        }
+        if (replay_active_) {
+            const std::uint64_t active_min = replay_prepared_
+                ? std::min(replay_seq_, replay_next_) : replay_next_;
+            if (active_min != 0) bound = std::min(bound, active_min);
+        }
+        for (std::size_t i = 0; i < replay_count_; ++i) {
+            const auto& r = replay_ring_[(replay_head_ + i) % replay_ring_.size()];
+            if (r.begin != 0) bound = std::min(bound, r.begin);
+        }
+        return bound;
+    }
+
     void update_retention_floor() noexcept {
-        if (config_.retain_outbound_messages == 0) return;
+        if (config_.retain_outbound_messages == 0) {
+            retention_deferred_ = false;
+            return;
+        }
         const auto latest = journal_.next_outbound_seq() == 0 ? 0 : journal_.next_outbound_seq() - 1;
-        if (latest < config_.retain_outbound_messages) return;
+        if (latest < config_.retain_outbound_messages) {
+            retention_deferred_ = false;
+            return;
+        }
         const auto window_floor = latest - config_.retain_outbound_messages + 1;
         const auto ack_floor = peer_ack_seq_ == std::numeric_limits<std::uint64_t>::max()
             ? peer_ack_seq_ : peer_ack_seq_ + 1;
-        const auto floor = std::max(std::min(window_floor, ack_floor),
+        const auto target_floor = std::min(window_floor, ack_floor);
+        // Never allow retention to prune outbound records still queued in TX or replay!
+        const auto in_flight_floor = min_in_flight_outbound_seq();
+        retention_deferred_ = (in_flight_floor < target_floor);
+        const auto floor = std::max(std::min(target_floor, in_flight_floor),
                                     journal_.lowest_retained_outbound_seq());
         if (floor > journal_.lowest_retained_outbound_seq()) {
             (void)journal_.set_retention_floor(floor, journal_.completed_inbound_record_id());
@@ -2246,6 +2348,7 @@ private:
         std::uint64_t next_inbound = 0;
         std::uint64_t effective_seq = sequence;
         bool seq_reset_ev = false, gapfill_ev = false, dup_gapfill = false;
+        bool noop_seq_reset = false, reject_seq_reset = false;
         std::string_view logout_text{};
 
         if (msg_type == "A") {
@@ -2278,9 +2381,14 @@ private:
             if (tags.new_seq == nullptr || !detail::direct_parse_u64(tags.new_seq->value, next_inbound))
                 return fail(Status{ErrorCode::protocol_error, 36});
             if (!is_gf) {
-                if (next_inbound <= core_.next_inbound()) return fail(Status{ErrorCode::protocol_error, 36});
-                seq_reset_ev = true;
-                effective_seq = core_.next_inbound();
+                if (next_inbound > core_.next_inbound()) {
+                    seq_reset_ev = true;
+                    effective_seq = core_.next_inbound();
+                } else if (next_inbound == core_.next_inbound() || poss_dup) {
+                    noop_seq_reset = true;
+                } else {
+                    reject_seq_reset = true;
+                }
             } else {
                 if (!poss_dup || !orig_valid || next_inbound <= sequence)
                     return fail(Status{ErrorCode::protocol_error, 123});
@@ -2312,6 +2420,38 @@ private:
             dc.orig_sending_time_valid = orig_valid;
             const auto dd = core_.process(dc);
             if (!dd.status.ok()) return fail(dd.status);
+            return Status::success();
+        }
+
+        if (noop_seq_reset || reject_seq_reset) {
+            detail::CoreEvent rc{};
+            rc.kind = detail::CoreEventKind::inbound_candidate;
+            rc.now_ms = now_ms;
+            rc.sequence = core_.next_inbound();
+            rc.msg_type = msg_type;
+            rc.poss_dup = poss_dup;
+            rc.orig_sending_time_valid = orig_valid;
+            const auto rd = core_.process(rc);
+            if (!rd.status.ok()) return fail(rd.status);
+            if (!poss_dup && ack_cand) {
+                const auto max_out = journal_.next_outbound_seq() == 0 ? 0 : journal_.next_outbound_seq() - 1;
+                if (*ack_cand < peer_ack_seq_ || *ack_cand > max_out)
+                    return fail(Status{ErrorCode::protocol_error, 369});
+            }
+            if (reject_seq_reset) {
+                const Status reject_err{ErrorCode::invalid_value, 36};
+                std::array<detail::DirectAdminField, 5> rfields{
+                    detail::DirectAdminField{45, FieldKind::unsigned_integer, sequence, {}},
+                    detail::DirectAdminField{371, FieldKind::unsigned_integer, 36ULL, {}},
+                    detail::DirectAdminField{372, FieldKind::string, 0, "4"},
+                    detail::DirectAdminField{373, FieldKind::unsigned_integer, 5ULL, {}},
+                    detail::DirectAdminField{58, FieldKind::string, 0, reject_err.message()},
+                };
+                if (const auto st = send_admin("3", rfields, now_ms); !st.ok()) return fail(st);
+                if constexpr (requires { handler_.on_error(reject_err); }) {
+                    try { handler_.on_error(reject_err); } catch (...) {}
+                }
+            }
             return Status::success();
         }
 
@@ -2496,11 +2636,14 @@ private:
     std::size_t replay_count_{};
     bool replay_active_{};
     bool replay_prepared_{};
+    std::uint64_t replay_origin_begin_{};
     std::uint64_t replay_next_{};
     std::uint64_t replay_end_{};
     std::uint64_t replay_seq_{};
     std::uint64_t replay_advance_{};
     RecordId replay_dep_{};
+    std::vector<RecordId> replay_merged_deps_{};
+    bool retention_deferred_{};
     std::size_t replay_bytes_{};
     std::size_t replay_offset_{};
     std::array<char, 32> replay_msg_type_{};

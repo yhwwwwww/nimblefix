@@ -56,6 +56,7 @@ struct JournalReader::State {
     std::vector<std::shared_ptr<void>> mapping_leases{};
     std::size_t slot{static_cast<std::size_t>(-1)};
     std::atomic<RecordId> cursor{};
+    std::atomic<RecordId> min_record_id{};
 
     ~State() {
         if (!registry || slot >= registry->capacity) return;

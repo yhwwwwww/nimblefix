@@ -96,6 +96,7 @@ struct LoopbackTransport {
     std::string tx_wire;
     bool open_state{};
     bool peer_eof{};
+    bool block_writes{};
     std::size_t write_batch_calls{};
     std::size_t write_batch_chunks{};
 
@@ -119,11 +120,13 @@ struct LoopbackTransport {
     }
     [[nodiscard]] nf::TransportIoResult write(std::span<const char> in) noexcept {
         if (!open_state) return {0, false, true, nf::Status{nf::ErrorCode::io_error}};
+        if (block_writes) return {0, true, false, nf::Status::success()};
         tx_wire.append(in.data(), in.size());
         return {in.size(), false, false, nf::Status::success()};
     }
     [[nodiscard]] nf::TransportIoResult write_batch(std::span<const std::span<const char>> chunks) noexcept {
         if (!open_state) return {0, false, true, nf::Status{nf::ErrorCode::io_error}};
+        if (block_writes) return {0, true, false, nf::Status::success()};
         ++write_batch_calls;
         write_batch_chunks += chunks.size();
         std::size_t total = 0;
@@ -1619,6 +1622,194 @@ void test_followup_audit_recovery_and_timeouts() {
     }
 }
 
+// Regression tests for code review N01 (retention vs unflushed TX), N02 (SequenceReset),
+// N03 (DirectSendQueue constructor integer overflow), and N05 (overlapping ResendRequest dedup).
+void test_code_review_n01_n02_n03_n05_regressions() {
+    // N03: DirectSendQueue constructor rejects integer overflow / oversized arguments cleanly.
+    {
+        auto expect_invalid = [](std::size_t cap, std::size_t body) {
+            bool threw = false;
+            try {
+                nf::DirectSendQueue q(cap, body);
+                (void)q.capacity();
+            } catch (const std::invalid_argument&) {
+                threw = true;
+            }
+            CHECK(threw);
+        };
+        expect_invalid(256, std::numeric_limits<std::size_t>::max());
+        expect_invalid(256, std::numeric_limits<std::size_t>::max() - 16U);
+        expect_invalid(256, static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max()) + 1U);
+        expect_invalid(std::numeric_limits<std::size_t>::max(), 512);
+        expect_invalid((std::size_t{1} << 30U) + 1U, 512);
+        // Normal valid construction still works identically.
+        nf::DirectSendQueue ok_q(16, 128);
+        CHECK(ok_q.capacity() == 16 && ok_q.max_body_bytes() == 128);
+    }
+
+    // N01: DirectInitiator retention must never prune unflushed outbound frames even with high peer 369.
+    {
+        TempDir dir;
+        auto cfg = make_config(dir);
+        cfg.journal_capacity_bytes = 4U * 1024U * 1024U;
+        cfg.journal_segment_bytes = 8'192;
+        cfg.journal_max_segments = 256;
+        cfg.max_pending_messages = 256;
+        cfg.retain_outbound_messages = 32; // Smaller than queued backlog (120)
+        cfg.write_stall_ms = 60'000;
+
+        struct NoopH {
+            int errors{};
+            void on_error(nf::Status) noexcept { ++errors; }
+        };
+        auto opened = nf::DirectInitiator<fix::Schema, NoopH, LoopbackTransport>::open(cfg);
+        CHECK(opened.ok());
+        auto init = std::move(opened).value();
+        CHECK(init.connect(0, t0).ok());
+        init.transport().push_from_peer(make_frame(nf::message<"A">().set<98>(0).set<108>(30),
+                                                   "SELL", "BUY", 1, t0));
+        CHECK(init.poll_once(1, t0).ok());
+        CHECK(init.is_active());
+        init.transport().tx_wire.clear();
+
+        // Block writes and enqueue 120 orders spanning multiple 8 KiB segments.
+        init.transport().block_writes = true;
+        const std::string pad(64, 'K');
+        for (int i = 0; i < 120; ++i) {
+            const std::string cid = "DN01-" + std::to_string(i) + "-" + pad;
+            CHECK(init.enqueue_stream<fix::NewOrderSingle>([&](auto& w) {
+                w.cl_ord_id(cid).symbol("AAPL").side('1').transact_time(t1)
+                 .order_qty(nf::Decimal{10, 0}).ord_type('1');
+            }, static_cast<std::uint64_t>(2 + i), t1).ok());
+        }
+        CHECK(init.pending_outbound() == 120);
+
+        // Peer sends Heartbeat claiming 369=121 while all 120 orders are still unflushed!
+        std::array<char, 512> hbuf{};
+        nf::SessionHeader hhdr{"SELL", "BUY", 2, t1};
+        hhdr.last_msg_seq_num_processed = 121;
+        const auto henc = nf::encode_fix44(nf::message<"0">(), hhdr, hbuf);
+        CHECK(henc.ok());
+        init.transport().push_from_peer({hbuf.data(), henc.value()});
+        CHECK(init.poll_once(200, t1).ok());
+        CHECK(init.is_active());
+
+        // Unblock transport and flush: all 120 frames must drain intact and retention must catch up!
+        init.transport().block_writes = false;
+        CHECK(init.flush(201).ok());
+        CHECK(!init.wants_write() && init.is_active() && init.handler().errors == 0);
+        int sent_count = 0;
+        std::string wire;
+        while (init.transport().pop_sent_frame(wire)) {
+            if (field(wire, 35) == "D") {
+                CHECK(field(wire, 34) == std::to_string(2 + sent_count));
+                ++sent_count;
+            }
+        }
+        CHECK(sent_count == 120);
+        CHECK(init.journal().lowest_retained_outbound_seq() > 1);
+    }
+
+    // N02: DirectInitiator SequenceReset-Reset mode (no-op, PossDup replay, live lower -> Reject).
+    {
+        TempDir dir;
+        auto cfg = make_config(dir);
+        struct ErrH {
+            int errors{};
+            nf::Status last{};
+            void on_error(nf::Status s) noexcept { ++errors; last = s; }
+        };
+        auto opened = nf::DirectInitiator<fix::Schema, ErrH, LoopbackTransport>::open(cfg);
+        CHECK(opened.ok());
+        auto init = std::move(opened).value();
+        CHECK(init.connect(0, t0).ok());
+        init.transport().push_from_peer(make_frame(nf::message<"A">().set<98>(0).set<108>(30),
+                                                   "SELL", "BUY", 1, t0));
+        CHECK(init.poll_once(1, t0).ok());
+        init.transport().tx_wire.clear();
+
+        // Forward Reset -> 5, then no-op Reset -> 5, then PossDup replay -> 5.
+        init.transport().push_from_peer(make_frame(nf::message<"4">().set<36>(5), "SELL", "BUY", 2, t0));
+        CHECK(init.poll_once(2, t0).ok());
+        CHECK(init.is_active() && init.next_inbound_seq() == 5);
+
+        init.transport().push_from_peer(make_frame(nf::message<"4">().set<36>(5), "SELL", "BUY", 5, t1));
+        init.transport().push_from_peer(make_frame(nf::message<"4">().set<36>(4), "SELL", "BUY", 2, t1, true, t0));
+        CHECK(init.poll_once(3, t1).ok());
+        CHECK(init.is_active() && init.next_inbound_seq() == 5 && init.handler().errors == 0);
+        CHECK(init.transport().tx_wire.empty());
+
+        // Live backward Reset (NewSeqNo=3 < 5): emits Reject (35=3, 371=36, 372=4, 373=5) and stays active.
+        init.transport().push_from_peer(make_frame(nf::message<"4">().set<123>('N').set<36>(3), "SELL", "BUY", 5, t2));
+        CHECK(init.poll_once(4, t2).ok());
+        CHECK(init.is_active() && init.next_inbound_seq() == 5);
+        CHECK(init.handler().errors == 1 && init.handler().last.code == nf::ErrorCode::invalid_value &&
+              init.handler().last.tag == 36);
+        std::string rej;
+        CHECK(init.transport().pop_sent_frame(rej));
+        CHECK(field(rej, 35) == "3" && field(rej, 45) == "5" &&
+              field(rej, 371) == "36" && field(rej, 372) == "4" && field(rej, 373) == "5");
+
+        // Normal message at seq 5 still accepted cleanly.
+        init.transport().push_from_peer(make_frame(nf::message<"0">(), "SELL", "BUY", 5, t2));
+        CHECK(init.poll_once(5, t2).ok());
+        CHECK(init.is_active() && init.next_inbound_seq() == 6);
+    }
+
+    // N05: DirectInitiator merges overlapping ResendRequests across distinct inbound dependencies.
+    {
+        TempDir dir;
+        auto cfg = make_config(dir);
+        cfg.max_pending_messages = 8; // Small replay_ring_ (capacity 8)
+        cfg.write_stall_ms = 60'000;
+        struct NoopH {
+            int errors{};
+            void on_error(nf::Status) noexcept { ++errors; }
+        };
+        auto opened = nf::DirectInitiator<fix::Schema, NoopH, LoopbackTransport>::open(cfg);
+        CHECK(opened.ok());
+        auto init = std::move(opened).value();
+        CHECK(init.connect(0, t0).ok());
+        init.transport().push_from_peer(make_frame(nf::message<"A">().set<98>(0).set<108>(30),
+                                                   "SELL", "BUY", 1, t0));
+        CHECK(init.poll_once(1, t0).ok());
+
+        for (int i = 0; i < 10; ++i) {
+            CHECK(init.send_stream<fix::NewOrderSingle>([&](auto& w) {
+                w.cl_ord_id("DR-" + std::to_string(i)).symbol("AAPL").side('1').transact_time(t1)
+                 .order_qty(nf::Decimal{1, 0}).ord_type('1');
+            }, static_cast<std::uint64_t>(2 + i), t1).ok());
+        }
+        init.transport().tx_wire.clear();
+
+        // Block writes and flood 20 overlapping ResendRequests (> replay_ring_.size() == 8!).
+        init.transport().block_writes = true;
+        for (int i = 0; i < 20; ++i) {
+            const std::uint64_t end_seq = static_cast<std::uint64_t>(7 + (i % 5)); // up to 11
+            init.transport().push_from_peer(make_frame(nf::message<"2">().set<7>(2).set<16>(end_seq),
+                                                       "SELL", "BUY", static_cast<std::uint64_t>(2 + i), t2));
+        }
+        CHECK(init.poll_once(30, t2).ok());
+        CHECK(init.is_active() && init.handler().errors == 0);
+
+        // Unblock and flush: exact 10 frames (seq 2..11) replayed once, all 20 ResendRequests delivered!
+        init.transport().block_writes = false;
+        CHECK(init.flush(31).ok());
+        CHECK(!init.wants_write() && init.is_active());
+        std::vector<std::string> seqs;
+        std::string wire;
+        while (init.transport().pop_sent_frame(wire)) {
+            if (field(wire, 35) == "D") {
+                CHECK(field(wire, 43) == "Y");
+                seqs.push_back(field(wire, 34));
+            }
+        }
+        CHECK(seqs.size() == 10);
+        for (std::size_t i = 0; i < seqs.size(); ++i) CHECK(seqs[i] == std::to_string(2 + i));
+        CHECK(init.journal().completed_inbound_seq() == 21);
+    }
+}
+
 } // namespace
 
 int main() {
@@ -1635,6 +1826,7 @@ int main() {
     test_inbound_and_outbound_logon_redacts_secrets();
     test_send_stream_large_spill_invokes_lambda_once();
     test_followup_audit_recovery_and_timeouts();
+    test_code_review_n01_n02_n03_n05_regressions();
     if (failures != 0) {
         std::cerr << failures << " direct initiator test(s) failed\n";
         return 1;

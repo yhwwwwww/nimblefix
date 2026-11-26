@@ -839,6 +839,7 @@ Result<JournalReader> Journal::create_reader(RecordId start_id) noexcept {
         state->cursor.store(start_id == 0
             ? (published == 0 ? 0 : records_data_[published - 1].id) : start_id,
             std::memory_order_release);
+        state->min_record_id.store(start_id, std::memory_order_release);
         return JournalReader{std::move(state)};
     } catch (...) {
         return Status{ErrorCode::capacity_exceeded, 0, 0};
@@ -856,12 +857,25 @@ Status Journal::reader_next(JournalReader::State& state, JournalRecord& record) 
     const auto lowest_id = lowest_retained_record_id_.load(std::memory_order_acquire);
     if (cursor != 0 && cursor < lowest_id)
         return {ErrorCode::reader_expired, 0, static_cast<std::size_t>(cursor)};
-    const auto position = slot.position.load(std::memory_order_relaxed);
+    auto position = slot.position.load(std::memory_order_relaxed);
     const auto published = published_record_count_.load(std::memory_order_acquire);
     if (position > published) return {ErrorCode::reader_expired, 0, 0};
     if (published - position > max_reader_lag_records_)
         return {ErrorCode::reader_expired, 0, static_cast<std::size_t>(cursor)};
     if (position >= published) return {ErrorCode::need_more, 0, 0};
+
+    const RecordId min_id = state.min_record_id.load(std::memory_order_relaxed);
+    if (min_id != 0) [[unlikely]] {
+        while (position < published && records_data_[position].id < min_id) {
+            ++position;
+        }
+        if (position >= published) {
+            slot.position.store(position, std::memory_order_release);
+            return {ErrorCode::need_more, 0, 0};
+        }
+        state.min_record_id.store(0, std::memory_order_relaxed);
+    }
+
     const auto& source = records_data_[position];
     record.id = source.id;
     record.kind = source.kind;

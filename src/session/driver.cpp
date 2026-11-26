@@ -237,6 +237,7 @@ struct ReplayRange {
     std::uint64_t begin{};
     std::uint64_t end{};
     RecordId dependency{};
+    std::vector<RecordId> merged_dependencies{};
 };
 
 struct TxDescriptor {
@@ -469,12 +470,14 @@ struct SessionDriver::Impl {
     std::size_t replay_count{};
     std::size_t recovery_count{};
     std::size_t recovery_bytes{};
+    std::uint64_t replay_origin_begin{};
     std::uint64_t replay_next{};
     std::uint64_t replay_end{};
     std::uint64_t replay_advance{};
     std::uint64_t replay_receipt_id{};
     std::uint64_t replay_sequence{};
     RecordId replay_dependency{};
+    std::vector<RecordId> replay_merged_dependencies{};
     std::uint64_t deferred_logon_sequence{};
     std::size_t replay_bytes{};
     std::size_t replay_offset{};
@@ -509,6 +512,7 @@ struct SessionDriver::Impl {
     bool staged_tx_active{};
     bool staged_tx_is_replay{};
     std::size_t staged_tx_bytes{};
+    bool retention_deferred{};
     Status recovery_status{};
 
     [[nodiscard]] Status set_wall_time(std::string_view value) noexcept {
@@ -577,10 +581,27 @@ struct SessionDriver::Impl {
         return static_cast<std::uint32_t>(id >> 48U);
     }
 
+    [[nodiscard]] std::uint64_t min_in_flight_outbound_seq() const noexcept {
+        std::uint64_t bound = journal.next_outbound_seq();
+        if (tx_count != 0) {
+            bound = std::min(bound, tx_slots[tx_head].sequence);
+        }
+        if (replay_active) {
+            const std::uint64_t active_min = replay_prepared
+                ? std::min(replay_sequence, replay_next) : replay_next;
+            if (active_min != 0) bound = std::min(bound, active_min);
+        }
+        for (std::size_t i = 0; i < replay_count; ++i) {
+            const auto& range = replay_slots[(replay_head + i) % replay_slots.size()];
+            if (range.begin != 0) bound = std::min(bound, range.begin);
+        }
+        return bound;
+    }
+
     [[nodiscard]] Status update_retention_floor(bool force = false) noexcept {
         const auto cursor = journal.completed_inbound_record_id();
         const auto inbound_segment = segment_index(cursor);
-        if (!force && inbound_segment <= last_retention_inbound_segment &&
+        if (!force && !retention_deferred && inbound_segment <= last_retention_inbound_segment &&
             last_appended_outbound_segment <= last_retention_outbound_segment) {
             return Status::success();
         }
@@ -590,7 +611,11 @@ struct SessionDriver::Impl {
             window_floor = latest - config.retain_outbound_messages + 1;
         const auto ack_floor = peer_ack_seq == std::numeric_limits<std::uint64_t>::max()
             ? peer_ack_seq : peer_ack_seq + 1;
-        auto floor = std::min(window_floor, ack_floor);
+        const auto target_floor = std::min(window_floor, ack_floor);
+        // Never allow retention to prune outbound records still queued in TX or replay!
+        const auto in_flight_floor = min_in_flight_outbound_seq();
+        retention_deferred = (in_flight_floor < target_floor);
+        auto floor = std::min(target_floor, in_flight_floor);
         floor = std::max(floor, journal.lowest_retained_outbound_seq());
         std::uint32_t outbound_segment = 0;
         if (floor <= latest) {
@@ -784,6 +809,9 @@ struct SessionDriver::Impl {
             }
         }
         if (tx_count == 0 && !replay_active && replay_count == 0) write_timer_active = false;
+        if (retention_deferred) [[unlikely]] {
+            if (const auto rstatus = update_retention_floor(); !rstatus.ok()) return fail(rstatus);
+        }
         maybe_notify_capacity();
         return fatal ? last_status : Status::success();
     }
@@ -840,7 +868,6 @@ struct SessionDriver::Impl {
                     record_id = committed.value().id;
                     encoded_size = encoded.value();
                     last_appended_outbound_segment = std::max(last_appended_outbound_segment, segment_index(record_id));
-                    if (const auto status = update_retention_floor(); !status.ok()) return fail(status);
                     committed_zero_copy = true;
                 } else if (encoded.status().code != ErrorCode::capacity_exceeded) {
                     return encoded.status();
@@ -861,13 +888,15 @@ struct SessionDriver::Impl {
                 if (!appended.ok()) return appended.status();
                 record_id = appended.value().id;
                 last_appended_outbound_segment = std::max(last_appended_outbound_segment, segment_index(record_id));
-                if (const auto status = update_retention_floor(); !status.ok()) return fail(status);
             }
         }
         if (const auto status = enqueue(record_id, encoded_size, sequence, 0, msg_type,
                 now_ms, false); !status.ok()) {
             if (persist) return fail(Status{ErrorCode::protocol_error, 34});
             return status;
+        }
+        if (persist) {
+            if (const auto status = update_retention_floor(); !status.ok()) return fail(status);
         }
         if (persist) {
             detail::CoreEvent event{};
@@ -1042,6 +1071,20 @@ struct SessionDriver::Impl {
             now_ms, wall_time, logon_reply, false, {}, 0, true, dependency);
     }
 
+    [[nodiscard]] bool attach_merged_dependency(std::vector<RecordId>& merged,
+        RecordId primary, RecordId dep) const noexcept {
+        if (dep == 0 || dep == primary) return true;
+        if (std::find(merged.begin(), merged.end(), dep) != merged.end()) return true;
+        const std::size_t cap = std::max<std::size_t>(replay_slots.size() * 4U, 256U);
+        if (merged.size() >= cap) return false;
+        try {
+            merged.push_back(dep);
+            return true;
+        } catch (...) {
+            return false;
+        }
+    }
+
     [[nodiscard]] Status queue_replay(std::uint64_t begin, std::uint64_t end,
         RecordId dependency) noexcept {
         const auto next_out = journal.next_outbound_seq();
@@ -1049,19 +1092,33 @@ struct SessionDriver::Impl {
         const auto maximum = next_out - 1;
         if (end == 0 || end > maximum) end = maximum;
         if (begin == 0 || begin > end) return Status{ErrorCode::invalid_value, 7};
-        if (replay_active && dependency == replay_dependency &&
-            begin <= replay_end_queued() && end >= replay_begin_queued()) {
-            if (begin < replay_next) begin = replay_next;
-            if (end > replay_end) replay_end = end;
-            return Status::success();
+        if (replay_active) {
+            const std::uint64_t active_cover_begin =
+                (dependency == replay_dependency) ? replay_next : replay_origin_begin;
+            const std::uint64_t active_adj_end =
+                replay_end + (replay_end != std::numeric_limits<std::uint64_t>::max());
+            if (begin >= active_cover_begin && begin <= active_adj_end &&
+                end >= active_cover_begin) {
+                if (!attach_merged_dependency(replay_merged_dependencies, replay_dependency, dependency)) {
+                    return Status{ErrorCode::queue_full};
+                }
+                if (end > replay_end) replay_end = end;
+                return Status::success();
+            }
         }
-        if (replay_count != 0) {
-            const auto last_index = (replay_head + replay_count - 1) % replay_slots.size();
-            auto& last = replay_slots[last_index];
-            if (last.dependency == dependency &&
-                begin <= last.end + (last.end != std::numeric_limits<std::uint64_t>::max()) && end >= last.begin) {
-                last.begin = std::min(last.begin, begin);
-                last.end = std::max(last.end, end);
+        for (std::size_t i = replay_count; i > 0; --i) {
+            const auto slot_index = (replay_head + i - 1) % replay_slots.size();
+            auto& slot = replay_slots[slot_index];
+            const std::uint64_t slot_adj_end =
+                slot.end + (slot.end != std::numeric_limits<std::uint64_t>::max());
+            const std::uint64_t req_adj_end =
+                end + (end != std::numeric_limits<std::uint64_t>::max());
+            if (begin <= slot_adj_end && req_adj_end >= slot.begin) {
+                if (!attach_merged_dependency(slot.merged_dependencies, slot.dependency, dependency)) {
+                    return Status{ErrorCode::queue_full};
+                }
+                slot.begin = std::min(slot.begin, begin);
+                slot.end = std::max(slot.end, end);
                 return Status::success();
             }
         }
@@ -1070,7 +1127,11 @@ struct SessionDriver::Impl {
             return Status{ErrorCode::queue_full};
         }
         if (replay_count == replay_slots.size()) return Status{ErrorCode::queue_full};
-        replay_slots[(replay_head + replay_count) % replay_slots.size()] = ReplayRange{begin, end, dependency};
+        auto& target = replay_slots[(replay_head + replay_count) % replay_slots.size()];
+        target.begin = begin;
+        target.end = end;
+        target.dependency = dependency;
+        target.merged_dependencies.clear();
         ++replay_count;
         if (!write_timer_active) {
             pending_since_ms = callback_now_ms;
@@ -1090,12 +1151,15 @@ struct SessionDriver::Impl {
 
     void start_next_replay() noexcept {
         if (replay_active || replay_count == 0) return;
-        const auto range = replay_slots[replay_head];
-        replay_head = (replay_head + 1) % replay_slots.size();
-        --replay_count;
+        auto& range = replay_slots[replay_head];
+        replay_origin_begin = range.begin;
         replay_next = range.begin;
         replay_end = range.end;
         replay_dependency = range.dependency;
+        replay_merged_dependencies = std::move(range.merged_dependencies);
+        range.merged_dependencies.clear();
+        replay_head = (replay_head + 1) % replay_slots.size();
+        --replay_count;
         replay_active = true;
         replay_prepared = false;
     }
@@ -1365,20 +1429,35 @@ struct SessionDriver::Impl {
 
     [[nodiscard]] Status finish_replay_range() noexcept {
         const auto dependency = replay_dependency;
+        auto merged = std::move(replay_merged_dependencies);
+        replay_merged_dependencies.clear();
+        replay_origin_begin = 0;
         replay_active = false;
         replay_prepared = false;
         replay_offset = 0;
         replay_bytes = 0;
         replay_receipt_id = 0;
         replay_dependency = 0;
-        if (dependency != 0) {
-            const auto* inbound = journal.find_record(dependency);
-            if (inbound == nullptr || inbound->kind != RecordKind::inbound) return Status{ErrorCode::corrupt_store};
+        bool completed_any = false;
+        auto complete_dep = [&](RecordId dep_id) noexcept -> Status {
+            if (dep_id == 0) return Status::success();
+            const auto* inbound = journal.find_record(dep_id);
+            if (inbound == nullptr || inbound->kind != RecordKind::inbound)
+                return Status{ErrorCode::corrupt_store};
             const auto sequence = inbound->seq;
-            if (const auto status = append_delivery(dependency, sequence); !status.ok()) return status;
-            if (core.state() == SessionState::active) {
-                return deliver_recovery(callback_now_ms, callback_wall_time);
-            }
+            if (const auto status = append_delivery(dep_id, sequence); !status.ok()) return status;
+            completed_any = true;
+            return Status::success();
+        };
+        if (const auto status = complete_dep(dependency); !status.ok()) return status;
+        for (const auto extra : merged) {
+            if (const auto status = complete_dep(extra); !status.ok()) return status;
+        }
+        if (retention_deferred) [[unlikely]] {
+            if (const auto rstatus = update_retention_floor(); !rstatus.ok()) return rstatus;
+        }
+        if (completed_any && core.state() == SessionState::active) {
+            return deliver_recovery(callback_now_ms, callback_wall_time);
         }
         return Status::success();
     }
@@ -1902,11 +1981,11 @@ struct SessionDriver::Impl {
         }
         if (dependency != 0 && receipt_id != 0) increment_dependent_reply(dependency);
         last_appended_outbound_segment = std::max(last_appended_outbound_segment, segment_index(committed_id));
-        if (const auto status = update_retention_floor(); !status.ok()) return fail(status);
         if (const auto status = enqueue(committed_id, encoded_size, sequence,
                 receipt_id, message.msg_type, now_ms, true); !status.ok()) {
             return fail(Status{ErrorCode::protocol_error, 34});
         }
+        if (const auto status = update_retention_floor(); !status.ok()) return fail(status);
         put_receipt(receipt_id, sequence, ReceiptState::appended);
         ++next_receipt_id;
         detail::CoreEvent event{};
@@ -2034,11 +2113,11 @@ struct SessionDriver::Impl {
         }
         if (dependency != 0 && receipt_id != 0) increment_dependent_reply(dependency);
         last_appended_outbound_segment = std::max(last_appended_outbound_segment, segment_index(committed_id));
-        if (const auto status = update_retention_floor(); !status.ok()) return fail(status);
         if (const auto status = enqueue(committed_id, encoded_size, sequence,
                 receipt_id, msg_type, now_ms, true); !status.ok()) {
             return fail(Status{ErrorCode::protocol_error, 34});
         }
+        if (const auto status = update_retention_floor(); !status.ok()) return fail(status);
         put_receipt(receipt_id, sequence, ReceiptState::appended);
         ++next_receipt_id;
         detail::CoreEvent event{};
@@ -2067,11 +2146,16 @@ struct SessionDriver::Impl {
         admin_bytes = 0;
         replay_head = 0;
         replay_count = 0;
+        replay_origin_begin = 0;
         replay_active = false;
         replay_prepared = false;
         replay_offset = 0;
         replay_bytes = 0;
         replay_receipt_id = 0;
+        replay_dependency = 0;
+        replay_merged_dependencies.clear();
+        for (auto& slot : replay_slots) slot.merged_dependencies.clear();
+        retention_deferred = false;
         write_timer_active = false;
         stall_logout_attempted = false;
         stall_logout_deadline = 0;
@@ -2277,6 +2361,8 @@ struct SessionDriver::Impl {
         bool sequence_reset_event = false;
         bool gapfill_event = false;
         bool duplicate_gapfill = false;
+        bool noop_sequence_reset = false;
+        bool reject_sequence_reset = false;
         bool logon_reset_requested = false;
         std::optional<std::uint64_t> inbound_peer_ack{};
         std::string_view logout_text{};
@@ -2331,9 +2417,18 @@ struct SessionDriver::Impl {
                 return fail(Status{ErrorCode::protocol_error, 36});
             }
             if (!is_gap_fill) {
-                if (next_inbound <= core.next_inbound()) return fail(Status{ErrorCode::protocol_error, 36});
-                sequence_reset_event = true;
-                effective_sequence = core.next_inbound();
+                if (next_inbound > core.next_inbound()) {
+                    sequence_reset_event = true;
+                    effective_sequence = core.next_inbound();
+                } else if (next_inbound == core.next_inbound() || poss_dup) {
+                    // FIX 4.4 / QuickFIX parity: NewSeqNo == expected (no-op) or
+                    // PossDup retransmission of an already-applied Reset is ignored cleanly.
+                    noop_sequence_reset = true;
+                } else {
+                    // FIX 4.4 / QuickFIX parity: live attempt to lower expected sequence
+                    // replies with Session Reject (373=5) without terminating the session.
+                    reject_sequence_reset = true;
+                }
             } else {
                 if (!poss_dup || !orig_valid || next_inbound <= sequence)
                     return fail(Status{ErrorCode::protocol_error, 123});
@@ -2369,6 +2464,36 @@ struct SessionDriver::Impl {
             dup_check.orig_sending_time_valid = orig_valid;
             const auto dup_disp = core.process(dup_check);
             if (!dup_disp.status.ok()) return fail(dup_disp.status);
+            return Status::success();
+        }
+
+        if (noop_sequence_reset || reject_sequence_reset) {
+            detail::CoreEvent reset_check{};
+            reset_check.kind = detail::CoreEventKind::inbound_candidate;
+            reset_check.now_ms = now_ms;
+            reset_check.sequence = core.next_inbound();
+            reset_check.msg_type = msg_type;
+            reset_check.poss_dup = poss_dup;
+            reset_check.orig_sending_time_valid = orig_valid;
+            const auto reset_disp = core.process(reset_check);
+            if (!reset_disp.status.ok()) return fail(reset_disp.status);
+            if (!poss_dup && parsed_ack_candidate) {
+                const auto last_outbound = journal.next_outbound_seq() == 0
+                    ? 0 : journal.next_outbound_seq() - 1;
+                if (*parsed_ack_candidate < peer_ack_seq || *parsed_ack_candidate > last_outbound)
+                    return fail(Status{ErrorCode::protocol_error, 369});
+            }
+            if (reject_sequence_reset) {
+                const Status reject_err{ErrorCode::invalid_value, 36};
+                callback_now_ms = now_ms;
+                callback_wall_time = wall_time;
+                if (const auto status = send_protocol_reject(sequence, "4", reject_err, 5,
+                        now_ms, wall_time); !status.ok()) {
+                    return fail(status);
+                }
+                notify_error(reject_err);
+                if (!callback_observer_status.ok()) return fail(callback_observer_status);
+            }
             return Status::success();
         }
 
@@ -2660,6 +2785,9 @@ struct SessionDriver::Impl {
                 remaining = {logon_tx_buffer.data() + queued->offset, logon_tx_size - queued->offset};
             } else {
                 const auto* record = journal.find_record(queued->record_id);
+                if (record == nullptr && queued->record_id < journal.lowest_retained_record_id()) {
+                    return fail(Status{ErrorCode::history_unavailable});
+                }
                 if (record == nullptr || record->kind != RecordKind::outbound ||
                     record->payload.size() != queued->frame_size || queued->offset > queued->frame_size) {
                     return fail(Status{ErrorCode::corrupt_store});
@@ -2713,6 +2841,9 @@ struct SessionDriver::Impl {
                 const auto& desc = tx_slots[tx_index(i)];
                 if (desc.ephemeral) break;
                 const auto* record = journal.find_record(desc.record_id);
+                if (record == nullptr && desc.record_id < journal.lowest_retained_record_id()) {
+                    return fail(Status{ErrorCode::history_unavailable});
+                }
                 if (record == nullptr || record->kind != RecordKind::outbound ||
                     record->payload.size() != desc.frame_size || desc.offset > desc.frame_size) {
                     return fail(Status{ErrorCode::corrupt_store});
@@ -2795,6 +2926,9 @@ struct SessionDriver::Impl {
                 slice = {logon_tx_buffer.data() + desc.offset, logon_tx_size - desc.offset};
             } else {
                 const auto* record = journal.find_record(desc.record_id);
+                if (record == nullptr && desc.record_id < journal.lowest_retained_record_id()) {
+                    return fail(Status{ErrorCode::history_unavailable});
+                }
                 if (record == nullptr || record->kind != RecordKind::outbound ||
                     record->payload.size() != desc.frame_size || desc.offset > desc.frame_size) {
                     return fail(Status{ErrorCode::corrupt_store});

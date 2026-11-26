@@ -629,6 +629,60 @@ void test_replay_wire_hints_and_cross_process_spmc_tailer() {
     }
 }
 
+// N04: Journal::create_reader(future_start_id) must filter out subsequently appended records
+// whose RecordId is still below start_id, preserve cursor monotonicity, and deliver once id >= start_id.
+void test_future_start_id_filtering() {
+    TempStore store;
+    auto cfg = store.config();
+    cfg.capacity_bytes = 256U * 1024U;
+    cfg.segment_bytes = 64U * 1024U;
+    cfg.max_segments = 4;
+    cfg.max_records = 1024;
+    cfg.max_readers = 4;
+
+    auto opened = Journal::open(cfg);
+    CHECK(opened.ok());
+    if (!opened.ok()) return;
+    auto journal = std::move(opened).value();
+
+    const std::string payload(128, 'F');
+    for (std::uint64_t seq = 1; seq <= 3; ++seq) {
+        CHECK(journal.append(RecordKind::inbound, seq, 0, 0, payload).ok());
+    }
+    const RecordId last_before = journal.records().back().id;
+    const RecordId future_start = last_before + 1024U;
+
+    auto reader_res = journal.create_reader(future_start);
+    CHECK(reader_res.ok());
+    if (!reader_res.ok()) return;
+    auto reader = std::move(reader_res).value();
+    CHECK(reader.cursor() == future_start);
+
+    // Record 4 has id < future_start: must NOT be returned and cursor must NOT regress!
+    const auto rec4 = journal.append(RecordKind::inbound, 4, 0, 0, payload);
+    CHECK(rec4.ok() && rec4.value().id < future_start);
+    JournalRecord out{};
+    CHECK(reader.next(out).code == ErrorCode::need_more);
+    CHECK(reader.cursor() == future_start);
+    CHECK(reader.lag_records() == 0);
+
+    // Append more records until one reaches id >= future_start.
+    RecordId first_qualifying_id = 0;
+    std::uint64_t first_qualifying_seq = 0;
+    for (std::uint64_t seq = 5; seq <= 30; ++seq) {
+        const auto app = journal.append(RecordKind::inbound, seq, 0, 0, payload);
+        CHECK(app.ok());
+        if (first_qualifying_id == 0 && app.value().id >= future_start) {
+            first_qualifying_id = app.value().id;
+            first_qualifying_seq = seq;
+        }
+    }
+    CHECK(first_qualifying_id >= future_start);
+    CHECK(reader.next(out).ok());
+    CHECK(out.id == first_qualifying_id && out.seq == first_qualifying_seq);
+    CHECK(reader.cursor() == first_qualifying_id);
+}
+
 } // namespace
 
 int main() {
@@ -639,6 +693,7 @@ int main() {
     test_reader_calls_race_safely_with_journal_teardown();
     test_deterministic_journal_replayer_offline_timing_and_tcp();
     test_replay_wire_hints_and_cross_process_spmc_tailer();
+    test_future_start_id_filtering();
     if (failures != 0) {
         std::cerr << failures << " journal reader test(s) failed\n";
         return 1;
