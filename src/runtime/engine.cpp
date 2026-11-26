@@ -3782,6 +3782,17 @@ struct EngineRuntime::Impl {
             else if (peer->connection == Connection::connected && peer->driver) {
                 const auto session_deadline = peer->driver->next_deadline_ms();
                 if (session_deadline != 0) deadline = std::min(deadline, session_deadline);
+                const auto flow = peer->settings.flow_control.value_or(FlowControlConfig{});
+                if (peer->read_pause_since != 0) {
+                    deadline = std::min(deadline,
+                        peer->read_pause_since + flow.receive_pause_timeout_ms);
+                }
+                if (peer->session &&
+                    peer->session->callback_in_flight.load(std::memory_order_acquire) &&
+                    peer->session->callback_started_ms != 0) {
+                    deadline = std::min(deadline,
+                        peer->session->callback_started_ms + flow.max_delivery_age_ms);
+                }
             }
         }
         for (const auto& session : sessions) {
@@ -4067,9 +4078,13 @@ struct EngineRuntime::Impl {
                 auto& peer = *peer_ptr;
                 if (peer.closed || peer.connection != Connection::connected ||
                     peer.unread_size() == 0) continue;
-                const auto buffered_status = process_peer_buffer(peer, now);
+                bool hit_budget = false;
+                const auto buffered_status = process_peer_buffer(peer, now, &hit_budget);
                 if (!buffered_status.ok() || peer.closed) continue;
-                if (has_complete_buffered_frame(peer)) buffered_work = true;
+                if (hit_budget && peer.driver && peer.driver->can_receive() &&
+                    has_complete_buffered_frame(peer)) {
+                    buffered_work = true;
+                }
             }
             for (auto& item : pending) {
                 if (!item->closed && now >= item->deadline) {

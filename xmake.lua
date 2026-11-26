@@ -252,12 +252,12 @@ if has_config("tests") then
         add_files("tests/initiator_probe.cpp")
         add_deps("nimblefix")
     target_end()
-    for _, name in ipairs({"parser", "message", "generated", "contract", "journal", "session", "session_boundary", "session_limits", "network", "settings", "journal_reader", "journal_rotation", "protocol_core", "protocol_session", "protocol_security", "queued_runtime", "sender_schema", "schema_codec", "dynamic_message", "engine_features", "producer_lane", "queued_shutdown", "sender_expiry", "io_backend"}) do
+    for _, name in ipairs({"parser", "message", "generated", "contract", "journal", "session", "session_boundary", "session_limits", "network", "settings", "journal_reader", "journal_rotation", "protocol_core", "protocol_session", "protocol_security", "queued_runtime", "sender_schema", "schema_codec", "dynamic_message", "engine_features", "producer_lane", "queued_shutdown", "sender_expiry", "io_backend", "backpressure"}) do
         target(name .. "-test")
             set_kind("binary")
             add_files("tests/" .. name .. "_test.cpp")
             add_deps("nimblefix")
-            if name == "generated" or name == "contract" or name == "sender_schema" or name == "io_backend" then
+            if name == "generated" or name == "contract" or name == "sender_schema" or name == "io_backend" or name == "backpressure" then
                 add_deps("fix44-sample")
                 add_includedirs(generated_dir)
             end

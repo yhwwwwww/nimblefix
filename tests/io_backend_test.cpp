@@ -23,6 +23,7 @@
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <sched.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -45,21 +46,29 @@ struct TempDir {
     ~TempDir() { std::filesystem::remove_all(path); }
 };
 
-std::uint16_t pick_free_port() {
-    int fd = ::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
-    if (fd < 0) return 0;
-    int one = 1;
-    ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
-    sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    addr.sin_port = 0;
-    if (::bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) { ::close(fd); return 0; }
-    socklen_t len = sizeof(addr);
-    if (::getsockname(fd, reinterpret_cast<sockaddr*>(&addr), &len) != 0) { ::close(fd); return 0; }
-    const std::uint16_t port = ntohs(addr.sin_port);
-    ::close(fd);
-    return port;
+std::vector<int> allowed_cpus() {
+    std::vector<int> cpus;
+    cpu_set_t set;
+    CPU_ZERO(&set);
+    if (::sched_getaffinity(0, sizeof(set), &set) == 0) {
+        for (int cpu = 0; cpu < CPU_SETSIZE; ++cpu) {
+            if (CPU_ISSET(cpu, &set)) cpus.push_back(cpu);
+        }
+    }
+    if (cpus.empty()) cpus.push_back(0);
+    return cpus;
+}
+
+template <class EngineT>
+std::uint16_t wait_listener_port(const EngineT& engine, std::string_view name,
+                                 std::chrono::milliseconds timeout = std::chrono::seconds(5)) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        const auto ep = engine.listener_endpoint(name);
+        if (ep.ok() && ep.value().port != 0) return ep.value().port;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    return 0;
 }
 
 template <class Policy>
@@ -67,8 +76,6 @@ void run_backend_roundtrip(nf::IoBackendKind backend_kind, std::size_t sessions_
                            const char* label) {
     TempDir dir_acc;
     TempDir dir_ini;
-    const std::uint16_t port = pick_free_port();
-    CHECK(port != 0);
 
     nf::EngineConfig acc_cfg{};
     acc_cfg.storage.directory = dir_acc.path;
@@ -91,7 +98,7 @@ void run_backend_roundtrip(nf::IoBackendKind backend_kind, std::size_t sessions_
     CHECK(acc_res.ok());
     if (!acc_res.ok()) return;
     auto acceptor = std::move(acc_res).value();
-    CHECK(acceptor.add_listener({"main", {"127.0.0.1", port}}).ok());
+    CHECK(acceptor.add_listener({"main", {"127.0.0.1", 0}}).ok());
 
     for (std::size_t s = 0; s < sessions_count; ++s) {
         nf::AcceptorConfig ac{};
@@ -120,11 +127,29 @@ void run_backend_roundtrip(nf::IoBackendKind backend_kind, std::size_t sessions_
             }).status();
         }).ok());
 
+    CHECK(acceptor.on_error([&](const nf::ErrorEvent& ev) {
+        std::cerr << "[" << label << " ACC ERR] " << ev.session_name << " op=" << ev.operation
+                  << " code=" << static_cast<int>(ev.status.code) << " off=" << ev.status.offset << "\n";
+    }).ok());
+
+    std::thread acc_thread([&] { (void)acceptor.run(); });
+    const std::uint16_t port = wait_listener_port(acceptor, "main");
+    CHECK(port != 0);
+    if (port == 0) {
+        acceptor.request_stop();
+        acc_thread.join();
+        return;
+    }
+
     nf::EngineConfig ini_cfg = acc_cfg;
     ini_cfg.storage.directory = dir_ini.path;
     auto ini_res = nf::Engine<fix::Schema, Policy>::create(ini_cfg);
     CHECK(ini_res.ok());
-    if (!ini_res.ok()) return;
+    if (!ini_res.ok()) {
+        acceptor.request_stop();
+        acc_thread.join();
+        return;
+    }
     auto initiator = std::move(ini_res).value();
 
     std::vector<nf::SessionHandle> handles;
@@ -146,21 +171,17 @@ void run_backend_roundtrip(nf::IoBackendKind backend_kind, std::size_t sessions_
             return nf::Status::success();
         }).ok());
 
-    CHECK(acceptor.on_error([&](const nf::ErrorEvent& ev) {
-        std::cerr << "[" << label << " ACC ERR] " << ev.session_name << " op=" << ev.operation
-                  << " code=" << static_cast<int>(ev.status.code) << " off=" << ev.status.offset << "\n";
-    }).ok());
     CHECK(initiator.on_error([&](const nf::ErrorEvent& ev) {
         std::cerr << "[" << label << " INI ERR] " << ev.session_name << " op=" << ev.operation
                   << " code=" << static_cast<int>(ev.status.code) << " off=" << ev.status.offset << "\n";
     }).ok());
 
-    std::thread acc_thread([&] { (void)acceptor.run(); });
     std::thread ini_thread([&] { (void)initiator.run(); });
 
-    const auto active_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    const auto active_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    std::size_t active_n = 0;
     while (std::chrono::steady_clock::now() < active_deadline) {
-        std::size_t active_n = 0;
+        active_n = 0;
         for (std::size_t s = 0; s < handles.size(); ++s) {
             const auto snap = initiator.snapshot("ini-" + std::to_string(s));
             if (snap.ok() && snap.value().state == nf::SessionState::active) ++active_n;
@@ -168,6 +189,7 @@ void run_backend_roundtrip(nf::IoBackendKind backend_kind, std::size_t sessions_
         if (active_n == sessions_count) break;
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
+    CHECK(active_n == sessions_count);
 
     for (std::size_t s = 0; s < handles.size(); ++s) {
         auto sender = handles[s].sender<fix::Schema>();
@@ -185,7 +207,7 @@ void run_backend_roundtrip(nf::IoBackendKind backend_kind, std::size_t sessions_
     }
 
     const int expected_total = static_cast<int>(sessions_count) * orders_per_session;
-    const auto done_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    const auto done_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
     while (ini_received.load(std::memory_order_relaxed) < expected_total &&
            std::chrono::steady_clock::now() < done_deadline) {
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
@@ -199,8 +221,8 @@ void run_backend_roundtrip(nf::IoBackendKind backend_kind, std::size_t sessions_
     }
 
     initiator.request_stop();
-    acceptor.request_stop();
     ini_thread.join();
+    acceptor.request_stop();
     acc_thread.join();
 
     if (g_failures == 0) {
@@ -212,8 +234,6 @@ void run_backend_roundtrip(nf::IoBackendKind backend_kind, std::size_t sessions_
 void test_abrupt_disconnect_and_reconnect(nf::IoBackendKind backend_kind) {
     TempDir dir_acc;
     TempDir dir_ini;
-    const std::uint16_t port = pick_free_port();
-    CHECK(port != 0);
 
     nf::EngineConfig acc_cfg{};
     acc_cfg.storage.directory = dir_acc.path;
@@ -236,7 +256,7 @@ void test_abrupt_disconnect_and_reconnect(nf::IoBackendKind backend_kind) {
     CHECK(acc_res.ok());
     if (!acc_res.ok()) return;
     auto acceptor = std::move(acc_res).value();
-    CHECK(acceptor.add_listener({"main", {"127.0.0.1", port}}).ok());
+    CHECK(acceptor.add_listener({"main", {"127.0.0.1", 0}}).ok());
     CHECK(acceptor.add_acceptor({"acc-0", "main", "SELL", "BUY-0"}).ok());
     CHECK(acceptor.on<fix::NewOrderSingle>([&](nf::SessionContext& ctx, const fix::NewOrderSingleView& req) {
         return ctx.send_stream<fix::ExecutionReport>([&](auto& w) {
@@ -247,9 +267,24 @@ void test_abrupt_disconnect_and_reconnect(nf::IoBackendKind backend_kind) {
     }).ok());
 
     std::thread acc_thread([&] { (void)acceptor.run(); });
+    const std::uint16_t port = wait_listener_port(acceptor, "main");
+    CHECK(port != 0);
+    if (port == 0) {
+        acceptor.request_stop();
+        acc_thread.join();
+        return;
+    }
 
     // Run two consecutive initiator lifecycles against the same io_uring acceptor (verifies clean cancel_fd + sweep).
     for (int cycle = 0; cycle < 2; ++cycle) {
+        if (cycle > 0) {
+            const auto d_drop = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+            while (std::chrono::steady_clock::now() < d_drop) {
+                const auto as = acceptor.snapshot("acc-0");
+                if (as.ok() && as.value().state != nf::SessionState::active) break;
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            }
+        }
         nf::EngineConfig ini_cfg = acc_cfg;
         ini_cfg.storage.directory = dir_ini.path;
         auto ini_res = nf::Engine<fix::Schema, nf::Inline>::create(ini_cfg);
@@ -263,7 +298,7 @@ void test_abrupt_disconnect_and_reconnect(nf::IoBackendKind backend_kind) {
             return nf::Status::success();
         }).ok());
         std::thread ini_thread([&] { (void)initiator.run(); });
-        const auto d1 = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+        const auto d1 = std::chrono::steady_clock::now() + std::chrono::seconds(5);
         bool became_active = false;
         while (std::chrono::steady_clock::now() < d1) {
             auto s = initiator.snapshot("ini-0");
@@ -280,6 +315,7 @@ void test_abrupt_disconnect_and_reconnect(nf::IoBackendKind backend_kind) {
                       << (s.ok() ? static_cast<int>(s.value().state) : -1)
                       << " acc_state=" << (as.ok() ? static_cast<int>(as.value().state) : -1) << "\n";
         }
+        CHECK(became_active);
         auto sender = h.value().sender<fix::Schema>();
         for (int i = 0; i < 10; ++i) {
             const auto cl_id = "CYC-" + std::to_string(cycle) + "-" + std::to_string(i);
@@ -289,7 +325,7 @@ void test_abrupt_disconnect_and_reconnect(nf::IoBackendKind backend_kind) {
                  .order_qty(nf::Decimal{100, 0}).ord_type('1');
             }).ok());
         }
-        const auto d2 = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+        const auto d2 = std::chrono::steady_clock::now() + std::chrono::seconds(5);
         while (got.load() < 10 && std::chrono::steady_clock::now() < d2) {
             std::this_thread::sleep_for(std::chrono::milliseconds(2));
         }
@@ -308,18 +344,16 @@ void test_sharded_reactor(nf::IoBackendConfig backend_cfg, const char* label) {
     // 8 Acceptor sessions & 8 Sharded Initiator sessions across 4 shards.
     TempDir dir_acc;
     TempDir dir_ini;
-    const std::uint16_t port = pick_free_port();
-    CHECK(port != 0);
 
     constexpr std::size_t kShards = 4;
     constexpr std::size_t kSessions = 8;
     constexpr int kOrdersPerSession = 30;
-    const unsigned hw = std::max(1U, std::thread::hardware_concurrency());
+    const auto cpus = allowed_cpus();
 
     nf::ShardedEngineConfig acc_scfg{};
     acc_scfg.shard_count = kShards;
     for (std::size_t i = 0; i < kShards; ++i) {
-        acc_scfg.cpu_cores.push_back(static_cast<int>(i % hw));
+        acc_scfg.cpu_cores.push_back(cpus[i % cpus.size()]);
     }
     acc_scfg.base.storage.directory = dir_acc.path;
     acc_scfg.base.storage.journal_capacity_bytes = 2U * 1024U * 1024U;
@@ -346,20 +380,13 @@ void test_sharded_reactor(nf::IoBackendConfig backend_cfg, const char* label) {
     CHECK(acceptor.shard_count() == kShards);
     CHECK(initiator.shard_count() == kShards);
 
-    CHECK(acceptor.add_listener({"main", {"127.0.0.1", port}}).ok());
+    CHECK(acceptor.add_listener({"main", {"127.0.0.1", 0}}).ok());
 
-    std::vector<nf::SessionHandle> handles;
-    handles.reserve(kSessions);
     for (std::size_t s = 0; s < kSessions; ++s) {
         const std::string acc_name = "acc-" + std::to_string(s);
-        const std::string ini_name = "ini-" + std::to_string(s);
         const std::string client_id = "SHARD-BUY-" + std::to_string(s);
         CHECK(acceptor.add_acceptor({acc_name, "main", "SELL", client_id}).ok());
         CHECK(acceptor.session_shard(acc_name) == (s % kShards));
-        auto h = initiator.add_initiator({ini_name, client_id, "SELL", {"127.0.0.1", port}});
-        CHECK(h.ok());
-        CHECK(initiator.session_shard(ini_name) == (s % kShards));
-        if (h.ok()) handles.push_back(std::move(h).value());
     }
 
     std::atomic<int> acc_received{0};
@@ -385,20 +412,39 @@ void test_sharded_reactor(nf::IoBackendConfig backend_cfg, const char* label) {
         }).status();
     }).ok());
 
+    CHECK(acceptor.validate().ok());
+    std::thread acc_thread([&] { (void)acceptor.run(); });
+    const std::uint16_t port = wait_listener_port(acceptor, "main");
+    CHECK(port != 0);
+    if (port == 0) {
+        acceptor.request_stop();
+        acc_thread.join();
+        return;
+    }
+
+    std::vector<nf::SessionHandle> handles;
+    handles.reserve(kSessions);
+    for (std::size_t s = 0; s < kSessions; ++s) {
+        const std::string ini_name = "ini-" + std::to_string(s);
+        const std::string client_id = "SHARD-BUY-" + std::to_string(s);
+        auto h = initiator.add_initiator({ini_name, client_id, "SELL", {"127.0.0.1", port}});
+        CHECK(h.ok());
+        CHECK(initiator.session_shard(ini_name) == (s % kShards));
+        if (h.ok()) handles.push_back(std::move(h).value());
+    }
+
     CHECK(initiator.on<fix::ExecutionReport>([&](nf::SessionContext&, const fix::ExecutionReportView&) {
         ini_received.fetch_add(1, std::memory_order_relaxed);
         return nf::Status::success();
     }).ok());
 
-    CHECK(acceptor.validate().ok());
     CHECK(initiator.validate().ok());
-
-    std::thread acc_thread([&] { (void)acceptor.run(); });
     std::thread ini_thread([&] { (void)initiator.run(); });
 
-    const auto active_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    const auto active_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    std::size_t active_n = 0;
     while (std::chrono::steady_clock::now() < active_deadline) {
-        std::size_t active_n = 0;
+        active_n = 0;
         for (std::size_t s = 0; s < handles.size(); ++s) {
             const auto snap = initiator.snapshot("ini-" + std::to_string(s));
             if (snap.ok() && snap.value().state == nf::SessionState::active) ++active_n;
@@ -406,6 +452,7 @@ void test_sharded_reactor(nf::IoBackendConfig backend_cfg, const char* label) {
         if (active_n == kSessions) break;
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
+    CHECK(active_n == kSessions);
 
     for (std::size_t s = 0; s < handles.size(); ++s) {
         auto sender = handles[s].sender<fix::Schema>();
@@ -423,7 +470,7 @@ void test_sharded_reactor(nf::IoBackendConfig backend_cfg, const char* label) {
     }
 
     const int expected_total = static_cast<int>(kSessions) * kOrdersPerSession;
-    const auto done_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    const auto done_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
     while (ini_received.load(std::memory_order_relaxed) < expected_total &&
            std::chrono::steady_clock::now() < done_deadline) {
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
@@ -432,25 +479,41 @@ void test_sharded_reactor(nf::IoBackendConfig backend_cfg, const char* label) {
     CHECK(ini_received.load() == expected_total);
     CHECK(distinct_acc_tids.size() == kShards);
 
-    // Out-of-band read-only sidecar check on shared ShardedEngine mmap telemetry region
+    // Out-of-band read-only sidecar check on shared ShardedEngine mmap telemetry region.
+    // Poll briefly so every shard finishes its next publish_snapshots() pass after the final callback.
     {
         auto acc_reader = nf::TelemetryReader::open(acc_tel);
         auto ini_reader = nf::TelemetryReader::open(ini_tel);
         CHECK(acc_reader.ok() && ini_reader.ok());
         if (acc_reader.ok() && ini_reader.ok()) {
-            const auto acc_snaps = acc_reader.value().read_all();
-            const auto ini_snaps = ini_reader.value().read_all();
-            CHECK(acc_snaps.size() == kSessions);
-            CHECK(ini_snaps.size() == kSessions);
+            const auto tel_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+            std::size_t acc_sz = 0, ini_sz = 0;
             std::uint64_t acc_deliv = 0, ini_deliv = 0, acc_val = 0, ini_jrn = 0;
-            for (const auto& s : acc_snaps) {
-                acc_deliv += s.business_deliveries;
-                acc_val += s.stages[static_cast<std::size_t>(nf::TelemetryStage::validate)].count;
+            while (std::chrono::steady_clock::now() < tel_deadline) {
+                const auto acc_snaps = acc_reader.value().read_all();
+                const auto ini_snaps = ini_reader.value().read_all();
+                acc_sz = acc_snaps.size();
+                ini_sz = ini_snaps.size();
+                acc_deliv = ini_deliv = acc_val = ini_jrn = 0;
+                for (const auto& s : acc_snaps) {
+                    acc_deliv += s.business_deliveries;
+                    acc_val += s.stages[static_cast<std::size_t>(nf::TelemetryStage::validate)].count;
+                }
+                for (const auto& s : ini_snaps) {
+                    ini_deliv += s.business_deliveries;
+                    ini_jrn += s.stages[static_cast<std::size_t>(nf::TelemetryStage::journal)].count;
+                }
+                if (acc_sz == kSessions && ini_sz == kSessions &&
+                    acc_deliv == static_cast<std::uint64_t>(expected_total) &&
+                    ini_deliv == static_cast<std::uint64_t>(expected_total) &&
+                    acc_val == static_cast<std::uint64_t>(expected_total) &&
+                    ini_jrn == static_cast<std::uint64_t>(expected_total)) {
+                    break;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
             }
-            for (const auto& s : ini_snaps) {
-                ini_deliv += s.business_deliveries;
-                ini_jrn += s.stages[static_cast<std::size_t>(nf::TelemetryStage::journal)].count;
-            }
+            CHECK(acc_sz == kSessions);
+            CHECK(ini_sz == kSessions);
             CHECK(acc_deliv == static_cast<std::uint64_t>(expected_total));
             CHECK(ini_deliv == static_cast<std::uint64_t>(expected_total));
             CHECK(acc_val == static_cast<std::uint64_t>(expected_total));
@@ -459,8 +522,8 @@ void test_sharded_reactor(nf::IoBackendConfig backend_cfg, const char* label) {
     }
 
     initiator.request_stop();
-    acceptor.request_stop();
     ini_thread.join();
+    acceptor.request_stop();
     acc_thread.join();
 
     if (g_failures == 0) {
@@ -471,10 +534,15 @@ void test_sharded_reactor(nf::IoBackendConfig backend_cfg, const char* label) {
 }
 
 void test_core_affinity_idle_strategy_and_sharded_reactor() {
-    // 1. CPU affinity helper contract
-    CHECK(nf::pin_current_thread(-1).ok());
-    CHECK(nf::pin_current_thread(0).ok());
-    CHECK(nf::pin_current_thread(99999).code == nf::ErrorCode::invalid_config);
+    // 1. CPU affinity helper contract (run on a throwaway thread so the main
+    //    test thread's CPU mask is never narrowed for subsequent child threads).
+    const int valid_cpu = allowed_cpus().front();
+    std::thread affinity_probe([valid_cpu] {
+        CHECK(nf::pin_current_thread(-1).ok());
+        CHECK(nf::pin_current_thread(valid_cpu).ok());
+        CHECK(nf::pin_current_thread(99999).code == nf::ErrorCode::invalid_config);
+    });
+    affinity_probe.join();
 
     // 2. ShardedEngine on epoll + hybrid_backoff
     test_sharded_reactor(nf::IoBackendConfig::hybrid(200, 50), "epoll+hybrid_backoff");
@@ -699,8 +767,6 @@ void test_proactor_send_commit_contract() {
 
     TempDir dir_acc;
     TempDir dir_ini;
-    const std::uint16_t port = pick_free_port();
-    CHECK(port != 0);
 
     // Acceptor runs on normal epoll; Initiator runs on MockProactorBackend.
     nf::EngineConfig acc_cfg{};
@@ -713,7 +779,7 @@ void test_proactor_send_commit_contract() {
     CHECK(acc_res.ok());
     if (!acc_res.ok()) return;
     auto acceptor = std::move(acc_res).value();
-    CHECK(acceptor.add_listener({"main", {"127.0.0.1", port}}).ok());
+    CHECK(acceptor.add_listener({"main", {"127.0.0.1", 0}}).ok());
     CHECK(acceptor.add_acceptor({"acc-0", "main", "SELL", "BUY"}).ok());
 
     std::mutex ord_mu;
@@ -724,6 +790,15 @@ void test_proactor_send_commit_contract() {
         return nf::Status::success();
     }).ok());
 
+    std::thread acc_thread([&] { (void)acceptor.run(); });
+    const std::uint16_t port = wait_listener_port(acceptor, "main");
+    CHECK(port != 0);
+    if (port == 0) {
+        acceptor.request_stop();
+        acc_thread.join();
+        return;
+    }
+
     MockProactorControl ctl{};
     g_mock_proactor_ctl = &ctl;
     nf::detail::set_io_backend_test_factory(&mock_proactor_factory);
@@ -733,10 +808,15 @@ void test_proactor_send_commit_contract() {
     ini_cfg.storage.journal_capacity_bytes = 2U * 1024U * 1024U;
     ini_cfg.storage.segment_bytes = 256U * 1024U;
     ini_cfg.storage.journal_max_records = 4096;
+    ini_cfg.reconnect_delay_ms = 60'000;
     ini_cfg.io_backend = nf::IoBackendConfig::io_uring();
     auto ini_res = nf::Engine<fix::Schema, nf::Inline>::create(ini_cfg);
     CHECK(ini_res.ok());
-    if (!ini_res.ok()) return;
+    if (!ini_res.ok()) {
+        acceptor.request_stop();
+        acc_thread.join();
+        return;
+    }
     auto initiator = std::move(ini_res).value();
     auto h = initiator.add_initiator({"ini-0", "BUY", "SELL", {"127.0.0.1", port}});
     CHECK(h.ok());
@@ -745,10 +825,9 @@ void test_proactor_send_commit_contract() {
     CHECK(lane_res.ok());
     auto lane = std::move(lane_res).value();
 
-    std::thread acc_thread([&] { (void)acceptor.run(); });
     std::thread ini_thread([&] { (void)initiator.run(); });
 
-    const auto d0 = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    const auto d0 = std::chrono::steady_clock::now() + std::chrono::seconds(5);
     while (std::chrono::steady_clock::now() < d0) {
         auto s = initiator.snapshot("ini-0");
         if (s.ok() && s.value().state == nf::SessionState::active) break;
@@ -771,7 +850,7 @@ void test_proactor_send_commit_contract() {
     });
     CHECK(send1.ok());
 
-    const auto d1 = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    const auto d1 = std::chrono::steady_clock::now() + std::chrono::seconds(5);
     while (std::chrono::steady_clock::now() < d1) {
         {
             std::lock_guard lock(ctl.mu);
@@ -787,7 +866,7 @@ void test_proactor_send_commit_contract() {
     // Query receipt while SEND is still in flight: MUST be `appended`, NOT `written`!
     {
         auto rec = lane.receipt(send1.value().id);
-        const auto d_rec = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+        const auto d_rec = std::chrono::steady_clock::now() + std::chrono::seconds(5);
         while (std::chrono::steady_clock::now() < d_rec && (!rec.ok() || rec.value().state == nf::ReceiptState::accepted)) {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
             rec = lane.receipt(send1.value().id);
@@ -801,7 +880,7 @@ void test_proactor_send_commit_contract() {
         std::lock_guard lock(ctl.mu);
         ctl.action = MockProactorControl::Action::release_partial;
     }
-    const auto d2 = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    const auto d2 = std::chrono::steady_clock::now() + std::chrono::seconds(5);
     while (std::chrono::steady_clock::now() < d2) {
         if (initiator.snapshot("ini-0").value().written_bytes == written_before + 20) {
             std::lock_guard lock(ctl.mu);
@@ -822,14 +901,14 @@ void test_proactor_send_commit_contract() {
         ctl.intercept_orders = false;
     }
     bool saw_written = false;
-    const auto d3 = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    const auto d3 = std::chrono::steady_clock::now() + std::chrono::seconds(5);
     while (std::chrono::steady_clock::now() < d3 && !saw_written) {
         const auto rec = lane.receipt(send1.value().id);
         if (rec.ok() && rec.value().state == nf::ReceiptState::written) saw_written = true;
         else std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
     CHECK(saw_written);
-    const auto d3b = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    const auto d3b = std::chrono::steady_clock::now() + std::chrono::seconds(5);
     while (std::chrono::steady_clock::now() < d3b) {
         {
             std::lock_guard lock(ord_mu);
@@ -855,7 +934,7 @@ void test_proactor_send_commit_contract() {
     });
     CHECK(send2.ok());
     bool saw_written2 = false;
-    const auto d4 = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    const auto d4 = std::chrono::steady_clock::now() + std::chrono::seconds(5);
     while (std::chrono::steady_clock::now() < d4) {
         const auto rec = lane.receipt(send2.value().id);
         if (rec.ok() && rec.value().state == nf::ReceiptState::written) saw_written2 = true;
@@ -887,7 +966,7 @@ void test_proactor_send_commit_contract() {
          .transact_time("20261123-14:00:02.000").order_qty(nf::Decimal{10, 0}).ord_type('1');
     });
     CHECK(send3.ok());
-    const auto d5 = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    const auto d5 = std::chrono::steady_clock::now() + std::chrono::seconds(5);
     while (std::chrono::steady_clock::now() < d5) {
         {
             std::lock_guard lock(ctl.mu);
@@ -901,20 +980,27 @@ void test_proactor_send_commit_contract() {
         ctl.action = MockProactorControl::Action::fail_epipe;
         ctl.intercept_orders = false;
     }
-    // Wait briefly for -EPIPE disconnect to process; verify receipt 3 NEVER reports written.
+    // Wait for -EPIPE disconnect to process (reconnect_delay_ms is 60s so no reconnect races written_bytes).
     bool saw_written3 = false;
-    const auto d6 = std::chrono::steady_clock::now() + std::chrono::milliseconds(150);
+    bool saw_disconnected3 = false;
+    const auto d6 = std::chrono::steady_clock::now() + std::chrono::seconds(5);
     while (std::chrono::steady_clock::now() < d6) {
         const auto rec = lane.receipt(send3.value().id);
         if (rec.ok() && rec.value().state == nf::ReceiptState::written) saw_written3 = true;
+        const auto snap = initiator.snapshot("ini-0");
+        if (snap.ok() && snap.value().state != nf::SessionState::active) {
+            saw_disconnected3 = true;
+            break;
+        }
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
+    CHECK(saw_disconnected3);
     CHECK(!saw_written3);
     CHECK(initiator.snapshot("ini-0").value().written_bytes == written_before_fail);
 
     initiator.request_stop();
-    acceptor.request_stop();
     ini_thread.join();
+    acceptor.request_stop();
     acc_thread.join();
 
     if (g_failures == 0) {

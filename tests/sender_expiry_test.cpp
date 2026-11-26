@@ -400,7 +400,7 @@ void test_queued_dependent_expiry_keeps_delivery_open(const std::filesystem::pat
     const auto received_snapshot = engine->snapshot("session");
     CHECK(received_snapshot.ok() && received_snapshot.value().received_frames >= 1);
     const auto callback_deadline = std::chrono::steady_clock::now() + 2s;
-    while (dependent_id.load(std::memory_order_acquire) == 0 &&
+    while (callback_count.load(std::memory_order_acquire) == 0 &&
         std::chrono::steady_clock::now() < callback_deadline) std::this_thread::yield();
     const auto id = dependent_id.load(std::memory_order_acquire);
     CHECK(id != 0 && callback_count.load(std::memory_order_acquire) == 1);
