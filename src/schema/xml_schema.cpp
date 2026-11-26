@@ -999,14 +999,37 @@ std::string FingerprintBuilder::finish() { return sha256(bytes_); }
     storage->components.reserve(schema.sorted_components.size());
     std::int32_t header_comp_idx = -1;
     std::int32_t trailer_comp_idx = -1;
+    auto session_req_mask_for = [&](const std::vector<MessageMemberDescriptor>& members) -> std::uint16_t {
+        std::uint16_t mask = 0;
+        for (const auto& m : members) {
+            if (!m.required || m.kind != MemberKind::field || m.field_index >= storage->fields.size()) continue;
+            switch (storage->fields[m.field_index].tag) {
+            case 8u:    mask |= (1u << 0); break;
+            case 9u:    mask |= (1u << 1); break;
+            case 35u:   mask |= (1u << 2); break;
+            case 49u:   mask |= (1u << 3); break;
+            case 56u:   mask |= (1u << 4); break;
+            case 34u:   mask |= (1u << 5); break;
+            case 52u:   mask |= (1u << 6); break;
+            case 43u:   mask |= (1u << 7); break;
+            case 122u:  mask |= (1u << 8); break;
+            case 369u:  mask |= (1u << 9); break;
+            case 1128u: mask |= (1u << 10); break;
+            case 10u:   mask |= (1u << 11); break;
+            default: break;
+            }
+        }
+        return mask;
+    };
     for (std::size_t i = 0; i < schema.sorted_components.size(); ++i) {
         if (schema.sorted_components[i].name == "Header") header_comp_idx = static_cast<std::int32_t>(i);
         if (schema.sorted_components[i].name == "Trailer") trailer_comp_idx = static_cast<std::int32_t>(i);
+        const std::uint16_t req_smask = session_req_mask_for(storage->component_members[i]);
         storage->components.push_back({storage->keep(schema.sorted_components[i].name),
             std::span<const MessageMemberDescriptor>{storage->component_members[i]},
             std::span<const MemberTagEntry>{storage->component_members_by_tag[i]},
             std::span<const std::uint32_t>{storage->component_group_tags[i]},
-            component_blooms[i], true});
+            component_blooms[i], true, req_smask});
     }
 
     storage->message_members.reserve(schema.sorted_messages.size());

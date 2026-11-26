@@ -147,6 +147,10 @@ bool DirectTlsTransport::is_connecting() const noexcept {
     return impl_ && impl_->tcp.valid() && (impl_->tcp.is_connecting() || impl_->tls_handshaking);
 }
 
+bool DirectTlsTransport::is_handshaking() const noexcept {
+    return impl_ && impl_->tcp.valid() && !impl_->tcp.is_connecting() && impl_->tls_handshaking;
+}
+
 bool DirectTlsTransport::handshake_complete() const noexcept {
     return impl_ && impl_->tcp.valid() && !impl_->tls_handshaking && impl_->tls.handshake_complete();
 }

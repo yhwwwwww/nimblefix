@@ -21,10 +21,10 @@ NimbleFIX 采用三层模块化 C++20 架构，围绕确定性的亚微秒级热
 |               (NimbleFIX::nimblefix_core_tls)                               |
 +-----------------------------------------------------------------------------+
 | Core:         流式编码器（StreamWriter / Fixed）、编译期生成字典、           |
-|               分段 mmap 日志（SSE4.2 CRC32C）、SessionCore、                |
-|               TcpTransport（write_batch/sendmsg）、DirectInitiator、        |
-|               ConnectionStrategy 主备切换、DirectSendQueue（SPSC）、         |
-|               旁路 mmap 遥测、JournalReplayer 历史回放                       |
+|               分段 mmap 日志（SSE4.2 CRC32C、跨进程 SPMC JournalTailer）、   |
+|               SessionCore、TcpTransport（write_batch/sendmsg）、             |
+|               DirectInitiator、ConnectionStrategy 主备切换、                 |
+|               DirectSendQueue（SPSC）、旁路 mmap 遥测、JournalReplayer       |
 |               (NimbleFIX::nimblefix_core — 仅 C++20 + pthread)              |
 +-----------------------------------------------------------------------------+
 ```
@@ -45,7 +45,7 @@ NimbleFIX 采用三层模块化 C++20 架构，围绕确定性的亚微秒级热
 
 | API | 可变性与控制流 | 内存分配 | 复用方式 | 主要用途 |
 | :--- | :--- | :--- | :--- | :--- |
-| **流式编码（默认）**：`send_stream<Msg>(fn)` / `encode_fix44_stream<Msg>` | 原生 `if`/`for`、`std::optional<T>`、嵌套重复组、`w.header()` | 0 堆分配 | 无状态 lambda | 最快、最灵活的生产主力接口（~130–140 ns） |
+| **流式编码（默认）**：`send_stream<Msg>(fn)` / `encode_fix44_stream<Msg>` | 原生 `if`/`for`、`std::optional<T>`、嵌套重复组、`w.header()` | 0 堆分配 | 无状态 lambda | 最快、最灵活的生产主力接口（~110–150 ns） |
 | **固定模板**：`NewOrderSingle::Fixed<ByteCap, fix::field::...>` | 固定字段集合、存在位图 | 0 堆分配（栈缓冲） | `reset()` 原地复用 | 可反复原地改写的预填充模板消息 |
 | **无字典 / 动态**：`nf::message<"D">()` / `DynamicMessage` | 任意运行期 `(tag, value)` 对 | SSO / 堆 | 可变 | 底层管理帧与运行期自定义 Tag |
 
@@ -105,4 +105,4 @@ NimbleFIX 采用三层模块化 C++20 架构，围绕确定性的亚微秒级热
 ## 6. 旁路 mmap 遥测与历史回放
 
 - **旁路 mmap 遥测（`<nimblefix/telemetry.hpp>`）**：可选 `MAP_SHARED` `.nfxt` 共享内存区域，每个会话拥有独立缓存行对齐槽位，仅由协议归属线程使用 relaxed load+store 写入（零锁、零堆分配、零系统调用）。开启 `telemetry_stage_probes = true` 后，为 `read`、`parse`、`validate`、`journal`、`write` 五个阶段记录 433 桶对数线性纳秒级 HDR 直方图；`TelemetryReader` 在外部进程以 `O_RDONLY`/`PROT_READ` 只读映射并导出结构化快照或 Prometheus 指标。
-- **确定性历史回放（`<nimblefix/replay.hpp>`）**：`JournalReplayer` 通过带租约保护的 `JournalReader` 读取在线或离线 `.nfxj` 日志，支持方向（`inbound`/`outbound`/`both`）、序列号区间、Epoch 与管理帧过滤，并按全速、原始 `52=SendingTime` 或倍速回放至进程内回调或真实 TCP 端点。
+- **确定性历史回放与跨进程 SPMC 追尾（`<nimblefix/journal.hpp>`、`<nimblefix/replay.hpp>`）**：`JournalTailer` 以 `O_RDONLY`/`PROT_READ` 只读映射在线或离线 `.nfxj` 分段（不抢占 `LOCK_EX`），通过 acquire-load 无锁感知写端 release 发布的 `record_commit_marker` 并自动跨段追尾，在不影响交易写端热路径的前提下支持 DropCopy、合规审计与风控旁路进程。`JournalReplayer` 按路径回放时默认基于 `JournalTailer`（同时提供进程内带租约 `JournalReader` 重载），支持方向（`inbound`/`outbound`/`both`）、序列号区间、Epoch、管理帧与 `WireHints` 过滤，并按全速、原始 `52=SendingTime` 或倍速回放至回调或 TCP 端点。

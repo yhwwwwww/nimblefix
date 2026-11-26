@@ -25,13 +25,13 @@
 | **序列号 Epoch** | 显式允许的 Logon 重置（`141=Y`）、审计 Epoch 记录、仅按策略重置为 1 | 默认重连保留序列号；存在未处理输入或活跃读租约时禁止不安全重置。 |
 | **FIX 369（`LastMsgSeqNumProcessed`）** | 发送已完成业务处理的最高连续入站序列号；校验对端进度；约束日志保留下界 | 已落盘但尚未完成回调与关联回复提交的入站消息不会提前通过 Tag `369` 确认。 |
 | **Logout 与 Reject** | 本地、对端及双向并发 Logout（写完再关与有限关闭超时）；结构/类型错误返回标准 Session Reject（`35=3`） | 对手方特定的 `BusinessMessageReject`（`35=j`）策略由应用负责。 |
-| **分段 mmap 日志** | 预分配分段 `MAP_SHARED` mmap 日志、SSE4.2 硬件 CRC32C、零拷贝 `reserve()`/`commit()`、`.tmp` + 原子 `rename` 建段、索引/检查点重建、段轮转、热路径外 `poll_maintenance()`、独立读游标与租约保护 | 无纯内存模式；分段序号与 `RecordId` 单调递增永不复用；空间满时 fail-closed，绝不覆盖仍需重传的历史。 |
+| **分段 mmap 日志** | 预分配分段 `MAP_SHARED` mmap 日志、SSE4.2 硬件 CRC32C、零拷贝 `reserve()`/`commit()`、`.tmp` + 原子 `rename` 建段、索引/检查点重建、段轮转、热路径外 `poll_maintenance()`、进程内带租约 `JournalReader` 与跨进程无锁只读 SPMC `JournalTailer`（`O_RDONLY`/`PROT_READ`，零写端开销） | 无纯内存模式；分段序号与 `RecordId` 单调递增永不复用；空间满时 fail-closed，绝不覆盖仍需重传的历史；跨进程 `JournalTailer` 绝不阻塞交易写端，滞后超出已回收分段时返回 `reader_expired` / `history_unavailable`。 |
 | **恢复与确认语义** | 发送前落盘、回调前落盘；崩溃恢复重投未完成入站消息（`is_recovery == true`）并复用已落盘的关联回复 | 确认级别 `appended` 保障同机进程崩溃（`SIGKILL`/异常退出）恢复；热路径不做逐消息 `fsync`/`msync`，不覆盖宿主机突然断电；至少一次投递要求外部副作用幂等。 |
 | **发送回执（`Engine`）** | `accepted`、`appended`、`written`、`failed`、`expired`，有界环形保留 | `written` 表示本机 socket/TLS 已接收字节；对手方确认以业务回报（如 `ExecutionReport`）为准。 |
 | **TLS** | 可选 OpenSSL 3（`DirectTlsTransport` 与 `Engine`），TLS 1.2/1.3、CA + SAN 主机名/IP 校验、可选 mTLS、非阻塞 `WANT_READ`/`WANT_WRITE`、重连复用 `TlsContext` | 不支持交互式口令私钥；证书校验失败立即关闭连接，不降级明文。 |
 | **会话标识与时间窗** | 持久化标识 = 协议版本 + 方向化 CompID + 可选限定符；显式 UTC 星期/时间窗口（支持跨午夜） | 会话显示名与端口号不属于持久化标识；不做夏令时换算，也不在窗口边界自动重置序列号。 |
 | **旁路 mmap 遥测** | 可选 `telemetry_path`（`.nfxt` `MAP_SHARED`）与 `telemetry_stage_probes`，支持 `DirectInitiator`、`Engine`、`ShardedEngine`；433 桶单写者纳秒 HDR 直方图（`read`/`parse`/`validate`/`journal`/`write`、`p50/p90/p99/p99.9/p99.99`）；只读 `TelemetryReader` + `nimblefix telemetry` | 默认关闭（零开销）；单写者保证热路径零锁、零堆分配、零 `fsync`。 |
-| **历史回放** | `<nimblefix/replay.hpp>`（`JournalReplayer::replay` / `replay_to_tcp`）与 `nimblefix replay`；基于带租约 `JournalReader` 读取在线或离线 `.nfxj` 日志，支持方向/序列号/Epoch/管理帧过滤及全速/原速/倍速回放至回调或 TCP 端点 | 原样回放已提交的 FIX 报文。 |
+| **历史回放** | `<nimblefix/replay.hpp>`（`JournalReplayer::replay` / `replay_to_tcp`）与 `nimblefix replay`；按路径读取在线或离线 `.nfxj` 时使用跨进程无锁 `JournalTailer`（不抢占 `LOCK_EX`），也提供进程内带租约 `JournalReader` 重载；支持方向/序列号/Epoch/管理帧过滤、`ReplayOptions::wire_hints` 自定义 `DATA`/`LENGTH` 配对及全速/原速/倍速回放至回调或 TCP 端点 | 原样回放已提交的 FIX 报文。 |
 | **手动事件循环** | 调用方线程驱动 `Engine::start()` + `poll_once(max_wait_ms)` 或 `DirectInitiator::poll_once()` / `drain()`；线程安全 `request_stop()` | 每个 `Engine` 实例对应单次运行生命周期；重启请基于同一存储目录重新创建。 |
 
 ---

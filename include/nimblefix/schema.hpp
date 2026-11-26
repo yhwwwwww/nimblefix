@@ -85,6 +85,7 @@ struct ComponentDescriptor {
     std::span<const std::uint32_t> group_count_tags{};
     std::uint64_t group_count_tag_bloom{};
     bool has_group_index{};
+    std::uint16_t required_session_mask{0xFFFFu};
 };
 
 struct MessageDescriptor {
@@ -826,24 +827,46 @@ private:
     struct SeenMember {
         std::uint32_t member_index;
         std::uint32_t wire_index;
+        std::uint8_t owner; // 0 = level, 1 = header, 2 = trailer
     };
+    constexpr std::size_t max_env_bitset_words = 4;
+    std::uint64_t env_seen_bits[max_env_bitset_words]{};
+    const std::size_t header_member_count = header != nullptr ? header->members.size() : 0;
+    const std::size_t trailer_member_count = trailer != nullptr ? trailer->members.size() : 0;
+    const bool use_env_bitset = (header_member_count + trailer_member_count) <= (max_env_bitset_words * 64);
     constexpr std::size_t stack_seen_cap = 256;
     SeenMember seen_list[stack_seen_cap];
     std::size_t seen_count = 0;
     bool seen_overflow = false;
+    std::uint8_t section = 0; // 0 = header, 1 = body, 2 = trailer (top_level only)
+    Status first_order_error{};
     Status first_unknown_error{};
 
     // Pass 1: Walk wire fields once to validate group structure, detect duplicates,
-    // and collect seen member positions.
+    // and collect seen member positions (including non-session Header/Trailer members).
     for (std::size_t cursor = 0; cursor < fields.size();) {
         const auto tag = fields[cursor].tag;
         if (top_level && is_session_or_frame_tag(tag)) {
+            if (tag == 10u) {
+                section = 2u;
+            } else if (section != 0u && validation_level == ValidationLevel::strict && first_order_error.ok()) {
+                first_order_error = {ErrorCode::invalid_value, static_cast<int>(tag), fields[cursor].offset};
+            }
             ++cursor;
             continue;
         }
         std::size_t member_idx = 0;
         const auto* member = find_member_in_level(schema, level, tag, &member_idx);
         if (member != nullptr) {
+            if (top_level) {
+                if (section == 2u) {
+                    if (validation_level == ValidationLevel::strict && first_order_error.ok()) {
+                        first_order_error = {ErrorCode::invalid_value, static_cast<int>(tag), fields[cursor].offset};
+                    }
+                } else {
+                    section = 1u;
+                }
+            }
             // Check duplicates.
             bool is_dup = false;
             if (use_bitset) {
@@ -852,7 +875,7 @@ private:
                 else seen_bits[member_idx >> 6U] |= mask;
             } else {
                 for (std::size_t s = 0; s < seen_count; ++s) {
-                    if (seen_list[s].member_index == member_idx) { is_dup = true; break; }
+                    if (seen_list[s].owner == 0 && seen_list[s].member_index == member_idx) { is_dup = true; break; }
                 }
             }
             if (is_dup) {
@@ -868,7 +891,8 @@ private:
             if (seen_count < stack_seen_cap) {
                 seen_list[seen_count++] = SeenMember{
                     static_cast<std::uint32_t>(member_idx),
-                    static_cast<std::uint32_t>(cursor)};
+                    static_cast<std::uint32_t>(cursor),
+                    0};
             } else {
                 seen_overflow = true;
             }
@@ -878,26 +902,75 @@ private:
 
         bool allowed_envelope = false;
         if (header != nullptr) {
-            if (const auto* hm = find_member_in_level(schema, header_level, tag)) {
+            std::size_t h_idx = 0;
+            if (const auto* hm = find_member_in_level(schema, header_level, tag, &h_idx)) {
+                if (section != 0u && validation_level == ValidationLevel::strict && first_order_error.ok()) {
+                    first_order_error = {ErrorCode::invalid_value, static_cast<int>(tag), fields[cursor].offset};
+                }
+                bool is_dup = false;
+                if (use_env_bitset) {
+                    const auto mask = std::uint64_t{1} << (h_idx & 63U);
+                    if ((env_seen_bits[h_idx >> 6U] & mask) != 0) is_dup = true;
+                    else env_seen_bits[h_idx >> 6U] |= mask;
+                } else {
+                    for (std::size_t s = 0; s < seen_count; ++s) {
+                        if (seen_list[s].owner == 1 && seen_list[s].member_index == h_idx) { is_dup = true; break; }
+                    }
+                }
+                if (is_dup) {
+                    return {ErrorCode::duplicate_field, static_cast<int>(tag), fields[cursor].offset};
+                }
+                std::size_t next_cursor = cursor + 1;
                 if (hm->kind == MemberKind::group) {
                     const auto scan = skip_group(schema, fields, ancestors, header_level, cursor, depth);
                     if (!scan.status.ok()) return scan.status;
-                    cursor = scan.end;
-                } else {
-                    ++cursor;
+                    next_cursor = scan.end;
                 }
+                if (seen_count < stack_seen_cap) {
+                    seen_list[seen_count++] = SeenMember{
+                        static_cast<std::uint32_t>(h_idx),
+                        static_cast<std::uint32_t>(cursor),
+                        1};
+                } else {
+                    seen_overflow = true;
+                }
+                cursor = next_cursor;
                 allowed_envelope = true;
             }
         }
         if (!allowed_envelope && trailer != nullptr) {
-            if (const auto* tm = find_member_in_level(schema, trailer_level, tag)) {
+            std::size_t t_idx = 0;
+            if (const auto* tm = find_member_in_level(schema, trailer_level, tag, &t_idx)) {
+                section = 2u;
+                const std::size_t env_bit = header_member_count + t_idx;
+                bool is_dup = false;
+                if (use_env_bitset) {
+                    const auto mask = std::uint64_t{1} << (env_bit & 63U);
+                    if ((env_seen_bits[env_bit >> 6U] & mask) != 0) is_dup = true;
+                    else env_seen_bits[env_bit >> 6U] |= mask;
+                } else {
+                    for (std::size_t s = 0; s < seen_count; ++s) {
+                        if (seen_list[s].owner == 2 && seen_list[s].member_index == t_idx) { is_dup = true; break; }
+                    }
+                }
+                if (is_dup) {
+                    return {ErrorCode::duplicate_field, static_cast<int>(tag), fields[cursor].offset};
+                }
+                std::size_t next_cursor = cursor + 1;
                 if (tm->kind == MemberKind::group) {
                     const auto scan = skip_group(schema, fields, ancestors, trailer_level, cursor, depth);
                     if (!scan.status.ok()) return scan.status;
-                    cursor = scan.end;
-                } else {
-                    ++cursor;
+                    next_cursor = scan.end;
                 }
+                if (seen_count < stack_seen_cap) {
+                    seen_list[seen_count++] = SeenMember{
+                        static_cast<std::uint32_t>(t_idx),
+                        static_cast<std::uint32_t>(cursor),
+                        2};
+                } else {
+                    seen_overflow = true;
+                }
+                cursor = next_cursor;
                 allowed_envelope = true;
             }
         }
@@ -910,23 +983,26 @@ private:
     }
 
     // Helper to look up a seen wire index by tag (for Length/Data pair checks).
-    const auto find_seen_wire_index = [&](std::uint32_t target_tag) noexcept -> const FieldView* {
+    const auto find_seen_wire_index = [&](std::uint32_t target_tag, std::uint8_t owner = 0) noexcept -> const FieldView* {
         if (!seen_overflow) {
             for (std::size_t s = 0; s < seen_count; ++s) {
+                if (seen_list[s].owner != owner) continue;
                 const auto& f = fields[seen_list[s].wire_index];
                 if (f.tag == target_tag) return &f;
             }
             return nullptr;
         }
-        const auto lookup = find_level_field(schema, level.members, fields, target_tag,
-            level.members_by_tag, &ancestors, header);
+        const auto& target_level = owner == 1 ? header_level : (owner == 2 ? trailer_level : level);
+        const auto lookup = find_level_field(schema, target_level.members, fields, target_tag,
+            target_level.members_by_tag, &ancestors, owner == 0 ? header : nullptr);
         return lookup.found ? &fields[lookup.index] : nullptr;
     };
 
     // Pass 2: Validate scalar values, enums, Length/Data pairs, and nested groups
     // for all seen members (O(F) instead of O(M * F)).
-    const auto validate_seen = [&](std::size_t member_idx, std::size_t wire_idx) noexcept -> Status {
-        const auto& member = level.members[member_idx];
+    const auto validate_seen = [&](std::uint8_t owner, std::size_t member_idx, std::size_t wire_idx) noexcept -> Status {
+        const auto& owner_level = owner == 1 ? header_level : (owner == 2 ? trailer_level : level);
+        const auto& member = owner_level.members[member_idx];
         const auto& found = fields[wire_idx];
         const auto tag = found.tag;
         if (member.kind == MemberKind::field) {
@@ -941,7 +1017,7 @@ private:
                 return {ErrorCode::invalid_value, static_cast<int>(tag), found.offset};
             }
             if (descriptor->length_tag != 0) {
-                const auto* len_field = find_seen_wire_index(descriptor->length_tag);
+                const auto* len_field = find_seen_wire_index(descriptor->length_tag, owner);
                 if (len_field == nullptr)
                     return {ErrorCode::missing_field, static_cast<int>(descriptor->length_tag)};
                 std::uint64_t length{};
@@ -951,7 +1027,7 @@ private:
                 std::uint64_t length{};
                 if (!parse_unsigned(found.value, length) || length == 0)
                     return {ErrorCode::invalid_value, static_cast<int>(tag), found.offset};
-                const auto* data_field = find_seen_wire_index(descriptor->data_tag);
+                const auto* data_field = find_seen_wire_index(descriptor->data_tag, owner);
                 if (data_field == nullptr || length != data_field->value.size())
                     return {ErrorCode::invalid_value, static_cast<int>(tag), found.offset};
             }
@@ -966,7 +1042,7 @@ private:
         if (validation_level != ValidationLevel::structure) {
             AncestorStack child_ancestors = ancestors;
             if (child_ancestors.count < max_schema_group_depth + 2)
-                child_ancestors.levels[child_ancestors.count++] = level;
+                child_ancestors.levels[child_ancestors.count++] = owner_level;
             const MemberLevel group_level{group->members, group->members_by_tag};
             std::size_t cursor = wire_idx + 1;
             for (std::size_t entry = 0; entry < count; ++entry) {
@@ -985,27 +1061,65 @@ private:
 
     if (!seen_overflow) {
         for (std::size_t s = 0; s < seen_count; ++s) {
-            if (const auto st = validate_seen(seen_list[s].member_index, seen_list[s].wire_index); !st.ok())
+            if (const auto st = validate_seen(seen_list[s].owner, seen_list[s].member_index, seen_list[s].wire_index); !st.ok())
                 return st;
         }
     } else {
         // Fallback for messages with >256 distinct present top-level fields.
         for (std::size_t cursor = 0; cursor < fields.size();) {
+            const auto tag = fields[cursor].tag;
+            if (top_level && is_session_or_frame_tag(tag)) {
+                ++cursor;
+                continue;
+            }
             std::size_t member_idx = 0;
-            if (const auto* member = find_member_in_level(schema, level, fields[cursor].tag, &member_idx)) {
-                if (const auto st = validate_seen(member_idx, cursor); !st.ok()) return st;
+            if (const auto* member = find_member_in_level(schema, level, tag, &member_idx)) {
+                if (const auto st = validate_seen(0, member_idx, cursor); !st.ok()) return st;
                 if (member->kind == MemberKind::group) {
                     const auto scan = skip_group(schema, fields, ancestors, level, cursor, depth);
                     if (!scan.status.ok()) return scan.status;
                     cursor = scan.end;
                     continue;
                 }
+            } else if (header != nullptr) {
+                if (const auto* hm = find_member_in_level(schema, header_level, tag, &member_idx)) {
+                    if (const auto st = validate_seen(1, member_idx, cursor); !st.ok()) return st;
+                    if (hm->kind == MemberKind::group) {
+                        const auto scan = skip_group(schema, fields, ancestors, header_level, cursor, depth);
+                        if (!scan.status.ok()) return scan.status;
+                        cursor = scan.end;
+                        continue;
+                    }
+                } else if (trailer != nullptr) {
+                    if (const auto* tm = find_member_in_level(schema, trailer_level, tag, &member_idx)) {
+                        if (const auto st = validate_seen(2, member_idx, cursor); !st.ok()) return st;
+                        if (tm->kind == MemberKind::group) {
+                            const auto scan = skip_group(schema, fields, ancestors, trailer_level, cursor, depth);
+                            if (!scan.status.ok()) return scan.status;
+                            cursor = scan.end;
+                            continue;
+                        }
+                    }
+                }
+            } else if (trailer != nullptr) {
+                if (const auto* tm = find_member_in_level(schema, trailer_level, tag, &member_idx)) {
+                    if (const auto st = validate_seen(2, member_idx, cursor); !st.ok()) return st;
+                    if (tm->kind == MemberKind::group) {
+                        const auto scan = skip_group(schema, fields, ancestors, trailer_level, cursor, depth);
+                        if (!scan.status.ok()) return scan.status;
+                        cursor = scan.end;
+                        continue;
+                    }
+                }
             }
             ++cursor;
         }
     }
 
-    // Pass 3: Check required members (O(R) when required_members is populated).
+    if (!first_order_error.ok()) return first_order_error;
+
+    // Pass 3: Check required members (O(R) when required_members is populated),
+    // including non-session required Header/Trailer fields and groups.
     if (validation_level != ValidationLevel::structure) {
         const auto is_member_seen = [&](std::size_t idx) noexcept -> bool {
             if (use_bitset) return (seen_bits[idx >> 6U] & (std::uint64_t{1} << (idx & 63U))) != 0;
@@ -1024,6 +1138,39 @@ private:
                 if (level.members[i].required && !is_member_seen(i)) {
                     return {ErrorCode::required_field_missing,
                         static_cast<int>(member_tag(schema, level.members[i]))};
+                }
+            }
+        }
+        if (top_level && header != nullptr) {
+            for (std::size_t i = 0; i < header->members.size(); ++i) {
+                if (!header->members[i].required) continue;
+                const auto tag = member_tag(schema, header->members[i]);
+                if (is_session_or_frame_tag(tag)) continue;
+                const bool present = use_env_bitset
+                    ? ((env_seen_bits[i >> 6U] & (std::uint64_t{1} << (i & 63U))) != 0)
+                    : (find_seen_wire_index(tag, 1) != nullptr);
+                if (!present) {
+                    std::size_t body_idx = 0;
+                    if (find_member_in_level(schema, level, tag, &body_idx) == nullptr || !is_member_seen(body_idx)) {
+                        return {ErrorCode::required_field_missing, static_cast<int>(tag)};
+                    }
+                }
+            }
+        }
+        if (top_level && trailer != nullptr) {
+            for (std::size_t i = 0; i < trailer->members.size(); ++i) {
+                if (!trailer->members[i].required) continue;
+                const auto tag = member_tag(schema, trailer->members[i]);
+                if (is_session_or_frame_tag(tag)) continue;
+                const std::size_t env_bit = header_member_count + i;
+                const bool present = use_env_bitset
+                    ? ((env_seen_bits[env_bit >> 6U] & (std::uint64_t{1} << (env_bit & 63U))) != 0)
+                    : (find_seen_wire_index(tag, 2) != nullptr);
+                if (!present) {
+                    std::size_t body_idx = 0;
+                    if (find_member_in_level(schema, level, tag, &body_idx) == nullptr || !is_member_seen(body_idx)) {
+                        return {ErrorCode::required_field_missing, static_cast<int>(tag)};
+                    }
                 }
             }
         }
@@ -1066,6 +1213,179 @@ template <class T>
     return member != nullptr ? descriptor_group(schema, *member) : nullptr;
 }
 
+// Validate session/frame Header & Trailer tags (8, 9, 10, 34, 35, 43, 49, 52, 56, 122, 369, 1128)
+// for standalone full-message validation (validate_schema_message). SessionDriver/DirectInitiator
+// call validate_schema_message_for_type after validating session header fields themselves.
+[[nodiscard]] inline Status validate_header_session_tags(const SchemaDescriptor& schema,
+    const ComponentDescriptor& header, const ComponentDescriptor* trailer,
+    std::span<const FieldView> fields, ValidationLevel level) noexcept {
+    constexpr std::uint16_t kBit8    = 1u << 0;
+    constexpr std::uint16_t kBit9    = 1u << 1;
+    constexpr std::uint16_t kBit35   = 1u << 2;
+    constexpr std::uint16_t kBit49   = 1u << 3;
+    constexpr std::uint16_t kBit56   = 1u << 4;
+    constexpr std::uint16_t kBit34   = 1u << 5;
+    constexpr std::uint16_t kBit52   = 1u << 6;
+    constexpr std::uint16_t kBit43   = 1u << 7;
+    constexpr std::uint16_t kBit122  = 1u << 8;
+    constexpr std::uint16_t kBit369  = 1u << 9;
+    constexpr std::uint16_t kBit1128 = 1u << 10;
+    constexpr std::uint16_t kBit10   = 1u << 11;
+
+    constexpr std::uint64_t kLowSessionTagMask =
+        (std::uint64_t{1} << 8u)  | (std::uint64_t{1} << 9u)  | (std::uint64_t{1} << 10u) |
+        (std::uint64_t{1} << 34u) | (std::uint64_t{1} << 35u) | (std::uint64_t{1} << 43u) |
+        (std::uint64_t{1} << 49u) | (std::uint64_t{1} << 52u) | (std::uint64_t{1} << 56u);
+
+    std::uint16_t seen = 0;
+    Status first_content_err{};
+    Status first_unknown_err{};
+
+    for (const auto& f : fields) {
+        const auto tag = f.tag;
+        if (tag < 64u) {
+            if (((kLowSessionTagMask >> tag) & 1ULL) == 0) continue;
+        } else if (tag != 122u && tag != 369u && tag != 1128u) [[likely]] {
+            continue;
+        }
+        std::uint16_t bit = 0;
+        switch (tag) {
+        case 8u:
+            bit = kBit8;
+            if (first_content_err.ok() && !detail::is_valid_text(f.value))
+                first_content_err = {ErrorCode::invalid_value, 8, f.offset};
+            break;
+        case 9u: {
+            bit = kBit9;
+            std::uint64_t parsed{};
+            if (first_content_err.ok() && !parse_unsigned(f.value, parsed))
+                first_content_err = {ErrorCode::invalid_value, 9, f.offset};
+            break;
+        }
+        case 35u:
+            bit = kBit35;
+            if (first_content_err.ok() && !detail::is_valid_text(f.value))
+                first_content_err = {ErrorCode::invalid_value, 35, f.offset};
+            break;
+        case 49u:
+            bit = kBit49;
+            if (first_content_err.ok() && !detail::is_valid_text(f.value))
+                first_content_err = {ErrorCode::invalid_value, 49, f.offset};
+            break;
+        case 56u:
+            bit = kBit56;
+            if (first_content_err.ok() && !detail::is_valid_text(f.value))
+                first_content_err = {ErrorCode::invalid_value, 56, f.offset};
+            break;
+        case 34u: {
+            bit = kBit34;
+            std::uint64_t parsed{};
+            if (first_content_err.ok() && (!parse_unsigned(f.value, parsed) || parsed == 0))
+                first_content_err = {ErrorCode::invalid_value, 34, f.offset};
+            break;
+        }
+        case 52u:
+            bit = kBit52;
+            if (first_content_err.ok() && !detail::is_valid_utc_timestamp(f.value))
+                first_content_err = {ErrorCode::invalid_timestamp, 52, f.offset};
+            break;
+        case 43u:
+            bit = kBit43;
+            if (first_content_err.ok() && f.value != "Y" && f.value != "N")
+                first_content_err = {ErrorCode::invalid_value, 43, f.offset};
+            break;
+        case 122u:
+            bit = kBit122;
+            if (first_content_err.ok() && !detail::is_valid_utc_timestamp(f.value))
+                first_content_err = {ErrorCode::invalid_timestamp, 122, f.offset};
+            break;
+        case 369u: {
+            bit = kBit369;
+            std::uint64_t parsed{};
+            if (first_content_err.ok() && !parse_unsigned(f.value, parsed))
+                first_content_err = {ErrorCode::invalid_value, 369, f.offset};
+            break;
+        }
+        case 1128u: {
+            bit = kBit1128;
+            const MemberLevel hlevel{header.members, header.members_by_tag};
+            const auto* m = find_member_in_level(schema, hlevel, 1128u);
+            if (m == nullptr) {
+                if (level == ValidationLevel::strict && first_unknown_err.ok())
+                    first_unknown_err = {ErrorCode::invalid_value, 1128, f.offset};
+            } else if (first_content_err.ok()) {
+                const auto* fd = descriptor_field(schema, *m);
+                if (fd != nullptr) {
+                    if (!valid_field_value(*fd, f.value))
+                        first_content_err = {ErrorCode::invalid_value, 1128, f.offset};
+                    else if (level == ValidationLevel::strict && !enum_values_accept(*fd, f.value))
+                        first_content_err = {ErrorCode::invalid_value, 1128, f.offset};
+                }
+            }
+            break;
+        }
+        case 10u:
+            bit = kBit10;
+            if (first_content_err.ok() && !detail::is_valid_text(f.value))
+                first_content_err = {ErrorCode::invalid_value, 10, f.offset};
+            break;
+        default:
+            continue;
+        }
+        if ((seen & bit) != 0) {
+            return {ErrorCode::duplicate_field, static_cast<int>(tag), f.offset};
+        }
+        seen |= bit;
+    }
+
+    if (!first_content_err.ok()) return first_content_err;
+
+    if (level != ValidationLevel::structure) {
+        const bool need_hdr_scan = header.required_session_mask == 0xFFFFu
+            ? true
+            : ((seen & header.required_session_mask) != header.required_session_mask);
+        if (need_hdr_scan) {
+            for (const auto& m : header.members) {
+                if (!m.required || m.kind != MemberKind::field) continue;
+                const auto tag = member_tag(schema, m);
+                std::uint16_t bit = 0;
+                switch (tag) {
+                case 8u:    bit = kBit8; break;
+                case 9u:    bit = kBit9; break;
+                case 35u:   bit = kBit35; break;
+                case 49u:   bit = kBit49; break;
+                case 56u:   bit = kBit56; break;
+                case 34u:   bit = kBit34; break;
+                case 52u:   bit = kBit52; break;
+                case 43u:   bit = kBit43; break;
+                case 122u:  bit = kBit122; break;
+                case 369u:  bit = kBit369; break;
+                case 1128u: bit = kBit1128; break;
+                default: continue;
+                }
+                if ((seen & bit) == 0) {
+                    return {ErrorCode::required_field_missing, static_cast<int>(tag)};
+                }
+            }
+        }
+        if (trailer != nullptr) {
+            const bool need_trl_scan = trailer->required_session_mask == 0xFFFFu
+                ? ((seen & kBit10) == 0)
+                : ((seen & trailer->required_session_mask) != trailer->required_session_mask);
+            if (need_trl_scan) {
+                for (const auto& m : trailer->members) {
+                    if (m.required && m.kind == MemberKind::field && member_tag(schema, m) == 10u) {
+                        return {ErrorCode::required_field_missing, 10};
+                    }
+                }
+            }
+        }
+    }
+
+    if (!first_unknown_err.ok()) return first_unknown_err;
+    return Status::success();
+}
+
 } // namespace detail
 
 [[nodiscard]] inline bool is_valid_schema_field_value(const FieldDescriptor& field,
@@ -1094,14 +1414,26 @@ template <class T>
 [[nodiscard]] inline Status validate_schema_message(const SchemaDescriptor& schema,
     const FlatMessageView& message, ValidationLevel level = ValidationLevel::strict) noexcept {
     const auto fields = message.fields();
+    Status st{};
     if (fields.size() >= 3 && fields[2].tag == 35) {
-        return validate_schema_message_for_type(schema, fields[2].value, fields[2].offset,
+        st = validate_schema_message_for_type(schema, fields[2].value, fields[2].offset,
+            fields, level, message.parsed_index());
+    } else {
+        const auto msg_type = message.find_unique(35);
+        if (!msg_type.ok()) return msg_type.status();
+        st = validate_schema_message_for_type(schema, msg_type.value().value, msg_type.value().offset,
             fields, level, message.parsed_index());
     }
-    const auto msg_type = message.find_unique(35);
-    if (!msg_type.ok()) return msg_type.status();
-    return validate_schema_message_for_type(schema, msg_type.value().value, msg_type.value().offset,
-        fields, level, message.parsed_index());
+    if (!st.ok()) return st;
+    if (const auto* header = detail::find_header_component(schema); header != nullptr) {
+        const auto hst = detail::validate_header_session_tags(
+            schema, *header, detail::find_trailer_component(schema), fields, level);
+        if (!hst.ok()) {
+            if (message.parsed_index() != nullptr) message.parsed_index()->invalidate();
+            return hst;
+        }
+    }
+    return Status::success();
 }
 
 template <class Schema>

@@ -337,12 +337,12 @@ int main() {
 
 | 业务特征 | 推荐组合 | 原因 |
 | :--- | :--- | :--- |
-| 单通道、低频/单笔极低延迟 | `DirectInitiator::send_stream()`（单线程） | 单向延迟最低（**4.69 µs**），零线程切换 |
-| 单通道、单线程连发多笔订单 | `DirectInitiator::enqueue_stream()` + `flush()` | 合并为 1 次 `sendmsg()`（**1.27M ord/s**） |
-| 单通道、重策略计算 + 密集连发 | `DirectInitiator` + `DirectSendQueue`（双线程） | 策略计算与 I/O 并行（**1.43M ord/s**，CO-Free 延迟减半） |
+| 单通道、低频/单笔极低延迟 | `DirectInitiator::send_stream()`（单线程） | 单向延迟最低（**4.62 µs**），零线程切换 |
+| 单通道、单线程连发多笔订单 | `DirectInitiator::enqueue_stream()` + `flush()` | 合并为 1 次 `sendmsg()`（**1.44M ord/s**） |
+| 单通道、重策略计算 + 密集连发 | `DirectInitiator` + `DirectSendQueue`（双线程） | 策略计算与 I/O 并行（2 µs/笔计算下 **427k ord/s**、`Burst->Recv` 延迟减半；开放循环 p99 **24.1 µs**） |
 | 2–8 个会话、回调快且无阻塞 | `Engine<Schema, Inline>`（`epoll` / `io_uring`） | 单协议线程无锁，应用状态天然单线程 |
 | 多会话、回调含数据库/RPC 阻塞 | `Engine<Schema, Queued>` | 慢回调与协议心跳/收包解耦 |
-| 8–64+ 高并发服务端 | `ShardedEngine<Schema, Inline>`（`hybrid_backoff` 绑核） | 单端口多核扩展（**471k ord/s**，p99.9 降低 7.8×） |
+| 8–64+ 高并发服务端 | `ShardedEngine<Schema, Inline>`（`io_uring` + `hybrid_backoff` 绑核） | 单端口多核扩展（**447k ord/s**，p99 降低 4.11×） |
 
 ---
 
@@ -443,7 +443,8 @@ NimbleFIX 所有运行时都遵循**单写者协议归属（Single-Writer Protoc
 | `ProducerLane<Schema>`（`handle.producer_lane()`） | 无锁 SPSC（单生产者） | 绑定首次调用线程；其他线程调用返回 `ErrorCode::wrong_thread` |
 | `SessionContext`、`FlatMessageView`、`{Msg}View` | 仅当次回调有效 | 不可保存到回调之外；需要留存时请拷贝字段数据 |
 | `TelemetryReader` | 只读、跨进程安全 | `O_RDONLY`/`PROT_READ` 映射 `.nfxt`，零锁无干扰 |
-| `JournalReplayer` | 在线/离线均安全 | 使用带租约保护的 `JournalReader` |
+| `JournalTailer` | 只读、跨进程无锁 SPMC | `O_RDONLY`/`PROT_READ` 映射 `.nfxj` 分段（不抢 `LOCK_EX`），绝不阻塞交易写端；单实例单线程调用 |
+| `JournalReplayer` | 在线/离线均安全 | 按路径回放使用跨进程无锁 `JournalTailer`；进程内 `Journal&` 重载使用带租约 `JournalReader` |
 
 ---
 
@@ -537,7 +538,30 @@ for (const auto& s : reader.snapshot()) {
 // std::cout << reader.to_prometheus();
 ```
 
-### 6.5 确定性历史回放（`JournalReplayer`）
+### 6.5 跨进程实时追尾（`JournalTailer`）与历史回放（`JournalReplayer`）
+
+`JournalTailer` 为在线或离线 `.nfxj` 会话日志提供类似 Chronicle Queue 的跨进程无锁 SPMC 只读追尾（适合 DropCopy、实时风控与合规旁路进程）。多个独立进程可并发追尾同一个活跃交易会话，对交易写端热路径零额外开销：
+
+```cpp
+#include <nimblefix/journal.hpp>
+
+nimblefix::JournalTailerConfig tcfg{};
+tcfg.journal_path = "./state/buy/FIX.4.4_BUY_SELL.nfxj";
+tcfg.start = nimblefix::JournalTailStart::beginning; // 或 ::end / ::from_id
+tcfg.verify_crc = true;
+
+auto tailer = nimblefix::JournalTailer::open(tcfg).value();
+for (;;) {
+    auto rec = tailer.poll(); // 非阻塞：追到队尾返回 std::nullopt
+    if (!rec.ok()) break;     // 如滞后超出已回收分段返回 ErrorCode::reader_expired
+    if (rec.value().has_value()) {
+        const auto& view = *rec.value(); // 零拷贝负载视图，下次 poll() 前有效
+        (void)view.header; (void)view.payload;
+    }
+}
+```
+
+如需按条件确定性回放（在线或离线），可使用 `JournalReplayer`（含自定义 `DATA`/`LENGTH` 配对时可设置 `opts.wire_hints`）：
 
 ```cpp
 #include <nimblefix/replay.hpp>

@@ -68,4 +68,8 @@ public:
 [[nodiscard]] Result<std::unique_ptr<IoBackend>> create_io_backend(
     const IoBackendConfig& config) noexcept;
 
+using IoBackendTestFactory = Result<std::unique_ptr<IoBackend>> (*)(
+    const IoBackendConfig& config) noexcept;
+void set_io_backend_test_factory(IoBackendTestFactory factory) noexcept;
+
 } // namespace nimblefix::detail

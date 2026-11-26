@@ -75,6 +75,9 @@ struct DirectInitiatorConfig {
     // Optional mmap telemetry region (.nfxt) for zero-overhead out-of-band observability.
     std::filesystem::path telemetry_path{};
     bool telemetry_stage_probes{false};
+    // Bounded TCP/TLS connect+handshake timeout and outbound write-stall deadline (0 disables).
+    std::uint32_t connect_timeout_ms{10'000};
+    std::uint32_t write_stall_ms{30'000};
 };
 
 // Default no-op handler for tests or send-only initiators.
@@ -451,8 +454,11 @@ public:
             const auto st = transport_.connect(ep.host, ep.port);
             if (st.ok()) {
                 if (!transport_.is_connecting()) {
+                    connect_deadline_ = 0;
                     return on_transport_connected(now_ms, wall_time);
                 }
+                connect_deadline_ = config_.connect_timeout_ms != 0
+                    ? saturating_add(now_ms, config_.connect_timeout_ms) : 0;
                 return Status::success();
             }
             last_err = st;
@@ -495,11 +501,32 @@ public:
 
         if (transport_.is_connecting()) {
             const auto fc = transport_.finish_connect();
-            if (fc.code == ErrorCode::need_more) return Status::success();
+            if (fc.code == ErrorCode::need_more) {
+                if (connect_deadline_ != 0 && now_ms >= connect_deadline_) {
+                    Status timeout_err{ErrorCode::io_error};
+                    if constexpr (requires { transport_.is_handshaking(); }) {
+                        if (transport_.is_handshaking()) {
+                            timeout_err = Status{ErrorCode::tls_handshake_timeout};
+                        }
+                    }
+                    last_status_ = timeout_err;
+                    if constexpr (requires { handler_.on_error(timeout_err); }) {
+                        try { handler_.on_error(timeout_err); } catch (...) {}
+                    }
+                    handle_disconnect(timeout_err, now_ms);
+                    return timeout_err;
+                }
+                return Status::success();
+            }
             if (!fc.ok()) {
+                last_status_ = fc;
+                if constexpr (requires { handler_.on_error(fc); }) {
+                    try { handler_.on_error(fc); } catch (...) {}
+                }
                 handle_disconnect(fc, now_ms);
                 return fc;
             }
+            connect_deadline_ = 0;
             if (const auto st = on_transport_connected(now_ms, wall_time_); !st.ok()) return st;
         }
 
@@ -556,12 +583,72 @@ public:
             if (const auto fl = flush_tx(now_ms); !fl.ok()) return fl;
         }
 
-        // 4. Process SessionCore heartbeat / TestRequest / Logon / Logout timers.
+        // 4. Enforce bounded write-stall deadline (matches SessionDriver::on_tick).
+        if (write_timer_active_ && wants_write() && config_.write_stall_ms != 0 &&
+            now_ms >= last_byte_progress_ms_ &&
+            now_ms - last_byte_progress_ms_ >= config_.write_stall_ms) {
+            if (!stall_logout_attempted_ && core_.state() == SessionState::active) {
+                stall_logout_attempted_ = true;
+                stall_logout_deadline_ = saturating_add(now_ms, config_.logout_timeout_ms);
+                detail::CoreEvent lo{};
+                lo.kind = detail::CoreEventKind::local_logout;
+                lo.now_ms = now_ms;
+                lo.text = "Write stalled";
+                const auto lout = core_.process(lo);
+                if (!lout.status.ok()) return fail(lout.status);
+                bool logout_ok = true;
+                for (std::size_t i = 0; i < lout.action_count; ++i) {
+                    if (lout.actions[i].kind == detail::CoreActionKind::send_logout) {
+                        std::array<detail::DirectAdminField, 1> f{};
+                        std::size_t n = 0;
+                        if (!lout.actions[i].text.empty()) {
+                            f[n++] = {58, FieldKind::string, 0, lout.actions[i].text};
+                        }
+                        if (!send_admin("5", {f.data(), n}, now_ms).ok()) {
+                            logout_ok = false;
+                            break;
+                        }
+                    }
+                }
+                if (!logout_ok) {
+                    const Status err{ErrorCode::write_stalled};
+                    last_status_ = err;
+                    if constexpr (requires { handler_.on_error(err); }) {
+                        try { handler_.on_error(err); } catch (...) {}
+                    }
+                    handle_disconnect(err, now_ms);
+                    return err;
+                }
+            } else if (!stall_logout_attempted_ || now_ms >= stall_logout_deadline_) {
+                const Status err{ErrorCode::write_stalled};
+                last_status_ = err;
+                if constexpr (requires { handler_.on_error(err); }) {
+                    try { handler_.on_error(err); } catch (...) {}
+                }
+                handle_disconnect(err, now_ms);
+                return err;
+            }
+        }
+
+        // 5. Process SessionCore heartbeat / TestRequest / Logon / Logout timers.
         detail::CoreEvent tick{};
         tick.kind = detail::CoreEventKind::tick;
         tick.now_ms = now_ms;
         tick.has_pending_tx = wants_write();
         const auto out = core_.process(tick);
+        if (out.status.code == ErrorCode::logon_timeout ||
+            out.status.code == ErrorCode::heartbeat_timeout ||
+            out.status.code == ErrorCode::logout_timeout) {
+            last_status_ = out.status;
+            if (telemetry_slot_ != nullptr) {
+                telemetry_slot_->inc_error();
+            }
+            if constexpr (requires { handler_.on_error(out.status); }) {
+                try { handler_.on_error(out.status); } catch (...) {}
+            }
+            handle_disconnect(out.status, now_ms);
+            return out.status;
+        }
         if (const auto st = apply_actions(out, nullptr, 0, 0, now_ms); !st.ok()) return st;
 
         if (wants_write()) {
@@ -693,6 +780,7 @@ public:
         std::size_t drained = 0;
         bool wall_set = false;
         DirectSendQueue::SlotView slot{};
+        const bool in_recovery_delivery = (active_delivery_id_ != 0 && active_delivery_recovery_);
         while (drained < max_batch && tx_count_ < tx_ring_.size() - 2 && queue.try_peek(slot)) {
             if (!wall_set) {
                 if (const auto ts = set_wall_time(wall_time); !ts.ok()) return ts;
@@ -701,7 +789,9 @@ public:
             }
             const auto st = enqueue_prebuilt_body(slot.msg_type, slot.body, now_ms);
             if (!st.ok()) {
-                if (drained == 0) return st.status();
+                if (drained == 0 || in_recovery_delivery || st.status().code != ErrorCode::queue_full) {
+                    return st.status();
+                }
                 break;
             }
             queue.consume_one();
@@ -782,7 +872,18 @@ public:
         return fatal_ ? SessionState::failed : core_.state();
     }
     [[nodiscard]] Status status() const noexcept { return last_status_; }
-    [[nodiscard]] std::uint64_t next_deadline_ms() const noexcept { return core_.next_deadline(); }
+    [[nodiscard]] std::uint64_t next_deadline_ms() const noexcept {
+        if (transport_.valid() && transport_.is_connecting()) {
+            return connect_deadline_ != 0 ? connect_deadline_ : std::numeric_limits<std::uint64_t>::max();
+        }
+        auto deadline = core_.next_deadline();
+        if (stall_logout_attempted_) {
+            deadline = std::min(deadline, stall_logout_deadline_);
+        } else if (write_timer_active_ && wants_write() && config_.write_stall_ms != 0) {
+            deadline = std::min(deadline, saturating_add(last_byte_progress_ms_, config_.write_stall_ms));
+        }
+        return deadline;
+    }
     [[nodiscard]] std::uint64_t next_inbound_seq() const noexcept { return core_.next_inbound(); }
     [[nodiscard]] std::uint64_t next_outbound_seq() const noexcept { return core_.next_outbound(); }
     [[nodiscard]] std::size_t pending_outbound() const noexcept {
@@ -830,6 +931,7 @@ private:
           logon_tx_buf_(config_.max_frame_bytes),
           admin_arena_(config_.max_frame_bytes),
           parse_fields_(config_.max_frame_bytes / 4 + 2),
+          aux_parse_fields_(config_.max_frame_bytes / 4 + 2),
           tx_ring_(config_.max_pending_messages),
           replay_ring_(config_.max_pending_messages),
           recovery_ids_() {
@@ -929,12 +1031,26 @@ private:
         return Status::success();
     }
 
+    // Auxiliary parser for historical outbound records (replay / recovery reuse) that
+    // must NEVER overwrite parse_fields_ or parse_index_ while an inbound callback is active.
+    [[nodiscard]] Status parse_frame_aux(std::string_view bytes, FlatMessageView& out) noexcept {
+        if (bytes.size() > config_.max_frame_bytes) return Status{ErrorCode::too_large};
+        FrameView fv{};
+        constexpr auto hints = detail::direct_schema_wire_hints<Schema>();
+        if (const auto st = inspect_frame(bytes, fv, hints,
+                CodecLimits{config_.max_frame_bytes, config_.verify_checksum}); !st.ok())
+            return st;
+        if (fv.consumed != bytes.size()) return Status{ErrorCode::invalid_frame};
+        return parse_flat_verified(fv, aux_parse_fields_, out, hints);
+    }
+
     [[nodiscard]] Status fail(Status err) noexcept {
         if (fatal_) return last_status_.ok() ? err : last_status_;
         if (err.ok()) err = Status{ErrorCode::invalid_value};
         last_status_ = err;
         fatal_ = true;
         should_close_ = true;
+        if (transport_.valid()) transport_.close();
         detail::direct_secure_clear(logon_tx_buf_);
         logon_tx_size_ = 0;
         detail::direct_secure_clear(deferred_logon_buf_);
@@ -962,6 +1078,10 @@ private:
         deferred_logon_seq_ = 0;
         deferred_logon_pending_ = false;
         local_epoch_reset_started_ = false;
+        connect_deadline_ = 0;
+        write_timer_active_ = false;
+        stall_logout_attempted_ = false;
+        stall_logout_deadline_ = 0;
         should_close_ = false;
         detail::direct_secure_clear(logon_tx_buf_);
         detail::direct_secure_clear(deferred_logon_buf_);
@@ -1001,9 +1121,63 @@ private:
         return Status::success();
     }
 
+    [[nodiscard]] static constexpr std::uint64_t saturating_add(
+        std::uint64_t v, std::uint64_t amount) noexcept {
+        return amount > std::numeric_limits<std::uint64_t>::max() - v
+            ? std::numeric_limits<std::uint64_t>::max() : v + amount;
+    }
+
+    [[nodiscard]] bool has_dependent_outbound(RecordId inbound_id) const noexcept {
+        for (const auto& rec : journal_.records()) {
+            if (rec.kind == RecordKind::outbound && rec.dependency == inbound_id) return true;
+        }
+        return false;
+    }
+
+    [[nodiscard]] const JournalRecord* find_dependent_business_reply(
+        RecordId inbound_id, std::size_t target_ordinal) const noexcept {
+        std::size_t ordinal = 0;
+        for (const auto& rec : journal_.records()) {
+            if (rec.kind != RecordKind::outbound || rec.dependency != inbound_id || rec.receipt == 0) continue;
+            if (ordinal++ == target_ordinal) return &rec;
+        }
+        return nullptr;
+    }
+
+    [[nodiscard]] std::size_t count_dependent_business_replies(RecordId inbound_id) const noexcept {
+        std::size_t count = 0;
+        for (const auto& rec : journal_.records()) {
+            if (rec.kind == RecordKind::outbound && rec.dependency == inbound_id && rec.receipt != 0) ++count;
+        }
+        return count;
+    }
+
+    [[nodiscard]] Status extract_original_reply_header(
+        const JournalRecord& rec, SessionHeader& out) noexcept {
+        FlatMessageView original{};
+        if (const auto st = parse_frame_aux(rec.payload, original); !st.ok()) {
+            return Status{ErrorCode::corrupt_store};
+        }
+        const auto tags = detail::direct_extract_tags(original);
+        if (tags.dup_tag == 52 || tags.sending_time == nullptr) return Status{ErrorCode::corrupt_store, 52};
+        if (tags.dup_tag == 369) return Status{ErrorCode::corrupt_store, 369};
+        out = make_header(rec.seq, tags.sending_time->value);
+        out.last_msg_seq_num_processed.reset();
+        if (tags.peer_ack != nullptr) {
+            std::uint64_t ack{};
+            if (!detail::direct_parse_u64(tags.peer_ack->value, ack)) return Status{ErrorCode::corrupt_store, 369};
+            out.last_msg_seq_num_processed = ack;
+        }
+        return Status::success();
+    }
+
     [[nodiscard]] Status enqueue_tx(RecordId id, std::size_t size, std::uint64_t seq,
                                     std::string_view msg_type, bool ephemeral = false) noexcept {
         if (tx_count_ >= tx_ring_.size() || msg_type.size() > 32) return Status{ErrorCode::queue_full};
+        if (!write_timer_active_) {
+            last_byte_progress_ms_ = now_ms_;
+            write_timer_active_ = true;
+        }
         auto& slot = tx_ring_[(tx_head_ + tx_count_) % tx_ring_.size()];
         slot.record_id = id;
         slot.offset = 0;
@@ -1027,6 +1201,11 @@ private:
         }
         tx_head_ = (tx_head_ + 1) % tx_ring_.size();
         --tx_count_;
+        if (!wants_write()) {
+            write_timer_active_ = false;
+            stall_logout_attempted_ = false;
+            stall_logout_deadline_ = 0;
+        }
         if (written) {
             detail::CoreEvent ev{};
             ev.kind = detail::CoreEventKind::outbound_written;
@@ -1041,6 +1220,44 @@ private:
         return Status::success();
     }
 
+    [[gnu::noinline, gnu::cold]] [[nodiscard]] Result<std::optional<std::uint64_t>>
+    try_reuse_recovery_view(RecordId dep, detail::MessageView msg) noexcept {
+        const auto* existing = find_dependent_business_reply(dep, active_delivery_send_ordinal_);
+        if (existing == nullptr) return std::optional<std::uint64_t>{};
+        SessionHeader orig_header{};
+        if (const auto st = extract_original_reply_header(*existing, orig_header); !st.ok()) return st;
+        const auto candidate = encode_fix(msg, orig_header, encode_buf_);
+        if (!candidate.ok()) return candidate.status();
+        if (candidate.value() != existing->payload.size() ||
+            std::memcmp(encode_buf_.data(), existing->payload.data(), candidate.value()) != 0) {
+            return Status{ErrorCode::invalid_value};
+        }
+        ++active_delivery_send_ordinal_;
+        return std::optional<std::uint64_t>{existing->seq};
+    }
+
+    template <class Message, class Fn>
+    [[gnu::noinline, gnu::cold]] [[nodiscard]] Result<std::optional<std::uint64_t>>
+    try_reuse_recovery_stream(RecordId dep, Fn& fn) noexcept {
+        const auto* existing = find_dependent_business_reply(dep, active_delivery_send_ordinal_);
+        if (existing == nullptr) return std::optional<std::uint64_t>{};
+        SessionHeader orig_header{};
+        if (const auto st = extract_original_reply_header(*existing, orig_header); !st.ok()) return st;
+        auto buf = detail::StreamBuffer::begin_frame(encode_buf_, Message::msg_type, orig_header);
+        if (!buf.ok()) return buf.status();
+        typename Message::stream_writer_type writer{buf};
+        fn(writer);
+        if (const auto req = writer.validate_required(); !req.ok()) return req;
+        const auto candidate = buf.finish_frame();
+        if (!candidate.ok()) return candidate.status();
+        if (candidate.value() != existing->payload.size() ||
+            std::memcmp(encode_buf_.data(), existing->payload.data(), candidate.value()) != 0) {
+            return Status{ErrorCode::invalid_value};
+        }
+        ++active_delivery_send_ordinal_;
+        return std::optional<std::uint64_t>{existing->seq};
+    }
+
     [[nodiscard]] Result<std::uint64_t> send_view(detail::MessageView msg,
                                                   std::uint64_t now_ms,
                                                   std::string_view wt,
@@ -1049,6 +1266,12 @@ private:
         if (!is_active()) return Status{ErrorCode::not_ready};
         if (msg.msg_type.empty() || detail::direct_is_admin(msg.msg_type))
             return Status{ErrorCode::managed_field, 35};
+        const RecordId dep = active_delivery_id_;
+        if (dep != 0 && active_delivery_recovery_) [[unlikely]] {
+            const auto reused = try_reuse_recovery_view(dep, msg);
+            if (!reused.ok()) return reused.status();
+            if (reused.value().has_value()) return *reused.value();
+        }
         if (tx_count_ >= tx_ring_.size() - 2) return Status{ErrorCode::queue_full};
         if (const auto ts = set_wall_time(wt); !ts.ok()) return ts;
         now_ms_ = now_ms;
@@ -1074,7 +1297,7 @@ private:
         bool committed_ok = false;
         const std::uint64_t j_t0 = (telemetry_slot_ != nullptr && config_.telemetry_stage_probes)
             ? telemetry_now_ns() : 0ULL;
-        auto reserved = journal_.reserve(RecordKind::outbound, seq, seq, 0, reserve_bound);
+        auto reserved = journal_.reserve(RecordKind::outbound, seq, seq, dep, reserve_bound);
         if (reserved.ok()) {
             const auto encoded = encode_fix(msg, header, reserved.value().payload);
             if (encoded.ok()) {
@@ -1089,7 +1312,7 @@ private:
         if (!committed_ok) {
             const auto encoded = encode_fix(msg, header, encode_buf_);
             if (!encoded.ok()) return encoded.status();
-            const auto appended = journal_.append(RecordKind::outbound, seq, seq, 0,
+            const auto appended = journal_.append(RecordKind::outbound, seq, seq, dep,
                 std::string_view{encode_buf_.data(), encoded.value()});
             if (!appended.ok()) return fail(appended.status());
             committed_rec = appended.value();
@@ -1097,6 +1320,7 @@ private:
         if (j_t0 != 0ULL) {
             telemetry_slot_->record_stage(TelemetryStage::journal, telemetry_now_ns() - j_t0);
         }
+        if (dep != 0) ++active_delivery_send_ordinal_;
 
         detail::CoreEvent app{};
         app.kind = detail::CoreEventKind::outbound_appended;
@@ -1119,6 +1343,11 @@ private:
             const auto io = transport_.write(std::span<const char>{payload.data(), payload.size()});
             if (w_t0 != 0ULL && io.bytes != 0) {
                 telemetry_slot_->record_stage(TelemetryStage::write, telemetry_now_ns() - w_t0);
+            }
+            if (io.bytes != 0) {
+                last_byte_progress_ms_ = now_ms;
+                stall_logout_attempted_ = false;
+                stall_logout_deadline_ = 0;
             }
             if (io.bytes == payload.size() && io.status.ok()) {
                 detail::CoreEvent wr{};
@@ -1156,6 +1385,12 @@ private:
         if (!is_active()) return Status{ErrorCode::not_ready};
         if (msg_type.empty() || detail::direct_is_admin(msg_type))
             return Status{ErrorCode::managed_field, 35};
+        const RecordId dep = active_delivery_id_;
+        if (dep != 0 && active_delivery_recovery_) [[unlikely]] {
+            const auto reused = try_reuse_recovery_stream<Message>(dep, fn);
+            if (!reused.ok()) return reused.status();
+            if (reused.value().has_value()) return *reused.value();
+        }
         if (tx_count_ >= tx_ring_.size() - 2) return Status{ErrorCode::queue_full};
         if (const auto ts = set_wall_time(wt); !ts.ok()) return ts;
         now_ms_ = now_ms;
@@ -1167,43 +1402,52 @@ private:
             if (completed != 0) last_processed = completed;
         }
 
-        auto stream_into = [&](std::span<char> target) noexcept -> Result<std::size_t> {
-            detail::StreamBuffer buf = session_prefix_.valid
-                ? detail::StreamBuffer::begin_session_frame(
-                    target, msg_type, session_prefix_, seq, wall_time_, last_processed)
-                : detail::StreamBuffer::begin_frame(target, msg_type, make_header(seq, wall_time_));
-            if (!buf.ok()) return buf.status();
-            typename Message::stream_writer_type writer{buf};
-            fn(writer);
-            if (const auto req = writer.validate_required(); !req.ok()) return req;
-            return buf.finish_frame();
-        };
-
         const std::size_t seg_hint = config_.journal_segment_bytes != 0
             ? std::max<std::size_t>(512U, std::min<std::size_t>(config_.journal_segment_bytes / 2U, 4096U))
             : std::size_t{4096U};
         const std::size_t reserve_bound = std::min(config_.max_frame_bytes, seg_hint);
 
         JournalRecord committed_rec{};
-        bool committed_ok = false;
         const std::uint64_t j_t0 = (telemetry_slot_ != nullptr && config_.telemetry_stage_probes)
             ? telemetry_now_ns() : 0ULL;
-        auto reserved = journal_.reserve(RecordKind::outbound, seq, seq, 0, reserve_bound);
-        if (reserved.ok()) {
-            const auto encoded = stream_into(reserved.value().payload);
-            if (encoded.ok()) {
-                const auto committed = journal_.commit(reserved.value(), encoded.value());
-                if (!committed.ok()) return fail(committed.status());
-                committed_rec = committed.value();
-                committed_ok = true;
-            } else if (encoded.status().code != ErrorCode::capacity_exceeded) {
-                return encoded.status();
-            }
+        struct SpillCtx {
+            std::span<char> fallback;
+            bool spilled{false};
+        } spill{encode_buf_, false};
+        auto reserved = journal_.reserve(RecordKind::outbound, seq, seq, dep, reserve_bound);
+        std::span<char> target;
+        detail::StreamBuffer::GrowFn grow = nullptr;
+        if (reserved.ok()) [[likely]] {
+            target = reserved.value().payload;
+            grow = +[](void* raw, const char* old_data, std::size_t written,
+                       std::size_t min_cap) noexcept -> std::span<char> {
+                auto* st = static_cast<SpillCtx*>(raw);
+                if (st->spilled || min_cap > st->fallback.size()) return {};
+                if (written != 0) std::memcpy(st->fallback.data(), old_data, written);
+                st->spilled = true;
+                return st->fallback;
+            };
+        } else {
+            target = encode_buf_;
+            spill.spilled = true;
         }
-        if (!committed_ok) {
-            const auto encoded = stream_into(encode_buf_);
-            if (!encoded.ok()) return encoded.status();
-            const auto appended = journal_.append(RecordKind::outbound, seq, seq, 0,
+        detail::StreamBuffer buf = session_prefix_.valid
+            ? detail::StreamBuffer::begin_session_frame(
+                target, msg_type, session_prefix_, seq, wall_time_, last_processed, grow, &spill)
+            : detail::StreamBuffer::begin_frame(
+                target, msg_type, make_header(seq, wall_time_), grow, &spill);
+        if (!buf.ok()) return buf.status();
+        typename Message::stream_writer_type writer{buf};
+        fn(writer);
+        if (const auto req = writer.validate_required(); !req.ok()) return req;
+        const auto encoded = buf.finish_frame();
+        if (!encoded.ok()) return encoded.status();
+        if (!spill.spilled) [[likely]] {
+            const auto committed = journal_.commit(reserved.value(), encoded.value());
+            if (!committed.ok()) return fail(committed.status());
+            committed_rec = committed.value();
+        } else {
+            const auto appended = journal_.append(RecordKind::outbound, seq, seq, dep,
                 std::string_view{encode_buf_.data(), encoded.value()});
             if (!appended.ok()) return fail(appended.status());
             committed_rec = appended.value();
@@ -1211,6 +1455,7 @@ private:
         if (j_t0 != 0ULL) {
             telemetry_slot_->record_stage(TelemetryStage::journal, telemetry_now_ns() - j_t0);
         }
+        if (dep != 0) ++active_delivery_send_ordinal_;
 
         detail::CoreEvent app{};
         app.kind = detail::CoreEventKind::outbound_appended;
@@ -1232,6 +1477,11 @@ private:
             const auto io = transport_.write(std::span<const char>{payload.data(), payload.size()});
             if (w_t0 != 0ULL && io.bytes != 0) {
                 telemetry_slot_->record_stage(TelemetryStage::write, telemetry_now_ns() - w_t0);
+            }
+            if (io.bytes != 0) {
+                last_byte_progress_ms_ = now_ms;
+                stall_logout_attempted_ = false;
+                stall_logout_deadline_ = 0;
             }
             if (io.bytes == payload.size() && io.status.ok()) {
                 detail::CoreEvent wr{};
@@ -1258,18 +1508,41 @@ private:
         return seq;
     }
 
+    [[gnu::noinline, gnu::cold]] [[nodiscard]] Result<std::optional<std::uint64_t>>
+    try_reuse_recovery_prebuilt(RecordId dep, std::string_view msg_type,
+                                std::string_view body) noexcept {
+        const auto* existing = find_dependent_business_reply(dep, active_delivery_send_ordinal_);
+        if (existing == nullptr) return std::optional<std::uint64_t>{};
+        SessionHeader orig_header{};
+        if (const auto st = extract_original_reply_header(*existing, orig_header); !st.ok()) return st;
+        const auto candidate = encode_fix_from_body(msg_type, body, orig_header, encode_buf_);
+        if (!candidate.ok()) return candidate.status();
+        if (candidate.value() != existing->payload.size() ||
+            std::memcmp(encode_buf_.data(), existing->payload.data(), candidate.value()) != 0) {
+            return Status{ErrorCode::invalid_value};
+        }
+        ++active_delivery_send_ordinal_;
+        return std::optional<std::uint64_t>{existing->seq};
+    }
+
     [[nodiscard]] Result<std::uint64_t> enqueue_prebuilt_body(std::string_view msg_type,
                                                               std::string_view body,
                                                               std::uint64_t now_ms) noexcept {
         if (msg_type.empty() || detail::direct_is_admin(msg_type))
             return Status{ErrorCode::managed_field, 35};
+        const RecordId dep = active_delivery_id_;
+        if (dep != 0 && active_delivery_recovery_) [[unlikely]] {
+            const auto reused = try_reuse_recovery_prebuilt(dep, msg_type, body);
+            if (!reused.ok()) return reused.status();
+            if (reused.value().has_value()) return *reused.value();
+        }
         const auto seq = core_.next_outbound();
         const auto header = make_header(seq, wall_time_);
         const std::size_t reserve_bound = std::min(config_.max_frame_bytes, std::size_t{192} + body.size());
 
         JournalRecord committed_rec{};
         bool committed_ok = false;
-        auto reserved = journal_.reserve(RecordKind::outbound, seq, seq, 0, reserve_bound);
+        auto reserved = journal_.reserve(RecordKind::outbound, seq, seq, dep, reserve_bound);
         if (reserved.ok()) {
             const auto encoded = encode_fix_from_body(msg_type, body, header, reserved.value().payload);
             if (encoded.ok()) {
@@ -1284,11 +1557,12 @@ private:
         if (!committed_ok) {
             const auto encoded = encode_fix_from_body(msg_type, body, header, encode_buf_);
             if (!encoded.ok()) return encoded.status();
-            const auto appended = journal_.append(RecordKind::outbound, seq, seq, 0,
+            const auto appended = journal_.append(RecordKind::outbound, seq, seq, dep,
                 std::string_view{encode_buf_.data(), encoded.value()});
             if (!appended.ok()) return fail(appended.status());
             committed_rec = appended.value();
         }
+        if (dep != 0) ++active_delivery_send_ordinal_;
 
         detail::CoreEvent app{};
         app.kind = detail::CoreEventKind::outbound_appended;
@@ -1414,9 +1688,18 @@ private:
             return Status::success();
         }
         if (replay_count_ >= replay_ring_.size()) return Status{ErrorCode::queue_full};
+        if (!write_timer_active_) {
+            last_byte_progress_ms_ = now_ms_;
+            write_timer_active_ = true;
+        }
         replay_ring_[(replay_head_ + replay_count_) % replay_ring_.size()] = ReplayRange{begin, end, dep};
         ++replay_count_;
         start_next_replay();
+        if (!wants_write()) {
+            write_timer_active_ = false;
+            stall_logout_attempted_ = false;
+            stall_logout_deadline_ = 0;
+        }
         return Status::success();
     }
 
@@ -1438,7 +1721,7 @@ private:
             const auto* rec = journal_.find_outbound(replay_next_);
             if (rec == nullptr || rec->payload.empty()) return Status{ErrorCode::corrupt_store, 34};
             FlatMessageView parsed{};
-            if (const auto st = parse_frame(rec->payload, parsed); !st.ok()) return st;
+            if (const auto st = parse_frame_aux(rec->payload, parsed); !st.ok()) return st;
             const auto tags = detail::direct_extract_tags(parsed);
             if (tags.msg_type == nullptr || tags.sending_time == nullptr)
                 return Status{ErrorCode::corrupt_store, 35};
@@ -1463,7 +1746,7 @@ private:
                 const auto* nr = journal_.find_outbound(gap_end);
                 if (nr == nullptr || nr->payload.empty()) return Status{ErrorCode::corrupt_store, 34};
                 FlatMessageView np{};
-                if (const auto st = parse_frame(nr->payload, np); !st.ok()) return st;
+                if (const auto st = parse_frame_aux(nr->payload, np); !st.ok()) return st;
                 const auto nt = detail::direct_extract_tags(np);
                 if (nt.msg_type == nullptr) return Status{ErrorCode::corrupt_store, 35};
                 if (!detail::direct_is_admin(nt.msg_type->value)) break;
@@ -1501,6 +1784,11 @@ private:
             if (const auto st = append_delivery(dep, in->seq); !st.ok()) return st;
         }
         start_next_replay();
+        if (!wants_write()) {
+            write_timer_active_ = false;
+            stall_logout_attempted_ = false;
+            stall_logout_deadline_ = 0;
+        }
         return Status::success();
     }
 
@@ -1540,6 +1828,11 @@ private:
                     const auto io = transport_.write_batch(std::span<const std::span<const char>>{chunks.data(), n_chunks});
                     if (wb_t0 != 0ULL && io.bytes != 0) {
                         telemetry_slot_->record_stage(TelemetryStage::write, telemetry_now_ns() - wb_t0);
+                    }
+                    if (io.bytes != 0) {
+                        last_byte_progress_ms_ = now_ms;
+                        stall_logout_attempted_ = false;
+                        stall_logout_deadline_ = 0;
                     }
                     std::size_t remaining = io.bytes;
                     while (remaining > 0 && tx_count_ != 0) {
@@ -1582,6 +1875,9 @@ private:
                 telemetry_slot_->record_stage(TelemetryStage::write, telemetry_now_ns() - w_t0);
             }
             if (io.bytes != 0) {
+                last_byte_progress_ms_ = now_ms;
+                stall_logout_attempted_ = false;
+                stall_logout_deadline_ = 0;
                 if (replay_due) replay_offset_ += io.bytes;
                 else q->offset += io.bytes;
             }
@@ -1683,6 +1979,9 @@ private:
             telemetry_slot_->record_stage(TelemetryStage::validate, telemetry_now_ns() - v_t0);
         }
         if (!valid.ok()) {
+            // Never silently mark an unfinished recovered inbound record as delivered if
+            // validation fails during recovery; fail-closed so the incomplete state remains diagnosable.
+            if (info.is_recovery) return fail(valid);
             const auto tags = detail::direct_extract_tags(msg);
             const auto ref_type = tags.msg_type ? tags.msg_type->value : std::string_view{};
             std::array<detail::DirectAdminField, 5> rfields{};
@@ -1702,6 +2001,23 @@ private:
             return d.ok() ? d : fail(d);
         }
         Status cb{};
+        struct DeliveryScopeGuard {
+            RecordId& id_slot;
+            bool& rec_slot;
+            std::size_t& ord_slot;
+            RecordId prev_id;
+            bool prev_rec;
+            std::size_t prev_ord;
+            ~DeliveryScopeGuard() {
+                id_slot = prev_id;
+                rec_slot = prev_rec;
+                ord_slot = prev_ord;
+            }
+        } scope{active_delivery_id_, active_delivery_recovery_, active_delivery_send_ordinal_,
+                active_delivery_id_, active_delivery_recovery_, active_delivery_send_ordinal_};
+        active_delivery_id_ = info.record_id;
+        active_delivery_recovery_ = info.is_recovery;
+        active_delivery_send_ordinal_ = 0;
         try {
             if constexpr (requires { handler_.on_message(*this, msg, info); }) {
                 cb = handler_.on_message(*this, msg, info);
@@ -1711,7 +2027,11 @@ private:
         } catch (...) {
             cb = Status{ErrorCode::callback_failed};
         }
+        const std::size_t accepted_replies = active_delivery_send_ordinal_;
         if (!cb.ok()) return fail(Status{ErrorCode::callback_failed, cb.tag, cb.offset});
+        if (info.is_recovery && count_dependent_business_replies(info.record_id) > accepted_replies) {
+            return fail(Status{ErrorCode::callback_failed});
+        }
         if (telemetry_slot_ != nullptr) telemetry_slot_->inc_delivery();
         const auto d = append_delivery(info.record_id, info.msg_seq_num);
         return d.ok() ? d : fail(d);
@@ -1737,15 +2057,18 @@ private:
                         return fail(Status{ErrorCode::corrupt_store, 7});
                     if (const auto st = queue_replay(b, e, id); !st.ok()) return fail(st);
                 } else if (mt == "1" && tags.test_id) {
-                    std::array<detail::DirectAdminField, 1> f{
-                        detail::DirectAdminField{112, FieldKind::string, 0, tags.test_id->value}};
-                    if (const auto st = send_admin("0", f, now_ms, id); !st.ok()) return fail(st);
+                    if (!has_dependent_outbound(id)) {
+                        std::array<detail::DirectAdminField, 1> f{
+                            detail::DirectAdminField{112, FieldKind::string, 0, tags.test_id->value}};
+                        if (const auto st = send_admin("0", f, now_ms, id); !st.ok()) return fail(st);
+                    }
                     if (const auto st = append_delivery(id, rec->seq); !st.ok()) return fail(st);
                 } else {
                     if (const auto st = append_delivery(id, rec->seq); !st.ok()) return fail(st);
                 }
             } else {
-                if (const auto st = deliver_to_handler(msg, DeliveryInfo{id, rec->seq, true}, now_ms); !st.ok())
+                if (const auto st = deliver_to_handler(msg, DeliveryInfo{id, rec->seq, true}, now_ms,
+                        mt, tags.msg_type->offset); !st.ok())
                     return st;
             }
         }
@@ -1820,6 +2143,42 @@ private:
             }
         }
         return Status::success();
+    }
+
+    [[nodiscard]] Result<std::size_t> encode_safe_inbound_logon(
+        const detail::DirectInboundTags& tags, std::uint64_t wire_seq,
+        bool poss_dup, bool orig_valid, std::optional<std::uint64_t> peer_ack) noexcept {
+        std::array<detail::DirectAdminField, 4> fields{};
+        std::size_t count = 0;
+        std::uint64_t enc_val{}, hb_val{};
+        if (tags.encrypt == nullptr || !detail::direct_parse_u64(tags.encrypt->value, enc_val))
+            return Status{ErrorCode::corrupt_store, 98};
+        if (tags.hb_int == nullptr || !detail::direct_parse_u64(tags.hb_int->value, hb_val))
+            return Status{ErrorCode::corrupt_store, 108};
+        fields[count++] = {98, FieldKind::unsigned_integer, enc_val, {}};
+        fields[count++] = {108, FieldKind::unsigned_integer, hb_val, {}};
+        if (tags.reset_flag != nullptr) {
+            fields[count++] = {141, FieldKind::character,
+                static_cast<unsigned char>(tags.reset_flag->value.empty() ? 0 : tags.reset_flag->value[0]), {}};
+        }
+        if (config_.version == FixVersion::fixt11) {
+            if (tags.appl_ver == nullptr) return Status{ErrorCode::corrupt_store, 1137};
+            fields[count++] = {1137, FieldKind::string, 0, tags.appl_ver->value};
+        }
+        detail::DirectAdminStorage stg{};
+        if (const auto st = detail::direct_build_admin("A", {fields.data(), count}, stg, admin_arena_); !st.ok()) {
+            detail::direct_secure_clear(admin_arena_);
+            return st;
+        }
+        SessionHeader hdr{config_.remote_comp_id, config_.local_comp_id, wire_seq,
+            tags.sending_time->value, poss_dup,
+            (poss_dup && orig_valid && tags.orig_time != nullptr) ? tags.orig_time->value : std::string_view{}};
+        hdr.version = config_.version;
+        hdr.last_msg_seq_num_processed = peer_ack;
+        const auto encoded = encode_fix(stg.view, hdr, encode_buf_);
+        detail::direct_secure_clear(admin_arena_);
+        if (!encoded.ok()) return encoded.status();
+        return encoded.value();
     }
 
     [[nodiscard]] Status process_inbound_frame(const FrameView& fv, std::uint64_t now_ms,
@@ -2021,11 +2380,17 @@ private:
         if (disp.inbound != detail::InboundDisposition::accept)
             return fail(Status{ErrorCode::protocol_error});
 
+        std::string_view stored_payload = fv.bytes;
+        if (msg_type == "A") {
+            const auto safe = encode_safe_inbound_logon(tags, sequence, poss_dup, orig_valid, ack_cand);
+            if (!safe.ok()) return fail(safe.status());
+            stored_payload = {encode_buf_.data(), safe.value()};
+        }
         const std::uint64_t persisted_next = (seq_reset_ev || gapfill_ev) ? next_inbound : 0;
         const std::uint64_t ij_t0 = (telemetry_slot_ != nullptr && config_.telemetry_stage_probes)
             ? telemetry_now_ns() : 0ULL;
         const auto appended = journal_.append(RecordKind::inbound, effective_seq, 0, 0,
-                                              fv.bytes, persisted_next);
+                                              stored_payload, persisted_next);
         if (ij_t0 != 0ULL) {
             telemetry_slot_->record_stage(TelemetryStage::journal, telemetry_now_ns() - ij_t0);
         }
@@ -2119,6 +2484,7 @@ private:
     std::vector<char> logon_tx_buf_;
     std::vector<char> admin_arena_;
     std::vector<FieldView> parse_fields_;
+    std::vector<FieldView> aux_parse_fields_;
     detail::ParsedFieldIndex parse_index_{};
     std::vector<TxEntry> tx_ring_;
     std::vector<ReplayRange> replay_ring_;
@@ -2153,6 +2519,15 @@ private:
     bool wall_time_ms_valid_{};
     std::uint64_t now_ms_{};
     std::uint64_t peer_ack_seq_{};
+    std::uint64_t connect_deadline_{};
+    std::uint64_t last_byte_progress_ms_{};
+    std::uint64_t stall_logout_deadline_{};
+    bool write_timer_active_{};
+    bool stall_logout_attempted_{};
+
+    RecordId active_delivery_id_{};
+    bool active_delivery_recovery_{};
+    std::size_t active_delivery_send_ordinal_{};
 
     bool should_close_{};
     bool fatal_{};

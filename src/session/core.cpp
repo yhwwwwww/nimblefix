@@ -71,6 +71,7 @@ CoreOutput SessionCore::process(const CoreEvent& event) noexcept {
         }
         connected_ = true;
         should_close_ = false;
+        failure_ = Status::success();
         state_ = SessionState::awaiting_logon;
         logon_deadline_ = saturating_add(event.now_ms, logon_timeout_ms_);
         last_rx_ms_ = event.now_ms;

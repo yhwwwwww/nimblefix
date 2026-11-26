@@ -21,10 +21,10 @@ NimbleFIX is structured as a three-layer C++20 FIX protocol library. Every hot-p
 |               (NimbleFIX::nimblefix_core_tls)                               |
 +-----------------------------------------------------------------------------+
 | Core:         Streaming Codec (StreamWriter / Fixed), Generated Schemas,    |
-|               Segmented mmap Journal (SSE4.2 CRC32C), SessionCore,          |
-|               TcpTransport (write_batch/sendmsg), DirectInitiator,          |
-|               ConnectionStrategy Failover, DirectSendQueue (SPSC),          |
-|               Telemetry, JournalReplayer                                    |
+|               Segmented mmap Journal (SSE4.2 CRC32C, SPMC JournalTailer),   |
+|               SessionCore, TcpTransport (write_batch/sendmsg),            |
+|               DirectInitiator, ConnectionStrategy Failover,               |
+|               DirectSendQueue (SPSC), Telemetry, JournalReplayer          |
 |               (NimbleFIX::nimblefix_core — C++20 + pthread only)            |
 +-----------------------------------------------------------------------------+
 ```
@@ -45,7 +45,7 @@ The primary outbound API streams typed FIX fields directly into the destination 
 
 | API | Mutability / Control Flow | Allocation | Reuse | Primary Use |
 | :--- | :--- | :--- | :--- | :--- |
-| **Streaming (Default)**: `send_stream<Msg>(fn)` / `encode_fix44_stream<Msg>` | Native `if`/`for`, `std::optional<T>`, nested groups, `w.header()` | 0 heap alloc | Stateless lambda | Fastest & most flexible production API (~130–140 ns) |
+| **Streaming (Default)**: `send_stream<Msg>(fn)` / `encode_fix44_stream<Msg>` | Native `if`/`for`, `std::optional<T>`, nested groups, `w.header()` | 0 heap alloc | Stateless lambda | Fastest & most flexible production API (~110–150 ns) |
 | **Fixed Template**: `NewOrderSingle::Fixed<ByteCap, fix::field::...>` | Fixed declared field set, presence bitmap | 0 heap alloc (stack buffer) | `reset()` in-place reuse | Reusable pre-populated message templates |
 | **Untyped / Runtime**: `nf::message<"D">()` / `DynamicMessage` | Arbitrary runtime `(tag, value)` pairs | SSO / heap | Mutable | Low-level admin frames & dynamic venue tags |
 
@@ -105,4 +105,4 @@ For multi-core deployments scaling across many concurrent sessions (`<nimblefix/
 ## 6. Out-of-Band mmap Telemetry & Historical Replay
 
 - **mmap Telemetry (`<nimblefix/telemetry.hpp>`)**: Opt-in `MAP_SHARED` `.nfxt` telemetry region with cache-line-aligned per-session slots written exclusively by each session's protocol-owner thread (relaxed load+store, zero locks/mallocs/syscalls). When `telemetry_stage_probes = true`, records 433-bucket log-linear nanosecond HDR histograms for `read`, `parse`, `validate`, `journal`, and `write`. `TelemetryReader` maps the file `O_RDONLY`/`PROT_READ` from an external process and exports structured snapshots or Prometheus metrics.
-- **Deterministic Replay (`<nimblefix/replay.hpp>`)**: `JournalReplayer` attaches a lease-protected `JournalReader` to live or offline `.nfxj` journals, supporting direction (`inbound`/`outbound`/`both`), sequence range, epoch, and admin filtering with full-speed, original `52=SendingTime`, or scaled playback into an in-process callback or a TCP endpoint.
+- **Deterministic Replay & Cross-Process SPMC Tailing (`<nimblefix/journal.hpp>`, `<nimblefix/replay.hpp>`)**: `JournalTailer` maps live or offline `.nfxj` segments `O_RDONLY`/`PROT_READ` without taking `LOCK_EX` and polls the writer's release-published `record_commit_marker` lock-free across segment rotations — enabling zero-writer-overhead DropCopy, compliance, and risk sidecar processes. `JournalReplayer` uses `JournalTailer` for path-based live/offline playback (and supports an in-process lease-protected `JournalReader` overload), with direction (`inbound`/`outbound`/`both`), sequence range, epoch, admin, and `WireHints` filtering at full-speed, original `52=SendingTime`, or scaled pacing into an in-process callback or TCP endpoint.

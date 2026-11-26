@@ -258,16 +258,30 @@ class StreamBuffer {
 public:
     static constexpr std::size_t checksum_suffix_size = 7;
 
+    // Optional spill/grow callback invoked only if the initial buffer is exhausted.
+    // The callback must preserve [old_data, old_data + current_written) in the returned span.
+    using GrowFn = std::span<char> (*)(
+        void* ctx, const char* old_data, std::size_t current_written,
+        std::size_t min_total_capacity) noexcept;
+
     // Body-only streaming mode (for encode_body_stream / DirectSendQueue / Sender / ProducerLane).
-    explicit StreamBuffer(std::span<char> out) noexcept
+    explicit StreamBuffer(std::span<char> out, GrowFn grow_fn = nullptr, void* grow_ctx = nullptr) noexcept
         : base_(out.data()), p_(out.data()), end_(out.data() + out.size()),
-          cap_(out.size()), body_mode_(true) {}
+          cap_(out.size()), grow_fn_(grow_fn), grow_ctx_(grow_ctx), body_mode_(true) {}
+
+    void set_grow_callback(GrowFn grow_fn, void* grow_ctx) noexcept {
+        grow_fn_ = grow_fn;
+        grow_ctx_ = grow_ctx;
+    }
+
+    [[nodiscard]] const char* data() const noexcept { return base_; }
 
     // Full-frame mode with arbitrary caller-provided SessionHeader (validates header upfront).
     template <class Header>
     static StreamBuffer begin_frame(std::span<char> out, std::string_view msg_type,
-                                    const Header& header) noexcept {
-        StreamBuffer buf{out};
+                                    const Header& header, GrowFn grow_fn = nullptr,
+                                    void* grow_ctx = nullptr) noexcept {
+        StreamBuffer buf{out, grow_fn, grow_ctx};
         buf.body_mode_ = false;
         const auto begin = begin_string(header.version);
         if (begin.empty()) { buf.fail(ErrorCode::invalid_header, 8); return buf; }
@@ -295,13 +309,15 @@ public:
         buf.begin_ = begin;
         // Guess 3-digit BodyLength ("8=" + begin + SOH + "9=000" + SOH) -> zero memmove for 100..999 B frames.
         const std::size_t guessed = 2U + begin.size() + 1U + 2U + 3U + 1U;
-        if (out.size() <= guessed + checksum_suffix_size) {
-            buf.fail(ErrorCode::capacity_exceeded);
-            return buf;
+        if (buf.cap_ <= guessed + checksum_suffix_size) {
+            if (!buf.grow_to(0, guessed + checksum_suffix_size + 1U)) {
+                buf.fail(ErrorCode::capacity_exceeded);
+                return buf;
+            }
         }
         buf.body_start_ = guessed;
-        buf.p_ = out.data() + guessed;
-        buf.end_ = out.data() + out.size() - checksum_suffix_size;
+        buf.p_ = buf.base_ + guessed;
+        buf.end_ = buf.base_ + buf.cap_ - checksum_suffix_size;
 
         buf.write_tag_str("35=", 3, msg_type);
         buf.write_tag_str("49=", 3, header.sender_comp_id);
@@ -324,8 +340,10 @@ public:
                                             const StaticSessionPrefix& prefix,
                                             std::uint64_t msg_seq_num,
                                             std::string_view prevalidated_wall_time,
-                                            std::optional<std::uint64_t> last_processed_seq = std::nullopt) noexcept {
-        StreamBuffer buf{out};
+                                            std::optional<std::uint64_t> last_processed_seq = std::nullopt,
+                                            GrowFn grow_fn = nullptr,
+                                            void* grow_ctx = nullptr) noexcept {
+        StreamBuffer buf{out, grow_fn, grow_ctx};
         buf.body_mode_ = false;
         if (!prefix.valid || msg_seq_num == 0) {
             buf.fail(ErrorCode::invalid_header);
@@ -333,13 +351,15 @@ public:
         }
         buf.begin_ = begin_string(prefix.version);
         const std::size_t guessed = prefix.begin_prefix_size + 4U; // "8=...9=" + "000" + SOH
-        if (out.size() <= guessed + checksum_suffix_size) {
-            buf.fail(ErrorCode::capacity_exceeded);
-            return buf;
+        if (buf.cap_ <= guessed + checksum_suffix_size) {
+            if (!buf.grow_to(0, guessed + checksum_suffix_size + 1U)) {
+                buf.fail(ErrorCode::capacity_exceeded);
+                return buf;
+            }
         }
         buf.body_start_ = guessed;
-        buf.p_ = out.data() + guessed;
-        buf.end_ = out.data() + out.size() - checksum_suffix_size;
+        buf.p_ = buf.base_ + guessed;
+        buf.end_ = buf.base_ + buf.cap_ - checksum_suffix_size;
 
         buf.write_tag_str("35=", 3, msg_type);
         buf.write_raw(prefix.comp_ids.data(), prefix.comp_ids_size);
@@ -421,10 +441,7 @@ public:
 
     void write_raw(const char* src, std::size_t n) noexcept {
         if (!err_.ok()) return;
-        if (n > static_cast<std::size_t>(end_ - p_)) {
-            fail(ErrorCode::capacity_exceeded);
-            return;
-        }
+        if (!ensure_space(n)) return;
         if (n != 0) {
             std::memcpy(p_, src, n);
             p_ += n;
@@ -434,10 +451,7 @@ public:
     void write_tag_str(const char* prefix, std::size_t plen, std::string_view v) noexcept {
         if (!err_.ok()) return;
         const std::size_t need = plen + v.size() + 1U;
-        if (need > static_cast<std::size_t>(end_ - p_)) {
-            fail(ErrorCode::capacity_exceeded);
-            return;
-        }
+        if (!ensure_space(need)) return;
         std::memcpy(p_, prefix, plen);
         p_ += plen;
         if (!v.empty()) {
@@ -450,10 +464,7 @@ public:
     void write_tag_char(const char* prefix, std::size_t plen, char c) noexcept {
         if (!err_.ok()) return;
         const std::size_t need = plen + 2U;
-        if (need > static_cast<std::size_t>(end_ - p_)) {
-            fail(ErrorCode::capacity_exceeded);
-            return;
-        }
+        if (!ensure_space(need)) return;
         std::memcpy(p_, prefix, plen);
         p_[plen] = c;
         p_[plen + 1U] = '\x01';
@@ -674,7 +685,10 @@ public:
         const std::size_t actual_start = 2U + begin_.size() + 1U + 2U + digits + 1U;
         const std::size_t total_size = actual_start + body_len + checksum_suffix_size;
         if (total_size > cap_) {
-            return Status{ErrorCode::capacity_exceeded};
+            const std::size_t written = static_cast<std::size_t>(p_ - base_);
+            if (!grow_to(written, total_size)) {
+                return Status{ErrorCode::capacity_exceeded};
+            }
         }
         if (actual_start != body_start_) {
             std::memmove(base_ + actual_start, base_ + body_start_, body_len);
@@ -704,11 +718,44 @@ public:
     }
 
 private:
+    [[gnu::noinline, gnu::cold]] [[nodiscard]] bool grow_to(std::size_t written, std::size_t min_cap) noexcept {
+        if (grow_fn_ == nullptr) return false;
+        const auto next = grow_fn_(grow_ctx_, base_, written, min_cap);
+        if (next.data() == nullptr || next.size() < min_cap) return false;
+        const std::size_t suffix = body_mode_ ? 0U : checksum_suffix_size;
+        base_ = next.data();
+        p_ = base_ + written;
+        cap_ = next.size();
+        end_ = base_ + cap_ - suffix;
+        return true;
+    }
+
+    [[gnu::noinline, gnu::cold]] [[nodiscard]] bool ensure_space_slow(std::size_t need) noexcept {
+        const std::size_t written = static_cast<std::size_t>(p_ - base_);
+        const std::size_t suffix = body_mode_ ? 0U : checksum_suffix_size;
+        if (need > std::numeric_limits<std::size_t>::max() - written - suffix) {
+            fail(ErrorCode::too_large);
+            return false;
+        }
+        if (!grow_to(written, written + need + suffix)) {
+            fail(ErrorCode::capacity_exceeded);
+            return false;
+        }
+        return true;
+    }
+
+    [[nodiscard]] bool ensure_space(std::size_t need) noexcept {
+        if (need <= static_cast<std::size_t>(end_ - p_)) [[likely]] return true;
+        return ensure_space_slow(need);
+    }
+
     char* base_{};
     char* p_{};
     char* end_{};
     std::size_t cap_{};
     std::size_t body_start_{};
+    GrowFn grow_fn_{nullptr};
+    void* grow_ctx_{nullptr};
     std::string_view begin_{};
     std::uint32_t pending_len_tag_{};
     std::uint32_t pending_data_tag_{};
@@ -833,11 +880,13 @@ template <class Message, class Fn>
 [[nodiscard]] Result<std::size_t> encode_session_stream(
     std::span<char> output, const detail::StaticSessionPrefix& prefix,
     std::uint64_t msg_seq_num, std::string_view prevalidated_wall_time,
-    std::optional<std::uint64_t> last_processed_seq, Fn&& fn) noexcept {
+    std::optional<std::uint64_t> last_processed_seq, Fn&& fn,
+    detail::StreamBuffer::GrowFn grow_fn = nullptr, void* grow_ctx = nullptr) noexcept {
     static_assert(!requires { requires Message::is_group_entry; },
         "repeating group entries cannot be encoded as standalone FIX messages");
     auto buf = detail::StreamBuffer::begin_session_frame(
-        output, Message::msg_type, prefix, msg_seq_num, prevalidated_wall_time, last_processed_seq);
+        output, Message::msg_type, prefix, msg_seq_num, prevalidated_wall_time,
+        last_processed_seq, grow_fn, grow_ctx);
     if (!buf.ok()) return buf.status();
     typename Message::stream_writer_type writer{buf};
     fn(writer);
@@ -849,40 +898,60 @@ namespace detail {
 
 // Stack-first body streaming helper for Layer 1/2 send_stream() entry points
 // (SessionContext, SessionDriver, Sender, ProducerLane). Avoids heap allocation
-// for messages up to 4 KiB and falls back to a temporary buffer only if exceeded.
+// for messages up to 4 KiB and spills seamlessly into a heap buffer if exceeded
+// so the user's encoding callable is guaranteed to be invoked at most once.
 template <class Message, class Fn, class Sink>
     requires streamable_message<Message>
 [[nodiscard]] auto stream_body_and_invoke(Fn&& fn, Sink&& sink) noexcept {
     using ReturnType = decltype(sink(std::declval<MessageView>()));
     static_assert(!requires { requires Message::is_group_entry; },
         "repeating group entries cannot be sent as standalone FIX messages");
+    struct SpillState {
+        std::vector<char> heap_buf{};
+        bool too_large{false};
+    } spill{};
+    auto grow = +[](void* raw, const char* old_data, std::size_t written,
+                    std::size_t min_cap) noexcept -> std::span<char> {
+        auto* st = static_cast<SpillState*>(raw);
+        constexpr std::size_t max_body_cap = 1024U * 1024U;
+        if (min_cap > max_body_cap) {
+            st->too_large = true;
+            return {};
+        }
+        std::size_t next_cap = st->heap_buf.empty() ? 16384U : st->heap_buf.size() * 2U;
+        while (next_cap < min_cap) next_cap *= 2U;
+        if (next_cap > max_body_cap) next_cap = max_body_cap;
+        try {
+            if (st->heap_buf.empty()) {
+                st->heap_buf.resize(next_cap);
+                if (written != 0) std::memcpy(st->heap_buf.data(), old_data, written);
+            } else {
+                st->heap_buf.resize(next_cap);
+            }
+            return std::span<char>{st->heap_buf.data(), st->heap_buf.size()};
+        } catch (...) {
+            return {};
+        }
+    };
     char stack_buf[4096];
-    const auto body_len = encode_body_stream<Message>(std::span<char>{stack_buf, sizeof(stack_buf)}, fn);
-    if (body_len.ok()) {
-        return sink(make_prebuilt_body_view(
-            Message::msg_type, std::string_view{stack_buf, body_len.value()}));
+    StreamBuffer buf{std::span<char>{stack_buf, sizeof(stack_buf)}, grow, &spill};
+    typename Message::stream_writer_type writer{buf};
+    fn(writer);
+    if (const auto req = writer.validate_required(); !req.ok()) {
+        if (spill.too_large && req.code == ErrorCode::capacity_exceeded) {
+            return ReturnType{Status{ErrorCode::too_large}};
+        }
+        return ReturnType{req};
     }
-    if (body_len.status().code != ErrorCode::capacity_exceeded) {
+    const auto body_len = buf.finish_body();
+    if (!body_len.ok()) {
+        if (spill.too_large && body_len.status().code == ErrorCode::capacity_exceeded) {
+            return ReturnType{Status{ErrorCode::too_large}};
+        }
         return ReturnType{body_len.status()};
     }
-    try {
-        std::size_t cap = 16384;
-        while (cap <= 1024U * 1024U) {
-            std::vector<char> heap_buf(cap);
-            const auto retry = encode_body_stream<Message>(heap_buf, fn);
-            if (retry.ok()) {
-                return sink(make_prebuilt_body_view(
-                    Message::msg_type, std::string_view{heap_buf.data(), retry.value()}));
-            }
-            if (retry.status().code != ErrorCode::capacity_exceeded) {
-                return ReturnType{retry.status()};
-            }
-            cap *= 2;
-        }
-        return ReturnType{Status{ErrorCode::too_large}};
-    } catch (...) {
-        return ReturnType{Status{ErrorCode::capacity_exceeded}};
-    }
+    return sink(make_prebuilt_body_view(
+        Message::msg_type, std::string_view{buf.data(), body_len.value()}));
 }
 
 } // namespace detail

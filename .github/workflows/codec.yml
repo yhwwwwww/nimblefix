@@ -28,14 +28,16 @@ jobs:
         run: xmake check
       - name: Installed consumers
         run: |
-          python3 tests/install_test.py --examples
-          python3 tests/install_test.py --core-only
+          ./build/linux/x86_64/release/install-test --root . --cxx "$CXX" --examples \
+            --endpoint-test build/linux/x86_64/release/endpoint-test
+          ./build/linux/x86_64/release/install-test --root . --cxx "$CXX" --core-only
       - name: Benchmark smoke
         run: |
-          python3 bench/run.py --binary build/linux/x86_64/release/codec-bench --compiler "$CXX" --samples 100 --runs 1 --output /tmp/codec-smoke
-          python3 bench/session_run.py --binary build/linux/x86_64/release/session-bench --samples 100 --runs 1 --output /tmp/session-smoke
-          python3 bench/tcp_run.py --binary build/linux/x86_64/release/tcp-bench-server --samples 100 --rate 1000 --output /tmp/tcp-smoke
-          python3 bench/tcp_run.py --binary build/linux/x86_64/release/null-tcp-server --echo --samples 100 --rate 1000 --output /tmp/echo-smoke
+          ./build/linux/x86_64/release/codec-bench 100 > /tmp/codec-smoke.csv
+          ./build/linux/x86_64/release/session-bench 100 /tmp/session-smoke > /tmp/session-smoke.csv
+          ./build/linux/x86_64/release/direct-initiator-bench 50 200
+          ./build/linux/x86_64/release/acceptor-bench 50 200 2 epoll
+          ./build/linux/x86_64/release/initiator-burst-bench --smoke
           ./build/linux/x86_64/release/quickfix-parity-bench 50 200 schemas/standard/FIX44.xml
 
   sanitizer:
@@ -62,25 +64,18 @@ jobs:
           - label: rhel8-gcc12
             image: almalinux:8
             toolset: gcc-toolset-12
-            python_pkg: python3.11
-            python_bin: python3.11
           - label: rhel8-gcc14
             image: almalinux:8
             toolset: gcc-toolset-14
-            python_pkg: python3.11
-            python_bin: python3.11
           - label: rhel9-gcc14
             image: almalinux:9
             toolset: gcc-toolset-14
-            python_pkg: python3
-            python_bin: python3
     container:
       image: ${{ matrix.image }}
     env:
       XMAKE_ROOT: y
       LANG: C.UTF-8
       LC_ALL: C.UTF-8
-      PYTHONUTF8: '1'
     steps:
       - name: Install RHEL toolchain and dependencies
         run: |
@@ -88,11 +83,7 @@ jobs:
           dnf install -y --setopt=install_weak_deps=False \
             ${{ matrix.toolset }}-gcc-c++ \
             cmake make git tar gzip which util-linux \
-            openssl openssl-devel libxml2-devel pkgconf-pkg-config \
-            ${{ matrix.python_pkg }}
-          if [ "${{ matrix.python_bin }}" != "python3" ]; then
-            ln -sf "/usr/bin/${{ matrix.python_bin }}" /usr/local/bin/python3
-          fi
+            openssl openssl-devel libxml2-devel pkgconf-pkg-config
           echo "/opt/rh/${{ matrix.toolset }}/root/usr/bin" >> "$GITHUB_PATH"
           echo "/usr/local/bin" >> "$GITHUB_PATH"
           echo "CC=/opt/rh/${{ matrix.toolset }}/root/usr/bin/gcc" >> "$GITHUB_ENV"
@@ -120,19 +111,21 @@ jobs:
           xmake --version
           "$CXX" --version
           cmake --version
-          python3 --version
       - name: Configure
         run: xmake f -y -m release --toolchain=gcc --cc="$CC" --cxx="$CXX" --ld="$CXX" --benchmarks=y --tls=y --xml=y
       - name: Build and test
         run: xmake check
       - name: Installed consumers
         run: |
-          python3 tests/install_test.py --examples --features
-          python3 tests/install_test.py --core-only
+          ./build/linux/x86_64/release/install-test --root . --cxx "$CXX" --examples --features \
+            --endpoint-test build/linux/x86_64/release/endpoint-test \
+            --xmake-schema-test build/linux/x86_64/release/xmake_schema-test
+          ./build/linux/x86_64/release/install-test --root . --cxx "$CXX" --core-only
       - name: Benchmark smoke
         run: |
-          python3 bench/run.py --binary build/linux/x86_64/release/codec-bench --compiler "$CXX" --samples 100 --runs 1 --output /tmp/codec-smoke
-          python3 bench/session_run.py --binary build/linux/x86_64/release/session-bench --samples 100 --runs 1 --output /tmp/session-smoke
-          python3 bench/tcp_run.py --binary build/linux/x86_64/release/tcp-bench-server --samples 100 --rate 1000 --output /tmp/tcp-smoke
-          python3 bench/tcp_run.py --binary build/linux/x86_64/release/null-tcp-server --echo --samples 100 --rate 1000 --output /tmp/echo-smoke
+          ./build/linux/x86_64/release/codec-bench 100 > /tmp/codec-smoke.csv
+          ./build/linux/x86_64/release/session-bench 100 /tmp/session-smoke > /tmp/session-smoke.csv
+          ./build/linux/x86_64/release/direct-initiator-bench 50 200
+          ./build/linux/x86_64/release/acceptor-bench 50 200 2 epoll
+          ./build/linux/x86_64/release/initiator-burst-bench --smoke
           ./build/linux/x86_64/release/quickfix-parity-bench 50 200 schemas/standard/FIX44.xml

@@ -11,6 +11,7 @@
 #include <netinet/in.h>
 #include <string>
 #include <sys/socket.h>
+#include <sys/wait.h>
 #include <thread>
 #include <unistd.h>
 #include <vector>
@@ -418,6 +419,216 @@ void test_deterministic_journal_replayer_offline_timing_and_tcp() {
     }
 }
 
+// Regression test for F07 (ReplayOptions::wire_hints for custom LENGTH/DATA with embedded SOH)
+// and F08 (cross-process SPMC JournalTailer: live path replay, multi-process fork() tailing
+// across segment rotations, aborted reserve skip, start=end/from_id, and pruned expiration).
+void test_replay_wire_hints_and_cross_process_spmc_tailer() {
+    // 1. F07 + F08: Custom LENGTH/DATA (5000/5001) with embedded SOH + live path replay while writer holds LOCK_EX
+    {
+        TempStore store;
+        const std::string raw_custom = make_replay_fix_frame(
+            "Z", 1, "20261126-00:00:00.000", std::string_view{"5000=3\x01" "5001=A\x01" "B\x01"});
+        const std::string raw_admin = make_replay_fix_frame(
+            "0", 2, "20261126-00:00:00.010");
+        const std::string raw_custom2 = make_replay_fix_frame(
+            "Z", 3, "20261126-00:00:00.020", std::string_view{"5000=3\x01" "5001=X\x01" "Y\x01"});
+
+        const std::array<LengthDataPair, 1> pairs{{{5000, 5001}}};
+        const WireHints custom_hints{pairs};
+
+        auto opened = Journal::open(store.config());
+        CHECK(opened.ok());
+        if (!opened.ok()) return;
+        auto& writer = opened.value();
+        CHECK(writer.append(RecordKind::outbound, 1, 1, 0, raw_custom).ok());
+        CHECK(writer.append(RecordKind::outbound, 2, 2, 0, raw_admin).ok());
+        CHECK(writer.append(RecordKind::outbound, 3, 3, 0, raw_custom2).ok());
+
+        // Path-based replay while writer STILL holds LOCK_EX + custom WireHints + skip_admin + scaled timing!
+        ReplayOptions opts{};
+        opts.journal_path = store.path;
+        opts.direction = ReplayDirection::outbound;
+        opts.wire_hints = custom_hints;
+        opts.skip_admin = true;
+        opts.verify_frames = true;
+        opts.timing = ReplayTiming::scaled;
+        opts.speed_multiplier = 20.0; // 20ms / 20 = 1ms
+        std::vector<std::string> got_values;
+        const auto live_res = JournalReplayer::replay(opts,
+            [&](const JournalRecord&, const FlatMessageView* parsed) noexcept -> Status {
+                if (parsed == nullptr) return Status{ErrorCode::invalid_frame};
+                const auto f = parsed->find_unique(5001);
+                if (!f.ok()) return f.status();
+                got_values.emplace_back(f.value().value);
+                return Status::success();
+            });
+        CHECK(live_res.ok());
+        if (live_res.ok()) {
+            CHECK(live_res.value().replayed_frames == 2);
+            CHECK(live_res.value().invalid_frames == 0);
+            CHECK(live_res.value().total_sleep_ns == 1'000'000ULL);
+        }
+        CHECK(got_values.size() == 2 &&
+              got_values[0] == std::string_view("A\x01" "B", 3) &&
+              got_values[1] == std::string_view("X\x01" "Y", 3));
+    }
+
+    // 2. True multi-process SPMC (fork()): 1 writer process rotating across multiple segments
+    //    (including an aborted reserve before rotation), 2 independent consumer processes tailing live!
+    {
+        TempStore store;
+        JournalConfig cfg = store.config();
+        cfg.capacity_bytes = 256U * 1024U; // 16 segments of 16 KiB (plus no audit) -> fits 160 records
+        cfg.segment_bytes = 16U * 1024U;
+        cfg.max_segments = 16;
+        cfg.max_records = 4096;
+
+        auto opened = Journal::open(cfg);
+        CHECK(opened.ok());
+        if (!opened.ok()) return;
+        auto writer = std::move(opened).value();
+
+        // Pre-seed 5 records before spawning the "start=end" tailer.
+        constexpr std::uint64_t pre_count = 5;
+        constexpr std::uint64_t total_count = 140; // ~200B/rec => ~28 KiB => crosses multiple 16 KiB segments!
+        const std::string pad(140, 'P');
+        for (std::uint64_t s = 1; s <= pre_count; ++s) {
+            const std::string f = make_replay_fix_frame("D", s, "20261126-00:00:00.000",
+                "11=O" + std::to_string(s) + "\x01" "58=" + pad + "\x01");
+            CHECK(writer.append(RecordKind::outbound, s, s, 0, f).ok());
+        }
+
+        // Open both tailers in separate child processes via fork() — genuine cross-process SPMC!
+        int ready_pipe[2]{-1, -1};
+        CHECK(::pipe(ready_pipe) == 0);
+
+        auto spawn_tailer = [&](JournalTailStart start_mode, std::uint64_t expected_first,
+                                std::uint64_t expected_last) -> pid_t {
+            const pid_t pid = ::fork();
+            if (pid == 0) {
+                ::close(ready_pipe[0]);
+                auto t = JournalTailer::open(JournalTailerConfig{
+                    store.path, "FIX.4.4|local=SELL|remote=BUY", start_mode, 0, true});
+                if (!t.ok()) ::_exit(10);
+                // Signal parent that tailer is open and positioned before parent appends more records.
+                const char b = 'R';
+                if (::write(ready_pipe[1], &b, 1) != 1) ::_exit(11);
+                ::close(ready_pipe[1]);
+
+                auto& tailer = t.value();
+                std::uint64_t expect = expected_first;
+                const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+                JournalRecord rec{};
+                while (expect <= expected_last) {
+                    const auto st = tailer.next(rec);
+                    if (st.code == ErrorCode::need_more) {
+                        if (std::chrono::steady_clock::now() > deadline) ::_exit(12);
+                        std::this_thread::yield();
+                        continue;
+                    }
+                    if (!st.ok()) ::_exit(13);
+                    if (rec.kind != RecordKind::outbound || rec.seq != expect) ::_exit(14);
+                    const std::string needle = "11=O" + std::to_string(expect) + "\x01";
+                    if (rec.payload.find(needle) == std::string_view::npos) ::_exit(15);
+                    ++expect;
+                }
+                // Confirm tailer crossed at least one segment boundary!
+                if (tailer.current_segment_index() == 0) ::_exit(16);
+                ::_exit(0);
+            }
+            return pid;
+        };
+
+        const pid_t child_begin = spawn_tailer(JournalTailStart::beginning, 1, total_count);
+        const pid_t child_end   = spawn_tailer(JournalTailStart::end, pre_count + 1, total_count);
+        ::close(ready_pipe[1]);
+
+        // Wait for both child tailers to open and position before appending remaining records.
+        for (int i = 0; i < 2; ++i) {
+            char b{};
+            CHECK(::read(ready_pipe[0], &b, 1) == 1 && b == 'R');
+        }
+        ::close(ready_pipe[0]);
+
+        for (std::uint64_t s = pre_count + 1; s <= total_count; ++s) {
+            // Exercise an aborted/uncommitted reserve() before a real commit to verify tailer skips cleanly.
+            if (s == 50) {
+                auto discarded = writer.reserve(RecordKind::outbound, s, s, 0, 512);
+                if (discarded.ok()) {
+                    std::memset(discarded.value().payload.data(), 'Z', 64);
+                }
+            }
+            const std::string f = make_replay_fix_frame("D", s, "20261126-00:00:00.001",
+                "11=O" + std::to_string(s) + "\x01" "58=" + pad + "\x01");
+            CHECK(writer.append(RecordKind::outbound, s, s, 0, f).ok());
+            if (writer.needs_maintenance()) CHECK(writer.poll_maintenance().ok());
+        }
+
+        int st1 = 0, st2 = 0;
+        CHECK(::waitpid(child_begin, &st1, 0) == child_begin && WIFEXITED(st1) && WEXITSTATUS(st1) == 0);
+        CHECK(::waitpid(child_end, &st2, 0) == child_end && WIFEXITED(st2) && WEXITSTATUS(st2) == 0);
+
+        // Verify from_id starting at a mid-journal RecordId!
+        const RecordId mid_id = writer.records()[75].id;
+        auto from_mid = JournalTailer::open(JournalTailerConfig{
+            store.path, {}, JournalTailStart::from_id, mid_id, true});
+        CHECK(from_mid.ok());
+        if (from_mid.ok()) {
+            JournalRecord rec{};
+            CHECK(from_mid.value().next(rec).ok());
+            CHECK(rec.id == mid_id && rec.seq == writer.records()[75].seq);
+        }
+    }
+
+    // 3. Pruned segment expiration: writer prunes old segments while external tailer lags behind
+    {
+        TempStore store;
+        JournalConfig cfg = store.config();
+        cfg.capacity_bytes = 64U * 1024U; // 8 segments of 8 KiB
+        cfg.segment_bytes = 8U * 1024U;
+        cfg.max_segments = 8;
+        cfg.max_records = 2048;
+        cfg.max_readers = 0; // External tailers are independent of in-process reader leases
+
+        auto opened = Journal::open(cfg);
+        CHECK(opened.ok());
+        if (!opened.ok()) return;
+        auto writer = std::move(opened).value();
+        const std::string big(1000, 'B');
+
+        // Fill seg 0, open tailer on seg 0 (reads only 1 record), then write across seg 1..3 and prune seg 0..1!
+        CHECK(writer.append(RecordKind::outbound, 1, 1, 0, big).ok());
+        const RecordId first_id = writer.records().front().id;
+        auto tailer_res = JournalTailer::open(JournalTailerConfig{
+            store.path, {}, JournalTailStart::beginning, 0, true});
+        CHECK(tailer_res.ok());
+        if (!tailer_res.ok()) return;
+        auto& tailer = tailer_res.value();
+        JournalRecord rec{};
+        CHECK(tailer.next(rec).ok() && rec.seq == 1);
+
+        for (std::uint64_t s = 2; s <= 15; ++s) {
+            CHECK(writer.append(RecordKind::outbound, s, s, 0, big).ok());
+            if (writer.needs_maintenance()) CHECK(writer.poll_maintenance().ok());
+        }
+        // Advance retention floor past seg 0 and seg 1 so seg 0 and seg 1 are unlinked!
+        CHECK(writer.set_retention_floor(14, 0).ok());
+
+        // Drain whatever remained in already-mapped seg 0; once tailer tries to enter pruned seg 1 -> reader_expired!
+        Status final_st{};
+        for (int i = 0; i < 32; ++i) {
+            final_st = tailer.next(rec);
+            if (!final_st.ok()) break;
+        }
+        CHECK(final_st.code == ErrorCode::reader_expired);
+
+        // Opening a new tailer with from_id pointing into pruned seg 0 -> history_unavailable!
+        const auto stale_open = JournalTailer::open(JournalTailerConfig{
+            store.path, {}, JournalTailStart::from_id, first_id, true});
+        CHECK(!stale_open.ok() && stale_open.status().code == ErrorCode::history_unavailable);
+    }
+}
+
 } // namespace
 
 int main() {
@@ -427,6 +638,7 @@ int main() {
     test_reader_calls_race_safely_with_retention_and_teardown();
     test_reader_calls_race_safely_with_journal_teardown();
     test_deterministic_journal_replayer_offline_timing_and_tcp();
+    test_replay_wire_hints_and_cross_process_spmc_tailer();
     if (failures != 0) {
         std::cerr << failures << " journal reader test(s) failed\n";
         return 1;

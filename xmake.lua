@@ -462,7 +462,9 @@ if has_config("benchmarks") then
                 else
                     add_deps("quickfix-bundled")
                 end
-                add_ldflags("-Wl,--wrap=malloc", {force = true})
+                for _, symbol in ipairs({"malloc", "calloc", "realloc", "aligned_alloc", "posix_memalign"}) do
+                    add_ldflags("-Wl,--wrap=" .. symbol, {force = true})
+                end
             target_end()
         end
     end
@@ -521,21 +523,27 @@ if has_config("benchmarks") then
             add_files("bench/direct_initiator_bench.cpp")
             add_deps("nimblefix-core", "fix44-schema")
             add_includedirs(generated_dir)
-            add_ldflags("-Wl,--wrap=malloc", {force = true})
+            for _, symbol in ipairs({"malloc", "calloc", "realloc", "aligned_alloc", "posix_memalign"}) do
+                add_ldflags("-Wl,--wrap=" .. symbol, {force = true})
+            end
         target_end()
         target("acceptor-bench")
             set_kind("binary")
             add_files("bench/acceptor_bench.cpp")
             add_deps("nimblefix", "fix44-schema")
             add_includedirs(generated_dir)
-            add_ldflags("-Wl,--wrap=malloc", {force = true})
+            for _, symbol in ipairs({"malloc", "calloc", "realloc", "aligned_alloc", "posix_memalign"}) do
+                add_ldflags("-Wl,--wrap=" .. symbol, {force = true})
+            end
         target_end()
         target("initiator-burst-bench")
             set_kind("binary")
             add_files("bench/initiator_burst_bench.cpp")
             add_deps("nimblefix", "fix44-schema")
             add_includedirs(generated_dir)
-            add_ldflags("-Wl,--wrap=malloc", {force = true})
+            for _, symbol in ipairs({"malloc", "calloc", "realloc", "aligned_alloc", "posix_memalign"}) do
+                add_ldflags("-Wl,--wrap=" .. symbol, {force = true})
+            end
         target_end()
     end
     if has_config("tests") then

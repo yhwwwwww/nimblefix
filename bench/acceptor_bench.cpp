@@ -23,6 +23,8 @@
 #include <thread>
 #include <vector>
 
+#include "alloc_audit.hpp"
+
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
@@ -31,26 +33,6 @@
 
 namespace nf = nimblefix;
 namespace fix = nimblefix::fix44;
-
-namespace {
-bool g_track_alloc = false;
-std::uint64_t g_alloc_calls = 0;
-} // namespace
-
-extern "C" void* __real_malloc(std::size_t);
-extern "C" void* __wrap_malloc(std::size_t size) {
-    if (g_track_alloc) ++g_alloc_calls;
-    return __real_malloc(size);
-}
-void* operator new(std::size_t size) {
-    if (auto* p = std::malloc(size == 0 ? 1 : size)) return p;
-    throw std::bad_alloc();
-}
-void* operator new[](std::size_t size) { return ::operator new(size); }
-void operator delete(void* p) noexcept { std::free(p); }
-void operator delete[](void* p) noexcept { std::free(p); }
-[[gnu::noinline]] void operator delete(void* p, std::size_t) noexcept { std::free(p); }
-void operator delete[](void* p, std::size_t) noexcept { std::free(p); }
 
 namespace {
 
@@ -291,23 +273,23 @@ bool run_pre_tcp_acceptor(std::size_t warmup, std::size_t samples, LatencyStats&
         if (len == 0) { std::filesystem::remove_all(dir); return false; }
         const std::uint64_t ts_ms = warmup + i + 2;
 
-        g_alloc_calls = 0;
-        g_track_alloc = true;
+        nf::bench_audit::reset();
+        nf::bench_audit::enable();
         const std::uint64_t t0 = now_ns();
         if (!driver.receive({order_wire.data(), len}, ts_ms, wt).ok()) {
-            g_track_alloc = false;
+            nf::bench_audit::disable();
             std::filesystem::remove_all(dir);
             return false;
         }
         const std::uint64_t t1 = now_ns();
         if (!driver.flush(&SinkWriter::write, &sink, ts_ms, 65536).ok()) {
-            g_track_alloc = false;
+            nf::bench_audit::disable();
             std::filesystem::remove_all(dir);
             return false;
         }
         const std::uint64_t t2 = now_ns();
-        g_track_alloc = false;
-        total_allocs += g_alloc_calls;
+        nf::bench_audit::disable();
+        total_allocs += nf::bench_audit::calls();
 
         recv_reply_ns.push_back(t1 - t0);
         flush_ns.push_back(t2 - t1);
@@ -400,12 +382,18 @@ std::string current_utc_timestamp() {
 
 bool run_tcp_client_session(std::uint16_t port, std::string sender_comp, std::size_t warmup,
                             std::size_t samples, std::vector<std::uint64_t>& rtt_out,
-                            std::atomic<int>& ready_count, std::atomic<bool>& go_flag) {
-    struct ReadyGuard {
-        std::atomic<int>& c;
-        bool signaled{false};
-        ~ReadyGuard() { if (!signaled) c.fetch_add(1, std::memory_order_release); }
-    } ready_guard{ready_count};
+                            std::atomic<int>& ready_count, std::atomic<bool>& go_flag,
+                            std::atomic<int>& done_count, std::atomic<bool>& finish_flag) {
+    struct PhaseGuard {
+        std::atomic<int>& ready;
+        std::atomic<int>& done;
+        bool ready_signaled{false};
+        bool done_signaled{false};
+        ~PhaseGuard() {
+            if (!ready_signaled) ready.fetch_add(1, std::memory_order_release);
+            if (!done_signaled) done.fetch_add(1, std::memory_order_release);
+        }
+    } phase_guard{ready_count, done_count};
 
     int fd = ::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
     if (fd < 0) return false;
@@ -454,12 +442,14 @@ bool run_tcp_client_session(std::uint16_t port, std::string sender_comp, std::si
         if (!tcp_recv_frame(fd, rx, head, tail, fv)) { ::close(fd); return false; }
     }
 
-    ready_guard.signaled = true;
+    // Pre-reserve result storage BEFORE enabling the steady-state allocation audit window.
+    rtt_out.clear();
+    rtt_out.reserve(samples);
+
+    phase_guard.ready_signaled = true;
     ready_count.fetch_add(1, std::memory_order_release);
     while (!go_flag.load(std::memory_order_acquire)) std::this_thread::yield();
 
-    rtt_out.clear();
-    rtt_out.reserve(samples);
     for (std::size_t i = 0; i < samples; ++i) {
         nf::SessionHeader h{sender_comp, "SELL", seq++, wt};
         auto enc = nf::encode_fix44(order.view(), h, tx);
@@ -470,6 +460,10 @@ bool run_tcp_client_session(std::uint16_t port, std::string sender_comp, std::si
         if (!tcp_recv_frame(fd, rx, head, tail, fv)) { ::close(fd); return false; }
         rtt_out.push_back(now_ns() - t0);
     }
+
+    phase_guard.done_signaled = true;
+    done_count.fetch_add(1, std::memory_order_release);
+    while (!finish_flag.load(std::memory_order_acquire)) std::this_thread::yield();
 
     auto logout = nf::message<"5">();
     nf::SessionHeader lh{sender_comp, "SELL", seq++, wt};
@@ -555,6 +549,8 @@ bool run_engine_acceptor_tcp(std::size_t session_count, std::size_t warmup, std:
 
     std::atomic<int> ready_count{0};
     std::atomic<bool> go_flag{false};
+    std::atomic<int> done_count{0};
+    std::atomic<bool> finish_flag{false};
     std::vector<std::vector<std::uint64_t>> per_client_rtt(session_count);
     std::vector<std::atomic<bool>> client_ok(session_count);
     std::vector<std::thread> clients;
@@ -563,7 +559,7 @@ bool run_engine_acceptor_tcp(std::size_t session_count, std::size_t warmup, std:
         client_ok[s].store(false);
         clients.emplace_back([&, s] {
             const bool ok = run_tcp_client_session(port, "BUY-" + std::to_string(s),
-                warmup, samples, per_client_rtt[s], ready_count, go_flag);
+                warmup, samples, per_client_rtt[s], ready_count, go_flag, done_count, finish_flag);
             client_ok[s].store(ok, std::memory_order_release);
         });
     }
@@ -571,15 +567,24 @@ bool run_engine_acceptor_tcp(std::size_t session_count, std::size_t warmup, std:
     while (ready_count.load(std::memory_order_acquire) < static_cast<int>(session_count)) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
+    nf::bench_audit::reset();
+    nf::bench_audit::enable();
     const std::uint64_t t_wall_start = now_ns();
     go_flag.store(true, std::memory_order_release);
+
+    while (done_count.load(std::memory_order_acquire) < static_cast<int>(session_count)) {
+        std::this_thread::sleep_for(std::chrono::microseconds(100));
+    }
+    const std::uint64_t t_wall_ns = now_ns() - t_wall_start;
+    nf::bench_audit::disable();
+    const std::uint64_t measured_allocs = nf::bench_audit::calls();
+    finish_flag.store(true, std::memory_order_release);
 
     bool all_ok = true;
     for (std::size_t s = 0; s < session_count; ++s) {
         clients[s].join();
         if (!client_ok[s].load(std::memory_order_acquire)) all_ok = false;
     }
-    const std::uint64_t t_wall_ns = now_ns() - t_wall_start;
 
     engine.request_stop();
     server_thread.join();
@@ -592,7 +597,7 @@ bool run_engine_acceptor_tcp(std::size_t session_count, std::size_t warmup, std:
     std::vector<std::uint64_t> merged;
     merged.reserve(session_count * samples);
     for (const auto& v : per_client_rtt) merged.insert(merged.end(), v.begin(), v.end());
-    stats_out = compute_stats(merged, 0);
+    stats_out = compute_stats(merged, measured_allocs);
     agg_rate_out = (static_cast<double>(merged.size()) * 1e9) / static_cast<double>(t_wall_ns);
 
     std::cout << "\n=== " << label << " (" << session_count << " session(s), "
@@ -603,7 +608,8 @@ bool run_engine_acceptor_tcp(std::size_t session_count, std::size_t warmup, std:
               << "  p99  = " << stats_out.p99_ns / 1000.0 << " us\n"
               << "  p99.9= " << stats_out.p999_ns / 1000.0 << " us\n"
               << "  max  = " << stats_out.max_ns / 1000.0 << " us\n"
-              << "  agg  = " << static_cast<std::uint64_t>(agg_rate_out) << " orders/sec (1 engine thread)\n";
+              << "  agg  = " << static_cast<std::uint64_t>(agg_rate_out) << " orders/sec (1 engine thread)"
+              << " | allocs = " << stats_out.alloc_calls << "\n";
     return true;
 }
 
@@ -682,6 +688,8 @@ bool run_sharded_acceptor_tcp(std::size_t shard_count, std::size_t session_count
 
     std::atomic<int> ready_count{0};
     std::atomic<bool> go_flag{false};
+    std::atomic<int> done_count{0};
+    std::atomic<bool> finish_flag{false};
     std::vector<std::vector<std::uint64_t>> per_client_rtt(session_count);
     std::vector<std::atomic<bool>> client_ok(session_count);
     std::vector<std::thread> clients;
@@ -690,7 +698,7 @@ bool run_sharded_acceptor_tcp(std::size_t shard_count, std::size_t session_count
         client_ok[s].store(false);
         clients.emplace_back([&, s] {
             const bool ok = run_tcp_client_session(port, "BUY-" + std::to_string(s),
-                warmup, samples, per_client_rtt[s], ready_count, go_flag);
+                warmup, samples, per_client_rtt[s], ready_count, go_flag, done_count, finish_flag);
             client_ok[s].store(ok, std::memory_order_release);
         });
     }
@@ -698,15 +706,24 @@ bool run_sharded_acceptor_tcp(std::size_t shard_count, std::size_t session_count
     while (ready_count.load(std::memory_order_acquire) < static_cast<int>(session_count)) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
+    nf::bench_audit::reset();
+    nf::bench_audit::enable();
     const std::uint64_t t_wall_start = now_ns();
     go_flag.store(true, std::memory_order_release);
+
+    while (done_count.load(std::memory_order_acquire) < static_cast<int>(session_count)) {
+        std::this_thread::sleep_for(std::chrono::microseconds(100));
+    }
+    const std::uint64_t t_wall_ns = now_ns() - t_wall_start;
+    nf::bench_audit::disable();
+    const std::uint64_t measured_allocs = nf::bench_audit::calls();
+    finish_flag.store(true, std::memory_order_release);
 
     bool all_ok = true;
     for (std::size_t s = 0; s < session_count; ++s) {
         clients[s].join();
         if (!client_ok[s].load(std::memory_order_acquire)) all_ok = false;
     }
-    const std::uint64_t t_wall_ns = now_ns() - t_wall_start;
 
     engine.request_stop();
     server_thread.join();
@@ -719,7 +736,7 @@ bool run_sharded_acceptor_tcp(std::size_t shard_count, std::size_t session_count
     std::vector<std::uint64_t> merged;
     merged.reserve(session_count * samples);
     for (const auto& v : per_client_rtt) merged.insert(merged.end(), v.begin(), v.end());
-    stats_out = compute_stats(merged, 0);
+    stats_out = compute_stats(merged, measured_allocs);
     agg_rate_out = (static_cast<double>(merged.size()) * 1e9) / static_cast<double>(t_wall_ns);
 
     std::cout << "\n=== " << label << " (" << shard_count << " shards, " << session_count
@@ -731,7 +748,7 @@ bool run_sharded_acceptor_tcp(std::size_t shard_count, std::size_t session_count
               << "  p99.9= " << stats_out.p999_ns / 1000.0 << " us\n"
               << "  max  = " << stats_out.max_ns / 1000.0 << " us\n"
               << "  agg  = " << static_cast<std::uint64_t>(agg_rate_out) << " orders/sec ("
-              << shard_count << " pinned shards)\n";
+              << shard_count << " pinned shards) | allocs = " << stats_out.alloc_calls << "\n";
     return true;
 }
 
@@ -764,17 +781,18 @@ int main(int argc, char** argv) {
         }
         std::cout << "\n--- Sharded Scaling Summary (" << multi_sessions << " concurrent sessions, 1 shared port) ---\n"
                   << "  1-core epoll           : p50=" << std::fixed << std::setprecision(2) << s1.p50_ns / 1000.0
-                  << " us | p99=" << s1.p99_ns / 1000.0 << " us | agg=" << static_cast<std::uint64_t>(r1) << " ord/s\n"
+                  << " us | p99=" << s1.p99_ns / 1000.0 << " us | agg=" << static_cast<std::uint64_t>(r1)
+                  << " ord/s | allocs=" << s1.alloc_calls << "\n"
                   << "  4-shard epoll          : p50=" << s4.p50_ns / 1000.0
                   << " us | p99=" << s4.p99_ns / 1000.0 << " us | agg=" << static_cast<std::uint64_t>(r4)
-                  << " ord/s (" << std::setprecision(2) << (r4 / r1) << "x)\n"
+                  << " ord/s (" << std::setprecision(2) << (r4 / r1) << "x) | allocs=" << s4.alloc_calls << "\n"
                   << "  4-shard hybrid_backoff : p50=" << s8.p50_ns / 1000.0
                   << " us | p99=" << s8.p99_ns / 1000.0 << " us | agg=" << static_cast<std::uint64_t>(r8)
-                  << " ord/s (" << std::setprecision(2) << (r8 / r1) << "x)\n";
+                  << " ord/s (" << std::setprecision(2) << (r8 / r1) << "x) | allocs=" << s8.alloc_calls << "\n";
         if (has_uring) {
             std::cout << "  4-shard io_uring+hyb   : p50=" << su.p50_ns / 1000.0
                       << " us | p99=" << su.p99_ns / 1000.0 << " us | agg=" << static_cast<std::uint64_t>(ru)
-                      << " ord/s (" << std::setprecision(2) << (ru / r1) << "x)\n";
+                      << " ord/s (" << std::setprecision(2) << (ru / r1) << "x) | allocs=" << su.alloc_calls << "\n";
         }
         return 0;
     }

@@ -59,6 +59,8 @@ struct ReplayOptions {
     bool verify_frames{true};
     bool verify_checksum{true};
     std::size_t max_frame_bytes{default_max_frame_bytes};
+    // Optional schema WireHints for custom LENGTH/DATA pairs containing SOH bytes.
+    WireHints wire_hints{};
     // Caps any single inter-frame sleep in original/scaled mode (0 = uncapped).
     std::uint64_t max_sleep_us{1'000'000};
     std::size_t journal_max_records{65'536};
@@ -210,17 +212,108 @@ struct ProbedManifest {
 
 } // namespace detail
 
-// Deterministic historical replayer built on the lease-protected mmap JournalReader.
-// Replays recorded FIX sessions offline into a callback sink or over real TCP with
+// Deterministic historical replayer built on the mmap JournalReader (in-process)
+// and lock-free read-only JournalTailer (cross-process live or offline .nfxj).
+// Replays recorded FIX sessions into a callback sink or over real TCP with
 // original (tag 52=SendingTime), scaled, or full-speed timing.
 class JournalReplayer {
 public:
-    // Replays from an already-open Journal using a lease-protected JournalReader.
+    // Replays from an already-open Journal using an in-process lease-protected JournalReader.
     // Sink signature: Status on_frame(const JournalRecord& rec, const FlatMessageView* parsed)
     template <class Sink>
     [[nodiscard]] static Result<ReplayStats> replay(Journal& journal,
                                                     const ReplayOptions& opts,
                                                     Sink&& on_frame) noexcept try {
+        if (const auto st = validate_options(opts); !st.ok()) return st;
+        auto reader_res = journal.create_reader(journal.lowest_retained_record_id());
+        if (!reader_res.ok()) return reader_res.status();
+        auto reader = std::move(reader_res).value();
+        return replay_from_source(reader, opts, std::forward<Sink>(on_frame));
+    } catch (const std::bad_alloc&) {
+        return Status{ErrorCode::capacity_exceeded};
+    } catch (...) {
+        return Status{ErrorCode::io_error};
+    }
+
+    // Replays from an already-open cross-process read-only JournalTailer.
+    template <class Sink>
+    [[nodiscard]] static Result<ReplayStats> replay(JournalTailer& tailer,
+                                                    const ReplayOptions& opts,
+                                                    Sink&& on_frame) noexcept try {
+        if (const auto st = validate_options(opts); !st.ok()) return st;
+        return replay_from_source(tailer, opts, std::forward<Sink>(on_frame));
+    } catch (const std::bad_alloc&) {
+        return Status{ErrorCode::capacity_exceeded};
+    } catch (...) {
+        return Status{ErrorCode::io_error};
+    }
+
+    // Opens a segmented v2 mmap Journal in lock-free read-only mode (JournalTailer)
+    // and replays matching frames into on_frame. Works on BOTH live active sessions
+    // (without blocking or locking the writer process) and offline .nfxj journals.
+    template <class Sink>
+    [[nodiscard]] static Result<ReplayStats> replay(const ReplayOptions& opts,
+                                                    Sink&& on_frame) noexcept try {
+        if (opts.journal_path.empty()) return Status{ErrorCode::invalid_config};
+        if (const auto st = validate_options(opts); !st.ok()) return st;
+        const std::string path_str = opts.journal_path.string();
+        JournalTailerConfig tcfg{};
+        tcfg.path = path_str;
+        tcfg.session_key = opts.session_key;
+        tcfg.start = JournalTailStart::beginning;
+        tcfg.verify_crc = true;
+        auto opened = JournalTailer::open(tcfg);
+        if (!opened.ok()) return opened.status();
+        return replay_from_source(opened.value(), opts, std::forward<Sink>(on_frame));
+    } catch (const std::bad_alloc&) {
+        return Status{ErrorCode::capacity_exceeded};
+    } catch (...) {
+        return Status{ErrorCode::io_error};
+    }
+
+    // Replays matching frames from an open Journal directly to a TCP endpoint.
+    [[nodiscard]] static Result<ReplayStats> replay_to_tcp(Journal& journal,
+                                                           const ReplayOptions& opts,
+                                                           const TcpEndpoint& target,
+                                                           std::uint32_t connect_timeout_ms = 5'000,
+                                                           std::uint32_t write_timeout_ms = 5'000) noexcept {
+        TcpTransport transport{};
+        if (const auto st = connect_tcp_target(transport, target, connect_timeout_ms); !st.ok()) return st;
+        return replay(journal, opts, [&](const JournalRecord& rec, const FlatMessageView*) noexcept -> Status {
+            return detail::replay_write_all_tcp(transport, rec.payload, write_timeout_ms);
+        });
+    }
+
+    // Opens a segmented v2 mmap Journal in lock-free read-only mode (live or offline)
+    // and streams matching frames to a TCP endpoint.
+    [[nodiscard]] static Result<ReplayStats> replay_to_tcp(const ReplayOptions& opts,
+                                                           const TcpEndpoint& target,
+                                                           std::uint32_t connect_timeout_ms = 5'000,
+                                                           std::uint32_t write_timeout_ms = 5'000) noexcept try {
+        if (opts.journal_path.empty()) return Status{ErrorCode::invalid_config};
+        if (const auto st = validate_options(opts); !st.ok()) return st;
+        const std::string path_str = opts.journal_path.string();
+        JournalTailerConfig tcfg{};
+        tcfg.path = path_str;
+        tcfg.session_key = opts.session_key;
+        tcfg.start = JournalTailStart::beginning;
+        tcfg.verify_crc = true;
+        auto opened = JournalTailer::open(tcfg);
+        if (!opened.ok()) return opened.status();
+        TcpTransport transport{};
+        if (const auto st = connect_tcp_target(transport, target, connect_timeout_ms); !st.ok()) return st;
+        return replay_from_source(opened.value(), opts,
+            [&](const JournalRecord& rec, const FlatMessageView*) noexcept -> Status {
+                return detail::replay_write_all_tcp(transport, rec.payload, write_timeout_ms);
+            });
+    } catch (const std::bad_alloc&) {
+        return Status{ErrorCode::capacity_exceeded};
+    } catch (...) {
+        return Status{ErrorCode::io_error};
+    }
+
+private:
+    [[nodiscard]] static Status validate_options(const ReplayOptions& opts) noexcept {
         if (opts.timing == ReplayTiming::scaled &&
             (!std::isfinite(opts.speed_multiplier) || opts.speed_multiplier <= 0.0)) {
             return Status{ErrorCode::invalid_config};
@@ -229,11 +322,38 @@ public:
             return Status{ErrorCode::invalid_config};
         }
         if (opts.max_frame_bytes < 64) return Status{ErrorCode::invalid_config};
+        return Status::success();
+    }
 
-        auto reader_res = journal.create_reader(journal.lowest_retained_record_id());
-        if (!reader_res.ok()) return reader_res.status();
-        auto reader = std::move(reader_res).value();
+    [[nodiscard]] static Status connect_tcp_target(TcpTransport& transport,
+                                                   const TcpEndpoint& target,
+                                                   std::uint32_t connect_timeout_ms) noexcept {
+        if (target.host.empty() || target.port == 0) return Status{ErrorCode::invalid_config};
+        const auto cst = transport.connect(target.host, target.port);
+        if (!cst.ok()) return cst;
+        if (transport.is_connecting()) {
+            const std::uint64_t deadline = telemetry_now_ns() +
+                static_cast<std::uint64_t>(connect_timeout_ms) * 1'000'000ULL;
+            while (transport.is_connecting()) {
+                const auto fc = transport.finish_connect();
+                if (fc.ok()) break;
+                if (fc.code != ErrorCode::need_more) return fc;
+                const std::uint64_t now = telemetry_now_ns();
+                if (now >= deadline) return Status{ErrorCode::io_error};
+                const int rem_ms = static_cast<int>(
+                    std::min<std::uint64_t>((deadline - now + 999'999ULL) / 1'000'000ULL, 1000ULL));
+                pollfd pfd{transport.native_fd(), POLLOUT, 0};
+                const int rc = ::poll(&pfd, 1, rem_ms);
+                if (rc < 0 && errno != EINTR) return Status{ErrorCode::io_error, 0, static_cast<std::size_t>(errno)};
+            }
+        }
+        return Status::success();
+    }
 
+    template <class Source, class Sink>
+    [[nodiscard]] static Result<ReplayStats> replay_from_source(Source& source,
+                                                                const ReplayOptions& opts,
+                                                                Sink&& on_frame) noexcept try {
         std::vector<FieldView> fields(opts.max_frame_bytes / 4 + 16);
         detail::ParsedFieldIndex index{};
         ReplayStats stats{};
@@ -243,7 +363,7 @@ public:
 
         JournalRecord rec{};
         for (;;) {
-            const auto st = reader.next(rec);
+            const auto st = source.next(rec);
             if (st.code == ErrorCode::need_more) break;
             if (!st.ok()) return st;
             ++stats.scanned_records;
@@ -272,7 +392,7 @@ public:
             const FlatMessageView* parsed_ptr = nullptr;
             if (need_parse) {
                 FrameView fv{};
-                const auto ist = inspect_frame(rec.payload, fv, WireHints{},
+                const auto ist = inspect_frame(rec.payload, fv, opts.wire_hints,
                     CodecLimits{opts.max_frame_bytes, opts.verify_checksum});
                 if (!ist.ok() || fv.consumed != rec.payload.size()) {
                     ++stats.invalid_frames;
@@ -280,7 +400,7 @@ public:
                     ++stats.skipped_records;
                     continue;
                 }
-                const auto pst = parse_flat_verified(fv, fields, parsed);
+                const auto pst = parse_flat_verified(fv, fields, parsed, opts.wire_hints);
                 if (!pst.ok()) {
                     ++stats.invalid_frames;
                     if (opts.verify_frames) return pst;
@@ -332,98 +452,6 @@ public:
         }
         stats.elapsed_ns = telemetry_now_ns() - start_ns;
         return stats;
-    } catch (const std::bad_alloc&) {
-        return Status{ErrorCode::capacity_exceeded};
-    } catch (...) {
-        return Status{ErrorCode::io_error};
-    }
-
-    // Opens an existing segmented mmap Journal from disk and replays matching frames into on_frame.
-    template <class Sink>
-    [[nodiscard]] static Result<ReplayStats> replay(const ReplayOptions& opts,
-                                                    Sink&& on_frame) noexcept try {
-        if (opts.journal_path.empty()) return Status{ErrorCode::invalid_config};
-        auto probed = detail::probe_v2_manifest(opts.journal_path);
-        if (!probed.ok()) return probed.status();
-        const auto& meta = probed.value();
-
-        const std::string key = opts.session_key.empty() ? meta.session_key : opts.session_key;
-        const std::string path_str = opts.journal_path.string();
-        JournalConfig jcfg{};
-        jcfg.path = path_str;
-        jcfg.session_key = key;
-        jcfg.capacity_bytes = meta.capacity_bytes;
-        jcfg.segment_bytes = meta.segment_bytes;
-        jcfg.max_segments = meta.max_segments;
-        jcfg.max_records = std::max<std::size_t>(opts.journal_max_records, 1024);
-        jcfg.max_readers = 1;
-        jcfg.max_reader_lag_records = jcfg.max_records;
-
-        auto opened = Journal::open(jcfg);
-        if (!opened.ok()) return opened.status();
-        return replay(opened.value(), opts, std::forward<Sink>(on_frame));
-    } catch (const std::bad_alloc&) {
-        return Status{ErrorCode::capacity_exceeded};
-    } catch (...) {
-        return Status{ErrorCode::io_error};
-    }
-
-    // Replays matching frames from an open Journal directly to a TCP endpoint.
-    [[nodiscard]] static Result<ReplayStats> replay_to_tcp(Journal& journal,
-                                                           const ReplayOptions& opts,
-                                                           const TcpEndpoint& target,
-                                                           std::uint32_t connect_timeout_ms = 5'000,
-                                                           std::uint32_t write_timeout_ms = 5'000) noexcept {
-        if (target.host.empty() || target.port == 0) return Status{ErrorCode::invalid_config};
-        TcpTransport transport{};
-        const auto cst = transport.connect(target.host, target.port);
-        if (!cst.ok()) return cst;
-        if (transport.is_connecting()) {
-            const std::uint64_t deadline = telemetry_now_ns() +
-                static_cast<std::uint64_t>(connect_timeout_ms) * 1'000'000ULL;
-            while (transport.is_connecting()) {
-                const auto fc = transport.finish_connect();
-                if (fc.ok()) break;
-                if (fc.code != ErrorCode::need_more) return fc;
-                const std::uint64_t now = telemetry_now_ns();
-                if (now >= deadline) return Status{ErrorCode::io_error};
-                const int rem_ms = static_cast<int>(
-                    std::min<std::uint64_t>((deadline - now + 999'999ULL) / 1'000'000ULL, 1000ULL));
-                pollfd pfd{transport.native_fd(), POLLOUT, 0};
-                const int rc = ::poll(&pfd, 1, rem_ms);
-                if (rc < 0 && errno != EINTR) return Status{ErrorCode::io_error, 0, static_cast<std::size_t>(errno)};
-            }
-        }
-        return replay(journal, opts, [&](const JournalRecord& rec, const FlatMessageView*) noexcept -> Status {
-            return detail::replay_write_all_tcp(transport, rec.payload, write_timeout_ms);
-        });
-    }
-
-    // Opens an existing segmented mmap Journal from disk and streams matching frames to a TCP endpoint.
-    [[nodiscard]] static Result<ReplayStats> replay_to_tcp(const ReplayOptions& opts,
-                                                           const TcpEndpoint& target,
-                                                           std::uint32_t connect_timeout_ms = 5'000,
-                                                           std::uint32_t write_timeout_ms = 5'000) noexcept try {
-        if (opts.journal_path.empty()) return Status{ErrorCode::invalid_config};
-        auto probed = detail::probe_v2_manifest(opts.journal_path);
-        if (!probed.ok()) return probed.status();
-        const auto& meta = probed.value();
-
-        const std::string key = opts.session_key.empty() ? meta.session_key : opts.session_key;
-        const std::string path_str = opts.journal_path.string();
-        JournalConfig jcfg{};
-        jcfg.path = path_str;
-        jcfg.session_key = key;
-        jcfg.capacity_bytes = meta.capacity_bytes;
-        jcfg.segment_bytes = meta.segment_bytes;
-        jcfg.max_segments = meta.max_segments;
-        jcfg.max_records = std::max<std::size_t>(opts.journal_max_records, 1024);
-        jcfg.max_readers = 1;
-        jcfg.max_reader_lag_records = jcfg.max_records;
-
-        auto opened = Journal::open(jcfg);
-        if (!opened.ok()) return opened.status();
-        return replay_to_tcp(opened.value(), opts, target, connect_timeout_ms, write_timeout_ms);
     } catch (const std::bad_alloc&) {
         return Status{ErrorCode::capacity_exceeded};
     } catch (...) {

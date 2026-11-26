@@ -37,6 +37,8 @@
 #include <thread>
 #include <vector>
 
+#include "alloc_audit.hpp"
+
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
@@ -46,29 +48,10 @@
 namespace nf = nimblefix;
 namespace fix = nimblefix::fix44;
 
-// Global allocation counters via -Wl,--wrap=malloc + operator new/delete.
-// Shared identically by BOTH NimbleFIX and statically-linked QuickFIX.
 namespace {
-std::atomic<bool> g_track_alloc{false};
-std::atomic<std::uint64_t> g_alloc_calls{0};
+auto& g_track_alloc = nf::bench_audit::g_track;
+auto& g_alloc_calls = nf::bench_audit::g_calls;
 } // namespace
-
-extern "C" void* __real_malloc(std::size_t);
-extern "C" void* __wrap_malloc(std::size_t size) {
-    if (g_track_alloc.load(std::memory_order_relaxed)) {
-        g_alloc_calls.fetch_add(1, std::memory_order_relaxed);
-    }
-    return __real_malloc(size);
-}
-void* operator new(std::size_t size) {
-    if (auto* p = std::malloc(size == 0 ? 1 : size)) return p;
-    throw std::bad_alloc();
-}
-void* operator new[](std::size_t size) { return ::operator new(size); }
-void operator delete(void* p) noexcept { std::free(p); }
-void operator delete[](void* p) noexcept { std::free(p); }
-[[gnu::noinline]] void operator delete(void* p, std::size_t) noexcept { std::free(p); }
-void operator delete[](void* p, std::size_t) noexcept { std::free(p); }
 
 namespace {
 
@@ -686,6 +669,85 @@ bool run_suite2_parse(std::size_t warmup, std::size_t samples,
     std::string wire;
     sample_order.toString(wire);
 
+    // Pre-timing validation parity equivalence gate: verify NimbleFIX and QuickFIX
+    // reach identical accept/reject decisions on valid AND malformed Header/Body frames.
+    {
+        auto make_raw_frame = [](std::string_view body) -> std::string {
+            std::string f = "8=FIX.4.4\x01" "9=" + std::to_string(body.size()) + "\x01" + std::string{body};
+            unsigned sum = 0;
+            for (unsigned char ch : f) sum += ch;
+            char cs[16]{};
+            std::snprintf(cs, sizeof(cs), "10=%03u\x01", sum % 256U);
+            f += cs;
+            return f;
+        };
+        auto nf_accepts = [](std::string_view raw) -> bool {
+            nf::FrameView fv{};
+            if (!nf::inspect_frame(raw, fv, fix::Schema::wire_hints()).ok()) return false;
+            std::array<nf::FieldView, 64> scratch{};
+            nf::FlatMessageView mv{};
+            if (!nf::parse_flat_verified(fv, scratch, mv, fix::Schema::wire_hints()).ok()) return false;
+            return nf::validate_schema_message(fix::Schema::descriptor(), mv, nf::ValidationLevel::strict).ok();
+        };
+        auto qf_accepts = [&](const std::string& raw) -> bool {
+            try {
+                FIX::Message msg;
+                msg.setString(raw, true, &dict);
+                dict.validate(msg);
+                return true;
+            } catch (const FIX::Exception&) {
+                return false;
+            }
+        };
+        struct ParityCase { const char* name; std::string raw; bool expected; };
+        const std::vector<ParityCase> cases{
+            {"valid_nos", wire, true},
+            {"valid_369_zero", make_raw_frame(
+                "35=D\x01" "49=BUY\x01" "56=SELL\x01" "34=2\x01" "52=20261123-00:00:00.000\x01" "369=0\x01"
+                "11=O1\x01" "55=AAPL\x01" "54=1\x01" "60=20261123-00:00:00.000\x01" "40=1\x01"), true},
+            {"missing_header_49", make_raw_frame(
+                "35=D\x01" "56=SELL\x01" "34=2\x01" "52=20261123-00:00:00.000\x01"
+                "11=O1\x01" "55=AAPL\x01" "54=1\x01" "60=20261123-00:00:00.000\x01" "40=1\x01"), false},
+            {"invalid_header_97_enum", make_raw_frame(
+                "35=D\x01" "49=BUY\x01" "56=SELL\x01" "34=2\x01" "52=20261123-00:00:00.000\x01" "97=Z\x01"
+                "11=O1\x01" "55=AAPL\x01" "54=1\x01" "60=20261123-00:00:00.000\x01" "40=1\x01"), false},
+            {"invalid_header_52_timestamp", make_raw_frame(
+                "35=D\x01" "49=BUY\x01" "56=SELL\x01" "34=2\x01" "52=BAD-TIME\x01"
+                "11=O1\x01" "55=AAPL\x01" "54=1\x01" "60=20261123-00:00:00.000\x01" "40=1\x01"), false},
+            {"duplicate_header_97", make_raw_frame(
+                "35=D\x01" "49=BUY\x01" "56=SELL\x01" "34=2\x01" "52=20261123-00:00:00.000\x01" "97=Y\x01" "97=N\x01"
+                "11=O1\x01" "55=AAPL\x01" "54=1\x01" "60=20261123-00:00:00.000\x01" "40=1\x01"), false},
+            {"header_after_body_50", make_raw_frame(
+                "35=D\x01" "49=BUY\x01" "56=SELL\x01" "34=2\x01" "52=20261123-00:00:00.000\x01"
+                "11=O1\x01" "55=AAPL\x01" "54=1\x01" "60=20261123-00:00:00.000\x01" "40=1\x01" "50=DESK\x01"), false},
+            {"body_after_trailer_93_89", make_raw_frame(
+                "35=D\x01" "49=BUY\x01" "56=SELL\x01" "34=2\x01" "52=20261123-00:00:00.000\x01"
+                "11=O1\x01" "55=AAPL\x01" "54=1\x01" "60=20261123-00:00:00.000\x01"
+                "93=3\x01" "89=sig\x01" "40=1\x01"), false},
+            {"invalid_body_54_enum", make_raw_frame(
+                "35=D\x01" "49=BUY\x01" "56=SELL\x01" "34=2\x01" "52=20261123-00:00:00.000\x01"
+                "11=O1\x01" "55=AAPL\x01" "54=Z\x01" "60=20261123-00:00:00.000\x01" "40=1\x01"), false},
+            {"unknown_tag_99999", make_raw_frame(
+                "35=D\x01" "49=BUY\x01" "56=SELL\x01" "34=2\x01" "52=20261123-00:00:00.000\x01"
+                "11=O1\x01" "55=AAPL\x01" "54=1\x01" "60=20261123-00:00:00.000\x01" "40=1\x01" "99999=X\x01"), false},
+            {"missing_required_40", make_raw_frame(
+                "35=D\x01" "49=BUY\x01" "56=SELL\x01" "34=2\x01" "52=20261123-00:00:00.000\x01"
+                "11=O1\x01" "55=AAPL\x01" "54=1\x01" "60=20261123-00:00:00.000\x01"), false},
+            {"duplicate_body_11", make_raw_frame(
+                "35=D\x01" "49=BUY\x01" "56=SELL\x01" "34=2\x01" "52=20261123-00:00:00.000\x01"
+                "11=O1\x01" "11=O2\x01" "55=AAPL\x01" "54=1\x01" "60=20261123-00:00:00.000\x01" "40=1\x01"), false},
+        };
+        for (const auto& c : cases) {
+            const bool nf_ok = nf_accepts(c.raw);
+            const bool qf_ok = qf_accepts(c.raw);
+            if (nf_ok != c.expected || qf_ok != c.expected) {
+                std::cerr << "Suite 2 parity gate mismatch on case '" << c.name
+                          << "': expected=" << c.expected << " nf=" << nf_ok << " qf=" << qf_ok << '\n';
+                return false;
+            }
+        }
+    }
+
     volatile std::uint64_t sink = 0;
 
     // 2A. NimbleFIX inspect + parse_flat_verified + strict 912-field validation + typed view read
@@ -815,6 +877,8 @@ bool run_nf_direct_initiator_rtt(std::size_t warmup, std::size_t samples, Stats&
     cfg.local_comp_id = "BUY";
     cfg.remote_comp_id = "SELL";
     cfg.heartbeat_ms = 60'000;
+    cfg.check_sending_time = true;
+    cfg.max_sending_time_skew_ms = 120'000;
     cfg.journal_capacity_bytes = 64U * 1024U * 1024U;
     cfg.journal_segment_bytes = 4U * 1024U * 1024U;
     cfg.journal_max_records = 262'144;
@@ -1345,7 +1409,7 @@ bool run_qf_acceptor_rtt(const std::string& dict_path,
 }
 
 // ============================================================================
-// Suite 5: Open-Loop Dense Burst (Initiator -> Neutral Peer, CO-Free 1-Way)
+// Suite 5: Single-Batch Simultaneous Burst (Initiator -> Neutral Peer, Burst->Recv 1-Way)
 // ============================================================================
 bool run_nf_direct_burst(bool batched, std::size_t warmup_bursts,
                          std::size_t bursts, std::size_t burst_size, Stats& out) {
@@ -1361,6 +1425,8 @@ bool run_nf_direct_burst(bool batched, std::size_t warmup_bursts,
     cfg.local_comp_id = "BUY";
     cfg.remote_comp_id = "SELL";
     cfg.heartbeat_ms = 60'000;
+    cfg.check_sending_time = true;
+    cfg.max_sending_time_skew_ms = 120'000;
     cfg.max_pending_messages = 256;
     cfg.journal_capacity_bytes = 64U * 1024U * 1024U;
     cfg.journal_segment_bytes = 4U * 1024U * 1024U;
@@ -1557,7 +1623,7 @@ int main(int argc, char** argv) {
               << "  Ack        : ExecutionReport (11 business fields, populated in callback)\n"
               << "  Store      : NimbleFIX v2 mmap Journal vs QuickFIX FileStore (OS page-cache, no fsync)\n"
               << "  Logging    : Disabled on both engines | TCP: 127.0.0.1 TCP_NODELAY=1 neutral peer\n"
-              << "  Allocators : Unified -Wl,--wrap=malloc + operator new/delete across both engines\n"
+              << "  Allocators : Unified -Wl,--wrap={malloc,calloc,realloc,aligned_alloc,posix_memalign} + operator new/delete\n"
               << "====================================================================================\n";
 
     try {
@@ -1607,17 +1673,17 @@ int main(int argc, char** argv) {
         print_row_us("NimbleFIX Engine Acceptor (epoll)", acc_epoll, &acc_qf);
         print_row_us("QuickFIX SocketAcceptor (FileStore)", acc_qf);
 
-        // Suite 5: Open-Loop Dense Burst (CO-Free One-Way Latency & Throughput)
+        // Suite 5: Single-Batch Simultaneous Burst (Burst->Recv 1-Way, inter-batch drain synchronized)
         const std::size_t burst_size = 32;
         const std::size_t warmup_bursts = std::max<std::size_t>(2, warmup / burst_size);
         const std::size_t bursts = std::max<std::size_t>(5, samples / burst_size);
-        std::cout << "\n=== Suite 5: Open-Loop Dense Burst (" << bursts << " bursts x " << burst_size
-                  << " orders, CO-Free 1-way) ===\n";
+        std::cout << "\n=== Suite 5: Single-Batch Simultaneous Burst (" << bursts << " bursts x " << burst_size
+                  << " orders, Burst->Recv 1-way, inter-batch drain) ===\n";
         Stats burst_direct{}, burst_batch{}, burst_qf{};
         if (!run_nf_direct_burst(false, warmup_bursts, bursts, burst_size, burst_direct) ||
             !run_nf_direct_burst(true, warmup_bursts, bursts, burst_size, burst_batch) ||
             !run_qf_burst(dict_path, warmup_bursts, bursts, burst_size, burst_qf)) {
-            std::cerr << "Suite 5 (Open-Loop Dense Burst) failed\n";
+            std::cerr << "Suite 5 (Single-Batch Simultaneous Burst) failed\n";
             return 1;
         }
         print_row_us("NimbleFIX DirectInitiator::send()", burst_direct, &burst_qf);

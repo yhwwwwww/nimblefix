@@ -14,6 +14,7 @@
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -515,16 +516,39 @@ std::string render_header(const Schema& schema, std::string_view ns_arg) {
     }
     emit("}};");
     emit("");
+    auto session_req_mask_for = [&](const std::vector<MemberDef>& ms) -> std::uint16_t {
+        std::uint16_t mask = 0;
+        for (const auto& m : ms) {
+            if (!m.required || m.kind != "field") continue;
+            switch (schema.fields_by_name.at(m.field_name).number) {
+            case 8u:    mask |= (1u << 0); break;
+            case 9u:    mask |= (1u << 1); break;
+            case 35u:   mask |= (1u << 2); break;
+            case 49u:   mask |= (1u << 3); break;
+            case 56u:   mask |= (1u << 4); break;
+            case 34u:   mask |= (1u << 5); break;
+            case 52u:   mask |= (1u << 6); break;
+            case 43u:   mask |= (1u << 7); break;
+            case 122u:  mask |= (1u << 8); break;
+            case 369u:  mask |= (1u << 9); break;
+            case 1128u: mask |= (1u << 10); break;
+            case 10u:   mask |= (1u << 11); break;
+            default: break;
+            }
+        }
+        return mask;
+    };
     emit("inline constexpr std::array<ComponentDescriptor, " + std::to_string(components.size()) + "> components{{");
     for (std::size_t i = 0; i < components.size(); ++i) {
         const auto [has_gt, bloom] = comp_meta[i];
         const std::string gt_expr = has_gt
             ? ("std::span<const std::uint32_t>{component_" + std::to_string(i) + "_members_group_tags}")
             : "std::span<const std::uint32_t>{}";
+        const std::uint16_t req_smask = session_req_mask_for(schema.expanded_components.at(components[i]->name));
         emit("    {" + cpp_string(components[i]->name) +
              ", std::span<const MessageMemberDescriptor>{component_" + std::to_string(i) + "_members}, "
              "std::span<const ::nimblefix::MemberTagEntry>{component_" + std::to_string(i) + "_members_by_tag}, " +
-             gt_expr + ", " + hex_u64(bloom) + ", true},");
+             gt_expr + ", " + hex_u64(bloom) + ", true, " + std::to_string(req_smask) + "u},");
     }
     emit("}};");
     emit("");
@@ -871,23 +895,94 @@ std::string render_header(const Schema& schema, std::string_view ns_arg) {
     const auto& header_members = schema.expanded_components.contains("Header") ? schema.expanded_components.at("Header") : empty_ms;
     const auto& trailer_members = schema.expanded_components.contains("Trailer") ? schema.expanded_components.at("Trailer") : empty_ms;
     std::set<std::uint32_t> header_scalar_tags, header_all_tags, trailer_scalar_tags, trailer_all_tags;
-    std::vector<std::pair<std::uint32_t, std::size_t>> header_groups, trailer_groups;
+    std::vector<std::tuple<std::uint32_t, std::size_t, bool>> header_groups, trailer_groups;
+    std::vector<const FieldDef*> env_scalars;
+    std::vector<bool> env_scalar_required;
+    std::set<std::uint32_t> env_scalar_seen;
+    std::vector<MemberDef> env_all_members;
     for (const auto& m : header_members) {
-        const std::uint32_t t = schema.fields_by_name.at(m.field_name).number;
+        const auto& fd = schema.fields_by_name.at(m.field_name);
+        const std::uint32_t t = fd.number;
         header_all_tags.insert(t);
-        if (m.kind == "field") header_scalar_tags.insert(t);
-        else header_groups.emplace_back(t, group_indexes.at(make_group_key(make_group_key, m)));
+        env_all_members.push_back(m);
+        if (m.kind == "field") {
+            header_scalar_tags.insert(t);
+            if (!session_or_frame_tags().contains(t) && env_scalar_seen.insert(t).second) {
+                env_scalars.push_back(&fd);
+                env_scalar_required.push_back(m.required);
+            }
+        } else {
+            header_groups.emplace_back(t, group_indexes.at(make_group_key(make_group_key, m)), m.required);
+        }
     }
     for (const auto& m : trailer_members) {
-        const std::uint32_t t = schema.fields_by_name.at(m.field_name).number;
+        const auto& fd = schema.fields_by_name.at(m.field_name);
+        const std::uint32_t t = fd.number;
         trailer_all_tags.insert(t);
-        if (m.kind == "field") trailer_scalar_tags.insert(t);
-        else trailer_groups.emplace_back(t, group_indexes.at(make_group_key(make_group_key, m)));
+        env_all_members.push_back(m);
+        if (m.kind == "field") {
+            trailer_scalar_tags.insert(t);
+            if (!session_or_frame_tags().contains(t) && env_scalar_seen.insert(t).second) {
+                env_scalars.push_back(&fd);
+                env_scalar_required.push_back(m.required);
+            }
+        } else {
+            trailer_groups.emplace_back(t, group_indexes.at(make_group_key(make_group_key, m)), m.required);
+        }
     }
     emit_tag_pred("is_header_scalar_tag", header_scalar_tags);
     emit_tag_pred("is_header_tag", header_all_tags);
     emit_tag_pred("is_trailer_scalar_tag", trailer_scalar_tags);
     emit_tag_pred("is_trailer_tag", trailer_all_tags);
+
+    if (env_scalars.empty()) {
+        emit("[[nodiscard]] inline int envelope_scalar_index(std::uint32_t) noexcept { return -1; }");
+        emit("[[nodiscard]] inline ::nimblefix::Status check_envelope_scalar(const ::nimblefix::FieldView&, ::nimblefix::ValidationLevel) noexcept { return ::nimblefix::Status::success(); }");
+    } else {
+        emit("[[nodiscard]] inline int envelope_scalar_index(std::uint32_t tag) noexcept {");
+        emit("    switch (tag) {");
+        for (std::size_t ei = 0; ei < env_scalars.size(); ++ei) {
+            emit("    case " + std::to_string(env_scalars[ei]->number) + "u: return " + std::to_string(ei) + ";");
+        }
+        emit("    default: return -1;");
+        emit("    }");
+        emit("}");
+        emit("[[gnu::noinline, gnu::cold]] [[nodiscard]] inline ::nimblefix::Status check_envelope_scalar(const ::nimblefix::FieldView& f, ::nimblefix::ValidationLevel level) noexcept {");
+        emit("    (void)level;");
+        emit("    switch (f.tag) {");
+        for (const FieldDef* ef : env_scalars) {
+            emit("    case " + std::to_string(ef->number) + "u: return " + scalar_check_expr(*ef) + ";");
+        }
+        emit("    default: return ::nimblefix::Status::success();");
+        emit("    }");
+        emit("}");
+    }
+    const auto env_ld_pairs = level_len_data_pairs(env_all_members);
+    std::set<std::uint32_t> env_ld_tags;
+    for (const auto& [lt, dt] : env_ld_pairs) {
+        env_ld_tags.insert(lt);
+        env_ld_tags.insert(dt);
+    }
+    if (!env_ld_pairs.empty()) {
+        emit("[[gnu::noinline, gnu::cold]] [[nodiscard]] inline ::nimblefix::Status check_envelope_len_data(std::span<const ::nimblefix::FieldView> fields) noexcept {");
+        for (const auto& [lt, dt] : env_ld_pairs) {
+            emit("    int ld_len_" + std::to_string(lt) + " = -1, ld_data_" + std::to_string(dt) + " = -1;");
+        }
+        emit("    for (std::size_t i = 0; i < fields.size(); ++i) {");
+        emit("        switch (fields[i].tag) {");
+        for (const auto& [lt, dt] : env_ld_pairs) {
+            emit("        case " + std::to_string(lt) + "u: if (ld_len_" + std::to_string(lt) + " < 0) ld_len_" + std::to_string(lt) + " = static_cast<int>(i); break;");
+            emit("        case " + std::to_string(dt) + "u: if (ld_data_" + std::to_string(dt) + " < 0) ld_data_" + std::to_string(dt) + " = static_cast<int>(i); break;");
+        }
+        emit("        default: break;");
+        emit("        }");
+        emit("    }");
+        for (const auto& [lt, dt] : env_ld_pairs) {
+            emit("    if (const auto st = ::nimblefix::detail::check_len_data_pair(fields, " + std::to_string(lt) + "u, ld_len_" + std::to_string(lt) + ", ld_data_" + std::to_string(dt) + "); !st.ok()) return st;");
+        }
+        emit("    return ::nimblefix::Status::success();");
+        emit("}");
+    }
 
     // Leaf-first group validators
     for (std::size_t g_idx : group_emit_order) {
@@ -1051,10 +1146,29 @@ std::string render_header(const Schema& schema, std::string_view ns_arg) {
         for (std::size_t mi = 0; mi < mm.size(); ++mi) {
             if (mm[mi].required) req_by_word[mi / 64].emplace_back(mi % 64, schema.fields_by_name.at(mm[mi].field_name).number);
         }
-        std::vector<std::pair<std::uint32_t, std::size_t>> act_hdr_g, act_trl_g;
-        for (const auto& [t, gi] : header_groups) if (!msg_tags.contains(t) && !session_or_frame_tags().contains(t)) act_hdr_g.emplace_back(t, gi);
-        for (const auto& [t, gi] : trailer_groups) if (!msg_tags.contains(t) && !session_or_frame_tags().contains(t)) act_trl_g.emplace_back(t, gi);
+        std::vector<std::tuple<std::uint32_t, std::size_t, bool>> act_hdr_g, act_trl_g;
+        for (const auto& [t, gi, req] : header_groups) if (!msg_tags.contains(t) && !session_or_frame_tags().contains(t)) act_hdr_g.emplace_back(t, gi, req);
+        for (const auto& [t, gi, req] : trailer_groups) if (!msg_tags.contains(t) && !session_or_frame_tags().contains(t)) act_trl_g.emplace_back(t, gi, req);
         const bool needs_ancestors = msg_has_groups || !act_hdr_g.empty() || !act_trl_g.empty();
+        const std::size_t env_total_bits = env_scalars.size() + act_hdr_g.size() + act_trl_g.size();
+        const std::size_t env_seen_words = env_total_bits == 0 ? 0 : (env_total_bits + 63) / 64;
+        std::map<std::size_t, std::vector<std::pair<std::size_t, std::uint32_t>>> env_req_by_word;
+        for (std::size_t ei = 0; ei < env_scalars.size(); ++ei) {
+            if (env_scalar_required[ei] && !msg_tags.contains(env_scalars[ei]->number)) {
+                env_req_by_word[ei / 64].emplace_back(ei % 64, env_scalars[ei]->number);
+            }
+        }
+        {
+            std::size_t gbit = env_scalars.size();
+            for (const auto& [ht, _gi, req] : act_hdr_g) {
+                if (req) env_req_by_word[gbit / 64].emplace_back(gbit % 64, ht);
+                ++gbit;
+            }
+            for (const auto& [tt, _gi, req] : act_trl_g) {
+                if (req) env_req_by_word[gbit / 64].emplace_back(gbit % 64, tt);
+                ++gbit;
+            }
+        }
 
         emit("[[nodiscard]] inline ::nimblefix::Status validate_msg_" + std::to_string(msg_idx) + "(");
         emit("    std::span<const ::nimblefix::FieldView> fields,");
@@ -1071,7 +1185,12 @@ std::string render_header(const Schema& schema, std::string_view ns_arg) {
         emit("    };");
         if (seen_words == 1) emit("    std::uint64_t seen = 0; (void)seen;");
         else emit("    std::uint64_t seen[" + std::to_string(seen_words) + "]{}; (void)seen;");
+        if (env_seen_words == 1) emit("    std::uint64_t env_seen = 0; (void)env_seen;");
+        else if (env_seen_words > 1) emit("    std::uint64_t env_seen[" + std::to_string(env_seen_words) + "]{}; (void)env_seen;");
+        if (!env_ld_pairs.empty()) emit("    bool has_env_ld = false;");
+        emit("    std::uint8_t section = 0;");
         emit("    ::nimblefix::Status first_content_err{};");
+        emit("    ::nimblefix::Status first_order_err{};");
         emit("    ::nimblefix::Status first_unknown_err{};");
         if (needs_ancestors) {
             emit("    ::nimblefix::detail::FastAncestorStack ancestors{};");
@@ -1087,8 +1206,16 @@ std::string render_header(const Schema& schema, std::string_view ns_arg) {
         emit("        const auto& f = fields[cursor];");
         emit("        const auto tag = f.tag;");
         emit("        switch (tag) {");
-        emit("        case 8u: case 9u: case 10u: case 34u: case 35u: case 43u:");
+        emit("        case 8u: case 9u: case 34u: case 35u: case 43u:");
         emit("        case 49u: case 52u: case 56u: case 122u: case 369u: case 1128u:");
+        emit("            if (section != 0u) [[unlikely]] {");
+        emit("                if (level == ::nimblefix::ValidationLevel::strict && first_order_err.ok())");
+        emit("                    first_order_err = {::nimblefix::ErrorCode::invalid_value, static_cast<int>(tag), f.offset};");
+        emit("            }");
+        emit("            ++cursor;");
+        emit("            break;");
+        emit("        case 10u:");
+        emit("            section = 2u;");
         emit("            ++cursor;");
         emit("            break;");
         for (std::size_t mi = 0; mi < mm.size(); ++mi) {
@@ -1098,6 +1225,10 @@ std::string render_header(const Schema& schema, std::string_view ns_arg) {
             const std::string seen_expr = (seen_words == 1) ? "seen" : ("seen[" + std::to_string(mi / 64) + "]");
             const std::size_t bit = mi % 64;
             emit("        case " + std::to_string(mf.number) + "u: {");
+            emit("            if (section == 2u) [[unlikely]] {");
+            emit("                if (level == ::nimblefix::ValidationLevel::strict && first_order_err.ok())");
+            emit("                    first_order_err = {::nimblefix::ErrorCode::invalid_value, " + std::to_string(mf.number) + ", f.offset};");
+            emit("            } else { section = 1u; }");
             emit("            if ((" + seen_expr + " & (std::uint64_t{1} << " + std::to_string(bit) + "u)) != 0) return fail_ret({::nimblefix::ErrorCode::duplicate_field, " + std::to_string(mf.number) + ", f.offset});");
             emit("            " + seen_expr + " |= (std::uint64_t{1} << " + std::to_string(bit) + "u);");
             if (m.kind == "field") {
@@ -1120,27 +1251,77 @@ std::string render_header(const Schema& schema, std::string_view ns_arg) {
             emit("        }");
         }
         emit("        default:");
-        for (const auto& [ht, hgi] : act_hdr_g) {
+        std::size_t env_group_bit_idx = env_scalars.size();
+        for (const auto& [ht, hgi, _req] : act_hdr_g) {
+            const std::string env_expr = (env_seen_words == 1) ? "env_seen" : ("env_seen[" + std::to_string(env_group_bit_idx / 64) + "]");
+            const std::size_t bit = env_group_bit_idx % 64;
+            ++env_group_bit_idx;
             emit("            if (tag == " + std::to_string(ht) + "u) {");
-            emit("                ::nimblefix::Status dummy_err{};");
+            emit("                if (section != 0u) [[unlikely]] {");
+            emit("                    if (level == ::nimblefix::ValidationLevel::strict && first_order_err.ok())");
+            emit("                        first_order_err = {::nimblefix::ErrorCode::invalid_value, " + std::to_string(ht) + ", f.offset};");
+            emit("                }");
+            emit("                if ((" + env_expr + " & (std::uint64_t{1} << " + std::to_string(bit) + "u)) != 0) return fail_ret({::nimblefix::ErrorCode::duplicate_field, " + std::to_string(ht) + ", f.offset});");
+            emit("                " + env_expr + " |= (std::uint64_t{1} << " + std::to_string(bit) + "u);");
             emit("                ancestors.predicates[ancestors.count++] = &is_header_tag;");
-            emit("                const auto hst = validate_group_" + std::to_string(hgi) + "(fields, cursor, ::nimblefix::ValidationLevel::structure, ancestors, dummy_err, 1);");
+            emit("                const auto hst = validate_group_" + std::to_string(hgi) + "(fields, cursor, level, ancestors, first_content_err, 1);");
             emit("                --ancestors.count;");
             emit("                if (!hst.ok()) return fail_ret(hst);");
             emit("                break;");
             emit("            }");
         }
-        for (const auto& [tt, tgi] : act_trl_g) {
+        for (const auto& [tt, tgi, _req] : act_trl_g) {
+            const std::string env_expr = (env_seen_words == 1) ? "env_seen" : ("env_seen[" + std::to_string(env_group_bit_idx / 64) + "]");
+            const std::size_t bit = env_group_bit_idx % 64;
+            ++env_group_bit_idx;
             emit("            if (tag == " + std::to_string(tt) + "u) {");
-            emit("                ::nimblefix::Status dummy_err{};");
+            emit("                section = 2u;");
+            emit("                if ((" + env_expr + " & (std::uint64_t{1} << " + std::to_string(bit) + "u)) != 0) return fail_ret({::nimblefix::ErrorCode::duplicate_field, " + std::to_string(tt) + ", f.offset});");
+            emit("                " + env_expr + " |= (std::uint64_t{1} << " + std::to_string(bit) + "u);");
             emit("                ancestors.predicates[ancestors.count++] = &is_trailer_tag;");
-            emit("                const auto tst = validate_group_" + std::to_string(tgi) + "(fields, cursor, ::nimblefix::ValidationLevel::structure, ancestors, dummy_err, 1);");
+            emit("                const auto tst = validate_group_" + std::to_string(tgi) + "(fields, cursor, level, ancestors, first_content_err, 1);");
             emit("                --ancestors.count;");
             emit("                if (!tst.ok()) return fail_ret(tst);");
             emit("                break;");
             emit("            }");
         }
-        emit("            if (is_header_scalar_tag(tag) || is_trailer_scalar_tag(tag)) { ++cursor; break; }");
+        if (!env_scalars.empty()) {
+            emit("            if (const int env_idx = envelope_scalar_index(tag); env_idx >= 0) {");
+            if (trailer_scalar_tags.empty()) {
+                emit("                if (section != 0u) [[unlikely]] {");
+                emit("                    if (level == ::nimblefix::ValidationLevel::strict && first_order_err.ok())");
+                emit("                        first_order_err = {::nimblefix::ErrorCode::invalid_value, static_cast<int>(tag), f.offset};");
+                emit("                }");
+            } else {
+                emit("                if (is_trailer_scalar_tag(tag)) { section = 2u; }");
+                emit("                else if (section != 0u) [[unlikely]] {");
+                emit("                    if (level == ::nimblefix::ValidationLevel::strict && first_order_err.ok())");
+                emit("                        first_order_err = {::nimblefix::ErrorCode::invalid_value, static_cast<int>(tag), f.offset};");
+                emit("                }");
+            }
+            if (env_seen_words == 1) {
+                emit("                const auto env_mask = std::uint64_t{1} << static_cast<unsigned>(env_idx);");
+                emit("                if ((env_seen & env_mask) != 0) return fail_ret({::nimblefix::ErrorCode::duplicate_field, static_cast<int>(tag), f.offset});");
+                emit("                env_seen |= env_mask;");
+            } else {
+                emit("                const auto env_mask = std::uint64_t{1} << (static_cast<unsigned>(env_idx) & 63u);");
+                emit("                auto& env_word = env_seen[static_cast<std::size_t>(env_idx) >> 6u];");
+                emit("                if ((env_word & env_mask) != 0) return fail_ret({::nimblefix::ErrorCode::duplicate_field, static_cast<int>(tag), f.offset});");
+                emit("                env_word |= env_mask;");
+            }
+            emit("                if (first_content_err.ok()) { if (const auto st = check_envelope_scalar(f, level); !st.ok()) first_content_err = st; }");
+            if (!env_ld_pairs.empty()) {
+                std::string cond;
+                for (std::uint32_t t : env_ld_tags) {
+                    if (!cond.empty()) cond += " || ";
+                    cond += "tag == " + std::to_string(t) + "u";
+                }
+                emit("                if (" + cond + ") has_env_ld = true;");
+            }
+            emit("                ++cursor;");
+            emit("                break;");
+            emit("            }");
+        }
         emit("            if (level == ::nimblefix::ValidationLevel::strict && first_unknown_err.ok())");
         emit("                first_unknown_err = {::nimblefix::ErrorCode::invalid_value, static_cast<int>(tag), f.offset};");
         emit("            ++cursor;");
@@ -1155,7 +1336,13 @@ std::string render_header(const Schema& schema, std::string_view ns_arg) {
             }
             emit("    }");
         }
-        if (!req_by_word.empty()) {
+        if (!env_ld_pairs.empty()) {
+            emit("    if (has_env_ld) {");
+            emit("        if (const auto eldst = check_envelope_len_data(fields); !eldst.ok()) return fail_ret(eldst);");
+            emit("    }");
+        }
+        emit("    if (!first_order_err.ok()) return fail_ret(first_order_err);");
+        if (!req_by_word.empty() || !env_req_by_word.empty()) {
             emit("    if (level != ::nimblefix::ValidationLevel::structure) {");
             for (const auto& [w, bits] : req_by_word) {
                 std::uint64_t mask = 0;
@@ -1164,6 +1351,16 @@ std::string render_header(const Schema& schema, std::string_view ns_arg) {
                 emit("        if ((" + seen_expr + " & " + hex_u64(mask) + ") != " + hex_u64(mask) + ") {");
                 for (const auto& [b, rtag] : bits) {
                     emit("            if ((" + seen_expr + " & (std::uint64_t{1} << " + std::to_string(b) + "u)) == 0) return fail_ret({::nimblefix::ErrorCode::required_field_missing, " + std::to_string(rtag) + "});");
+                }
+                emit("        }");
+            }
+            for (const auto& [w, bits] : env_req_by_word) {
+                std::uint64_t mask = 0;
+                for (const auto& [b, _rt] : bits) mask |= (std::uint64_t{1} << b);
+                const std::string env_expr = (env_seen_words == 1) ? "env_seen" : ("env_seen[" + std::to_string(w) + "]");
+                emit("        if ((" + env_expr + " & " + hex_u64(mask) + ") != " + hex_u64(mask) + ") {");
+                for (const auto& [b, rtag] : bits) {
+                    emit("            if ((" + env_expr + " & (std::uint64_t{1} << " + std::to_string(b) + "u)) == 0) return fail_ret({::nimblefix::ErrorCode::required_field_missing, " + std::to_string(rtag) + "});");
                 }
                 emit("        }");
             }

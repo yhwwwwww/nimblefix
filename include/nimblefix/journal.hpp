@@ -166,6 +166,62 @@ private:
     friend class Journal;
 };
 
+enum class JournalTailStart : std::uint8_t {
+    beginning = 0, // Start at the lowest currently retained segment/record.
+    end = 1,       // Skip existing committed records and tail only newly appended records.
+    from_id = 2,   // Start at the first committed record with id >= start_id (inclusive).
+};
+
+struct JournalTailerConfig {
+    // Full base path to one session's segmented v2 journal.
+    std::string_view path{};
+    // Optional expected session identity. If empty, auto-detected from the v2 manifest.
+    // When non-empty, strictly validated against the manifest's session_key.
+    std::string_view session_key{};
+    JournalTailStart start{JournalTailStart::beginning};
+    // Starting RecordId when start == JournalTailStart::from_id.
+    RecordId start_id{};
+    // Verify hardware CRC32C on every record read from shared mmap segments.
+    bool verify_crc{true};
+};
+
+// Lock-free, read-only, cross-process SPMC consumer for a segmented v2 mmap Journal.
+// Opens files with O_RDONLY + mmap(PROT_READ, MAP_SHARED) without acquiring the
+// writer's LOCK_EX lock, adding zero overhead and zero backpressure to the live
+// trading writer process. Multiple independent processes (e.g., FIX DropCopy,
+// risk/compliance sidecars, live/offline replay CLI) can tail concurrently.
+class JournalTailer {
+public:
+    JournalTailer() noexcept = default;
+    JournalTailer(const JournalTailer&) = delete;
+    JournalTailer& operator=(const JournalTailer&) = delete;
+    JournalTailer(JournalTailer&& other) noexcept;
+    JournalTailer& operator=(JournalTailer&& other) noexcept;
+    ~JournalTailer();
+
+    [[nodiscard]] static Result<JournalTailer> open(JournalTailerConfig config) noexcept;
+
+    // Reads the next committed record in chronological order.
+    // On Status::success(), record.payload points zero-copy into the read-only mmap
+    // segment and remains valid until the next call to next() or destruction.
+    // Returns ErrorCode::need_more when caught up to the writer's live head.
+    // Returns ErrorCode::reader_expired if the writer pruned the next required segment
+    // before this tailer advanced into it.
+    [[nodiscard]] Status next(JournalRecord& record) noexcept;
+
+    [[nodiscard]] RecordId cursor() const noexcept;
+    [[nodiscard]] std::uint32_t current_segment_index() const noexcept;
+    [[nodiscard]] std::string_view session_key() const noexcept;
+    [[nodiscard]] std::size_t segment_bytes() const noexcept;
+    [[nodiscard]] std::size_t capacity_bytes() const noexcept;
+    [[nodiscard]] std::size_t max_segments() const noexcept;
+
+private:
+    struct Impl;
+    explicit JournalTailer(std::unique_ptr<Impl> impl) noexcept;
+    std::unique_ptr<Impl> impl_{};
+};
+
 class Journal {
 public:
     Journal(const Journal&) = delete;

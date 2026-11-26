@@ -1581,6 +1581,7 @@ struct EngineRuntime::Impl {
         std::vector<char> uring_tx_buf;
         std::size_t uring_tx_size{};
         std::size_t uring_tx_offset{};
+        std::uint64_t uring_tx_submit_ns{};
         bool uring_rx_in_flight{};
         bool uring_tx_in_flight{};
         bool telemetry_probes{};
@@ -1692,8 +1693,10 @@ struct EngineRuntime::Impl {
             io_backend->cancel_fd(peer.stream.native_handle());
             io_backend->flush_submissions();
         }
+        if (peer.driver) peer.driver->abort_staged_tx();
         peer.uring_tx_size = 0;
         peer.uring_tx_offset = 0;
+        peer.uring_tx_submit_ns = 0;
     }
 
     void close_pending(Pending& item) noexcept {
@@ -3434,11 +3437,14 @@ struct EngineRuntime::Impl {
     }
 
     [[nodiscard]] Status write_peer(Peer& peer, std::uint64_t now) noexcept {
-        if (peer.closed || peer.connection != Connection::connected || !peer.driver ||
-            !peer.driver->needs_write()) return Status::success();
+        if (peer.closed || peer.connection != Connection::connected || !peer.driver) return Status::success();
         if (io_backend && io_backend->supports_proactor() && !peer.tls) {
+            if (!peer.driver->needs_write() && peer.uring_tx_offset >= peer.uring_tx_size) {
+                return Status::success();
+            }
             return proactor_kick_send(peer, now);
         }
+        if (!peer.driver->needs_write()) return Status::success();
         const auto status = peer.tls
             ? peer.driver->flush(&socket_writer, &peer, now, io_byte_budget)
             : peer.driver->flush_batch(&socket_batch_writer, &socket_writer, &peer, now, io_byte_budget);
@@ -3448,17 +3454,6 @@ struct EngineRuntime::Impl {
         }
         if (peer.session) peer.session->sender->unblock_commands();
         return Status::success();
-    }
-
-    static WriteResult uring_buffer_writer(void* context, std::span<const char> bytes) noexcept {
-        auto& peer = *static_cast<Peer*>(context);
-        const std::size_t avail = peer.uring_tx_buf.size() - peer.uring_tx_size;
-        if (avail == 0) return {0, true, Status::success()};
-        const std::size_t n = std::min(avail, bytes.size());
-        std::memcpy(peer.uring_tx_buf.data() + peer.uring_tx_size, bytes.data(), n);
-        peer.uring_tx_size += n;
-        if (peer.session) peer.session->written_bytes.fetch_add(n, std::memory_order_relaxed);
-        return {n, n < bytes.size(), Status::success()};
     }
 
     void proactor_arm_recv(Peer& peer) noexcept {
@@ -3490,9 +3485,21 @@ struct EngineRuntime::Impl {
     [[nodiscard]] Status proactor_kick_send(Peer& peer, std::uint64_t now) noexcept {
         if (!io_backend || !io_backend->supports_proactor() || peer.closed ||
             peer.connection != Connection::connected || peer.tls || !peer.stream.valid() ||
-            peer.uring_tx_in_flight || !peer.driver || !peer.driver->needs_write()) {
+            peer.uring_tx_in_flight || !peer.driver) {
             return Status::success();
         }
+        if (peer.uring_tx_offset < peer.uring_tx_size) {
+            peer.io_tag.pointer = &peer;
+            peer.uring_tx_submit_ns = (peer.telemetry_probes && peer.session && peer.session->telemetry_slot)
+                ? telemetry_now_ns() : 0ULL;
+            if (io_backend->submit_send(peer.io_tag, peer.stream.native_handle(),
+                    std::span<const char>{peer.uring_tx_buf.data() + peer.uring_tx_offset,
+                                          peer.uring_tx_size - peer.uring_tx_offset})) {
+                peer.uring_tx_in_flight = true;
+            }
+            return Status::success();
+        }
+        if (!peer.driver->needs_write()) return Status::success();
         if (peer.uring_tx_buf.empty()) {
             try {
                 peer.uring_tx_buf.resize(std::max<std::size_t>(io_byte_budget, config.max_frame_bytes));
@@ -3503,14 +3510,16 @@ struct EngineRuntime::Impl {
         }
         peer.uring_tx_size = 0;
         peer.uring_tx_offset = 0;
-        const auto status = peer.driver->flush(&uring_buffer_writer, &peer, now, peer.uring_tx_buf.size());
-        if (!status.ok()) {
-            peer.uring_tx_size = 0;
-            drop_peer(peer, status, now, false);
-            return status;
+        const auto staged = peer.driver->stage_tx(peer.uring_tx_buf, now);
+        if (!staged.ok()) {
+            drop_peer(peer, staged.status(), now, false);
+            return staged.status();
         }
-        if (peer.uring_tx_size == 0) return Status::success();
+        if (staged.value() == 0) return Status::success();
+        peer.uring_tx_size = staged.value();
         peer.io_tag.pointer = &peer;
+        peer.uring_tx_submit_ns = (peer.telemetry_probes && peer.session && peer.session->telemetry_slot)
+            ? telemetry_now_ns() : 0ULL;
         if (io_backend->submit_send(peer.io_tag, peer.stream.native_handle(),
                 std::span<const char>{peer.uring_tx_buf.data(), peer.uring_tx_size})) {
             peer.uring_tx_in_flight = true;
@@ -3548,7 +3557,8 @@ struct EngineRuntime::Impl {
             drop_peer(peer, Status{ErrorCode::too_large}, now, true);
             return;
         }
-        if (!peer.closed && peer.driver && peer.driver->needs_write()) {
+        if (!peer.closed && peer.driver &&
+            (peer.driver->needs_write() || peer.uring_tx_offset < peer.uring_tx_size)) {
             (void)proactor_kick_send(peer, now);
         }
         if (!peer.closed && peer.driver && peer.driver->can_receive() && !has_buffered) {
@@ -3564,6 +3574,8 @@ struct EngineRuntime::Impl {
             if (err == EAGAIN || err == EWOULDBLOCK || err == EINTR) {
                 if (peer.uring_tx_offset < peer.uring_tx_size && peer.stream.valid()) {
                     peer.io_tag.pointer = &peer;
+                    peer.uring_tx_submit_ns = (peer.telemetry_probes && peer.session && peer.session->telemetry_slot)
+                        ? telemetry_now_ns() : 0ULL;
                     if (io_backend->submit_send(peer.io_tag, peer.stream.native_handle(),
                             std::span<const char>{peer.uring_tx_buf.data() + peer.uring_tx_offset,
                                                   peer.uring_tx_size - peer.uring_tx_offset})) {
@@ -3572,14 +3584,65 @@ struct EngineRuntime::Impl {
                 }
                 return;
             }
-            if (err == ECANCELED) return;
+            if (err == ECANCELED) {
+                peer.driver->abort_staged_tx();
+                peer.uring_tx_size = 0;
+                peer.uring_tx_offset = 0;
+                peer.uring_tx_submit_ns = 0;
+                return;
+            }
+            peer.driver->abort_staged_tx();
+            peer.uring_tx_size = 0;
+            peer.uring_tx_offset = 0;
+            peer.uring_tx_submit_ns = 0;
             drop_peer(peer, Status{ErrorCode::io_error, 0, static_cast<std::size_t>(err)}, now, true);
             return;
         }
-        peer.uring_tx_offset += static_cast<std::size_t>(res);
+        if (res == 0) {
+            peer.driver->abort_staged_tx();
+            peer.uring_tx_size = 0;
+            peer.uring_tx_offset = 0;
+            peer.uring_tx_submit_ns = 0;
+            drop_peer(peer, Status{ErrorCode::connection_closed}, now, false);
+            return;
+        }
+        const auto written = static_cast<std::size_t>(res);
+        const auto remaining = peer.uring_tx_size - peer.uring_tx_offset;
+        if (written > remaining) {
+            peer.driver->abort_staged_tx();
+            peer.uring_tx_size = 0;
+            peer.uring_tx_offset = 0;
+            peer.uring_tx_submit_ns = 0;
+            drop_peer(peer, Status{ErrorCode::protocol_error}, now, true);
+            return;
+        }
+        if (peer.uring_tx_submit_ns != 0ULL && peer.session && peer.session->telemetry_slot) {
+            peer.session->telemetry_slot->record_stage(TelemetryStage::write,
+                telemetry_now_ns() - peer.uring_tx_submit_ns);
+            peer.uring_tx_submit_ns = 0ULL;
+        }
+        if (peer.session) {
+            peer.session->written_bytes.fetch_add(written, std::memory_order_relaxed);
+        }
+        const auto commit_status = peer.driver->commit_tx_written(written, now);
+        if (!commit_status.ok()) {
+            peer.driver->abort_staged_tx();
+            peer.uring_tx_size = 0;
+            peer.uring_tx_offset = 0;
+            drop_peer(peer, commit_status, now, false);
+            return;
+        }
+        if (peer.session) {
+            peer.session->sender->sync_receipts(*peer.driver);
+            for (const auto& lane : peer.session->sender->producer_lanes)
+                if (lane) lane->sync_receipts(*peer.driver);
+        }
+        peer.uring_tx_offset += written;
         if (peer.uring_tx_offset < peer.uring_tx_size) {
-            if (peer.stream.valid()) {
+            if (peer.stream.valid() && !peer.driver->should_close()) {
                 peer.io_tag.pointer = &peer;
+                peer.uring_tx_submit_ns = (peer.telemetry_probes && peer.session && peer.session->telemetry_slot)
+                    ? telemetry_now_ns() : 0ULL;
                 if (io_backend->submit_send(peer.io_tag, peer.stream.native_handle(),
                         std::span<const char>{peer.uring_tx_buf.data() + peer.uring_tx_offset,
                                               peer.uring_tx_size - peer.uring_tx_offset})) {
@@ -3591,6 +3654,10 @@ struct EngineRuntime::Impl {
         peer.uring_tx_size = 0;
         peer.uring_tx_offset = 0;
         if (peer.session) peer.session->sender->unblock_commands();
+        if (peer.driver->should_close()) {
+            drop_peer(peer, Status{ErrorCode::connection_closed}, now, false);
+            return;
+        }
         if (peer.driver->needs_write()) {
             (void)proactor_kick_send(peer, now);
         }
@@ -3882,7 +3949,8 @@ struct EngineRuntime::Impl {
                         process_producer_lanes(*peer, now);
                     // Flush newly queued outbound frames immediately (via proactor send or write_batch/sendmsg)
                     // instead of round-tripping through epoll_ctl(+EPOLLOUT) + epoll_wait.
-                    if (!peer->closed && peer->driver && peer->driver->needs_write() &&
+                    if (!peer->closed && peer->driver &&
+                        (peer->driver->needs_write() || peer->uring_tx_offset < peer->uring_tx_size) &&
                         !(peer->tls && peer->tls->write_wants_read())) {
                         if (io_backend && io_backend->supports_proactor() && !peer->tls) {
                             (void)proactor_kick_send(*peer, now);
@@ -4001,8 +4069,14 @@ struct EngineRuntime::Impl {
                     continue;
                 }
                 if (proactor && !peer->tls && peer->connection == Connection::connected) {
-                    if (peer->driver && peer->driver->needs_write() && !peer->uring_tx_in_flight) {
+                    if (peer->driver &&
+                        (peer->driver->needs_write() || peer->uring_tx_offset < peer->uring_tx_size) &&
+                        !peer->uring_tx_in_flight) {
                         (void)proactor_kick_send(*peer, now);
+                        if (!peer->closed && !peer->uring_tx_in_flight &&
+                            peer->uring_tx_offset < peer->uring_tx_size) {
+                            buffered_work = true;
+                        }
                     }
                     if (!peer->closed && !peer->uring_rx_in_flight &&
                         peer->driver && peer->driver->can_receive() &&

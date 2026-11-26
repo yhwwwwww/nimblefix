@@ -972,6 +972,653 @@ void test_zero_overhead_mmap_telemetry_and_stage_histograms() {
     CHECK(prom.find("stage=\"validate\",quantile=\"0.99\"") != std::string::npos);
 }
 
+// Regression test for R02: DirectInitiator recovery reuses previously committed
+// dependent business replies instead of duplicating orders with new MsgSeqNums.
+void test_recovery_reuses_dependent_business_reply() {
+    TempDir dir;
+    const auto cfg = make_config(dir);
+
+    struct ReplyOnExecHandler {
+        nf::DirectInitiator<fix::Schema, ReplyOnExecHandler, LoopbackTransport>* init{};
+        bool fail_after_send{false};
+        bool send_different_reply{false};
+        bool omit_reply{false};
+        int calls{0};
+        int recovery_calls{0};
+        nf::Result<std::uint64_t> last_send{nf::Status::success()};
+
+        [[nodiscard]] nf::Status on_message(const nf::FlatMessageView& msg,
+                                            const nf::DeliveryInfo& info) noexcept {
+            ++calls;
+            if (info.is_recovery) ++recovery_calls;
+            if (!msg.is<fix::ExecutionReport>() || init == nullptr) return nf::Status::success();
+            if (omit_reply) return nf::Status::success();
+            const std::string_view cid = send_different_reply ? "WRONG-REPLY" : "DEP-REPLY-1";
+            last_send = init->send_stream<fix::NewOrderSingle>([cid](auto& w) noexcept {
+                w.cl_ord_id(cid).symbol("AAPL").side('1')
+                 .transact_time(t1).order_qty(nf::Decimal{25, 0}).ord_type('1');
+            }, 10, t1);
+            if (!last_send.ok()) return last_send.status();
+            return fail_after_send ? nf::Status{nf::ErrorCode::callback_failed} : nf::Status::success();
+        }
+    };
+
+    std::uint64_t orig_reply_seq = 0;
+    nf::RecordId inbound_er_id = 0;
+
+    // 1. First session: receive ER seq 2, handler commits dependent reply (seq 2) then crashes/fails
+    //    BEFORE delivery record is written.
+    {
+        auto opened = nf::DirectInitiator<fix::Schema, ReplyOnExecHandler, LoopbackTransport>::open(cfg);
+        CHECK(opened.ok());
+        if (!opened.ok()) return;
+        auto init = std::move(opened).value();
+        init.handler().init = &init;
+        init.handler().fail_after_send = true;
+
+        CHECK(init.connect(0, t0).ok());
+        std::string wire;
+        CHECK(init.transport().pop_sent_frame(wire));
+        init.transport().push_from_peer(make_frame(nf::message<"A">().set<98>(0).set<108>(30), "SELL", "BUY", 1, t0));
+        CHECK(init.poll_once(1, t0).ok());
+        CHECK(init.is_active());
+
+        init.transport().push_from_peer(make_stream_frame<fix::ExecutionReport>([](auto& w) {
+            w.order_id("O1").exec_id("E1").cl_ord_id("TRIG-1").exec_type('0')
+             .ord_status('0').symbol("AAPL").side('1')
+             .leaves_qty(nf::Decimal{10, 0}).cum_qty(nf::Decimal{0, 0})
+             .avg_px(nf::Decimal{0, 0});
+        }, "SELL", "BUY", 2, t1));
+        const auto st = init.poll_once(2, t1);
+        CHECK(st.code == nf::ErrorCode::callback_failed);
+        CHECK(init.handler().calls == 1);
+        CHECK(init.handler().last_send.ok());
+        orig_reply_seq = init.handler().last_send.value();
+        CHECK(orig_reply_seq == 2);
+
+        // Verify the reply record carries non-zero dependency pointing to inbound ER!
+        int dep_replies = 0;
+        for (const auto& rec : init.journal().records()) {
+            if (rec.kind == nf::RecordKind::inbound && rec.seq == 2) inbound_er_id = rec.id;
+            if (rec.kind == nf::RecordKind::outbound && rec.receipt != 0 && rec.seq == orig_reply_seq) {
+                CHECK(rec.dependency != 0 && rec.dependency == inbound_er_id);
+                ++dep_replies;
+            }
+        }
+        CHECK(inbound_er_id != 0 && dep_replies == 1);
+    }
+
+    // 2. Reopen and verify mismatching recovery reply is rejected with invalid_value!
+    {
+        auto opened = nf::DirectInitiator<fix::Schema, ReplyOnExecHandler, LoopbackTransport>::open(cfg);
+        CHECK(opened.ok());
+        if (!opened.ok()) return;
+        auto init = std::move(opened).value();
+        init.handler().init = &init;
+        init.handler().send_different_reply = true;
+
+        CHECK(init.connect(10, t2).ok());
+        std::string wire;
+        CHECK(init.transport().pop_sent_frame(wire));
+        init.transport().push_from_peer(make_frame(nf::message<"A">().set<98>(0).set<108>(30), "SELL", "BUY", 3, t2));
+        const auto st = init.poll_once(11, t2);
+        CHECK(!st.ok() && st.code == nf::ErrorCode::callback_failed);
+        CHECK(!init.handler().last_send.ok() && init.handler().last_send.status().code == nf::ErrorCode::invalid_value);
+        CHECK(init.handler().recovery_calls == 1);
+    }
+
+    // 3. Reopen and verify omitting previously committed reply during recovery is rejected!
+    {
+        auto opened = nf::DirectInitiator<fix::Schema, ReplyOnExecHandler, LoopbackTransport>::open(cfg);
+        CHECK(opened.ok());
+        if (!opened.ok()) return;
+        auto init = std::move(opened).value();
+        init.handler().init = &init;
+        init.handler().omit_reply = true;
+
+        CHECK(init.connect(20, t2).ok());
+        std::string wire;
+        CHECK(init.transport().pop_sent_frame(wire));
+        init.transport().push_from_peer(make_frame(nf::message<"A">().set<98>(0).set<108>(30), "SELL", "BUY", 4, t2));
+        const auto st = init.poll_once(21, t2);
+        CHECK(!st.ok() && st.code == nf::ErrorCode::callback_failed);
+        CHECK(init.handler().recovery_calls == 1);
+    }
+
+    // 4. Reopen with matching reply -> reuses original seq 2, does NOT append a duplicate order!
+    {
+        auto opened = nf::DirectInitiator<fix::Schema, ReplyOnExecHandler, LoopbackTransport>::open(cfg);
+        CHECK(opened.ok());
+        if (!opened.ok()) return;
+        auto init = std::move(opened).value();
+        init.handler().init = &init;
+
+        const auto out_seq_before = init.next_outbound_seq();
+        CHECK(init.connect(30, t3).ok()); // Logon consumes out_seq_before
+        std::string wire;
+        CHECK(init.transport().pop_sent_frame(wire));
+        init.transport().push_from_peer(make_frame(nf::message<"A">().set<98>(0).set<108>(30), "SELL", "BUY", 5, t3));
+        CHECK(init.poll_once(31, t3).ok());
+        CHECK(init.is_active());
+        CHECK(init.handler().recovery_calls == 1);
+        CHECK(init.handler().last_send.ok() && init.handler().last_send.value() == orig_reply_seq);
+        // Outbound seq only advanced by 1 for Logon, NOT for the reused business reply!
+        CHECK(init.next_outbound_seq() == out_seq_before + 1);
+
+        int business_outbounds = 0;
+        for (const auto& rec : init.journal().records()) {
+            if (rec.kind == nf::RecordKind::outbound && rec.receipt != 0) ++business_outbounds;
+        }
+        CHECK(business_outbounds == 1);
+    }
+}
+
+// Controllable mock transport for R03 connect, TLS-handshake, and write-stall timeout tests.
+struct TimeoutMockTransport {
+    LoopbackTransport inner;
+    std::vector<std::uint16_t> attempted_ports;
+    std::uint16_t stall_connect_port{0};
+    bool report_handshaking{false};
+    bool block_writes{false};
+    bool connecting_state{false};
+
+    [[nodiscard]] nf::Status connect(std::string_view host, std::uint16_t port) noexcept {
+        attempted_ports.push_back(port);
+        if (port == stall_connect_port) {
+            inner.open_state = true;
+            connecting_state = true;
+            return nf::Status::success();
+        }
+        connecting_state = false;
+        return inner.connect(host, port);
+    }
+    [[nodiscard]] nf::Status finish_connect() noexcept {
+        if (connecting_state) return nf::Status{nf::ErrorCode::need_more};
+        return nf::Status::success();
+    }
+    [[nodiscard]] nf::TransportIoResult read(std::span<char> out) noexcept { return inner.read(out); }
+    [[nodiscard]] nf::TransportIoResult write(std::span<const char> in) noexcept {
+        if (block_writes) return {0, true, false, nf::Status::success()};
+        return inner.write(in);
+    }
+    [[nodiscard]] nf::TransportIoResult write_batch(std::span<const std::span<const char>> chunks) noexcept {
+        if (block_writes) return {0, true, false, nf::Status::success()};
+        return inner.write_batch(chunks);
+    }
+    void close() noexcept {
+        connecting_state = false;
+        inner.close();
+    }
+    [[nodiscard]] int native_fd() const noexcept { return inner.native_fd(); }
+    [[nodiscard]] bool valid() const noexcept { return inner.valid(); }
+    [[nodiscard]] bool is_connecting() const noexcept { return connecting_state; }
+    [[nodiscard]] bool is_handshaking() const noexcept { return connecting_state && report_handshaking; }
+};
+static_assert(nf::DirectTransport<TimeoutMockTransport>);
+
+// Regression test for R03: connect timeout, TLS handshake timeout, and write-stall timeout.
+void test_connect_tls_and_write_stall_timeouts() {
+    struct ErrorRecorder {
+        nf::ErrorCode last_code{nf::Status::success().code};
+        int error_count{0};
+        [[nodiscard]] nf::Status on_message(const nf::FlatMessageView&, const nf::DeliveryInfo&) noexcept {
+            return nf::Status::success();
+        }
+        void on_error(const nf::Status& st) noexcept {
+            last_code = st.code;
+            ++error_count;
+        }
+    };
+
+    // 1. Connect timeout triggers io_error + failover to standby endpoint!
+    {
+        TempDir dir;
+        auto cfg = make_config(dir);
+        cfg.endpoints = {{"127.0.0.1", 9101}, {"127.0.0.1", 9102}};
+        cfg.connection_strategy = nf::ConnectionStrategy::ordered(100, 1000, 2, 0, true, true);
+        cfg.connect_timeout_ms = 500;
+
+        TimeoutMockTransport mock{};
+        mock.stall_connect_port = 9101;
+        auto opened = nf::DirectInitiator<fix::Schema, ErrorRecorder, TimeoutMockTransport>::open(
+            cfg, ErrorRecorder{}, std::move(mock));
+        CHECK(opened.ok());
+        auto init = std::move(opened).value();
+
+        CHECK(init.connect(1000, t0).ok());
+        CHECK(init.valid_transport() && init.transport().is_connecting());
+        CHECK(init.next_deadline_ms() == 1500);
+        // Before deadline: stays connecting
+        CHECK(init.poll_once(1499, t0).ok());
+        CHECK(init.valid_transport() && init.handler().error_count == 0);
+        // At deadline: times out, calls on_error, closes transport, advances failover to 9102!
+        const auto st = init.poll_once(1500, t0);
+        CHECK(st.code == nf::ErrorCode::io_error);
+        CHECK(!init.valid_transport());
+        CHECK(init.handler().last_code == nf::ErrorCode::io_error);
+        CHECK(init.active_endpoint().port == 9102);
+        CHECK(init.reconnect_if_due(1500, t0).ok());
+        CHECK(init.valid_transport() && !init.transport().is_connecting());
+    }
+
+    // 2. TLS handshake timeout reports ErrorCode::tls_handshake_timeout!
+    {
+        TempDir dir;
+        auto cfg = make_config(dir);
+        cfg.endpoints = {{"127.0.0.1", 9201}};
+        cfg.connect_timeout_ms = 300;
+
+        TimeoutMockTransport mock{};
+        mock.stall_connect_port = 9201;
+        mock.report_handshaking = true;
+        auto opened = nf::DirectInitiator<fix::Schema, ErrorRecorder, TimeoutMockTransport>::open(
+            cfg, ErrorRecorder{}, std::move(mock));
+        CHECK(opened.ok());
+        auto init = std::move(opened).value();
+
+        CHECK(init.connect(2000, t0).ok());
+        CHECK(init.poll_once(2299, t0).ok());
+        const auto st = init.poll_once(2300, t0);
+        CHECK(st.code == nf::ErrorCode::tls_handshake_timeout);
+        CHECK(!init.valid_transport());
+        CHECK(init.handler().last_code == nf::ErrorCode::tls_handshake_timeout);
+    }
+
+    // 3. Write-stall timeout forces Logout then closes with ErrorCode::write_stalled!
+    {
+        TempDir dir;
+        auto cfg = make_config(dir);
+        cfg.endpoints = {{"127.0.0.1", 9301}, {"127.0.0.1", 9302}};
+        cfg.connection_strategy = nf::ConnectionStrategy::ordered(100, 1000, 2, 0, true, true);
+        cfg.heartbeat_ms = 30'000;
+        cfg.write_stall_ms = 500;
+        cfg.logout_timeout_ms = 200;
+
+        auto opened = nf::DirectInitiator<fix::Schema, ErrorRecorder, TimeoutMockTransport>::open(cfg);
+        CHECK(opened.ok());
+        auto init = std::move(opened).value();
+
+        CHECK(init.connect(1000, t0).ok());
+        std::string wire;
+        CHECK(init.transport().inner.pop_sent_frame(wire));
+        init.transport().inner.push_from_peer(
+            make_frame(nf::message<"A">().set<98>(0).set<108>(30), "SELL", "BUY", 1, t0));
+        CHECK(init.poll_once(1001, t0).ok());
+        CHECK(init.is_active());
+
+        // Block all socket writes and send an order -> write timer starts at t=2000!
+        init.transport().block_writes = true;
+        const auto sent = init.send_stream<fix::NewOrderSingle>([](auto& w) noexcept {
+            w.cl_ord_id("STALL-1").symbol("AAPL").side('1')
+             .transact_time(t1).order_qty(nf::Decimal{10, 0}).ord_type('1');
+        }, 2000, t1);
+        CHECK(sent.ok());
+        CHECK(init.wants_write());
+        CHECK(init.next_deadline_ms() == 2500);
+
+        // Before write_stall_ms: still active
+        CHECK(init.poll_once(2499, t1).ok());
+        CHECK(init.is_active());
+
+        // At write_stall_ms (2500): initiates Logout (state leaves active), arms logout deadline (2700)
+        CHECK(init.poll_once(2500, t1).ok());
+        CHECK(init.state() == nf::SessionState::logout_pending);
+        CHECK(init.valid_transport());
+        CHECK(init.next_deadline_ms() == 2700);
+
+        // At 2700: still stalled -> closes with ErrorCode::write_stalled & notifies on_error!
+        const auto stalled = init.poll_once(2700, t1);
+        CHECK(stalled.code == nf::ErrorCode::write_stalled);
+        CHECK(!init.valid_transport());
+        CHECK(init.handler().last_code == nf::ErrorCode::write_stalled);
+    }
+}
+
+// Regression test for R04: DirectInitiator redacts BOTH outbound and inbound Logon credentials
+// (tags 553/554) before persisting to the journal.
+void test_inbound_and_outbound_logon_redacts_secrets() {
+    TempDir dir;
+    auto cfg = make_config(dir);
+    cfg.username = "OUT-SECRET-USER";
+    cfg.password = "OUT-SECRET-PASS";
+
+    auto opened = nf::DirectInitiator<fix::Schema, RecordingHandler, LoopbackTransport>::open(cfg);
+    CHECK(opened.ok());
+    if (!opened.ok()) return;
+    auto init = std::move(opened).value();
+
+    CHECK(init.connect(0, t0).ok());
+    std::string out_logon;
+    CHECK(init.transport().pop_sent_frame(out_logon));
+    // Outbound wire frame DOES carry credentials to the counterparty
+    CHECK(field(out_logon, 553) == "OUT-SECRET-USER");
+    CHECK(field(out_logon, 554) == "OUT-SECRET-PASS");
+
+    // Counterparty replies with an inbound Logon that ALSO contains 553/554 secrets!
+    const auto peer_logon = make_frame(
+        nf::message<"A">().set<98>(0).set<108>(30)
+            .set<553>("IN-SECRET-USER").set<554>("IN-SECRET-PASS"),
+        "SELL", "BUY", 1, t0);
+    init.transport().push_from_peer(peer_logon);
+    CHECK(init.poll_once(1, t0).ok());
+    CHECK(init.is_active());
+
+    bool saw_in_logon = false;
+    bool saw_out_logon = false;
+    for (const auto& rec : init.journal().records()) {
+        CHECK(rec.payload.find("OUT-SECRET-USER") == std::string_view::npos);
+        CHECK(rec.payload.find("OUT-SECRET-PASS") == std::string_view::npos);
+        CHECK(rec.payload.find("IN-SECRET-USER") == std::string_view::npos);
+        CHECK(rec.payload.find("IN-SECRET-PASS") == std::string_view::npos);
+        CHECK(rec.payload.find("\x01" "553=") == std::string_view::npos);
+        CHECK(rec.payload.find("\x01" "554=") == std::string_view::npos);
+        if (rec.kind == nf::RecordKind::outbound && rec.seq == 1) {
+            saw_out_logon = true;
+            CHECK(field(rec.payload, 35) == "A");
+            CHECK(field(rec.payload, 49) == "BUY" && field(rec.payload, 56) == "SELL");
+        }
+        if (rec.kind == nf::RecordKind::inbound && rec.seq == 1) {
+            saw_in_logon = true;
+            CHECK(field(rec.payload, 35) == "A");
+            // Preserves inbound CompID direction!
+            CHECK(field(rec.payload, 49) == "SELL" && field(rec.payload, 56) == "BUY");
+            CHECK(field(rec.payload, 108) == "30");
+        }
+    }
+    CHECK(saw_out_logon && saw_in_logon);
+}
+
+// Regression test for R08: large send_stream payloads spilling out of the fast reserve
+// buffer MUST invoke the user writer lambda at most once!
+void test_send_stream_large_spill_invokes_lambda_once() {
+    // 1. DirectInitiator::send_stream > 4 KiB (spills from journal reserve into encode_buf_)
+    TempDir dir;
+    auto opened = nf::DirectInitiator<fix::Schema, RecordingHandler, LoopbackTransport>::open(
+        make_config(dir));
+    CHECK(opened.ok());
+    if (!opened.ok()) return;
+    auto init = std::move(opened).value();
+    CHECK(init.connect(0, t0).ok());
+    std::string wire;
+    CHECK(init.transport().pop_sent_frame(wire));
+    init.transport().push_from_peer(make_frame(nf::message<"A">().set<98>(0).set<108>(30), "SELL", "BUY", 1, t0));
+    CHECK(init.poll_once(1, t0).ok());
+    CHECK(init.is_active());
+
+    const std::string large_id(5200, 'X');
+    int lambda_calls = 0;
+    const auto sent = init.send_stream<fix::NewOrderSingle>([&](auto& w) {
+        ++lambda_calls;
+        w.cl_ord_id(large_id)
+         .symbol("AAPL")
+         .side('1')
+         .transact_time(t1)
+         .order_qty(nf::Decimal{100, 0})
+         .ord_type('1');
+    }, 2, t1);
+    CHECK(sent.ok());
+    CHECK(lambda_calls == 1);
+
+    std::string large_wire;
+    CHECK(init.transport().pop_sent_frame(large_wire));
+    CHECK(field(large_wire, 11) == large_id);
+
+    // 2. stream_body_and_invoke > 4 KiB (spills from stack buffer to vector in a single call)
+    int body_calls = 0;
+    std::string captured_body;
+    const auto body_st = nf::detail::stream_body_and_invoke<fix::NewOrderSingle>(
+        [&](auto& w) {
+            ++body_calls;
+            w.cl_ord_id(large_id).symbol("AAPL").side('1')
+             .transact_time(t1).order_qty(nf::Decimal{100, 0}).ord_type('1');
+        },
+        [&](nf::detail::MessageView view) {
+            CHECK(view.prebuilt_body);
+            captured_body.assign(view.value_bytes, view.value_byte_count);
+            return nf::Status::success();
+        });
+    CHECK(body_st.ok());
+    CHECK(body_calls == 1);
+    CHECK(captured_body.find(large_id) != std::string::npos);
+}
+
+struct DrainRecoveryHandler {
+    bool fail_after{};
+    int send_count{2};
+    std::string reply_prefix{"DRAIN-R"};
+    bool view_ok_before{};
+    bool view_ok_after{};
+    int recoveries{};
+
+    template <class Init>
+    [[nodiscard]] nf::Status on_message(Init& init, const nf::FlatMessageView& msg,
+                                        const nf::DeliveryInfo& info) noexcept {
+        if (info.is_recovery) ++recoveries;
+        const auto before = msg.find_unique(17);
+        view_ok_before = before.ok() && before.value().value == "E-F01";
+        nf::DirectSendQueue q(8, 512);
+        for (int i = 0; i < send_count; ++i) {
+            const std::string cid = reply_prefix + std::to_string(i);
+            const auto ps = q.try_push_stream<fix::NewOrderSingle>([&](auto& w) {
+                w.cl_ord_id(cid).symbol("AAPL").side('1').transact_time(t1)
+                 .order_qty(nf::Decimal{10, 0}).ord_type('1');
+            });
+            if (!ps.ok()) return ps;
+        }
+        if (send_count > 0) {
+            const auto dr = init.drain(q, 8, 10, t1);
+            if (!dr.ok()) return dr.status();
+        }
+        const auto after = msg.find_unique(17);
+        const auto typed = msg.as<fix::ExecutionReport>().exec_id();
+        view_ok_after = after.ok() && after.value().value == "E-F01" &&
+                        typed.ok() && typed.value() == "E-F01";
+        return fail_after ? nf::Status{nf::ErrorCode::callback_failed} : nf::Status::success();
+    }
+};
+
+// Regression tests for F01 (DirectSendQueue::drain recovery reuse), F02 (369=0 recovery
+// consistency), F03 (inbound FlatMessageView preserved across recovery reply reuse),
+// and F04 (Logon / Heartbeat / Logout timeouts close transport and advance failover).
+void test_followup_audit_recovery_and_timeouts() {
+    // 1. F01 + F03: DirectSendQueue::drain() & send_stream() inside recovery callbacks
+    //    preserve inbound FlatMessageView AND reuse/validate multi-reply sequences!
+    {
+
+        TempDir dir;
+        const auto cfg = make_config(dir);
+        {
+            auto opened = nf::DirectInitiator<fix::Schema, DrainRecoveryHandler, LoopbackTransport>::open(
+                cfg, DrainRecoveryHandler{true, 2, "DRAIN-R"});
+            CHECK(opened.ok());
+            auto init = std::move(opened).value();
+            CHECK(init.connect(0, t0).ok());
+            init.transport().push_from_peer(make_frame(nf::message<"A">().set<98>(0).set<108>(30), "SELL", "BUY", 1, t0));
+            CHECK(init.poll_once(1, t0).ok());
+            init.transport().push_from_peer(make_stream_frame<fix::ExecutionReport>([](auto& w) {
+                w.order_id("O1").exec_id("E-F01").cl_ord_id("ORD-1").exec_type('0')
+                 .ord_status('0').symbol("AAPL").side('1').leaves_qty(nf::Decimal{1, 0})
+                 .cum_qty(nf::Decimal{0, 0}).avg_px(nf::Decimal{0, 0});
+            }, "SELL", "BUY", 2, t1));
+            CHECK(init.poll_once(2, t1).code == nf::ErrorCode::callback_failed);
+            CHECK(!init.valid_transport()); // F04: fail() must close transport!
+        }
+
+        // Recovery attempt with modified second reply -> rejected without duplicating!
+        {
+            auto opened = nf::DirectInitiator<fix::Schema, DrainRecoveryHandler, LoopbackTransport>::open(
+                cfg, DrainRecoveryHandler{false, 2, "CHANGED-R"});
+            CHECK(opened.ok());
+            auto init = std::move(opened).value();
+            CHECK(init.connect(10, t2).ok());
+            init.transport().push_from_peer(make_frame(nf::message<"A">().set<98>(0).set<108>(30), "SELL", "BUY", 3, t2));
+            CHECK(init.poll_once(11, t2).code == nf::ErrorCode::callback_failed);
+        }
+
+        // Recovery attempt with fewer replies (1 instead of 2) -> rejected!
+        {
+            auto opened = nf::DirectInitiator<fix::Schema, DrainRecoveryHandler, LoopbackTransport>::open(
+                cfg, DrainRecoveryHandler{false, 1, "DRAIN-R"});
+            CHECK(opened.ok());
+            auto init = std::move(opened).value();
+            CHECK(init.connect(20, t2).ok());
+            init.transport().push_from_peer(make_frame(nf::message<"A">().set<98>(0).set<108>(30), "SELL", "BUY", 4, t2));
+            CHECK(init.poll_once(21, t2).code == nf::ErrorCode::callback_failed);
+        }
+
+        // Exact matching recovery via drain() -> reuses both replies, preserves view, commits delivery!
+        {
+            auto opened = nf::DirectInitiator<fix::Schema, DrainRecoveryHandler, LoopbackTransport>::open(
+                cfg, DrainRecoveryHandler{false, 2, "DRAIN-R"});
+            CHECK(opened.ok());
+            auto init = std::move(opened).value();
+            CHECK(init.connect(30, t2).ok());
+            init.transport().push_from_peer(make_frame(nf::message<"A">().set<98>(0).set<108>(30), "SELL", "BUY", 5, t2));
+            CHECK(init.poll_once(31, t2).ok());
+            CHECK(init.handler().recoveries == 1);
+            CHECK(init.handler().view_ok_before && init.handler().view_ok_after);
+            int replies = 0, dependent = 0;
+            for (const auto& rec : init.journal().records()) {
+                if (rec.kind == nf::RecordKind::outbound && field(rec.payload, 35) == "D") {
+                    ++replies;
+                    if (rec.dependency != 0) ++dependent;
+                }
+            }
+            CHECK(replies == 2 && dependent == 2);
+        }
+    }
+
+    // 2. F02: Inbound message with 369=0 accepted on initial receipt and cleanly redelivered on recovery
+    {
+        struct AckZeroHandler {
+            bool fail_after{};
+            int calls{};
+            int recovery_calls{};
+            [[nodiscard]] nf::Status on_message(const nf::FlatMessageView& msg,
+                                                const nf::DeliveryInfo& info) noexcept {
+                ++calls;
+                if (info.is_recovery) ++recovery_calls;
+                const auto eid = msg.as<fix::ExecutionReport>().exec_id();
+                if (!eid.ok() || eid.value() != "ACK-ZERO") return nf::Status{nf::ErrorCode::invalid_value};
+                return fail_after ? nf::Status{nf::ErrorCode::callback_failed} : nf::Status::success();
+            }
+        };
+        TempDir dir;
+        const auto cfg = make_config(dir);
+        nf::RecordId er_id{};
+        {
+            auto opened = nf::DirectInitiator<fix::Schema, AckZeroHandler, LoopbackTransport>::open(
+                cfg, AckZeroHandler{true});
+            CHECK(opened.ok());
+            auto init = std::move(opened).value();
+            CHECK(init.connect(0, t0).ok());
+            init.transport().push_from_peer(make_frame(nf::message<"A">().set<98>(0).set<108>(30), "SELL", "BUY", 1, t0));
+            CHECK(init.poll_once(1, t0).ok());
+            std::array<char, 2048> bytes{};
+            nf::SessionHeader hdr{"SELL", "BUY", 2, t1};
+            hdr.last_msg_seq_num_processed = 0;
+            const auto enc = nf::encode_stream<fix::ExecutionReport>(hdr, bytes, [](auto& w) {
+                w.order_id("O1").exec_id("ACK-ZERO").cl_ord_id("ORD-1").exec_type('0')
+                 .ord_status('0').symbol("AAPL").side('1').leaves_qty(nf::Decimal{1, 0})
+                 .cum_qty(nf::Decimal{0, 0}).avg_px(nf::Decimal{0, 0});
+            });
+            CHECK(enc.ok());
+            init.transport().push_from_peer({bytes.data(), enc.value()});
+            CHECK(init.poll_once(2, t1).code == nf::ErrorCode::callback_failed);
+            CHECK(init.handler().calls == 1);
+            for (const auto& rec : init.journal().records()) {
+                if (rec.kind == nf::RecordKind::inbound && rec.seq == 2) er_id = rec.id;
+            }
+            CHECK(er_id != 0 && !init.journal().has_delivery(er_id));
+        }
+        {
+            auto opened = nf::DirectInitiator<fix::Schema, AckZeroHandler, LoopbackTransport>::open(
+                cfg, AckZeroHandler{false});
+            CHECK(opened.ok());
+            auto init = std::move(opened).value();
+            CHECK(init.connect(10, t2).ok());
+            init.transport().push_from_peer(make_frame(nf::message<"A">().set<98>(0).set<108>(30), "SELL", "BUY", 3, t2));
+            CHECK(init.poll_once(11, t2).ok());
+            CHECK(init.handler().calls == 1 && init.handler().recovery_calls == 1);
+            CHECK(init.journal().has_delivery(er_id));
+        }
+    }
+
+    // 3. F04: Logon timeout, Heartbeat timeout, and Logout timeout close transport & advance failover
+    {
+        struct ErrTrackHandler {
+            nf::ErrorCode last_err{nf::Status::success().code};
+            int disconnects{};
+            void on_error(nf::Status st) noexcept { last_err = st.code; }
+            void on_disconnected(nf::Status) noexcept { ++disconnects; }
+        };
+        TempDir dir;
+        auto cfg = make_config(dir);
+        cfg.logon_timeout_ms = 50;
+        cfg.logout_timeout_ms = 50;
+        cfg.heartbeat_ms = 100;
+        cfg.endpoints = {{"127.0.0.1", 9901}, {"127.0.0.1", 9902}};
+        cfg.connection_strategy = nf::ConnectionStrategy::ordered(100, 1000, 2, 0, true, true);
+
+        auto opened = nf::DirectInitiator<fix::Schema, ErrTrackHandler, LoopbackTransport>::open(cfg);
+        CHECK(opened.ok());
+        auto init = std::move(opened).value();
+
+        // 3a. Logon timeout closes transport, advances failover to standby (index 1), allows reconnect!
+        CHECK(init.connect(0, t0).ok());
+        CHECK(init.active_endpoint_index() == 0);
+        const auto lt = init.poll_once(100, t0);
+        CHECK(lt.code == nf::ErrorCode::logon_timeout);
+        CHECK(!init.valid_transport());
+        CHECK(init.state() == nf::SessionState::disconnected);
+        CHECK(init.consecutive_connect_failures() == 1);
+        CHECK(init.active_endpoint_index() == 1);
+        CHECK(init.handler().last_err == nf::ErrorCode::logon_timeout);
+        CHECK(init.handler().disconnects == 1);
+
+        // Reconnect immediately succeeds on standby endpoint 1 and completes Logon!
+        CHECK(init.reconnect_if_due(100, t0).ok());
+        CHECK(init.valid_transport() && init.active_endpoint_index() == 1);
+        init.transport().push_from_peer(make_frame(nf::message<"A">().set<98>(0).set<108>(1), "SELL", "BUY", 1, t0));
+        CHECK(init.poll_once(101, t0).ok());
+        CHECK(init.is_active());
+
+        // 3b. Heartbeat / TestRequest timeout -> sends TestRequest, then Logout, then closes cleanly!
+        // Peer HeartBtInt=1s -> test interval = 1200 ms.
+        CHECK(init.poll_once(1'400, t1).ok()); // emits TestRequest (35=1)
+        std::string tr_wire;
+        bool saw_tr = false;
+        while (init.transport().pop_sent_frame(tr_wire)) {
+            if (field(tr_wire, 35) == "1") saw_tr = true;
+        }
+        CHECK(saw_tr);
+        // Advance past TestRequest response deadline (1400 + 1200 = 2600) -> enters logout_pending
+        CHECK(init.poll_once(2'700, t1).ok());
+        CHECK(init.state() == nf::SessionState::logout_pending);
+        // Advance past logout_timeout_ms (50 ms) -> heartbeat_timeout closes transport & disconnects!
+        const auto hb = init.poll_once(2'800, t1);
+        CHECK(hb.code == nf::ErrorCode::heartbeat_timeout);
+        CHECK(!init.valid_transport());
+        CHECK(init.state() == nf::SessionState::disconnected);
+        CHECK(init.handler().last_err == nf::ErrorCode::heartbeat_timeout);
+
+        // 3c. Reconnect again (reset_to_primary -> index 0), then local logout() times out cleanly!
+        const auto next_at = init.next_reconnect_at_ms();
+        CHECK(init.reconnect_if_due(next_at, t2).ok());
+        CHECK(init.valid_transport());
+        init.transport().push_from_peer(make_frame(nf::message<"A">().set<98>(0).set<108>(30), "SELL", "BUY", 2, t2));
+        CHECK(init.poll_once(next_at + 1, t2).ok());
+        CHECK(init.is_active());
+        CHECK(init.logout("bye", next_at + 10, t2).ok());
+        CHECK(init.state() == nf::SessionState::logout_pending);
+        const auto lo = init.poll_once(next_at + 100, t2);
+        CHECK(lo.code == nf::ErrorCode::logout_timeout);
+        CHECK(!init.valid_transport());
+        CHECK(init.state() == nf::SessionState::disconnected);
+        CHECK(init.handler().last_err == nf::ErrorCode::logout_timeout);
+    }
+}
+
 } // namespace
 
 int main() {
@@ -983,6 +1630,11 @@ int main() {
     test_subms_timestamps_and_optional_checksum_skip();
     test_multi_endpoint_failover_and_backoff();
     test_zero_overhead_mmap_telemetry_and_stage_histograms();
+    test_recovery_reuses_dependent_business_reply();
+    test_connect_tls_and_write_stall_timeouts();
+    test_inbound_and_outbound_logon_redacts_secrets();
+    test_send_stream_large_spill_invokes_lambda_once();
+    test_followup_audit_recovery_and_timeouts();
     if (failures != 0) {
         std::cerr << failures << " direct initiator test(s) failed\n";
         return 1;

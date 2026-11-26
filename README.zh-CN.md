@@ -22,7 +22,7 @@
 
 | 层级 | CMake / xmake 目标 | 包含能力 | 外部依赖 |
 | :--- | :--- | :--- | :--- |
-| **Core（核心层）** | `NimbleFIX::nimblefix_core` / `nimblefix-core` | 流式编码器（`StreamWriter`）、`Fixed<...>`、分段 mmap 日志、`SessionCore`、非阻塞 TCP（`sendmsg` 批发送）、`DirectInitiator`、多节点主备切换、无锁 SPSC `DirectSendQueue`、mmap 遥测、`JournalReplayer` | C++20 + `pthread` |
+| **Core（核心层）** | `NimbleFIX::nimblefix_core` / `nimblefix-core` | 流式编码器（`StreamWriter`）、`Fixed<...>`、分段 mmap 日志、跨进程无锁 SPMC `JournalTailer`、`SessionCore`、非阻塞 TCP（`sendmsg` 批发送）、`DirectInitiator`、多节点主备切换、无锁 SPSC `DirectSendQueue`、mmap 遥测、`JournalReplayer` | C++20 + `pthread` |
 | **Core + TLS** | `NimbleFIX::nimblefix_core_tls` / `nimblefix-core-tls` | Core 全部能力 + 非阻塞 OpenSSL 3 `DirectTlsTransport`（TLS 1.2/1.3、CA/SAN 校验、双向 mTLS） | OpenSSL 3+ |
 | **Full Runtime（完整运行时）** | `NimbleFIX::nimblefix` / `nimblefix` | 以上全部能力 + `Engine<Schema, Inline\|Queued>`、多核 `ShardedEngine`、Acceptor、可插拔 `IoBackend`（`epoll` / `busy_poll` / `io_uring`）、MPSC `Sender`、SPSC `ProducerLane`、可选运行期 XML（`NimbleFIX::nimblefix_xml`） | 可选 `liburing`、`libxml2` |
 
@@ -89,18 +89,20 @@ auto write_order = [&](auto& w) {
 
 ## 性能速览
 
-在 Release 模式（`-O3`、GCC 16.2.1、AMD Ryzen 7 7840HS、Linux 7.2）下，启用全量 912 字段 `FIX44.xml` 严格校验与真实分段 mmap 日志持久化测得。所有 NimbleFIX 热路径均为 **0 堆分配**。完整测试方法与复现步骤见 [性能基准](docs/benchmarks.zh-CN.md)。
+在 Release 模式（`-O3`、GCC 16.2.1、AMD Ryzen 7 7840HS、Linux 7.2）下，启用全量 912 字段 `FIX44.xml` 严格校验（覆盖 Header、Trailer 与 Body）、120 s `SendingTime` 校验与真实分段 mmap 日志持久化测得。堆分配通过 `-Wl,--wrap={malloc,calloc,realloc,aligned_alloc,posix_memalign}` 与全局 `operator new/delete` 统一审计（覆盖可执行文件与所有静态链接库）。完整测试方法与复现步骤见 [性能基准](docs/benchmarks.zh-CN.md)。
 
 | 基准项 | NimbleFIX (p50 / p99) | 吞吐 | 堆分配 |
 | :--- | ---: | ---: | :---: |
-| **流式编码**（`NewOrderSingle` + `NoPartyIDs[3]`） | **140 ns** / **151 ns** | 7.09M msgs/s | 0 |
-| **解析 + 912 字段严格校验 + 字段读取** | **361 ns** / **371 ns** | 2.73M msgs/s | 0 |
-| **纯引擎 Pre-TCP Acceptor 往返**（`SessionDriver` + mmap 日志） | **912 ns** / **1.13 µs** | 1.04M ord/s | 0 |
-| **本机 TCP Ping-Pong RTT**（`DirectInitiator` / `Engine` Acceptor） | **8.85 µs** / **9.35 µs** | 110k / 94k rt/s | 0 |
-| **本机 TCP 32 笔密集连发**（`DirectSendQueue` / `Engine + ProducerLane`） | **13.03 µs** / **17.18 µs** | 1.34M / 1.18M ord/s | 0 |
-| **4 分片 `ShardedEngine` Acceptor**（16 并发会话，单端口） | **29.82 µs** / **48.55 µs** | **503k ord/s** | 0 |
+| **流式编码**（`NewOrderSingle` + `NoPartyIDs[1]`，3 个参与方字段） | **110 ns** / **120 ns** | 9.07M msgs/s | 0 |
+| **解析 + 全量 `FIX44.xml` 严格校验 + 读取**（Header + Body + Trailer） | **411 ns** / **421 ns** | 2.44M msgs/s | 0 |
+| **纯引擎 Pre-TCP Acceptor 往返**（`SessionDriver` + mmap 日志） | **842 ns** / **1.02 µs** | 1.12M ord/s | 0/msg *（20k 笔中 8 次分段 checkpoint）* |
+| **本机 TCP Ping-Pong RTT**（`DirectInitiator`） | **8.63 µs** / **12.20 µs** | 111k rt/s | 0 |
+| **本机 TCP Ping-Pong RTT**（`Engine` Acceptor，`busy_poll`） | **9.39 µs** / **13.29 µs** | 96k ord/s | 0 |
+| **单批 32 笔同时到达爆发**（`enqueue_stream` + `sendmsg`，`Burst->Recv`） | **12.56 µs** / **17.05 µs** | 1.44M ord/s | 0 |
+| **开放循环定时突发**（`DirectSendQueue`，64k 目标 ord/s，`t_recv - t_sched`） | **15.86 µs** / **24.11 µs** | 64.3k ord/s | 0 |
+| **4 分片 `ShardedEngine` Acceptor**（`io_uring` + `hybrid_backoff`，16 会话，单端口） | **34.77 µs** / **52.17 µs** | **447k ord/s** | 0/msg *（160k 笔中 64 次分段 checkpoint）* |
 
-在严格同口径对比 QuickFIX 1.16.0（同一 `FIX44.xml` 严格校验与磁盘持久化）中：编码快 **8.8×**，解析校验快 **6.8×**，TCP 往返延迟低 **2.4×**，32 笔密集连发延迟低 **12.8×**。
+在严格同口径对比 QuickFIX 1.16.0（通过 12 组 Header/Trailer/Body 校验一致性门禁、同一 `FIX44.xml` 严格校验、`MaxLatency=120` 与磁盘持久化）中：编码快 **7.8×**，解析校验快 **5.7×**，TCP 往返延迟低 **2.4×**，32 笔同时到达爆发延迟低 **14.2×**。
 
 ---
 

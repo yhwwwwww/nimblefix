@@ -3,13 +3,17 @@
 #include <nimblefix/io_backend.hpp>
 #include <nimblefix/message.hpp>
 #include <nimblefix/sharded_engine.hpp>
+#include "../src/runtime/io_backend.hpp"
 
 #include <atomic>
 #include <chrono>
+#include <cerrno>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <iostream>
+#include <memory>
 #include <mutex>
 #include <set>
 #include <string>
@@ -476,9 +480,452 @@ void test_core_affinity_idle_strategy_and_sharded_reactor() {
     test_sharded_reactor(nf::IoBackendConfig::hybrid(200, 50), "epoll+hybrid_backoff");
 }
 
+// Deterministic mock Proactor backend to verify R01 two-phase send semantics:
+// delayed completion, partial send completion, -EPIPE failure after staging, and
+// submit_send() returning false (backpressure retry without losing staged bytes).
+struct MockProactorControl {
+    enum class Action { normal, hold, release_partial, release_all, fail_epipe };
+    std::mutex mu;
+    bool intercept_orders{false};
+    bool hold_next_send{false};
+    int reject_next_order_submits{0};
+    Action action{Action::normal};
+    std::size_t partial_bytes{20};
+    bool send_is_held{false};
+    std::size_t held_total_bytes{0};
+    std::size_t rejected_submit_count{0};
+};
+
+MockProactorControl* g_mock_proactor_ctl = nullptr;
+
+class MockProactorBackend final : public nf::detail::IoBackend {
+public:
+    MockProactorBackend(std::unique_ptr<nf::detail::IoBackend> inner, MockProactorControl* ctl)
+        : inner_(std::move(inner)), ctl_(ctl) {}
+
+    [[nodiscard]] nf::IoBackendKind kind() const noexcept override { return nf::IoBackendKind::io_uring; }
+    [[nodiscard]] bool supports_proactor() const noexcept override { return true; }
+
+    void sync_readiness(nf::detail::IoTag& tag, int fd, std::uint32_t desired_events) noexcept override {
+        inner_->sync_readiness(tag, fd, desired_events);
+    }
+    void remove(nf::detail::IoTag& tag) noexcept override {
+        inner_->remove(tag);
+    }
+
+    [[nodiscard]] bool submit_recv(nf::detail::IoTag& tag, int fd, std::span<char> buffer) noexcept override {
+        pending_recvs_.push_back({&tag, fd, buffer});
+        return true;
+    }
+
+    [[nodiscard]] bool submit_send(nf::detail::IoTag& tag, int fd, std::span<const char> buffer) noexcept override {
+        const std::string_view sv{buffer.data(), buffer.size()};
+        const bool is_order = sv.find("35=D\x01") != std::string_view::npos;
+        if (ctl_ != nullptr) {
+            std::lock_guard lock(ctl_->mu);
+            if (is_order && ctl_->reject_next_order_submits > 0) {
+                --ctl_->reject_next_order_submits;
+                ++ctl_->rejected_submit_count;
+                return false;
+            }
+            if ((ctl_->hold_next_send || (is_order && ctl_->intercept_orders)) &&
+                ctl_->action == MockProactorControl::Action::hold) {
+                ctl_->hold_next_send = false;
+                held_send_ = PendingSend{&tag, fd, buffer};
+                has_held_send_ = true;
+                ctl_->send_is_held = true;
+                ctl_->held_total_bytes = buffer.size();
+                return true;
+            }
+        }
+        pending_sends_.push_back({&tag, fd, buffer});
+        return true;
+    }
+
+    void cancel_fd(int fd) noexcept override {
+        for (auto it = pending_recvs_.begin(); it != pending_recvs_.end();) {
+            if (it->fd == fd) {
+                ready_.push_back({it->tag, nf::detail::IoCompletionKind::recv_done, 0, -ECANCELED});
+                it = pending_recvs_.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        for (auto it = pending_sends_.begin(); it != pending_sends_.end();) {
+            if (it->fd == fd) {
+                ready_.push_back({it->tag, nf::detail::IoCompletionKind::send_done, 0, -ECANCELED});
+                it = pending_sends_.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        if (has_held_send_ && held_send_.fd == fd) {
+            ready_.push_back({held_send_.tag, nf::detail::IoCompletionKind::send_done, 0, -ECANCELED});
+            has_held_send_ = false;
+            if (ctl_ != nullptr) {
+                std::lock_guard lock(ctl_->mu);
+                ctl_->send_is_held = false;
+            }
+        }
+    }
+
+    [[nodiscard]] int wait(std::span<nf::detail::IoCompletion> out, std::uint32_t wait_ms) noexcept override {
+        std::size_t count = 0;
+        auto push_comp = [&](nf::detail::IoCompletion c) -> bool {
+            if (count >= out.size()) return false;
+            out[count++] = c;
+            return true;
+        };
+
+        // 1. Drain already queued completions (e.g. from cancel_fd).
+        while (!ready_.empty() && count < out.size()) {
+            out[count++] = ready_.front();
+            ready_.erase(ready_.begin());
+        }
+
+        // 2. Process held send if test changed action.
+        if (has_held_send_ && ctl_ != nullptr && count < out.size()) {
+            MockProactorControl::Action act = MockProactorControl::Action::hold;
+            std::size_t partial_n = 0;
+            {
+                std::lock_guard lock(ctl_->mu);
+                act = ctl_->action;
+                partial_n = ctl_->partial_bytes;
+            }
+            if (act == MockProactorControl::Action::fail_epipe) {
+                auto s = held_send_;
+                has_held_send_ = false;
+                {
+                    std::lock_guard lock(ctl_->mu);
+                    ctl_->send_is_held = false;
+                    ctl_->action = MockProactorControl::Action::normal;
+                }
+                push_comp({s.tag, nf::detail::IoCompletionKind::send_done, 0, -EPIPE});
+            } else if (act == MockProactorControl::Action::release_partial) {
+                auto s = held_send_;
+                has_held_send_ = false;
+                const std::size_t to_send = std::min(partial_n, s.buf.size());
+                const ssize_t n = ::send(s.fd, s.buf.data(), to_send, MSG_NOSIGNAL | MSG_DONTWAIT);
+                const std::int32_t res = n >= 0 ? static_cast<std::int32_t>(n) : -errno;
+                {
+                    std::lock_guard lock(ctl_->mu);
+                    ctl_->send_is_held = false;
+                    // Hold the subsequent send for the remainder until test releases it!
+                    ctl_->hold_next_send = true;
+                    ctl_->action = MockProactorControl::Action::hold;
+                }
+                push_comp({s.tag, nf::detail::IoCompletionKind::send_done, 0, res});
+            } else if (act == MockProactorControl::Action::release_all ||
+                       act == MockProactorControl::Action::normal) {
+                auto s = held_send_;
+                has_held_send_ = false;
+                const ssize_t n = ::send(s.fd, s.buf.data(), s.buf.size(), MSG_NOSIGNAL | MSG_DONTWAIT);
+                const std::int32_t res = n >= 0 ? static_cast<std::int32_t>(n) : -errno;
+                {
+                    std::lock_guard lock(ctl_->mu);
+                    ctl_->send_is_held = false;
+                    ctl_->action = MockProactorControl::Action::normal;
+                }
+                push_comp({s.tag, nf::detail::IoCompletionKind::send_done, 0, res});
+            }
+        }
+
+        // 3. Process normal pending sends.
+        for (auto it = pending_sends_.begin(); it != pending_sends_.end() && count < out.size();) {
+            const ssize_t n = ::send(it->fd, it->buf.data(), it->buf.size(), MSG_NOSIGNAL | MSG_DONTWAIT);
+            if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+                ++it;
+                continue;
+            }
+            const std::int32_t res = n >= 0 ? static_cast<std::int32_t>(n) : -errno;
+            push_comp({it->tag, nf::detail::IoCompletionKind::send_done, 0, res});
+            it = pending_sends_.erase(it);
+        }
+
+        // 4. Poll pending recvs non-blockingly.
+        for (auto it = pending_recvs_.begin(); it != pending_recvs_.end() && count < out.size();) {
+            const ssize_t n = ::recv(it->fd, it->buf.data(), it->buf.size(), MSG_DONTWAIT);
+            if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+                ++it;
+                continue;
+            }
+            const std::int32_t res = n >= 0 ? static_cast<std::int32_t>(n) : -errno;
+            push_comp({it->tag, nf::detail::IoCompletionKind::recv_done, 0, res});
+            it = pending_recvs_.erase(it);
+        }
+
+        if (count > 0) return static_cast<int>(count);
+        const std::uint32_t slice_ms = (!pending_recvs_.empty() || !pending_sends_.empty() || has_held_send_)
+            ? std::min<std::uint32_t>(wait_ms, 1U) : wait_ms;
+        return inner_->wait(out, slice_ms);
+    }
+
+private:
+    struct PendingRecv { nf::detail::IoTag* tag; int fd; std::span<char> buf; };
+    struct PendingSend { nf::detail::IoTag* tag; int fd; std::span<const char> buf; };
+
+    std::unique_ptr<nf::detail::IoBackend> inner_;
+    MockProactorControl* ctl_{};
+    std::vector<PendingRecv> pending_recvs_;
+    std::vector<PendingSend> pending_sends_;
+    std::vector<nf::detail::IoCompletion> ready_;
+    PendingSend held_send_{};
+    bool has_held_send_{false};
+};
+
+nf::Result<std::unique_ptr<nf::detail::IoBackend>> mock_proactor_factory(
+    const nf::IoBackendConfig& config) noexcept {
+    if (config.kind != nf::IoBackendKind::io_uring) {
+        nf::detail::set_io_backend_test_factory(nullptr);
+        auto inner = nf::detail::create_io_backend(config);
+        nf::detail::set_io_backend_test_factory(&mock_proactor_factory);
+        return inner;
+    }
+    nf::detail::set_io_backend_test_factory(nullptr);
+    auto inner = nf::detail::create_io_backend(nf::IoBackendConfig::epoll());
+    nf::detail::set_io_backend_test_factory(&mock_proactor_factory);
+    if (!inner.ok()) return inner.status();
+    return std::unique_ptr<nf::detail::IoBackend>(
+        new (std::nothrow) MockProactorBackend(std::move(inner).value(), g_mock_proactor_ctl));
+}
+
+void test_proactor_send_commit_contract() {
+    struct FactoryReset {
+        ~FactoryReset() {
+            nf::detail::set_io_backend_test_factory(nullptr);
+            g_mock_proactor_ctl = nullptr;
+        }
+    } reset_guard;
+
+    TempDir dir_acc;
+    TempDir dir_ini;
+    const std::uint16_t port = pick_free_port();
+    CHECK(port != 0);
+
+    // Acceptor runs on normal epoll; Initiator runs on MockProactorBackend.
+    nf::EngineConfig acc_cfg{};
+    acc_cfg.storage.directory = dir_acc.path;
+    acc_cfg.storage.journal_capacity_bytes = 2U * 1024U * 1024U;
+    acc_cfg.storage.segment_bytes = 256U * 1024U;
+    acc_cfg.storage.journal_max_records = 4096;
+    acc_cfg.io_backend = nf::IoBackendConfig::epoll();
+    auto acc_res = nf::Engine<fix::Schema, nf::Inline>::create(acc_cfg);
+    CHECK(acc_res.ok());
+    if (!acc_res.ok()) return;
+    auto acceptor = std::move(acc_res).value();
+    CHECK(acceptor.add_listener({"main", {"127.0.0.1", port}}).ok());
+    CHECK(acceptor.add_acceptor({"acc-0", "main", "SELL", "BUY"}).ok());
+
+    std::mutex ord_mu;
+    std::vector<std::string> acc_orders;
+    CHECK(acceptor.on<fix::NewOrderSingle>([&](nf::SessionContext&, const fix::NewOrderSingleView& req) {
+        std::lock_guard lock(ord_mu);
+        acc_orders.emplace_back(req.cl_ord_id().value());
+        return nf::Status::success();
+    }).ok());
+
+    MockProactorControl ctl{};
+    g_mock_proactor_ctl = &ctl;
+    nf::detail::set_io_backend_test_factory(&mock_proactor_factory);
+
+    nf::EngineConfig ini_cfg{};
+    ini_cfg.storage.directory = dir_ini.path;
+    ini_cfg.storage.journal_capacity_bytes = 2U * 1024U * 1024U;
+    ini_cfg.storage.segment_bytes = 256U * 1024U;
+    ini_cfg.storage.journal_max_records = 4096;
+    ini_cfg.io_backend = nf::IoBackendConfig::io_uring();
+    auto ini_res = nf::Engine<fix::Schema, nf::Inline>::create(ini_cfg);
+    CHECK(ini_res.ok());
+    if (!ini_res.ok()) return;
+    auto initiator = std::move(ini_res).value();
+    auto h = initiator.add_initiator({"ini-0", "BUY", "SELL", {"127.0.0.1", port}});
+    CHECK(h.ok());
+    auto lane_res = h.value().producer_lane<fix::Schema>({.capacity_messages = 64,
+        .capacity_bytes = 65536, .receipt_capacity = 64});
+    CHECK(lane_res.ok());
+    auto lane = std::move(lane_res).value();
+
+    std::thread acc_thread([&] { (void)acceptor.run(); });
+    std::thread ini_thread([&] { (void)initiator.run(); });
+
+    const auto d0 = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    while (std::chrono::steady_clock::now() < d0) {
+        auto s = initiator.snapshot("ini-0");
+        if (s.ok() && s.value().state == nf::SessionState::active) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    CHECK(initiator.snapshot("ini-0").value().state == nf::SessionState::active);
+
+    // Case 1: Delayed partial SEND -> receipt stays `appended` & written_bytes unchanged
+    //         until final byte completes!
+    const auto written_before = initiator.snapshot("ini-0").value().written_bytes;
+    {
+        std::lock_guard lock(ctl.mu);
+        ctl.intercept_orders = true;
+        ctl.action = MockProactorControl::Action::hold;
+        ctl.partial_bytes = 20;
+    }
+    const auto send1 = lane.send_stream<fix::NewOrderSingle>([](auto& w) {
+        w.cl_ord_id("PROACTOR-PARTIAL-1").symbol("AAPL").side('1')
+         .transact_time("20261123-14:00:00.000").order_qty(nf::Decimal{100, 0}).ord_type('1');
+    });
+    CHECK(send1.ok());
+
+    const auto d1 = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (std::chrono::steady_clock::now() < d1) {
+        {
+            std::lock_guard lock(ctl.mu);
+            if (ctl.send_is_held) break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    {
+        std::lock_guard lock(ctl.mu);
+        CHECK(ctl.send_is_held);
+        CHECK(ctl.held_total_bytes > 40);
+    }
+    // Query receipt while SEND is still in flight: MUST be `appended`, NOT `written`!
+    {
+        auto rec = lane.receipt(send1.value().id);
+        const auto d_rec = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+        while (std::chrono::steady_clock::now() < d_rec && (!rec.ok() || rec.value().state == nf::ReceiptState::accepted)) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            rec = lane.receipt(send1.value().id);
+        }
+        CHECK(rec.ok() && rec.value().state == nf::ReceiptState::appended);
+    }
+    CHECK(initiator.snapshot("ini-0").value().written_bytes == written_before);
+
+    // Release ONLY the first 20 bytes -> receipt MUST STILL be `appended`, written_bytes += 20!
+    {
+        std::lock_guard lock(ctl.mu);
+        ctl.action = MockProactorControl::Action::release_partial;
+    }
+    const auto d2 = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (std::chrono::steady_clock::now() < d2) {
+        if (initiator.snapshot("ini-0").value().written_bytes == written_before + 20) {
+            std::lock_guard lock(ctl.mu);
+            if (ctl.send_is_held) break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    CHECK(initiator.snapshot("ini-0").value().written_bytes == written_before + 20);
+    {
+        const auto rec = lane.receipt(send1.value().id);
+        CHECK(rec.ok() && rec.value().state == nf::ReceiptState::appended);
+    }
+
+    // Now release the remainder -> receipt transitions to `written` and Acceptor receives full order!
+    {
+        std::lock_guard lock(ctl.mu);
+        ctl.action = MockProactorControl::Action::release_all;
+        ctl.intercept_orders = false;
+    }
+    bool saw_written = false;
+    const auto d3 = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (std::chrono::steady_clock::now() < d3 && !saw_written) {
+        const auto rec = lane.receipt(send1.value().id);
+        if (rec.ok() && rec.value().state == nf::ReceiptState::written) saw_written = true;
+        else std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    CHECK(saw_written);
+    const auto d3b = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (std::chrono::steady_clock::now() < d3b) {
+        {
+            std::lock_guard lock(ord_mu);
+            if (!acc_orders.empty()) break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    {
+        std::lock_guard lock(ord_mu);
+        CHECK(acc_orders.size() == 1 && acc_orders[0] == "PROACTOR-PARTIAL-1");
+    }
+
+    // Case 2: submit_send() returns false twice before succeeding -> staged bytes MUST be preserved and delivered!
+    {
+        std::lock_guard lock(ctl.mu);
+        ctl.reject_next_order_submits = 2;
+        ctl.rejected_submit_count = 0;
+        ctl.intercept_orders = false;
+    }
+    const auto send2 = lane.send_stream<fix::NewOrderSingle>([](auto& w) {
+        w.cl_ord_id("PROACTOR-RETRY-2").symbol("MSFT").side('2')
+         .transact_time("20261123-14:00:01.000").order_qty(nf::Decimal{50, 0}).ord_type('1');
+    });
+    CHECK(send2.ok());
+    bool saw_written2 = false;
+    const auto d4 = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (std::chrono::steady_clock::now() < d4) {
+        const auto rec = lane.receipt(send2.value().id);
+        if (rec.ok() && rec.value().state == nf::ReceiptState::written) saw_written2 = true;
+        {
+            std::lock_guard lock(ord_mu);
+            if (saw_written2 && acc_orders.size() >= 2) break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    CHECK(saw_written2);
+    {
+        std::lock_guard lock(ctl.mu);
+        CHECK(ctl.rejected_submit_count == 2);
+    }
+    {
+        std::lock_guard lock(ord_mu);
+        CHECK(acc_orders.size() == 2 && acc_orders[1] == "PROACTOR-RETRY-2");
+    }
+
+    // Case 3: Delayed SEND fails with -EPIPE -> receipt MUST NEVER become `written`!
+    const auto written_before_fail = initiator.snapshot("ini-0").value().written_bytes;
+    {
+        std::lock_guard lock(ctl.mu);
+        ctl.intercept_orders = true;
+        ctl.action = MockProactorControl::Action::hold;
+    }
+    const auto send3 = lane.send_stream<fix::NewOrderSingle>([](auto& w) {
+        w.cl_ord_id("PROACTOR-EPIPE-3").symbol("NVDA").side('1')
+         .transact_time("20261123-14:00:02.000").order_qty(nf::Decimal{10, 0}).ord_type('1');
+    });
+    CHECK(send3.ok());
+    const auto d5 = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (std::chrono::steady_clock::now() < d5) {
+        {
+            std::lock_guard lock(ctl.mu);
+            if (ctl.send_is_held) break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    {
+        std::lock_guard lock(ctl.mu);
+        CHECK(ctl.send_is_held);
+        ctl.action = MockProactorControl::Action::fail_epipe;
+        ctl.intercept_orders = false;
+    }
+    // Wait briefly for -EPIPE disconnect to process; verify receipt 3 NEVER reports written.
+    bool saw_written3 = false;
+    const auto d6 = std::chrono::steady_clock::now() + std::chrono::milliseconds(150);
+    while (std::chrono::steady_clock::now() < d6) {
+        const auto rec = lane.receipt(send3.value().id);
+        if (rec.ok() && rec.value().state == nf::ReceiptState::written) saw_written3 = true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    CHECK(!saw_written3);
+    CHECK(initiator.snapshot("ini-0").value().written_bytes == written_before_fail);
+
+    initiator.request_stop();
+    acceptor.request_stop();
+    ini_thread.join();
+    acc_thread.join();
+
+    if (g_failures == 0) {
+        std::cout << "[PASS] deterministic Proactor two-phase send contract (partial, retry, -EPIPE)\n";
+    }
+}
+
 } // namespace
 
 int main() {
+    test_proactor_send_commit_contract();
     run_backend_roundtrip<nf::Inline>(nf::IoBackendKind::epoll, 2, 25, "epoll Inline");
     run_backend_roundtrip<nf::Queued>(nf::IoBackendKind::epoll, 2, 25, "epoll Queued");
     run_backend_roundtrip<nf::Inline>(nf::IoBackendKind::busy_poll, 2, 25, "busy_poll Inline");

@@ -36,6 +36,7 @@ public:
     [[nodiscard]] int native_fd() const noexcept;
     [[nodiscard]] bool valid() const noexcept;
     [[nodiscard]] bool is_connecting() const noexcept;
+    [[nodiscard]] bool is_handshaking() const noexcept;
     [[nodiscard]] bool handshake_complete() const noexcept;
     [[nodiscard]] std::size_t pending_plaintext() const noexcept;
     [[nodiscard]] bool wants_read() const noexcept;

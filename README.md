@@ -22,7 +22,7 @@ A modern, low-latency C++20 FIX protocol library supporting FIX 4.2, 4.3, 4.4, a
 
 | Layer | CMake / xmake Target | Included Capabilities | External Dependencies |
 | :--- | :--- | :--- | :--- |
-| **Core** | `NimbleFIX::nimblefix_core` / `nimblefix-core` | Streaming codec (`StreamWriter`), `Fixed<...>`, segmented mmap journal, `SessionCore`, nonblocking TCP (`sendmsg` batching), `DirectInitiator`, multi-endpoint failover, lock-free SPSC `DirectSendQueue`, mmap telemetry, `JournalReplayer` | C++20 + `pthread` |
+| **Core** | `NimbleFIX::nimblefix_core` / `nimblefix-core` | Streaming codec (`StreamWriter`), `Fixed<...>`, segmented mmap journal, cross-process lock-free SPMC `JournalTailer`, `SessionCore`, nonblocking TCP (`sendmsg` batching), `DirectInitiator`, multi-endpoint failover, lock-free SPSC `DirectSendQueue`, mmap telemetry, `JournalReplayer` | C++20 + `pthread` |
 | **Core + TLS** | `NimbleFIX::nimblefix_core_tls` / `nimblefix-core-tls` | Everything in Core + nonblocking OpenSSL 3 `DirectTlsTransport` (TLS 1.2/1.3, CA/SAN verification, mTLS) | OpenSSL 3+ |
 | **Full Runtime** | `NimbleFIX::nimblefix` / `nimblefix` | Everything above + `Engine<Schema, Inline\|Queued>`, multi-core `ShardedEngine`, Acceptor, pluggable `IoBackend` (`epoll` / `busy_poll` / `io_uring`), MPSC `Sender`, SPSC `ProducerLane`, optional runtime XML (`NimbleFIX::nimblefix_xml`) | Optional `liburing`, `libxml2` |
 
@@ -89,18 +89,20 @@ auto write_order = [&](auto& w) {
 
 ## Performance Highlights
 
-Measured in Release mode (`-O3`, GCC 16.2.1, AMD Ryzen 7 7840HS, Linux 7.2) with the full 912-field `FIX44.xml` dictionary, strict validation, and real segmented mmap journal persistence. All NimbleFIX hot paths record **0 heap allocations**. See [Benchmarks](docs/benchmarks.md) for full methodology and reproduction commands.
+Measured in Release mode (`-O3`, GCC 16.2.1, AMD Ryzen 7 7840HS, Linux 7.2) with the full 912-field `FIX44.xml` dictionary (Header, Trailer, and body strict validation), 120 s `SendingTime` checks, and real segmented mmap journal persistence. Allocations are audited via `-Wl,--wrap={malloc,calloc,realloc,aligned_alloc,posix_memalign}` and global `operator new/delete` (covering the executable and all statically linked libraries). See [Benchmarks](docs/benchmarks.md) for full methodology and reproduction commands.
 
 | Benchmark | NimbleFIX (p50 / p99) | Throughput | Heap Allocs |
 | :--- | ---: | ---: | :---: |
-| **Stream Encode** (`NewOrderSingle` + `NoPartyIDs[3]`) | **140 ns** / **151 ns** | 7.09M msgs/s | 0 |
-| **Strict Parse + 912-Field Validate + Read** | **361 ns** / **371 ns** | 2.73M msgs/s | 0 |
-| **Pre-TCP Acceptor Turnaround** (`SessionDriver` + mmap journal) | **912 ns** / **1.13 µs** | 1.04M ord/s | 0 |
-| **Loopback TCP Ping-Pong RTT** (`DirectInitiator` / `Engine` Acceptor) | **8.85 µs** / **9.35 µs** | 110k / 94k rt/s | 0 |
-| **Loopback TCP 32-Order Burst** (`DirectSendQueue` / `Engine + ProducerLane`) | **13.03 µs** / **17.18 µs** | 1.34M / 1.18M ord/s | 0 |
-| **4-Shard `ShardedEngine` Acceptor** (16 sessions, 1 port) | **29.82 µs** / **48.55 µs** | **503k ord/s** | 0 |
+| **Stream Encode** (`NewOrderSingle` + `NoPartyIDs[1]`, 3 party fields) | **110 ns** / **120 ns** | 9.07M msgs/s | 0 |
+| **Strict Parse + Full `FIX44.xml` Validate + Read** (Header + Body + Trailer) | **411 ns** / **421 ns** | 2.44M msgs/s | 0 |
+| **Pre-TCP Acceptor Turnaround** (`SessionDriver` + mmap journal) | **842 ns** / **1.02 µs** | 1.12M ord/s | 0/msg *(8 seg-ckp / 20k)* |
+| **Loopback TCP Ping-Pong RTT** (`DirectInitiator`) | **8.63 µs** / **12.20 µs** | 111k rt/s | 0 |
+| **Loopback TCP Ping-Pong RTT** (`Engine` Acceptor, `busy_poll`) | **9.39 µs** / **13.29 µs** | 96k ord/s | 0 |
+| **Single-Batch 32-Order Burst** (`enqueue_stream` + `sendmsg`, `Burst->Recv`) | **12.56 µs** / **17.05 µs** | 1.44M ord/s | 0 |
+| **Open-Loop Scheduled Bursts** (`DirectSendQueue`, 64k target ord/s, `t_recv - t_sched`) | **15.86 µs** / **24.11 µs** | 64.3k ord/s | 0 |
+| **4-Shard `ShardedEngine` Acceptor** (`io_uring` + `hybrid_backoff`, 16 sessions, 1 port) | **34.77 µs** / **52.17 µs** | **447k ord/s** | 0/msg *(64 seg-ckp / 160k)* |
 
-In same-methodology parity tests against QuickFIX 1.16.0 (identical `FIX44.xml` strict validation and on-disk persistence): **8.8× faster** encode, **6.8× faster** strict parse & validate, **2.4× lower** TCP RTT, and **12.8× lower** 32-order burst latency.
+In same-methodology parity tests against QuickFIX 1.16.0 (verified 12-case Header/Trailer/Body validation equivalence gate, identical `FIX44.xml` strict validation, `MaxLatency=120`, and on-disk persistence): **7.8× faster** encode, **5.7× faster** strict parse & validate, **2.4× lower** TCP RTT, and **14.2× lower** 32-order simultaneous burst latency.
 
 ---
 

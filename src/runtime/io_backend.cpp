@@ -474,7 +474,18 @@ private:
 
 } // namespace
 
+namespace {
+IoBackendTestFactory g_io_backend_test_factory = nullptr;
+} // namespace
+
+void set_io_backend_test_factory(IoBackendTestFactory factory) noexcept {
+    g_io_backend_test_factory = factory;
+}
+
 Result<std::unique_ptr<IoBackend>> create_io_backend(const IoBackendConfig& config) noexcept {
+    if (g_io_backend_test_factory != nullptr) {
+        return g_io_backend_test_factory(config);
+    }
     try {
         switch (config.kind) {
         case IoBackendKind::epoll:

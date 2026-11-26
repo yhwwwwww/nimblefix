@@ -22,6 +22,8 @@
 #include <thread>
 #include <vector>
 
+#include "alloc_audit.hpp"
+
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
@@ -30,21 +32,6 @@
 
 namespace nf = nimblefix;
 namespace fix = nimblefix::fix44;
-
-namespace {
-std::atomic<bool> g_count_malloc{false};
-std::atomic<std::uint64_t> g_malloc_calls{0};
-} // namespace
-
-extern "C" {
-void* __real_malloc(std::size_t n);
-void* __wrap_malloc(std::size_t n) {
-    if (g_count_malloc.load(std::memory_order_relaxed)) {
-        g_malloc_calls.fetch_add(1, std::memory_order_relaxed);
-    }
-    return __real_malloc(n);
-}
-} // extern "C"
 
 namespace {
 
@@ -152,20 +139,20 @@ void run_message_construction_bench(std::size_t warmup, std::size_t samples) {
         std::vector<std::uint64_t> lats;
         lats.reserve(samples);
         for (std::size_t i = 0; i < warmup; ++i) sink += fn(i);
-        g_malloc_calls.store(0);
-        g_count_malloc.store(true);
+        nf::bench_audit::reset();
+        nf::bench_audit::enable();
         for (std::size_t i = 0; i < samples; ++i) {
             const std::uint64_t t0 = now_ns();
             sink += fn(i);
             const std::uint64_t t1 = now_ns();
             lats.push_back(t1 - t0);
         }
-        g_count_malloc.store(false);
+        nf::bench_audit::disable();
         const auto s = compute_stats(std::move(lats));
         std::cout << "  " << std::left << std::setw(42) << name
                   << " p50=" << std::right << std::fixed << std::setprecision(1) << std::setw(6) << s.p50_ns << " ns"
                   << " | p99=" << std::setw(6) << s.p99_ns << " ns"
-                  << " | allocs=" << g_malloc_calls.load() << '\n';
+                  << " | allocs=" << nf::bench_audit::calls() << '\n';
     };
 
     std::cout << "=== Part 0: Message Construction + FIX 4.4 Encode (" << samples
@@ -414,10 +401,12 @@ const char* mode_name(SendMode m) noexcept {
 }
 
 struct ModeResult {
-    Stats burst_oneway{}; // t_recv - t_burst_start (Coordinated-Omission-Free!)
+    Stats burst_oneway{}; // t_recv - t_burst_start (or t_recv - t_sched in open-loop)
     Stats send_oneway{};  // t_recv - t_send_stamp  (Per-order enqueue -> recv)
     Stats rtt{};          // Ping-Pong only
     double orders_per_sec{};
+    std::uint64_t alloc_calls{};
+    std::uint64_t backpressure_retries{};
 };
 
 struct ErCounterHandler {
@@ -430,10 +419,14 @@ struct ErCounterHandler {
     }
 };
 
-// Unified runner for Ping-Pong (burst_size==1, ping_pong==true) and Bursts (burst_size>1).
+// Unified runner for Ping-Pong (burst_size==1, ping_pong==true),
+// Single-Batch Simultaneous Bursts (inter_burst_interval_ns==0, inter-batch drain sync),
+// and True Open-Loop Scheduled Bursts (inter_burst_interval_ns>0, exogenous schedule t_sched, no inter-batch wait).
 bool run_workload_for_mode(SendMode mode, bool ping_pong, std::size_t warmup_bursts,
                            std::size_t measured_bursts, std::size_t burst_size,
-                           std::uint64_t strategy_compute_ns, ModeResult& out) {
+                           std::uint64_t strategy_compute_ns, ModeResult& out,
+                           std::uint64_t inter_burst_interval_ns = 0) {
+    const bool open_loop = (!ping_pong && inter_burst_interval_ns > 0);
     TimestampAcceptorPeer peer{ping_pong};
     if (!peer.start()) return false;
 
@@ -453,6 +446,8 @@ bool run_workload_for_mode(SendMode mode, bool ping_pong, std::size_t warmup_bur
     std::vector<std::uint64_t> rtt_samples;
     if (ping_pong) rtt_samples.reserve(total_measured_orders);
     std::uint64_t measured_wall_ns = 0;
+    std::uint64_t measured_allocs = 0;
+    std::uint64_t measured_retries = 0;
 
     if (mode == SendMode::direct_send || mode == SendMode::direct_batch_writev) {
         nf::DirectInitiatorConfig cfg{};
@@ -475,10 +470,22 @@ bool run_workload_for_mode(SendMode mode, bool ping_pong, std::size_t warmup_bur
             std::this_thread::yield();
         }
 
-        auto run_bursts = [&](std::size_t n_bursts, bool record_rtt) {
+        auto run_bursts = [&](std::size_t n_bursts, bool record_rtt, bool count_retries) {
             std::uint64_t sent_so_far = peer.received_orders();
+            const std::uint64_t sched_origin = now_ns();
             for (std::size_t b = 0; b < n_bursts; ++b) {
-                const std::uint64_t t_burst = now_ns();
+                std::uint64_t t_burst = 0;
+                if (open_loop) {
+                    t_burst = sched_origin + b * inter_burst_interval_ns;
+                    while (now_ns() < t_burst) {
+                        if (init.wants_write()) (void)init.poll_once();
+#if defined(__x86_64__) || defined(__i386__)
+                        __builtin_ia32_pause();
+#endif
+                    }
+                } else {
+                    t_burst = now_ns();
+                }
                 for (std::size_t i = 0; i < burst_size; ++i) {
                     spin_ns(strategy_compute_ns);
                     const std::uint64_t t_send = now_ns();
@@ -494,12 +501,14 @@ bool run_workload_for_mode(SendMode mode, bool ping_pong, std::size_t warmup_bur
                         while (true) {
                             const auto r = init.send_stream<fix::NewOrderSingle>(write_order);
                             if (r.ok()) break;
+                            if (count_retries) ++measured_retries;
                             (void)init.poll_once();
                         }
                     } else {
                         while (true) {
                             const auto r = init.enqueue_stream<fix::NewOrderSingle>(write_order);
                             if (r.ok()) break;
+                            if (count_retries) ++measured_retries;
                             (void)init.flush();
                             (void)init.poll_once();
                         }
@@ -516,19 +525,30 @@ bool run_workload_for_mode(SendMode mode, bool ping_pong, std::size_t warmup_bur
                 }
                 if (!ping_pong) {
                     if (mode == SendMode::direct_batch_writev) (void)init.flush();
-                    while (init.wants_write()) (void)init.poll_once();
-                    wait_peer_orders(sent_so_far);
+                    if (!open_loop) {
+                        while (init.wants_write()) (void)init.poll_once();
+                        wait_peer_orders(sent_so_far);
+                    } else if (init.wants_write()) {
+                        (void)init.poll_once();
+                    }
                 }
+            }
+            if (open_loop) {
+                while (init.wants_write()) (void)init.poll_once();
             }
         };
 
-        run_bursts(warmup_bursts, false);
+        run_bursts(warmup_bursts, false, false);
         wait_peer_orders(total_warmup_orders);
         peer.begin_capture(total_measured_orders);
+        nf::bench_audit::reset();
+        nf::bench_audit::enable();
         const std::uint64_t t0 = now_ns();
-        run_bursts(measured_bursts, ping_pong);
+        run_bursts(measured_bursts, ping_pong, true);
         wait_peer_orders(total_warmup_orders + total_measured_orders);
         measured_wall_ns = now_ns() - t0;
+        nf::bench_audit::disable();
+        measured_allocs = nf::bench_audit::calls();
         peer.end_capture();
 
         (void)init.logout();
@@ -570,10 +590,21 @@ bool run_workload_for_mode(SendMode mode, bool ping_pong, std::size_t warmup_bur
             }
         });
 
-        auto run_bursts = [&](std::size_t n_bursts, bool record_rtt) {
+        auto run_bursts = [&](std::size_t n_bursts, bool record_rtt, bool count_retries) {
             std::uint64_t sent_so_far = peer.received_orders();
+            const std::uint64_t sched_origin = now_ns();
             for (std::size_t b = 0; b < n_bursts; ++b) {
-                const std::uint64_t t_burst = now_ns();
+                std::uint64_t t_burst = 0;
+                if (open_loop) {
+                    t_burst = sched_origin + b * inter_burst_interval_ns;
+                    while (now_ns() < t_burst) {
+#if defined(__x86_64__) || defined(__i386__)
+                        __builtin_ia32_pause();
+#endif
+                    }
+                } else {
+                    t_burst = now_ns();
+                }
                 for (std::size_t i = 0; i < burst_size; ++i) {
                     spin_ns(strategy_compute_ns);
                     const std::uint64_t t_send = now_ns();
@@ -586,6 +617,7 @@ bool run_workload_for_mode(SendMode mode, bool ping_pong, std::size_t warmup_bur
                     };
                     const std::uint64_t expect_er = er_count.load(std::memory_order_relaxed) + 1;
                     while (!queue.try_push_stream<fix::NewOrderSingle>(write_order).ok()) {
+                        if (count_retries) ++measured_retries;
 #if defined(__x86_64__) || defined(__i386__)
                         __builtin_ia32_pause();
 #endif
@@ -601,17 +633,21 @@ bool run_workload_for_mode(SendMode mode, bool ping_pong, std::size_t warmup_bur
                         if (record_rtt) rtt_samples.push_back(now_ns() - t_send);
                     }
                 }
-                if (!ping_pong) wait_peer_orders(sent_so_far);
+                if (!ping_pong && !open_loop) wait_peer_orders(sent_so_far);
             }
         };
 
-        run_bursts(warmup_bursts, false);
+        run_bursts(warmup_bursts, false, false);
         wait_peer_orders(total_warmup_orders);
         peer.begin_capture(total_measured_orders);
+        nf::bench_audit::reset();
+        nf::bench_audit::enable();
         const std::uint64_t t0 = now_ns();
-        run_bursts(measured_bursts, ping_pong);
+        run_bursts(measured_bursts, ping_pong, true);
         wait_peer_orders(total_warmup_orders + total_measured_orders);
         measured_wall_ns = now_ns() - t0;
+        nf::bench_audit::disable();
+        measured_allocs = nf::bench_audit::calls();
         peer.end_capture();
 
         io_stop.store(true, std::memory_order_release);
@@ -650,10 +686,21 @@ bool run_workload_for_mode(SendMode mode, bool ping_pong, std::size_t warmup_bur
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
 
-        auto run_bursts = [&](std::size_t n_bursts, bool record_rtt) {
+        auto run_bursts = [&](std::size_t n_bursts, bool record_rtt, bool count_retries) {
             std::uint64_t sent_so_far = peer.received_orders();
+            const std::uint64_t sched_origin = now_ns();
             for (std::size_t b = 0; b < n_bursts; ++b) {
-                const std::uint64_t t_burst = now_ns();
+                std::uint64_t t_burst = 0;
+                if (open_loop) {
+                    t_burst = sched_origin + b * inter_burst_interval_ns;
+                    while (now_ns() < t_burst) {
+#if defined(__x86_64__) || defined(__i386__)
+                        __builtin_ia32_pause();
+#endif
+                    }
+                } else {
+                    t_burst = now_ns();
+                }
                 for (std::size_t i = 0; i < burst_size; ++i) {
                     spin_ns(strategy_compute_ns);
                     const std::uint64_t t_send = now_ns();
@@ -666,6 +713,7 @@ bool run_workload_for_mode(SendMode mode, bool ping_pong, std::size_t warmup_bur
                     };
                     const std::uint64_t expect_er = er_count.load(std::memory_order_relaxed) + 1;
                     while (!lane.send_stream<fix::NewOrderSingle>(write_order).ok()) {
+                        if (count_retries) ++measured_retries;
 #if defined(__x86_64__) || defined(__i386__)
                         __builtin_ia32_pause();
 #endif
@@ -681,17 +729,21 @@ bool run_workload_for_mode(SendMode mode, bool ping_pong, std::size_t warmup_bur
                         if (record_rtt) rtt_samples.push_back(now_ns() - t_send);
                     }
                 }
-                if (!ping_pong) wait_peer_orders(sent_so_far);
+                if (!ping_pong && !open_loop) wait_peer_orders(sent_so_far);
             }
         };
 
-        run_bursts(warmup_bursts, false);
+        run_bursts(warmup_bursts, false, false);
         wait_peer_orders(total_warmup_orders);
         peer.begin_capture(total_measured_orders);
+        nf::bench_audit::reset();
+        nf::bench_audit::enable();
         const std::uint64_t t0 = now_ns();
-        run_bursts(measured_bursts, ping_pong);
+        run_bursts(measured_bursts, ping_pong, true);
         wait_peer_orders(total_warmup_orders + total_measured_orders);
         measured_wall_ns = now_ns() - t0;
+        nf::bench_audit::disable();
+        measured_allocs = nf::bench_audit::calls();
         peer.end_capture();
 
         engine.request_stop();
@@ -704,6 +756,8 @@ bool run_workload_for_mode(SendMode mode, bool ping_pong, std::size_t warmup_bur
     out.orders_per_sec = measured_wall_ns > 0
         ? (static_cast<double>(total_measured_orders) * 1e9 / static_cast<double>(measured_wall_ns))
         : 0.0;
+    out.alloc_calls = measured_allocs;
+    out.backpressure_retries = measured_retries;
     const bool complete = peer.burst_latencies().size() == total_measured_orders;
     peer.stop();
     if (!complete) {
@@ -716,8 +770,18 @@ bool run_workload_for_mode(SendMode mode, bool ping_pong, std::size_t warmup_bur
 
 } // namespace
 
-int main() {
-    run_message_construction_bench(5'000, 30'000);
+int main(int argc, char** argv) {
+    const bool smoke = (argc > 1 && std::string_view{argv[1]} == "--smoke");
+    const std::size_t part0_warmup = smoke ? 100 : 5'000;
+    const std::size_t part0_samples = smoke ? 500 : 30'000;
+    const std::size_t pp_warmup = smoke ? 50 : 500;
+    const std::size_t pp_samples = smoke ? 200 : 5'000;
+    const std::size_t burst_warmup = smoke ? 4 : 20;
+    const std::size_t burst_count = smoke ? 20 : 200;
+    const std::size_t burst_size = smoke ? 16 : 32;
+    const std::uint64_t open_loop_interval_ns = 500'000; // 500 us/burst -> 64k ord/s (32 ord/burst)
+
+    run_message_construction_bench(part0_warmup, part0_samples);
 
     const std::array<SendMode, 4> modes{
         SendMode::direct_send,
@@ -727,10 +791,11 @@ int main() {
     };
 
     // Workload 1: Ping-Pong (1 in-flight)
-    std::cout << "\n=== Workload 1: Ping-Pong (1 in-flight, 5000 orders, 500 warmup, real TCP + FIX 4.4 + v2 Journal) ===\n";
+    std::cout << "\n=== Workload 1: Ping-Pong (1 in-flight, " << pp_samples << " orders, " << pp_warmup
+              << " warmup, real TCP + FIX 4.4 + v2 Journal) ===\n";
     for (const auto m : modes) {
         ModeResult r{};
-        if (!run_workload_for_mode(m, true, 500, 5'000, 1, 0, r)) {
+        if (!run_workload_for_mode(m, true, pp_warmup, pp_samples, 1, 0, r)) {
             std::cerr << "FAILED: " << mode_name(m) << '\n';
             return 1;
         }
@@ -738,38 +803,64 @@ int main() {
                   << " 1-way p50=" << std::right << std::fixed << std::setprecision(2) << std::setw(6) << r.send_oneway.p50_ns / 1000.0 << " us"
                   << " (p99=" << std::setw(6) << r.send_oneway.p99_ns / 1000.0 << " us)"
                   << " | RTT p50=" << std::setw(6) << r.rtt.p50_ns / 1000.0 << " us"
-                  << " | " << static_cast<std::uint64_t>(r.orders_per_sec) << " rt/s\n";
+                  << " (p99=" << std::setw(6) << r.rtt.p99_ns / 1000.0 << " us)"
+                  << " | " << static_cast<std::uint64_t>(r.orders_per_sec) << " rt/s"
+                  << " | allocs=" << r.alloc_calls << '\n';
     }
 
-    // Workload 2: Dense Burst (32 orders/burst, 0 ns strategy compute)
-    std::cout << "\n=== Workload 2: Dense Burst (200 bursts x 32 orders, 0 us compute) ===\n"
-              << "    [CO-Free = t_recv - t_burst_start (true latency from burst arrival); Enq->Recv = t_recv - t_enqueue]\n";
+    // Workload 2: Single-Batch Simultaneous Burst (inter-batch drain synchronized)
+    std::cout << "\n=== Workload 2: Single-Batch Simultaneous Burst (" << burst_count << " bursts x " << burst_size
+              << " orders, 0 us compute, inter-batch drain) ===\n"
+              << "    [Burst->Recv = t_recv - t_burst_start (intra-burst simultaneous arrival); Enq->Recv = t_recv - t_enqueue]\n";
     for (const auto m : modes) {
         ModeResult r{};
-        if (!run_workload_for_mode(m, false, 20, 200, 32, 0, r)) {
+        if (!run_workload_for_mode(m, false, burst_warmup, burst_count, burst_size, 0, r)) {
             std::cerr << "FAILED: " << mode_name(m) << '\n';
             return 1;
         }
         std::cout << "  " << std::left << std::setw(50) << mode_name(m)
-                  << " CO-Free p50=" << std::right << std::fixed << std::setprecision(2) << std::setw(6) << r.burst_oneway.p50_ns / 1000.0 << " us"
+                  << " Burst->Recv p50=" << std::right << std::fixed << std::setprecision(2) << std::setw(6) << r.burst_oneway.p50_ns / 1000.0 << " us"
                   << " (p99=" << std::setw(6) << r.burst_oneway.p99_ns / 1000.0 << " us)"
                   << " | Enq->Recv p50=" << std::setw(6) << r.send_oneway.p50_ns / 1000.0 << " us"
-                  << " | " << static_cast<std::uint64_t>(r.orders_per_sec) << " ord/s\n";
+                  << " | " << static_cast<std::uint64_t>(r.orders_per_sec) << " ord/s"
+                  << " | allocs=" << r.alloc_calls << '\n';
     }
 
-    // Workload 3: Dense Burst + 2 us simulated strategy compute per order
-    std::cout << "\n=== Workload 3: Dense Burst + 2 us Strategy Compute (200 bursts x 32 orders) ===\n";
+    // Workload 3: Single-Batch Simultaneous Burst + 2 us simulated strategy compute per order
+    std::cout << "\n=== Workload 3: Single-Batch Simultaneous Burst + 2 us Strategy Compute (" << burst_count
+              << " bursts x " << burst_size << " orders, inter-batch drain) ===\n";
     for (const auto m : modes) {
         ModeResult r{};
-        if (!run_workload_for_mode(m, false, 20, 200, 32, 2'000, r)) {
+        if (!run_workload_for_mode(m, false, burst_warmup, burst_count, burst_size, 2'000, r)) {
             std::cerr << "FAILED: " << mode_name(m) << '\n';
             return 1;
         }
         std::cout << "  " << std::left << std::setw(50) << mode_name(m)
-                  << " CO-Free p50=" << std::right << std::fixed << std::setprecision(2) << std::setw(6) << r.burst_oneway.p50_ns / 1000.0 << " us"
+                  << " Burst->Recv p50=" << std::right << std::fixed << std::setprecision(2) << std::setw(6) << r.burst_oneway.p50_ns / 1000.0 << " us"
                   << " (p99=" << std::setw(6) << r.burst_oneway.p99_ns / 1000.0 << " us)"
                   << " | Enq->Recv p50=" << std::setw(6) << r.send_oneway.p50_ns / 1000.0 << " us"
-                  << " | " << static_cast<std::uint64_t>(r.orders_per_sec) << " ord/s\n";
+                  << " | " << static_cast<std::uint64_t>(r.orders_per_sec) << " ord/s"
+                  << " | allocs=" << r.alloc_calls << '\n';
+    }
+
+    // Workload 4: True Open-Loop Scheduled Bursts (exogenous arrival schedule, NO inter-batch drain wait)
+    const double target_rate = (static_cast<double>(burst_size) * 1e9) / static_cast<double>(open_loop_interval_ns);
+    std::cout << "\n=== Workload 4: True Open-Loop Scheduled Bursts (" << burst_count << " bursts x " << burst_size
+              << " orders @ " << (open_loop_interval_ns / 1000) << " us/burst = "
+              << static_cast<std::uint64_t>(target_rate) << " target ord/s, NO inter-batch wait) ===\n"
+              << "    [OpenLoop = t_recv - t_sched (true CO-Free exogenous latency including backlog carry-over)]\n";
+    for (const auto m : modes) {
+        ModeResult r{};
+        if (!run_workload_for_mode(m, false, burst_warmup, burst_count, burst_size, 0, r, open_loop_interval_ns)) {
+            std::cerr << "FAILED: " << mode_name(m) << '\n';
+            return 1;
+        }
+        std::cout << "  " << std::left << std::setw(50) << mode_name(m)
+                  << " OpenLoop p50=" << std::right << std::fixed << std::setprecision(2) << std::setw(6) << r.burst_oneway.p50_ns / 1000.0 << " us"
+                  << " (p99=" << std::setw(6) << r.burst_oneway.p99_ns / 1000.0 << " us, max=" << std::setw(7) << r.burst_oneway.max_ns / 1000.0 << " us)"
+                  << " | " << static_cast<std::uint64_t>(r.orders_per_sec) << " ord/s"
+                  << " | retries=" << r.backpressure_retries
+                  << " | allocs=" << r.alloc_calls << '\n';
     }
     return 0;
 }

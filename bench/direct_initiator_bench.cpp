@@ -19,6 +19,8 @@
 #include <thread>
 #include <vector>
 
+#include "alloc_audit.hpp"
+
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
@@ -27,26 +29,6 @@
 
 namespace nf = nimblefix;
 namespace fix = nimblefix::fix44;
-
-namespace {
-bool g_track_alloc = false;
-std::uint64_t g_alloc_calls = 0;
-} // namespace
-
-extern "C" void* __real_malloc(std::size_t);
-extern "C" void* __wrap_malloc(std::size_t size) {
-    if (g_track_alloc) ++g_alloc_calls;
-    return __real_malloc(size);
-}
-void* operator new(std::size_t size) {
-    if (auto* p = std::malloc(size == 0 ? 1 : size)) return p;
-    throw std::bad_alloc();
-}
-void* operator new[](std::size_t size) { return ::operator new(size); }
-void operator delete(void* p) noexcept { std::free(p); }
-void operator delete[](void* p) noexcept { std::free(p); }
-void operator delete(void* p, std::size_t) noexcept { std::free(p); }
-void operator delete[](void* p, std::size_t) noexcept { std::free(p); }
 
 namespace {
 
@@ -399,24 +381,24 @@ bool run_user_encode_bench(std::size_t warmup, std::size_t samples) {
     std::vector<std::uint64_t> enc_ns;
     enc_ns.reserve(samples);
     std::uint64_t sink = 0;
-    g_alloc_calls = 0;
-    g_track_alloc = true;
+    nf::bench_audit::reset();
+    nf::bench_audit::enable();
     for (std::size_t i = 0; i < samples; ++i) {
         nf::SessionHeader h{"BUY", "SELL", i + 2, wt};
         const std::uint64_t t0 = now_ns();
-        if (!order.populate("ORD-000001").ok()) { g_track_alloc = false; return false; }
+        if (!order.populate("ORD-000001").ok()) { nf::bench_audit::disable(); return false; }
         const auto res = nf::encode_fix44(order.view(), h, wire);
         const std::uint64_t t1 = now_ns();
-        if (!res.ok()) { g_track_alloc = false; return false; }
+        if (!res.ok()) { nf::bench_audit::disable(); return false; }
         sink += static_cast<unsigned char>(wire[res.value() - 1]);
         enc_ns.push_back(t1 - t0);
     }
-    g_track_alloc = false;
+    nf::bench_audit::disable();
     const volatile std::uint64_t keep = sink;
     (void)keep;
 
-    const auto stats = compute_stats(enc_ns, g_alloc_calls);
-    std::cout << "=== 0.1.0-Parity Workload: Full 912-Field FIX 4.4 Schema | NewOrderSingle (7 fields + Price + NoPartyIDs[3]) & ExecutionReport (11 fields) ===\n";
+    const auto stats = compute_stats(enc_ns, nf::bench_audit::calls());
+    std::cout << "=== 0.1.0-Parity Workload: Full 912-Field FIX 4.4 Schema | NewOrderSingle (7 fields + NoPartyIDs[1], 3 party fields) & ExecutionReport (11 fields) ===\n";
     print_ns_row("  User Encode (Fixed in-loop fill + encode_fix44, no session/journal)", stats, "msgs/sec");
 
     // StreamWriter comparison on identical workload
@@ -433,8 +415,8 @@ bool run_user_encode_bench(std::size_t warmup, std::size_t samples) {
     std::vector<std::uint64_t> stream_ns;
     stream_ns.reserve(samples);
     sink = 0;
-    g_alloc_calls = 0;
-    g_track_alloc = true;
+    nf::bench_audit::reset();
+    nf::bench_audit::enable();
     for (std::size_t i = 0; i < samples; ++i) {
         nf::SessionHeader h{"BUY", "SELL", i + 2, wt};
         const std::uint64_t t0 = now_ns();
@@ -446,14 +428,14 @@ bool run_user_encode_bench(std::size_t warmup, std::size_t samples) {
              });
         });
         const std::uint64_t t1 = now_ns();
-        if (!res.ok()) { g_track_alloc = false; return false; }
+        if (!res.ok()) { nf::bench_audit::disable(); return false; }
         sink += static_cast<unsigned char>(wire[res.value() - 1]);
         stream_ns.push_back(t1 - t0);
     }
-    g_track_alloc = false;
+    nf::bench_audit::disable();
     const volatile std::uint64_t keep_stream = sink;
     (void)keep_stream;
-    const auto stream_stats = compute_stats(stream_ns, g_alloc_calls);
+    const auto stream_stats = compute_stats(stream_ns, nf::bench_audit::calls());
     print_ns_row("  User Encode (StreamWriter encode_fix44_stream, no session/journal)", stream_stats, "msgs/sec");
     return true;
 }
@@ -547,31 +529,31 @@ bool run_pre_tcp_bench(std::size_t warmup, std::size_t samples, LatencyStats& co
     std::uint64_t rx_allocs = 0;
 
     for (std::size_t i = 0; i < samples; ++i) {
-        // 1. Outbound (pre-TCP): DirectInitiator::send_stream (7 scalars + NoPartyIDs[3]) directly into v2 mmap Journal + SSE4.2 CRC32C + SessionCore + write handoff
-        g_alloc_calls = 0;
-        g_track_alloc = true;
+        // 1. Outbound (pre-TCP): DirectInitiator::send_stream (7 scalars + NoPartyIDs[1], 3 party fields) directly into v2 mmap Journal + SSE4.2 CRC32C + SessionCore + write handoff
+        nf::bench_audit::reset();
+        nf::bench_audit::enable();
         const std::uint64_t t0 = now_ns();
-        if (!init.send_stream<fix::NewOrderSingle>(stream_order).ok()) { g_track_alloc = false; std::filesystem::remove_all(dir); return false; }
+        if (!init.send_stream<fix::NewOrderSingle>(stream_order).ok()) { nf::bench_audit::disable(); std::filesystem::remove_all(dir); return false; }
         const std::uint64_t t1 = now_ns();
-        g_track_alloc = false;
-        tx_allocs += g_alloc_calls;
+        nf::bench_audit::disable();
+        tx_allocs += nf::bench_audit::calls();
 
         // Prepare inbound peer frame outside timed window.
         if (!feed_next_er()) { std::filesystem::remove_all(dir); return false; }
         const auto target = init.handler().received + 1;
 
         // 2. Inbound (pre-TCP): read buffer -> frame + checksum + parse_flat_verified + full 912-field FIX 4.4 Schema + SessionCore + v2 mmap Journal (inbound + delivery) + Handler
-        g_alloc_calls = 0;
-        g_track_alloc = true;
+        nf::bench_audit::reset();
+        nf::bench_audit::enable();
         const std::uint64_t t2 = now_ns();
         if (!init.poll_once().ok() || init.handler().received != target) {
-            g_track_alloc = false;
+            nf::bench_audit::disable();
             std::filesystem::remove_all(dir);
             return false;
         }
         const std::uint64_t t3 = now_ns();
-        g_track_alloc = false;
-        rx_allocs += g_alloc_calls;
+        nf::bench_audit::disable();
+        rx_allocs += nf::bench_audit::calls();
 
         const std::uint64_t d_tx = t1 - t0;
         const std::uint64_t d_rx = t3 - t2;
@@ -664,17 +646,17 @@ bool run_tcp_bench(std::size_t warmup, std::size_t samples, LatencyStats& tcp_ou
     std::vector<std::uint64_t> rtt_ns;
     rtt_ns.reserve(samples);
     const std::uint64_t t_start = now_ns();
-    g_alloc_calls = 0;
+    nf::bench_audit::reset();
     for (std::size_t i = 0; i < samples; ++i) {
         const auto target = init.handler().received + 1;
-        g_track_alloc = true;
+        nf::bench_audit::enable();
         const std::uint64_t t0 = now_ns();
-        if (!init.send_stream<fix::NewOrderSingle>(stream_order).ok()) { g_track_alloc = false; peer.finish(); std::filesystem::remove_all(dir); return false; }
+        if (!init.send_stream<fix::NewOrderSingle>(stream_order).ok()) { nf::bench_audit::disable(); peer.finish(); std::filesystem::remove_all(dir); return false; }
         while (init.handler().received < target) {
-            if (!init.poll_once().ok()) { g_track_alloc = false; peer.finish(); std::filesystem::remove_all(dir); return false; }
+            if (!init.poll_once().ok()) { nf::bench_audit::disable(); peer.finish(); std::filesystem::remove_all(dir); return false; }
         }
         const std::uint64_t t1 = now_ns();
-        g_track_alloc = false;
+        nf::bench_audit::disable();
         rtt_ns.push_back(t1 - t0);
         if (init.needs_maintenance()) (void)init.poll_maintenance();
     }
@@ -685,7 +667,7 @@ bool run_tcp_bench(std::size_t warmup, std::size_t samples, LatencyStats& tcp_ou
     peer.finish();
     std::filesystem::remove_all(dir);
 
-    tcp_out = compute_stats(rtt_ns, g_alloc_calls);
+    tcp_out = compute_stats(rtt_ns, nf::bench_audit::calls());
     const double throughput = (static_cast<double>(samples) * 1e9) / static_cast<double>(total_wall_ns);
     std::cout << "\n=== Real TCP Loopback FIX 4.4 Ping-Pong (" << samples << " samples, warmup " << warmup << ") ===\n"
               << std::fixed << std::setprecision(3)

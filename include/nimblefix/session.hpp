@@ -275,9 +275,11 @@ public:
         return send_stream_dependent(Message::msg_type,
             +[](void* ctx, std::span<char> out, const detail::StaticSessionPrefix& prefix,
                 std::uint64_t seq, std::string_view wt,
-                std::optional<std::uint64_t> last_proc) noexcept -> Result<std::size_t> {
+                std::optional<std::uint64_t> last_proc,
+                detail::StreamBuffer::GrowFn grow_fn, void* grow_ctx) noexcept -> Result<std::size_t> {
                 return encode_session_stream<Message>(
-                    out, prefix, seq, wt, last_proc, *static_cast<std::remove_reference_t<Fn>*>(ctx));
+                    out, prefix, seq, wt, last_proc,
+                    *static_cast<std::remove_reference_t<Fn>*>(ctx), grow_fn, grow_ctx);
             },
             &ref, now_ms, wall_time, 0, 0, false);
     }
@@ -314,7 +316,8 @@ private:
     using StreamEncodeFn = Result<std::size_t> (*)(
         void* ctx, std::span<char> out, const detail::StaticSessionPrefix& prefix,
         std::uint64_t seq, std::string_view wall_time,
-        std::optional<std::uint64_t> last_processed) noexcept;
+        std::optional<std::uint64_t> last_processed,
+        detail::StreamBuffer::GrowFn grow_fn, void* grow_ctx) noexcept;
 
     [[nodiscard]] Result<SendReceipt> send_dependent(detail::MessageView message,
         std::uint64_t now_ms, std::string_view wall_time, RecordId dependency,
@@ -323,6 +326,10 @@ private:
         StreamEncodeFn encode_fn, void* encode_ctx,
         std::uint64_t now_ms, std::string_view wall_time, RecordId dependency,
         std::size_t dependency_ordinal, bool recovery) noexcept;
+    // Two-phase proactor send helpers (used by EngineRuntime io_uring backend).
+    [[nodiscard]] Result<std::size_t> stage_tx(std::span<char> buffer, std::uint64_t now_ms) noexcept;
+    [[nodiscard]] Status commit_tx_written(std::size_t bytes_written, std::uint64_t now_ms) noexcept;
+    void abort_staged_tx() noexcept;
     std::unique_ptr<Impl> impl_{};
 };
 
@@ -337,9 +344,11 @@ template <class Message, class Fn>
         auto result = driver_->send_stream_dependent(Message::msg_type,
             +[](void* ctx, std::span<char> out, const detail::StaticSessionPrefix& prefix,
                 std::uint64_t seq, std::string_view wt,
-                std::optional<std::uint64_t> last_proc) noexcept -> Result<std::size_t> {
+                std::optional<std::uint64_t> last_proc,
+                detail::StreamBuffer::GrowFn grow_fn, void* grow_ctx) noexcept -> Result<std::size_t> {
                 return encode_session_stream<Message>(
-                    out, prefix, seq, wt, last_proc, *static_cast<std::remove_reference_t<Fn>*>(ctx));
+                    out, prefix, seq, wt, last_proc,
+                    *static_cast<std::remove_reference_t<Fn>*>(ctx), grow_fn, grow_ctx);
             },
             &ref, now_ms_, wall_time_, delivery_.record_id, send_ordinal_, false);
         if (result.ok()) ++send_ordinal_;

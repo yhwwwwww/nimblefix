@@ -335,6 +335,7 @@ struct SessionDriver::Impl {
           replay_buffer(config.max_frame_bytes + 128), deferred_logon_buffer(config.max_frame_bytes),
           logon_tx_buffer(config.max_frame_bytes), admin_arena(config.max_frame_bytes),
           parse_fields(config.max_frame_bytes / 4 + 2),
+          aux_parse_fields(config.max_frame_bytes / 4 + 2),
           receipt_slots(config.receipt_capacity), replay_slots(config.max_pending_messages),
           recovery_slots(config.max_pending_inbound_messages) {
         const auto retained_floor = journal.lowest_retained_outbound_seq();
@@ -437,6 +438,7 @@ struct SessionDriver::Impl {
     std::vector<char> logon_tx_buffer;
     std::vector<char> admin_arena;
     std::vector<FieldView> parse_fields;
+    std::vector<FieldView> aux_parse_fields;
     detail::ParsedFieldIndex parse_index{};
     std::vector<ReceiptSlot> receipt_slots;
     std::vector<ReplayRange> replay_slots;
@@ -504,6 +506,9 @@ struct SessionDriver::Impl {
     bool deferred_active_callback{};
     bool peer_reset_requested{};
     bool local_epoch_reset_started{};
+    bool staged_tx_active{};
+    bool staged_tx_is_replay{};
+    std::size_t staged_tx_bytes{};
     Status recovery_status{};
 
     [[nodiscard]] Status set_wall_time(std::string_view value) noexcept {
@@ -1112,6 +1117,20 @@ struct SessionDriver::Impl {
         return Status::success();
     }
 
+    // Auxiliary parser for historical outbound records (replay / recovery reply reuse) that
+    // must never overwrite parse_fields or parse_index while an inbound callback is active.
+    [[nodiscard]] Status parse_frame_aux(std::string_view bytes, FlatMessageView& message) noexcept {
+        if (bytes.size() > config.max_frame_bytes) return Status{ErrorCode::too_large};
+        FrameView frame{};
+        const bool check_csum = !config.settings || config.settings->verify_checksum;
+        if (const auto status = inspect_frame(bytes, frame, callbacks.wire_hints,
+                CodecLimits{config.max_frame_bytes, check_csum}); !status.ok()) {
+            return status;
+        }
+        if (frame.consumed != bytes.size()) return Status{ErrorCode::invalid_frame};
+        return parse_flat_verified(frame, aux_parse_fields, message, callbacks.wire_hints);
+    }
+
     [[nodiscard]] Status parse_inbound_header(const InboundTags& tags,
         std::string_view& msg_type, std::uint64_t& sequence, bool& poss_dup,
         bool& original_time_valid, std::string_view& test_id) const noexcept {
@@ -1277,7 +1296,7 @@ struct SessionDriver::Impl {
             const auto* record = journal.find_outbound(replay_next);
             if (record == nullptr || record->payload.empty()) return Status{ErrorCode::corrupt_store, 34};
             FlatMessageView parsed{};
-            if (const auto status = parse_frame(record->payload, parsed); !status.ok()) return status;
+            if (const auto status = parse_frame_aux(record->payload, parsed); !status.ok()) return status;
             bool duplicate = false;
             const auto* type = unique_field(parsed, 35, duplicate);
             if (duplicate || type == nullptr) return Status{ErrorCode::corrupt_store, 35};
@@ -1314,7 +1333,7 @@ struct SessionDriver::Impl {
                 const auto* next_record = journal.find_outbound(gap_end);
                 if (next_record == nullptr || next_record->payload.empty()) return Status{ErrorCode::corrupt_store, 34};
                 FlatMessageView next_parsed{};
-                if (const auto status = parse_frame(next_record->payload, next_parsed); !status.ok()) return status;
+                if (const auto status = parse_frame_aux(next_record->payload, next_parsed); !status.ok()) return status;
                 const auto* next_type = unique_field(next_parsed, 35, duplicate);
                 if (duplicate || next_type == nullptr) return Status{ErrorCode::corrupt_store, 35};
                 if (!is_session_admin(next_type->value)) break;
@@ -1775,7 +1794,7 @@ struct SessionDriver::Impl {
                 if (record.kind != RecordKind::outbound || record.dependency != dependency || record.receipt == 0) continue;
                 if (ordinal++ != dependency_ordinal) continue;
                 FlatMessageView original{};
-                if (const auto status = parse_frame(record.payload, original); !status.ok()) {
+                if (const auto status = parse_frame_aux(record.payload, original); !status.ok()) {
                     return Status{ErrorCode::corrupt_store};
                 }
                 bool duplicate = false;
@@ -1902,13 +1921,47 @@ struct SessionDriver::Impl {
 
     [[nodiscard]] Result<SendReceipt> send_application_stream(std::string_view msg_type,
         SessionDriver::StreamEncodeFn encode_fn, void* encode_ctx,
-        std::uint64_t now_ms, std::string_view wall_time, RecordId dependency) noexcept {
+        std::uint64_t now_ms, std::string_view wall_time, RecordId dependency,
+        std::size_t dependency_ordinal, bool recovery) noexcept {
         if (fatal) return last_status.ok() ? Status{ErrorCode::engine_stopped} : last_status;
         if (!is_active()) return Status{ErrorCode::not_ready};
         if (msg_type.empty() || is_session_admin(msg_type)) {
             return Status{ErrorCode::managed_field, 35};
         }
         if (msg_type.size() > max_msg_type_bytes) return Status{ErrorCode::unsupported, 35};
+        if (dependency != 0 && recovery) [[unlikely]] {
+            std::size_t ordinal = 0;
+            for (const auto& record : journal.records()) {
+                if (record.kind != RecordKind::outbound || record.dependency != dependency || record.receipt == 0) continue;
+                if (ordinal++ != dependency_ordinal) continue;
+                FlatMessageView original{};
+                if (const auto status = parse_frame_aux(record.payload, original); !status.ok()) {
+                    return Status{ErrorCode::corrupt_store};
+                }
+                bool duplicate = false;
+                const auto* original_time = unique_field(original, 52, duplicate);
+                if (duplicate || original_time == nullptr) return Status{ErrorCode::corrupt_store, 52};
+                const auto* original_ack_field = unique_field(original, 369, duplicate);
+                if (duplicate) return Status{ErrorCode::corrupt_store, 369};
+                std::optional<std::uint64_t> original_ack{};
+                if (original_ack_field != nullptr) {
+                    std::uint64_t ack{};
+                    if (!parse_unsigned(original_ack_field->value, ack)) return Status{ErrorCode::corrupt_store, 369};
+                    original_ack = ack;
+                }
+                const auto candidate = encode_fn(encode_ctx, encode_buffer, session_prefix,
+                    record.seq, original_time->value, original_ack, nullptr, nullptr);
+                if (!candidate.ok()) return candidate.status();
+                if (candidate.value() != record.payload.size() ||
+                    std::memcmp(encode_buffer.data(), record.payload.data(), candidate.value()) != 0) {
+                    return Status{ErrorCode::invalid_value};
+                }
+                const auto& stored = receipt_slots[static_cast<std::size_t>(record.receipt % receipt_slots.size())];
+                if (stored.occupied && stored.value.id == record.receipt) return stored.value;
+                return SendReceipt{record.receipt, record.seq, ReceiptState::expired,
+                    Status{ErrorCode::receipt_expired}};
+            }
+        }
         const auto message_limit = config.max_pending_messages - config.admin_reserve_messages;
         const auto byte_limit = config.max_pending_bytes - config.admin_reserve_bytes;
         const auto replay_reserve = replay_reservation_bytes();
@@ -1934,24 +1987,40 @@ struct SessionDriver::Impl {
         std::size_t encoded_size = 0;
         auto reserved = journal.reserve(RecordKind::outbound, sequence, receipt_id, dependency, fast_reserve);
         if (reserved.ok()) {
+            struct SpillCtx {
+                std::span<char> fallback;
+                bool spilled{false};
+            } spill{encode_buffer, false};
+            auto grow = +[](void* raw, const char* old_data, std::size_t written,
+                            std::size_t min_cap) noexcept -> std::span<char> {
+                auto* st = static_cast<SpillCtx*>(raw);
+                if (st->spilled || min_cap > st->fallback.size()) return {};
+                if (written != 0) std::memcpy(st->fallback.data(), old_data, written);
+                st->spilled = true;
+                return st->fallback;
+            };
             const auto encoded = encode_fn(encode_ctx, reserved.value().payload,
-                session_prefix, sequence, wall_time, last_proc);
-            if (encoded.ok()) {
-                if (encoded.value() > max_allowed) {
-                    capacity_blocked = true;
-                    return Status{ErrorCode::queue_full};
-                }
+                session_prefix, sequence, wall_time, last_proc, grow, &spill);
+            if (!encoded.ok()) return encoded.status();
+            if (encoded.value() > max_allowed) {
+                capacity_blocked = true;
+                return Status{ErrorCode::queue_full};
+            }
+            if (!spill.spilled) {
                 const auto committed = journal.commit(reserved.value(), encoded.value());
                 if (!committed.ok()) return fail(committed.status());
                 committed_id = committed.value().id;
                 encoded_size = encoded.value();
-            } else if (encoded.status().code != ErrorCode::capacity_exceeded) {
-                return encoded.status();
+            } else {
+                const auto appended = journal.append(RecordKind::outbound, sequence, receipt_id, dependency,
+                    std::string_view{encode_buffer.data(), encoded.value()});
+                if (!appended.ok()) return fail(appended.status());
+                committed_id = appended.value().id;
+                encoded_size = encoded.value();
             }
-        }
-        if (committed_id == 0) {
+        } else {
             const auto encoded = encode_fn(encode_ctx, encode_buffer,
-                session_prefix, sequence, wall_time, last_proc);
+                session_prefix, sequence, wall_time, last_proc, nullptr, nullptr);
             if (!encoded.ok()) return encoded.status();
             if (encoded.value() > max_allowed) {
                 capacity_blocked = true;
@@ -2014,6 +2083,9 @@ struct SessionDriver::Impl {
         deferred_logon_pending = false;
         peer_reset_requested = false;
         local_epoch_reset_started = false;
+        staged_tx_active = false;
+        staged_tx_is_replay = false;
+        staged_tx_bytes = 0;
     }
 
     [[nodiscard]] Status execute_core_output(const detail::CoreOutput& output,
@@ -2564,7 +2636,7 @@ struct SessionDriver::Impl {
         if (write == nullptr) return Status{ErrorCode::invalid_config};
         if (fatal) return last_status.ok() ? Status{ErrorCode::engine_stopped} : last_status;
         if (core.state() == SessionState::disconnected || core.state() == SessionState::closed ||
-            core.state() == SessionState::failed) return Status{ErrorCode::not_ready};
+            core.state() == SessionState::failed || staged_tx_active) return Status{ErrorCode::not_ready};
         callback_now_ms = now_ms;
         std::size_t written_this_turn = 0;
         while (written_this_turn < byte_budget && !should_close) {
@@ -2623,7 +2695,7 @@ struct SessionDriver::Impl {
         if (write_batch == nullptr || write_single == nullptr) return Status{ErrorCode::invalid_config};
         if (fatal) return last_status.ok() ? Status{ErrorCode::engine_stopped} : last_status;
         if (core.state() == SessionState::disconnected || core.state() == SessionState::closed ||
-            core.state() == SessionState::failed) return Status{ErrorCode::not_ready};
+            core.state() == SessionState::failed || staged_tx_active) return Status{ErrorCode::not_ready};
         if (replay_active || replay_count != 0 || tx_count <= 1) {
             return on_flush(write_single, context, now_ms, byte_budget);
         }
@@ -2680,6 +2752,120 @@ struct SessionDriver::Impl {
             if (result.bytes_written == 0 || result.would_block) break;
         }
         return fatal ? last_status : Status::success();
+    }
+
+    [[nodiscard]] Result<std::size_t> on_stage_tx(std::span<char> buffer, std::uint64_t now_ms) noexcept {
+        if (fatal) return last_status.ok() ? Status{ErrorCode::engine_stopped} : last_status;
+        if (core.state() == SessionState::disconnected || core.state() == SessionState::closed ||
+            core.state() == SessionState::failed || staged_tx_active) {
+            return Status{ErrorCode::not_ready};
+        }
+        if (buffer.empty() || should_close) return std::size_t{0};
+        callback_now_ms = now_ms;
+        start_next_replay();
+        if (replay_active && !replay_prepared) {
+            if (const auto status = build_replay_frame(); !status.ok()) return fail(status);
+        }
+        auto* queued = front_tx();
+        const bool replay_due = replay_active && replay_prepared &&
+            (queued == nullptr || (queued->offset == 0 && replay_sequence <= queued->sequence));
+        if (!replay_due && queued == nullptr) return std::size_t{0};
+
+        if (replay_due) {
+            const std::size_t rem = replay_bytes - replay_offset;
+            const std::size_t take = std::min(rem, buffer.size());
+            if (take != 0) {
+                std::memcpy(buffer.data(), replay_buffer.data() + replay_offset, take);
+                staged_tx_active = true;
+                staged_tx_is_replay = true;
+                staged_tx_bytes = take;
+            }
+            return take;
+        }
+
+        std::size_t copied = 0;
+        const bool allow_coalesce = !replay_active && replay_count == 0;
+        for (std::size_t i = 0; i < tx_count && copied < buffer.size(); ++i) {
+            const auto& desc = tx_slots[tx_index(i)];
+            std::span<const char> slice;
+            if (desc.ephemeral) {
+                if (logon_tx_size != desc.frame_size || desc.offset > logon_tx_size) {
+                    return fail(Status{ErrorCode::corrupt_store});
+                }
+                slice = {logon_tx_buffer.data() + desc.offset, logon_tx_size - desc.offset};
+            } else {
+                const auto* record = journal.find_record(desc.record_id);
+                if (record == nullptr || record->kind != RecordKind::outbound ||
+                    record->payload.size() != desc.frame_size || desc.offset > desc.frame_size) {
+                    return fail(Status{ErrorCode::corrupt_store});
+                }
+                slice = {record->payload.data() + desc.offset, desc.frame_size - desc.offset};
+            }
+            const std::size_t take = std::min(slice.size(), buffer.size() - copied);
+            if (take != 0) {
+                std::memcpy(buffer.data() + copied, slice.data(), take);
+                copied += take;
+            }
+            const bool is_logout = desc.msg_type_size == 1 && desc.msg_type[0] == '5';
+            if (take < slice.size() || !allow_coalesce || is_logout) break;
+        }
+        if (copied != 0) {
+            staged_tx_active = true;
+            staged_tx_is_replay = false;
+            staged_tx_bytes = copied;
+        }
+        return copied;
+    }
+
+    [[nodiscard]] Status on_commit_tx_written(std::size_t bytes_written, std::uint64_t now_ms) noexcept {
+        if (fatal) return last_status.ok() ? Status{ErrorCode::engine_stopped} : last_status;
+        if (bytes_written == 0) return Status::success();
+        if (!staged_tx_active || bytes_written > staged_tx_bytes) {
+            return fail(Status{ErrorCode::protocol_error});
+        }
+        callback_now_ms = now_ms;
+        const bool is_replay = staged_tx_is_replay;
+        last_byte_progress_ms = now_ms;
+        write_timer_active = true;
+        stall_logout_attempted = false;
+        stall_logout_deadline = 0;
+        staged_tx_bytes -= bytes_written;
+        if (staged_tx_bytes == 0) {
+            staged_tx_active = false;
+            staged_tx_is_replay = false;
+        }
+        if (is_replay) {
+            if (!replay_active || !replay_prepared || bytes_written > replay_bytes - replay_offset) {
+                return fail(Status{ErrorCode::protocol_error});
+            }
+            replay_offset += bytes_written;
+            if (replay_offset == replay_bytes) {
+                if (const auto status = finish_tx_frame(now_ms); !status.ok()) return status;
+            }
+            return fatal ? last_status : Status::success();
+        }
+        std::size_t left = bytes_written;
+        while (left != 0 && tx_count != 0) {
+            auto* front = front_tx();
+            const std::size_t rem = front->frame_size - front->offset;
+            if (left >= rem) {
+                left -= rem;
+                front->offset = front->frame_size;
+                if (const auto status = pop_tx(true, now_ms); !status.ok()) return status;
+                if (core.should_close()) should_close = true;
+            } else {
+                front->offset += left;
+                left = 0;
+            }
+        }
+        if (left != 0) return fail(Status{ErrorCode::protocol_error});
+        return fatal ? last_status : Status::success();
+    }
+
+    void on_abort_staged_tx() noexcept {
+        staged_tx_active = false;
+        staged_tx_is_replay = false;
+        staged_tx_bytes = 0;
     }
 
 };
@@ -2849,7 +3035,7 @@ Result<SendReceipt> SessionDriver::send_dependent(detail::MessageView message,
 Result<SendReceipt> SessionDriver::send_stream_dependent(std::string_view msg_type,
     StreamEncodeFn encode_fn, void* encode_ctx,
     std::uint64_t now_ms, std::string_view wall_time, RecordId dependency,
-    std::size_t, bool) noexcept {
+    std::size_t dependency_ordinal, bool recovery) noexcept {
     if (!impl_) return Status{ErrorCode::engine_stopped};
     if (const auto status = impl_->claim_owner(); !status.ok()) return status;
     if (dependency != 0 && !impl_->callback_active &&
@@ -2858,7 +3044,7 @@ Result<SendReceipt> SessionDriver::send_stream_dependent(std::string_view msg_ty
     if (const auto status = impl_->set_wall_time(wall_time); !status.ok()) return status;
     impl_->callback_now_ms = now_ms;
     return impl_->send_application_stream(msg_type, encode_fn, encode_ctx,
-        now_ms, impl_->callback_wall_time, dependency);
+        now_ms, impl_->callback_wall_time, dependency, dependency_ordinal, recovery);
 }
 
 Status SessionDriver::flush(WriteFn write, void* context, std::uint64_t now_ms,
@@ -2873,6 +3059,23 @@ Status SessionDriver::flush_batch(WriteBatchFn write_batch, WriteFn write_single
     if (!impl_) return Status{ErrorCode::engine_stopped};
     if (const auto status = impl_->claim_owner(); !status.ok()) return status;
     return impl_->on_flush_batch(write_batch, write_single, context, now_ms, byte_budget);
+}
+
+Result<std::size_t> SessionDriver::stage_tx(std::span<char> buffer, std::uint64_t now_ms) noexcept {
+    if (!impl_) return Status{ErrorCode::engine_stopped};
+    if (const auto status = impl_->claim_owner(); !status.ok()) return status;
+    return impl_->on_stage_tx(buffer, now_ms);
+}
+
+Status SessionDriver::commit_tx_written(std::size_t bytes_written, std::uint64_t now_ms) noexcept {
+    if (!impl_) return Status{ErrorCode::engine_stopped};
+    if (const auto status = impl_->claim_owner(); !status.ok()) return status;
+    return impl_->on_commit_tx_written(bytes_written, now_ms);
+}
+
+void SessionDriver::abort_staged_tx() noexcept {
+    if (!impl_) return;
+    impl_->on_abort_staged_tx();
 }
 
 Result<SendReceipt> SessionDriver::receipt(std::uint64_t id) const noexcept {

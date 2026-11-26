@@ -340,12 +340,12 @@ int main() {
 
 | Workload | Recommended Setup | Why |
 | :--- | :--- | :--- |
-| 1 venue, ping-pong / single orders | `DirectInitiator::send_stream()` (1 thread) | Lowest 1-way latency (**4.69 µs**), 0 thread handoff |
-| 1 venue, single thread emitting order bursts | `DirectInitiator::enqueue_stream()` + `flush()` | Coalesces burst into 1 `sendmsg()` (**1.27M ord/s**) |
-| 1 venue, heavy strategy compute + bursts | `DirectInitiator` + `DirectSendQueue` (2 threads) | Overlaps compute and I/O (**1.43M ord/s**, 2× lower CO-Free latency) |
+| 1 venue, ping-pong / single orders | `DirectInitiator::send_stream()` (1 thread) | Lowest 1-way latency (**4.62 µs**), 0 thread handoff |
+| 1 venue, single thread emitting order bursts | `DirectInitiator::enqueue_stream()` + `flush()` | Coalesces burst into 1 `sendmsg()` (**1.44M ord/s**) |
+| 1 venue, heavy strategy compute + bursts | `DirectInitiator` + `DirectSendQueue` (2 threads) | Overlaps compute and I/O (**427k ord/s** under 2 µs/order compute, 2× lower `Burst->Recv` latency; **24.1 µs** open-loop p99) |
 | 2–8 sessions, fast non-blocking callbacks | `Engine<Schema, Inline>` (`epoll` / `io_uring`) | Single protocol thread, lock-free user state |
 | Multiple sessions, blocking DB/RPC callbacks | `Engine<Schema, Queued>` | Isolates slow callbacks from heartbeats and TCP reads |
-| 8–64+ concurrent sessions | `ShardedEngine<Schema, Inline>` (`hybrid_backoff`, pinned cores) | Multi-core scaling on 1 port (**471k ord/s**, 7.8× lower p99.9) |
+| 8–64+ concurrent sessions | `ShardedEngine<Schema, Inline>` (`io_uring` + `hybrid_backoff`, pinned cores) | Multi-core scaling on 1 port (**447k ord/s**, 4.11× lower p99) |
 
 ---
 
@@ -446,7 +446,8 @@ Every NimbleFIX runtime follows **Single-Writer Protocol Ownership**: for any FI
 | `ProducerLane<Schema>` (`handle.producer_lane()`) | Lock-free SPSC (1 producer) | Bound to its first calling thread; other threads get `ErrorCode::wrong_thread` |
 | `SessionContext`, `FlatMessageView`, `{Msg}View` | Callback-scoped only | Do not retain past callback return; copy strings/fields if needed |
 | `TelemetryReader` | Read-only, out-of-process safe | Maps `.nfxt` `O_RDONLY`/`PROT_READ` with zero locks |
-| `JournalReplayer` | Safe on live or offline journals | Uses lease-protected `JournalReader` |
+| `JournalTailer` | Read-only, lock-free cross-process SPMC | Maps `.nfxj` segments `O_RDONLY`/`PROT_READ` (no `LOCK_EX`); never blocks the trading writer; 1 thread per tailer instance |
+| `JournalReplayer` | Safe on live or offline journals | Uses lock-free `JournalTailer` for path-based replay and lease-protected `JournalReader` for in-process `Journal&` replay |
 
 ---
 
@@ -540,7 +541,30 @@ for (const auto& s : reader.snapshot()) {
 // std::cout << reader.to_prometheus();
 ```
 
-### 6.5 Deterministic Historical Replay (`JournalReplayer`)
+### 6.5 Cross-Process Live Tailing (`JournalTailer`) & Historical Replay (`JournalReplayer`)
+
+`JournalTailer` provides Chronicle-Queue-style lock-free SPMC reading over any live or offline `.nfxj` session journal (ideal for DropCopy feeds, real-time risk monitors, and compliance archivers). Multiple independent processes can tail the same active trading session concurrently with zero writer overhead:
+
+```cpp
+#include <nimblefix/journal.hpp>
+
+nimblefix::JournalTailerConfig tcfg{};
+tcfg.journal_path = "./state/buy/FIX.4.4_BUY_SELL.nfxj";
+tcfg.start = nimblefix::JournalTailStart::beginning; // or ::end / ::from_id
+tcfg.verify_crc = true;
+
+auto tailer = nimblefix::JournalTailer::open(tcfg).value();
+for (;;) {
+    auto rec = tailer.poll(); // non-blocking: returns std::nullopt when caught up to head
+    if (!rec.ok()) break;     // e.g. ErrorCode::reader_expired if writer pruned lagged segments
+    if (rec.value().has_value()) {
+        const auto& view = *rec.value(); // zero-copy payload view valid until next poll()
+        (void)view.header; (void)view.payload;
+    }
+}
+```
+
+For deterministic filtered playback (live or offline), use `JournalReplayer` (set `opts.wire_hints` when replaying custom `DATA`/`LENGTH` pairs):
 
 ```cpp
 #include <nimblefix/replay.hpp>
