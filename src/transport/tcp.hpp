@@ -32,7 +32,8 @@ struct SocketIoResult {
 class TcpStream {
 public:
     TcpStream() noexcept = default;
-    explicit TcpStream(int fd) noexcept : fd_(fd) {}
+    explicit TcpStream(int fd, bool quickack = false) noexcept
+        : fd_(fd), quickack_(quickack) {}
     TcpStream(const TcpStream&) = delete;
     TcpStream& operator=(const TcpStream&) = delete;
     TcpStream(TcpStream&& other) noexcept;
@@ -48,13 +49,18 @@ public:
     [[nodiscard]] SocketIoResult write(std::span<const char> input) noexcept;
     [[nodiscard]] SocketIoResult write_batch(std::span<const std::span<const char>> chunks) noexcept;
     [[nodiscard]] Status finish_connect() noexcept;
+    void rearm_quickack() const noexcept;
     [[nodiscard]] int native_handle() const noexcept { return fd_; }
-    [[nodiscard]] int release_handle() noexcept { return std::exchange(fd_, -1); }
+    [[nodiscard]] int release_handle() noexcept {
+        quickack_ = false;
+        return std::exchange(fd_, -1);
+    }
     [[nodiscard]] bool valid() const noexcept { return fd_ >= 0; }
     void close() noexcept;
 
 private:
     int fd_{-1};
+    bool quickack_{false};
 };
 
 class TcpListener {

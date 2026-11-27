@@ -205,6 +205,15 @@ namespace stream {
 
 } // namespace stream
 
+template <class V>
+[[nodiscard]] constexpr bool stream_value_present(const V& value) noexcept {
+    if constexpr (is_optional_v<V>) return value.has_value();
+    else {
+        (void)value;
+        return true;
+    }
+}
+
 // Strictly caches ONLY session-immutable transport identity:
 //   "8=<BeginString>\x019=" and "49=<SenderCompID>\x0156=<TargetCompID>\x01".
 // Per-message header fields such as 50=SenderSubID / 57=TargetSubID /
@@ -382,8 +391,27 @@ public:
         if (err_.ok() && !status.ok()) err_ = status;
     }
 
+    [[nodiscard]] static constexpr std::uint16_t header_field_bit(std::uint32_t t) noexcept {
+        switch (t) {
+        case static_cast<std::uint32_t>(tag::sender_sub_id): return static_cast<std::uint16_t>(1U << 0U);
+        case static_cast<std::uint32_t>(tag::target_sub_id): return static_cast<std::uint16_t>(1U << 1U);
+        case static_cast<std::uint32_t>(tag::sender_location_id): return static_cast<std::uint16_t>(1U << 2U);
+        case static_cast<std::uint32_t>(tag::target_location_id): return static_cast<std::uint16_t>(1U << 3U);
+        case static_cast<std::uint32_t>(tag::on_behalf_of_comp_id): return static_cast<std::uint16_t>(1U << 4U);
+        case static_cast<std::uint32_t>(tag::on_behalf_of_sub_id): return static_cast<std::uint16_t>(1U << 5U);
+        case static_cast<std::uint32_t>(tag::on_behalf_of_location_id): return static_cast<std::uint16_t>(1U << 6U);
+        case static_cast<std::uint32_t>(tag::deliver_to_comp_id): return static_cast<std::uint16_t>(1U << 7U);
+        case static_cast<std::uint32_t>(tag::deliver_to_sub_id): return static_cast<std::uint16_t>(1U << 8U);
+        case static_cast<std::uint32_t>(tag::deliver_to_location_id): return static_cast<std::uint16_t>(1U << 9U);
+        case static_cast<std::uint32_t>(tag::poss_resend): return static_cast<std::uint16_t>(1U << 10U);
+        case static_cast<std::uint32_t>(tag::message_encoding): return static_cast<std::uint16_t>(1U << 11U);
+        case static_cast<std::uint32_t>(tag::appl_ver_id): return static_cast<std::uint16_t>(1U << 12U);
+        default: return 0U;
+        }
+    }
+
     // Dynamic standard header guard: optional header fields (e.g. 50=SenderSubID,
-    // 57=TargetSubID) must precede all message body fields.
+    // 57=TargetSubID) must precede all message body fields and must not repeat.
     [[nodiscard]] bool enter_header_field(std::uint32_t tag) noexcept {
         if (!err_.ok()) return false;
         if (pending_len_tag_ != 0) {
@@ -394,6 +422,12 @@ public:
             fail(ErrorCode::invalid_header, static_cast<int>(tag));
             return false;
         }
+        const std::uint16_t bit = header_field_bit(tag);
+        if ((header_seen_mask_ & bit) != 0U) {
+            fail(ErrorCode::duplicate_field, static_cast<int>(tag));
+            return false;
+        }
+        header_seen_mask_ |= bit;
         return true;
     }
 
@@ -760,6 +794,7 @@ private:
     std::uint32_t pending_len_tag_{};
     std::uint32_t pending_data_tag_{};
     std::uint64_t pending_len_value_{};
+    std::uint16_t header_seen_mask_{0};
     bool body_mode_{false};
     bool body_started_{false};
     Status err_{Status::success()};

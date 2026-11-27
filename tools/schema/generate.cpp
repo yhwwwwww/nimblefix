@@ -1522,15 +1522,29 @@ std::string render_header(const Schema& schema, std::string_view ns_arg) {
                                        const std::vector<MemberDef>& ms, bool is_entry, std::uint32_t delim_tag = 0) {
         std::vector<std::pair<std::size_t, std::uint32_t>> req_members;
         std::map<std::uint32_t, std::size_t> req_bit_by_tag;
+        std::map<std::uint32_t, std::size_t> seen_bit_by_tag;
         for (std::size_t i = 0; i < ms.size(); ++i) {
+            const std::uint32_t t = schema.fields_by_name.at(ms[i].field_name).number;
+            seen_bit_by_tag[t] = i;
             if (ms[i].required) {
-                const std::uint32_t t = schema.fields_by_name.at(ms[i].field_name).number;
                 req_bit_by_tag[t] = req_members.size();
                 req_members.emplace_back(i, t);
             }
         }
         const std::size_t req_words = (req_members.size() + 63) / 64;
         const bool has_req = !req_members.empty();
+        const std::size_t seen_words = (ms.size() + 63) / 64;
+        const bool has_seen = !ms.empty();
+        auto seen_test_expr = [&](std::size_t bit) -> std::string {
+            if (seen_words == 1)
+                return "(seen_mask_ & (std::uint64_t{1} << " + std::to_string(bit) + "u)) != 0";
+            return "(seen_mask_[" + std::to_string(bit / 64) + "u] & (std::uint64_t{1} << " + std::to_string(bit % 64) + "u)) != 0";
+        };
+        auto seen_set_stmt = [&](std::size_t bit) -> std::string {
+            if (seen_words == 1)
+                return "seen_mask_ |= (std::uint64_t{1} << " + std::to_string(bit) + "u);";
+            return "seen_mask_[" + std::to_string(bit / 64) + "u] |= (std::uint64_t{1} << " + std::to_string(bit % 64) + "u);";
+        };
 
         if (!is_entry) {
             emit("    [[nodiscard]] ::nimblefix::detail::StandardHeaderWriter header() noexcept {");
@@ -1538,7 +1552,8 @@ std::string render_header(const Schema& schema, std::string_view ns_arg) {
             emit("    }");
         }
 
-        for (const auto& m : ms) {
+        for (std::size_t member_idx = 0; member_idx < ms.size(); ++member_idx) {
+            const auto& m = ms[member_idx];
             if (m.kind != "field") continue;
             const auto& f = schema.fields_by_name.at(m.field_name);
             const std::string setter = snake_case(f.name);
@@ -1568,6 +1583,16 @@ std::string render_header(const Schema& schema, std::string_view ns_arg) {
             } else {
                 emit_call = "buf_.emit_str<" + std::to_string(f.number) + "u>(" + cpp_string(tag_prefix) + ", " + std::to_string(plen) + "u, std::forward<V>(value)" + val_arg + ")";
             }
+            std::string dup_guard =
+                "if (!::nimblefix::detail::stream_value_present(value)) return *this; "
+                "if (" + seen_test_expr(member_idx) + ") { buf_.fail(::nimblefix::ErrorCode::duplicate_field, " + std::to_string(f.number) + "); return *this; } " +
+                seen_set_stmt(member_idx) + " ";
+            if (is_data_pair) {
+                const std::uint32_t lt = field_pair_tags.at(f.number);
+                if (const auto lbit = seen_bit_by_tag.find(lt); lbit != seen_bit_by_tag.end()) {
+                    dup_guard += seen_set_stmt(lbit->second) + " ";
+                }
+            }
             std::vector<std::string> post_ops;
             if (is_entry) {
                 if (f.number == delim_tag) post_ops.push_back("first_field_ = false;");
@@ -1578,21 +1603,22 @@ std::string render_header(const Schema& schema, std::string_view ns_arg) {
                 if (req_words == 1) post_ops.push_back("req_mask_ |= (std::uint64_t{1} << " + std::to_string(bit) + "u);");
                 else post_ops.push_back("req_mask_[" + std::to_string(bit / 64) + "u] |= (std::uint64_t{1} << " + std::to_string(bit % 64) + "u);");
             }
-            std::string body;
+            std::string body = dup_guard;
             if (!post_ops.empty()) {
-                body = "if (" + emit_call + ") { ";
+                body += "if (" + emit_call + ") { ";
                 for (std::size_t k = 0; k < post_ops.size(); ++k) {
                     if (k != 0) body.push_back(' ');
                     body += post_ops[k];
                 }
                 body += " } return *this;";
             } else {
-                body = "(void)" + emit_call + "; return *this;";
+                body += "(void)" + emit_call + "; return *this;";
             }
             emit("    template<class V> " + writer_cls + "& " + setter + "(V&& value) noexcept { " + body + " }");
         }
 
-        for (const auto& m : ms) {
+        for (std::size_t member_idx = 0; member_idx < ms.size(); ++member_idx) {
+            const auto& m = ms[member_idx];
             if (m.kind != "group") continue;
             const auto& counter = schema.fields_by_name.at(m.field_name);
             const std::string setter = snake_case(counter.name);
@@ -1601,6 +1627,8 @@ std::string render_header(const Schema& schema, std::string_view ns_arg) {
             const std::string tag_prefix = std::to_string(counter.number) + "=";
             emit("    template<class Fn>");
             emit("    " + writer_cls + "& " + setter + "(std::size_t count, Fn&& fn) noexcept {");
+            emit("        if (" + seen_test_expr(member_idx) + ") { buf_.fail(::nimblefix::ErrorCode::duplicate_field, " + std::to_string(counter.number) + "); return *this; }");
+            emit("        " + seen_set_stmt(member_idx));
             if (is_entry) {
                 if (counter.number == delim_tag) emit("        first_field_ = false;");
                 else emit("        if (first_field_) { buf_.fail(::nimblefix::ErrorCode::required_field_missing, " + std::to_string(delim_tag) + "); return *this; }");
@@ -1666,6 +1694,10 @@ std::string render_header(const Schema& schema, std::string_view ns_arg) {
             if (req_words == 1) emit("        req_mask_ = 0;");
             else emit("        req_mask_.fill(0);");
         }
+        if (has_seen) {
+            if (seen_words == 1) emit("        seen_mask_ = 0;");
+            else emit("        seen_mask_.fill(0);");
+        }
         emit("    }");
         emit("private:");
         emit("    ::nimblefix::detail::StreamBuffer& buf_;");
@@ -1673,6 +1705,10 @@ std::string render_header(const Schema& schema, std::string_view ns_arg) {
         if (has_req) {
             if (req_words == 1) emit("    std::uint64_t req_mask_{0};");
             else emit("    std::array<std::uint64_t, " + std::to_string(req_words) + "> req_mask_{};");
+        }
+        if (has_seen) {
+            if (seen_words == 1) emit("    std::uint64_t seen_mask_{0};");
+            else emit("    std::array<std::uint64_t, " + std::to_string(seen_words) + "> seen_mask_{};");
         }
     };
 

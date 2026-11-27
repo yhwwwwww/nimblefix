@@ -155,19 +155,30 @@ public:
             requires { typename Message::schema_type; typename Message::view_type; } &&
             std::is_same_v<Schema, typename Message::schema_type> &&
             (std::is_invocable_r_v<Status, Callback&, SessionContext&, typename Message::view_type> ||
-             std::is_invocable_r_v<Status, Callback&, SessionContext&, const typename Message::view_type&>)
+             std::is_invocable_r_v<Status, Callback&, SessionContext&, const typename Message::view_type&> ||
+             std::is_invocable_r_v<Status, Callback&, SessionContext&,
+                typename Message::view_type, const DeliveryInfo&> ||
+             std::is_invocable_r_v<Status, Callback&, SessionContext&,
+                const typename Message::view_type&, const DeliveryInfo&>)
     [[nodiscard]] Status on(Callback&& callback) noexcept {
         try {
             if (!detail::callback_is_present(callback)) return {ErrorCode::invalid_config};
             if (Schema::find_message(Message::msg_type) == nullptr)
-                return {ErrorCode::schema_mismatch, 35};
+                return {ErrorCode::schema_mismatch, tag::msg_type};
             using View = typename Message::view_type;
             auto fn = std::forward<Callback>(callback);
             for (auto& shard : shards_) {
                 const auto st = shard->on_typed_message(Message::msg_type,
-                    [cb = fn](SessionContext& ctx, const FlatMessageView& flat, const DeliveryInfo&) mutable -> Status {
+                    [cb = fn](SessionContext& ctx, const FlatMessageView& flat,
+                              const DeliveryInfo& info) mutable -> Status {
                         View view{flat};
-                        if constexpr (std::is_invocable_r_v<Status, Callback&, SessionContext&, View>)
+                        if constexpr (std::is_invocable_r_v<Status, Callback&,
+                                          SessionContext&, View, const DeliveryInfo&>)
+                            return std::invoke(cb, ctx, std::move(view), info);
+                        else if constexpr (std::is_invocable_r_v<Status, Callback&,
+                                               SessionContext&, const View&, const DeliveryInfo&>)
+                            return std::invoke(cb, ctx, std::as_const(view), info);
+                        else if constexpr (std::is_invocable_r_v<Status, Callback&, SessionContext&, View>)
                             return std::invoke(cb, ctx, std::move(view));
                         else
                             return std::invoke(cb, ctx, std::as_const(view));
@@ -186,9 +197,17 @@ public:
             std::is_same_v<Schema, typename Message::schema_type>
     [[nodiscard]] Status ignore(std::string_view reason) noexcept {
         if (Schema::find_message(Message::msg_type) == nullptr)
-            return {ErrorCode::schema_mismatch, 35};
+            return {ErrorCode::schema_mismatch, tag::msg_type};
         for (auto& shard : shards_) {
             if (const auto st = shard->ignore_message(Message::msg_type, reason); !st.ok()) return st;
+        }
+        return Status::success();
+    }
+
+    [[nodiscard]] Status ignore_message(std::string_view msg_type,
+        std::string_view reason) noexcept requires std::is_same_v<Schema, FlatSchema> {
+        for (auto& shard : shards_) {
+            if (const auto st = shard->ignore_message(msg_type, reason); !st.ok()) return st;
         }
         return Status::success();
     }
@@ -270,11 +289,14 @@ public:
             const FixVersion version = config.settings.version;
             const std::string local_comp = config.local_comp_id;
             const std::string remote_comp = config.remote_comp_id;
+            const bool verify_checksum = config.settings.verify_checksum;
+            const WireHints route_wire_hints = config.settings.schema_wire_hints;
             auto handle = shards_[target]->add_acceptor(std::move(config));
             if (!handle.ok()) return handle.status();
             if (target != 0) {
                 const auto routed = shards_[0]->register_remote_acceptor_route(
-                    listener_name, version, local_comp, remote_comp, shards_[target].get());
+                    listener_name, version, local_comp, remote_comp, shards_[target].get(),
+                    verify_checksum, route_wire_hints);
                 if (!routed.ok()) return routed;
             }
             session_to_shard_.emplace(name, target);

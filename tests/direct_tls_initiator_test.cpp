@@ -73,6 +73,7 @@ struct TlsFixPeer {
     std::atomic<std::uint64_t> out_seq{1};
     std::atomic<int> accepted_connections{0};
     std::atomic<int> orders_received{0};
+    std::atomic<std::uint16_t> last_peer_port{0};
     std::thread worker;
     nf::TlsConfig server_tls{};
 
@@ -113,8 +114,12 @@ struct TlsFixPeer {
         while (!stop.load(std::memory_order_acquire)) {
             pollfd pfd{listen_fd, POLLIN, 0};
             if (::poll(&pfd, 1, 20) <= 0) continue;
-            int fd = ::accept4(listen_fd, nullptr, nullptr, SOCK_NONBLOCK | SOCK_CLOEXEC);
+            sockaddr_in peer_addr{};
+            socklen_t peer_len = sizeof(peer_addr);
+            int fd = ::accept4(listen_fd, reinterpret_cast<sockaddr*>(&peer_addr), &peer_len,
+                SOCK_NONBLOCK | SOCK_CLOEXEC);
             if (fd < 0) continue;
+            last_peer_port.store(ntohs(peer_addr.sin_port), std::memory_order_release);
             int one = 1;
             ::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
             accepted_connections.fetch_add(1, std::memory_order_relaxed);
@@ -425,6 +430,40 @@ int main(int argc, char** argv) {
             }
             CHECK(!err.ok());
             CHECK(err.code == nf::ErrorCode::certificate_error || err.code == nf::ErrorCode::tls_error);
+        }
+
+        // 4. DirectTlsTransport respects SocketOptions (local source IP/port binding & tcp_quickack).
+        {
+            TempDir bind_dir;
+            int probe_fd = ::socket(AF_INET, SOCK_STREAM, 0);
+            CHECK(probe_fd >= 0);
+            sockaddr_in paddr{};
+            paddr.sin_family = AF_INET;
+            paddr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+            paddr.sin_port = 0;
+            CHECK(::bind(probe_fd, reinterpret_cast<sockaddr*>(&paddr), sizeof(paddr)) == 0);
+            socklen_t plen = sizeof(paddr);
+            CHECK(::getsockname(probe_fd, reinterpret_cast<sockaddr*>(&paddr), &plen) == 0);
+            const std::uint16_t chosen_src_port = ntohs(paddr.sin_port);
+            ::close(probe_fd);
+
+            peer.out_seq.store(1, std::memory_order_release);
+            auto bound_cfg = make_cfg(bind_dir.path, peer.port);
+            bound_cfg.session_key = "FIX.4.4/BUY/SELL/BOUND";
+            bound_cfg.socket_options.local_bind_ip = "127.0.0.1";
+            bound_cfg.socket_options.local_bind_port = chosen_src_port;
+            bound_cfg.socket_options.tcp_quickack = true;
+
+            auto bound_t = nf::DirectTlsTransport::create(client_tls);
+            CHECK(bound_t.ok());
+            auto bound_open = nf::DirectInitiator<fix::Schema, TestHandler, nf::DirectTlsTransport>::open(
+                bound_cfg, TestHandler{}, std::move(bound_t).value());
+            CHECK(bound_open.ok());
+            auto bound_init = std::move(bound_open).value();
+            CHECK(bound_init.connect().ok());
+            CHECK(wait_active(bound_init));
+            CHECK(peer.last_peer_port.load(std::memory_order_acquire) == chosen_src_port);
+            bound_init.disconnect();
         }
 
         peer.finish();

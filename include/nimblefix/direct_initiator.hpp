@@ -383,6 +383,8 @@ public:
             (config.request_sequence_reset && !config.allow_sequence_reset) ||
             !config.connection_strategy.validate().ok() ||
             config.endpoints.size() > 16 ||
+            (!config.socket_options.local_bind_ip.empty() &&
+             !detail::is_valid_bind_ip(config.socket_options.local_bind_ip)) ||
             (config.unexpected_field_policy != UnexpectedFieldPolicy::reject &&
              config.unexpected_field_policy != UnexpectedFieldPolicy::ignore_with_metric &&
              config.unexpected_field_policy != UnexpectedFieldPolicy::passthrough)) {
@@ -1201,6 +1203,9 @@ private:
         deferred_logon_seq_ = 0;
         deferred_logon_pending_ = false;
         local_epoch_reset_started_ = false;
+        if (!was_active && one_shot_reset_active_) {
+            one_shot_sequence_reset_ = true;
+        }
         one_shot_reset_active_ = false;
         connect_deadline_ = 0;
         write_timer_active_ = false;
@@ -1954,7 +1959,11 @@ private:
             detail::DirectAdminStorage stg{};
             if (const auto st = detail::direct_build_admin(msg_type::sequence_reset, gf, stg, admin_arena_); !st.ok())
                 return st;
-            auto header = make_header(gap_begin, wall_time_, true, orig_time);
+            std::string_view gap_orig_time = orig_time;
+            if (detail::compare_utc_timestamps(gap_orig_time, wall_time_) > 0) {
+                gap_orig_time = wall_time_;
+            }
+            auto header = make_header(gap_begin, wall_time_, true, gap_orig_time);
             const auto enc = encode_fix(stg.view, header, replay_buf_);
             if (!enc.ok()) return enc.status();
             replay_bytes_ = enc.value();
@@ -2379,6 +2388,7 @@ private:
                 if (const auto st = queue_replay(a.first, a.last, inbound_id); !st.ok()) return fail(st);
                 break;
             case detail::CoreActionKind::become_active: {
+                one_shot_reset_active_ = false;
                 failover_.on_session_active();
                 sync_telemetry_state();
                 Status act{};

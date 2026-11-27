@@ -28,6 +28,15 @@ bool set_nodelay(int fd) noexcept {
     return ::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &enabled, sizeof(enabled)) == 0;
 }
 
+void enable_quickack_once(int fd) noexcept {
+#ifdef TCP_QUICKACK
+    const int enabled = 1;
+    (void)::setsockopt(fd, IPPROTO_TCP, TCP_QUICKACK, &enabled, sizeof(enabled));
+#else
+    (void)fd;
+#endif
+}
+
 void apply_socket_options(int fd, const SocketOptions& options) noexcept {
     if (options.send_buffer_bytes != 0) {
         const int sz = static_cast<int>(std::min<std::size_t>(
@@ -39,12 +48,9 @@ void apply_socket_options(int fd, const SocketOptions& options) noexcept {
             options.recv_buffer_bytes, static_cast<std::size_t>(std::numeric_limits<int>::max())));
         (void)::setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &sz, sizeof(sz));
     }
-#ifdef TCP_QUICKACK
     if (options.tcp_quickack) {
-        const int enabled = 1;
-        (void)::setsockopt(fd, IPPROTO_TCP, TCP_QUICKACK, &enabled, sizeof(enabled));
+        enable_quickack_once(fd);
     }
-#endif
 #ifdef SO_BUSY_POLL
     if (options.so_busy_poll_us != 0) {
         const int usec = static_cast<int>(std::min<std::uint32_t>(
@@ -110,12 +116,19 @@ bool is_numeric_host(std::string_view host, bool allow_empty) noexcept {
         ::inet_pton(AF_INET6, text.data(), &ipv6) == 1;
 }
 
-TcpStream::TcpStream(TcpStream&& other) noexcept : fd_(std::exchange(other.fd_, -1)) {}
+bool is_valid_bind_ip(std::string_view ip) noexcept {
+    return is_numeric_host(ip, false);
+}
+
+TcpStream::TcpStream(TcpStream&& other) noexcept
+    : fd_(std::exchange(other.fd_, -1)),
+      quickack_(std::exchange(other.quickack_, false)) {}
 
 TcpStream& TcpStream::operator=(TcpStream&& other) noexcept {
     if (this == &other) return *this;
     close();
     fd_ = std::exchange(other.fd_, -1);
+    quickack_ = std::exchange(other.quickack_, false);
     return *this;
 }
 
@@ -163,12 +176,12 @@ Result<TcpStream> TcpStream::connect(std::string_view host, std::uint16_t port,
             const int connected = ::connect(fd, address->ai_addr, address->ai_addrlen);
             if (connected == 0) {
                 ::freeaddrinfo(addresses);
-                return TcpStream{fd};
+                return TcpStream{fd, options.tcp_quickack};
             }
             if (errno == EINPROGRESS || errno == EWOULDBLOCK) {
                 in_progress = true;
                 ::freeaddrinfo(addresses);
-                return TcpStream{fd};
+                return TcpStream{fd, options.tcp_quickack};
             }
             last_error = errno;
             (void)::close(fd);
@@ -188,7 +201,10 @@ SocketIoResult TcpStream::read(std::span<char> output) noexcept {
     do {
         count = ::recv(fd_, output.data(), output.size(), 0);
     } while (count < 0 && errno == EINTR);
-    if (count > 0) return {static_cast<std::size_t>(count), false, false, Status::success()};
+    if (count > 0) {
+        if (quickack_) enable_quickack_once(fd_);
+        return {static_cast<std::size_t>(count), false, false, Status::success()};
+    }
     if (count == 0) return {0, false, true, Status::success()};
     if (errno == EAGAIN || errno == EWOULDBLOCK) return {0, true, false, Status::success()};
     return {0, false, false, socket_error()};
@@ -244,10 +260,15 @@ Status TcpStream::finish_connect() noexcept {
     return socket_error();
 }
 
+void TcpStream::rearm_quickack() const noexcept {
+    if (fd_ >= 0 && quickack_) enable_quickack_once(fd_);
+}
+
 void TcpStream::close() noexcept {
     if (fd_ < 0) return;
     (void)::close(fd_);
     fd_ = -1;
+    quickack_ = false;
 }
 
 TcpListener::TcpListener(TcpListener&& other) noexcept
@@ -327,7 +348,7 @@ Result<TcpStream> TcpListener::accept() noexcept {
             return socket_error();
         }
         apply_socket_options(fd, options_);
-        return TcpStream{fd};
+        return TcpStream{fd, options_.tcp_quickack};
     }
     if (errno == EAGAIN || errno == EWOULDBLOCK) return Status{ErrorCode::need_more};
     return socket_error();
@@ -387,8 +408,9 @@ Status TcpTransport::connect(std::string_view host, std::uint16_t port) noexcept
 Status TcpTransport::connect(std::string_view host, std::uint16_t port,
                              const SocketOptions& options) noexcept {
     close();
+    options_ = options;
     bool in_progress = false;
-    auto stream = detail::TcpStream::connect(host, port, in_progress, options);
+    auto stream = detail::TcpStream::connect(host, port, in_progress, options_);
     if (!stream.ok()) return stream.status();
     fd_ = stream.value().release_handle();
     connecting_ = in_progress;
@@ -420,7 +442,10 @@ TransportIoResult TcpTransport::read(std::span<char> output) noexcept {
     do {
         count = ::recv(fd_, output.data(), output.size(), 0);
     } while (count < 0 && errno == EINTR);
-    if (count > 0) return {static_cast<std::size_t>(count), false, false, Status::success()};
+    if (count > 0) {
+        rearm_quickack();
+        return {static_cast<std::size_t>(count), false, false, Status::success()};
+    }
     if (count == 0) return {0, false, true, Status::success()};
     if (errno == EAGAIN || errno == EWOULDBLOCK) return {0, true, false, Status::success()};
     return {0, false, false, Status{ErrorCode::io_error, 0, static_cast<std::size_t>(errno)}};
@@ -464,6 +489,10 @@ TransportIoResult TcpTransport::write_batch(std::span<const std::span<const char
     if (count == 0) return {0, false, true, Status::success()};
     if (errno == EAGAIN || errno == EWOULDBLOCK) return {0, true, false, Status::success()};
     return {0, false, false, Status{ErrorCode::io_error, 0, static_cast<std::size_t>(errno)}};
+}
+
+void TcpTransport::rearm_quickack() const noexcept {
+    if (fd_ >= 0 && options_.tcp_quickack) detail::enable_quickack_once(fd_);
 }
 
 void TcpTransport::close() noexcept {

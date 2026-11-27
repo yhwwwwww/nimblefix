@@ -1537,6 +1537,8 @@ struct EngineRuntime::Impl {
         std::string local_comp_id;
         std::string remote_comp_id;
         EngineRuntime* target{nullptr};
+        bool verify_checksum{true};
+        std::vector<LengthDataPair> wire_hint_pairs{};
     };
 
     struct HandoffItem {
@@ -1888,7 +1890,7 @@ struct EngineRuntime::Impl {
             if (eff_schema != nullptr) {
                 if (eff_schema->messages.empty()) return {ErrorCode::schema_mismatch};
                 if (!eff_schema->matches_session(item.settings.version, item.settings.default_appl_ver_id))
-                    return {ErrorCode::unsupported_protocol, 8};
+                    return {ErrorCode::unsupported_protocol, tag::begin_string};
             }
             if (const auto hst = check_session_wire_hints(item.settings.schema_wire_hints); !hst.ok()) return hst;
             if (!item.socket_options.local_bind_ip.empty() &&
@@ -1920,7 +1922,7 @@ struct EngineRuntime::Impl {
             if (eff_schema != nullptr) {
                 if (eff_schema->messages.empty()) return {ErrorCode::schema_mismatch};
                 if (!eff_schema->matches_session(item.config.settings.version, item.config.settings.default_appl_ver_id))
-                    return {ErrorCode::unsupported_protocol, 8};
+                    return {ErrorCode::unsupported_protocol, tag::begin_string};
             }
             if (const auto hst = check_session_wire_hints(item.config.settings.schema_wire_hints); !hst.ok()) return hst;
             if (item.listener_index >= listeners.size()) return {ErrorCode::invalid_config};
@@ -1931,6 +1933,42 @@ struct EngineRuntime::Impl {
                 (item.config.settings.flow_control->max_pending_bytes < config.max_frame_bytes * 3 ||
                  item.config.settings.flow_control->max_pending_inbound_bytes < config.max_frame_bytes))
                 return {ErrorCode::invalid_config};
+        }
+        for (const auto& route : remote_routes) {
+            if (route.listener_index >= listeners.size()) return {ErrorCode::invalid_config};
+            if (const auto hst = check_session_wire_hints(WireHints{route.wire_hint_pairs}); !hst.ok()) return hst;
+        }
+        for (std::size_t li = 0; li < listeners.size(); ++li) {
+            std::vector<LengthDataPair> listener_pairs = wire_hint_pairs;
+            auto merge_listener_pairs = [&](std::span<const LengthDataPair> extra) -> Status {
+                for (const auto& left : extra) {
+                    bool exists = false;
+                    for (const auto& right : listener_pairs) {
+                        if (left.length_tag == right.length_tag && left.data_tag == right.data_tag) {
+                            exists = true;
+                            continue;
+                        }
+                        const bool conflict =
+                            (left.length_tag == right.length_tag && left.data_tag != right.data_tag) ||
+                            (left.data_tag == right.data_tag && left.length_tag != right.length_tag) ||
+                            (left.length_tag == right.data_tag && left.data_tag != right.length_tag) ||
+                            (left.data_tag == right.length_tag && left.length_tag != right.data_tag);
+                        if (conflict) return {ErrorCode::invalid_config};
+                    }
+                    if (!exists) listener_pairs.push_back(left);
+                }
+                return Status::success();
+            };
+            for (const auto& acc : acceptors) {
+                if (acc.listener_index != li) continue;
+                if (const auto st = merge_listener_pairs(acc.config.settings.schema_wire_hints.length_data_pairs); !st.ok())
+                    return st;
+            }
+            for (const auto& route : remote_routes) {
+                if (route.listener_index != li) continue;
+                if (const auto st = merge_listener_pairs(route.wire_hint_pairs); !st.ok())
+                    return st;
+            }
         }
         if (initiators.size() + acceptors.size() > config.max_sessions)
             return {ErrorCode::invalid_config};
@@ -3306,6 +3344,35 @@ struct EngineRuntime::Impl {
         return no_index;
     }
 
+    void pending_framing_policy(std::size_t listener_index,
+        std::vector<LengthDataPair>& out_pairs, bool& out_verify_checksum) const {
+        out_pairs = wire_hint_pairs;
+        out_verify_checksum = true;
+        auto append_unique = [&out_pairs](std::span<const LengthDataPair> extra) {
+            for (const auto& candidate : extra) {
+                bool found = false;
+                for (const auto& existing : out_pairs) {
+                    if (existing.length_tag == candidate.length_tag &&
+                        existing.data_tag == candidate.data_tag) {
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) out_pairs.push_back(candidate);
+            }
+        };
+        for (const auto& acceptor : acceptors) {
+            if (acceptor.listener_index != listener_index) continue;
+            if (!acceptor.config.settings.verify_checksum) out_verify_checksum = false;
+            append_unique(acceptor.config.settings.schema_wire_hints.length_data_pairs);
+        }
+        for (const auto& route : remote_routes) {
+            if (route.listener_index != listener_index) continue;
+            if (!route.verify_checksum) out_verify_checksum = false;
+            append_unique(route.wire_hint_pairs);
+        }
+    }
+
     [[nodiscard]] Status adopt_pending(Pending& source, FrameView first_frame,
                                        std::uint64_t now) noexcept {
         Status frame_status{};
@@ -3314,12 +3381,16 @@ struct EngineRuntime::Impl {
         bool driver_registered = false;
         try {
         const std::string first_wire{first_frame.bytes};
+        std::vector<LengthDataPair> pending_pairs;
+        bool pending_verify_checksum = true;
+        pending_framing_policy(source.listener_index, pending_pairs, pending_verify_checksum);
+        const WireHints pending_hints{pending_pairs};
         frame_status = [&]() -> Status {
             const auto scratch_size = field_scratch.size();
             FlatMessageView message;
             auto status = parse_flat(first_frame,
                 std::span<FieldView>{field_scratch.data(), scratch_size}, message,
-                wire_hints, CodecLimits{config.max_frame_bytes});
+                pending_hints, CodecLimits{config.max_frame_bytes, pending_verify_checksum});
             if (!status.ok()) return status;
             std::string_view type, sender, target;
             if (!(status = field_value(message, tag::msg_type, type)).ok() ||
@@ -3334,6 +3405,14 @@ struct EngineRuntime::Impl {
                         route.remote_comp_id == sender &&
                         route.local_comp_id == target &&
                         route.target != nullptr && route.target->impl_ != nullptr) {
+                        if (route.verify_checksum && !pending_verify_checksum) {
+                            const WireHints route_hints = route.wire_hint_pairs.empty()
+                                ? wire_hints : WireHints{route.wire_hint_pairs};
+                            FrameView verified{};
+                            if (const auto cs = inspect_frame(first_frame.bytes, verified, route_hints,
+                                    CodecLimits{config.max_frame_bytes, true}); !cs.ok())
+                                return cs;
+                        }
                         const bool had_poll = source.io_tag.poll_armed;
                         io_remove(source.io_tag);
                         if (had_poll && io_backend && io_backend->supports_proactor()) {
@@ -3355,6 +3434,14 @@ struct EngineRuntime::Impl {
             }
             auto& acceptor = acceptors[acceptor_index];
             error_name = acceptor.config.name;
+            if (acceptor.config.settings.verify_checksum && !pending_verify_checksum) {
+                const WireHints acc_hints = acceptor.config.settings.schema_wire_hints.length_data_pairs.empty()
+                    ? wire_hints : acceptor.config.settings.schema_wire_hints;
+                FrameView verified{};
+                if (const auto cs = inspect_frame(first_frame.bytes, verified, acc_hints,
+                        CodecLimits{config.max_frame_bytes, true}); !cs.ok())
+                    return cs;
+            }
             const auto now_sys = current_schedule_time();
             if (!acceptor.config.settings.schedule.contains(now_sys))
                 return {ErrorCode::schedule_closed};
@@ -3512,8 +3599,17 @@ struct EngineRuntime::Impl {
     [[nodiscard]] Status process_pending_buffer(Pending& connection,
                                                std::uint64_t now) noexcept {
         FrameView frame{};
-        const auto status = inspect_frame(connection.receive_buffer, frame, wire_hints,
-            CodecLimits{config.max_frame_bytes});
+        std::vector<LengthDataPair> pending_pairs;
+        bool pending_verify_checksum = true;
+        try {
+            pending_framing_policy(connection.listener_index, pending_pairs, pending_verify_checksum);
+        } catch (...) {
+            close_pending(connection);
+            report_error({}, Status{ErrorCode::capacity_exceeded});
+            return {ErrorCode::capacity_exceeded};
+        }
+        const auto status = inspect_frame(connection.receive_buffer, frame, WireHints{pending_pairs},
+            CodecLimits{config.max_frame_bytes, pending_verify_checksum});
         if (status.code == ErrorCode::need_more) return Status::success();
         if (!status.ok()) {
             close_pending(connection);
@@ -3549,6 +3645,7 @@ struct EngineRuntime::Impl {
                 ? telemetry_now_ns() : 0ULL;
             const auto io = peer.tls ? peer.tls->read(std::span<char>{scratch, read_size})
                 : peer.stream.read(std::span<char>{scratch, read_size});
+            if (peer.tls && io.bytes != 0) peer.stream.rearm_quickack();
             if (r_t0 != 0ULL && io.bytes != 0) {
                 peer.session->telemetry_slot->record_stage(TelemetryStage::read, telemetry_now_ns() - r_t0);
             }
@@ -4977,7 +5074,7 @@ Result<ListenerHandle> EngineRuntime::add_handoff_listener(ListenerConfig config
 
 Status EngineRuntime::register_remote_acceptor_route(std::string_view listener_name,
     FixVersion version, std::string_view local_comp_id, std::string_view remote_comp_id,
-    EngineRuntime* target_shard) noexcept {
+    EngineRuntime* target_shard, bool verify_checksum, WireHints route_wire_hints) noexcept {
     if (!impl_ || impl_->has_run.load(std::memory_order_acquire) || target_shard == nullptr)
         return Status{ErrorCode::invalid_config};
     std::size_t listener_idx = no_index;
@@ -4994,8 +5091,11 @@ Status EngineRuntime::register_remote_acceptor_route(std::string_view listener_n
             return Status{ErrorCode::invalid_config};
     }
     try {
+        std::vector<LengthDataPair> pairs(route_wire_hints.length_data_pairs.begin(),
+            route_wire_hints.length_data_pairs.end());
         impl_->remote_routes.push_back(Impl::RemoteRoute{
-            listener_idx, version, std::string{local_comp_id}, std::string{remote_comp_id}, target_shard});
+            listener_idx, version, std::string{local_comp_id}, std::string{remote_comp_id},
+            target_shard, verify_checksum, std::move(pairs)});
         return Status::success();
     } catch (...) {
         return Status{ErrorCode::capacity_exceeded};
@@ -5047,10 +5147,10 @@ Status EngineRuntime::validate() const noexcept {
         if (impl_->schema->messages.empty()) return {ErrorCode::schema_mismatch};
         for (const auto& handler : impl_->typed_handlers)
             if (impl_->schema->find_message(handler.msg_type) == nullptr)
-                return {ErrorCode::schema_mismatch, 35};
+                return {ErrorCode::schema_mismatch, tag::msg_type};
         for (const auto& ignored : impl_->ignored_messages)
             if (impl_->schema->find_message(ignored.msg_type) == nullptr || ignored.reason.empty())
-                return {ErrorCode::schema_mismatch, 35};
+                return {ErrorCode::schema_mismatch, tag::msg_type};
     }
     if (!impl_->initiators.empty() && impl_->initiators.size() > impl_->config.max_sessions)
         return {ErrorCode::invalid_config};

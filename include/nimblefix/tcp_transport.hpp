@@ -11,6 +11,10 @@
 
 namespace nimblefix {
 
+namespace detail {
+[[nodiscard]] bool is_valid_bind_ip(std::string_view ip) noexcept;
+} // namespace detail
+
 struct TransportIoResult {
     std::size_t bytes{};
     bool would_block{};
@@ -59,6 +63,7 @@ public:
     [[nodiscard]] int native_fd() const noexcept { return fd_; }
     [[nodiscard]] bool valid() const noexcept { return fd_ >= 0; }
     [[nodiscard]] bool is_connecting() const noexcept { return connecting_; }
+    void rearm_quickack() const noexcept;
 
 private:
     int fd_{-1};

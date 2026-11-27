@@ -186,6 +186,42 @@ void test_generated_stream_and_fixed() {
         });
     check(!invalid_tag_time.ok() && invalid_tag_time.status().code == ErrorCode::invalid_timestamp &&
         invalid_tag_time.status().tag == 60);
+
+    // Duplicate body field rejected via named setter and via set<Tag>.
+    const auto dup_body = encode_stream<fix44::NewOrderSingle>(header, invalid_output, [](auto& w) {
+        w.cl_ord_id("client-1").cl_ord_id("client-dup").symbol("AAPL").side('1')
+         .transact_time("20261026-12:30:45").order_qty(100).ord_type('2');
+    });
+    check(!dup_body.ok() && dup_body.status().code == ErrorCode::duplicate_field &&
+        dup_body.status().tag == 11);
+
+    const auto dup_mixed = encode_stream<fix44::NewOrderSingle>(header, invalid_output, [](auto& w) {
+        w.cl_ord_id("client-1").symbol("AAPL").side('1')
+         .transact_time("20261026-12:30:45").order_qty(100).ord_type('2')
+         .price("150.25"_dec).template set<44>("151.00"_dec);
+    });
+    check(!dup_mixed.ok() && dup_mixed.status().code == ErrorCode::duplicate_field &&
+        dup_mixed.status().tag == 44);
+
+    // Disengaged optional followed by engaged value must NOT trigger duplicate_field.
+    std::array<char, 512> opt_then_val_output{};
+    const auto opt_then_val = encode_stream<fix44::NewOrderSingle>(header, opt_then_val_output, [&](auto& w) {
+        const std::optional<std::string_view> empty_sub{};
+        w.header().sender_sub_id(empty_sub).sender_sub_id("DESK-OK");
+        w.cl_ord_id("client-opt-ok").symbol("AAPL").side('1')
+         .transact_time("20261026-12:30:45").order_qty(100).ord_type('2')
+         .price(no_px).price("150.25"_dec);
+    });
+    check(opt_then_val.ok());
+
+    // Duplicate standard header field rejected with duplicate_field and exact tag.
+    const auto dup_hdr = encode_stream<fix44::NewOrderSingle>(header, invalid_output, [](auto& w) {
+        w.header().sender_sub_id("DESK-1").sender_sub_id("DESK-2");
+        w.cl_ord_id("client-1").symbol("AAPL").side('1')
+         .transact_time("20261026-12:30:45").order_qty(100).ord_type('1');
+    });
+    check(!dup_hdr.ok() && dup_hdr.status().code == ErrorCode::duplicate_field &&
+        dup_hdr.status().tag == 50);
 }
 
 } // namespace

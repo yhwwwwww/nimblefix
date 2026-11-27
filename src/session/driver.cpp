@@ -1406,6 +1406,9 @@ struct SessionDriver::Impl {
             const auto* first_original = unique_field(parsed, tag::orig_sending_time, duplicate);
             if (duplicate) return Status{ErrorCode::corrupt_store, tag::orig_sending_time};
             original_time = first_original == nullptr ? first_time->value : first_original->value;
+            if (detail::compare_utc_timestamps(original_time, callback_wall_time) > 0) {
+                original_time = callback_wall_time;
+            }
             while (gap_end <= replay_end) {
                 const auto* next_record = journal.find_outbound(gap_end);
                 if (next_record == nullptr || next_record->payload.empty())
@@ -1717,6 +1720,7 @@ struct SessionDriver::Impl {
     }
 
     [[nodiscard]] Status run_active(std::uint64_t now_ms, std::string_view wall_time) noexcept {
+        one_shot_reset_active = false;
         if (callbacks.deferred_active) {
             if (!callbacks.on_deferred_active) return fail(Status{ErrorCode::invalid_config});
             Status schedule_status{};
@@ -2243,10 +2247,14 @@ struct SessionDriver::Impl {
     }
 
     [[nodiscard]] Status on_disconnected(Status reason, std::uint64_t now_ms) noexcept {
+        const bool was_active = (core.state() == SessionState::active);
         detail::CoreEvent event{};
         event.kind = detail::CoreEventKind::disconnected;
         event.now_ms = now_ms;
         (void)core.process(event);
+        if (!was_active && one_shot_reset_active) {
+            one_shot_sequence_reset = true;
+        }
         clear_transmit_state();
         should_close = false;
         if (!reason.ok() && reason.code != ErrorCode::connection_closed) {

@@ -212,7 +212,8 @@ public:
     [[nodiscard]] Result<ListenerHandle> add_handoff_listener(ListenerConfig config) noexcept;
     [[nodiscard]] Status register_remote_acceptor_route(std::string_view listener_name,
         FixVersion version, std::string_view local_comp_id, std::string_view remote_comp_id,
-        EngineRuntime* target_shard) noexcept;
+        EngineRuntime* target_shard, bool verify_checksum = true,
+        WireHints route_wire_hints = {}) noexcept;
     [[nodiscard]] Status validate() const noexcept;
     [[nodiscard]] Status run() noexcept;
     [[nodiscard]] Status start() noexcept;
@@ -312,18 +313,28 @@ public:
             std::is_same_v<Schema, typename Message::schema_type> &&
             (std::is_invocable_r_v<Status, Callback&, SessionContext&, typename Message::view_type> ||
              std::is_invocable_r_v<Status, Callback&, SessionContext&,
-                const typename Message::view_type&>)
+                const typename Message::view_type&> ||
+             std::is_invocable_r_v<Status, Callback&, SessionContext&,
+                typename Message::view_type, const DeliveryInfo&> ||
+             std::is_invocable_r_v<Status, Callback&, SessionContext&,
+                const typename Message::view_type&, const DeliveryInfo&>)
     [[nodiscard]] Status on(Callback&& callback) noexcept {
         try {
             if (!detail::callback_is_present(callback)) return {ErrorCode::invalid_config};
             if (Schema::find_message(Message::msg_type) == nullptr)
-                return {ErrorCode::schema_mismatch, 35};
+                return {ErrorCode::schema_mismatch, tag::msg_type};
             using View = typename Message::view_type;
             return runtime_->on_typed_message(Message::msg_type,
                 [fn = std::forward<Callback>(callback)](SessionContext& context,
-                    const FlatMessageView& flat, const DeliveryInfo&) mutable -> Status {
+                    const FlatMessageView& flat, const DeliveryInfo& info) mutable -> Status {
                     View view{flat};
-                    if constexpr (std::is_invocable_r_v<Status, Callback&, SessionContext&, View>)
+                    if constexpr (std::is_invocable_r_v<Status, Callback&,
+                                      SessionContext&, View, const DeliveryInfo&>)
+                        return std::invoke(fn, context, std::move(view), info);
+                    else if constexpr (std::is_invocable_r_v<Status, Callback&,
+                                           SessionContext&, const View&, const DeliveryInfo&>)
+                        return std::invoke(fn, context, std::as_const(view), info);
+                    else if constexpr (std::is_invocable_r_v<Status, Callback&, SessionContext&, View>)
                         return std::invoke(fn, context, std::move(view));
                     else
                         return std::invoke(fn, context, std::as_const(view));
@@ -339,7 +350,7 @@ public:
             std::is_same_v<Schema, typename Message::schema_type>
     [[nodiscard]] Status ignore(std::string_view reason) noexcept {
         if (Schema::find_message(Message::msg_type) == nullptr)
-            return {ErrorCode::schema_mismatch, 35};
+            return {ErrorCode::schema_mismatch, tag::msg_type};
         return runtime_->ignore_message(Message::msg_type, reason);
     }
 

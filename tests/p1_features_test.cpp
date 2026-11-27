@@ -739,6 +739,193 @@ void test_admin_controls_and_gapfill() {
         CHECK(se.request_sequence_reset("ACC1", "sharded reset").ok());
         CHECK(!se.request_logout("UNKNOWN_SESSION").ok());
     }
+
+    // 4d. one_shot_sequence_reset survives a pre-active disconnect (Logon timeout / TCP drop before peer Logon).
+    {
+        TempDir dir("oneshot_preactive");
+        nf::SessionConfig dcfg{};
+        dcfg.role = nf::SessionRole::initiator;
+        dcfg.name = "DRV_ONESHOT";
+        dcfg.storage_directory = dir.path.string();
+        dcfg.session_key = "FIX.4.4/CLI/SRV";
+        dcfg.local_comp_id = "CLI";
+        dcfg.remote_comp_id = "SRV";
+        nf::SessionSettings settings{};
+        settings.version = nf::FixVersion::fix44;
+        settings.allow_sequence_reset = true;
+        dcfg.settings = settings;
+
+        auto drv = nf::SessionDriver::create(dcfg).value();
+        CHECK(drv.adjust_sequences(5, 8, "seed seqs").ok());
+        CHECK(drv.arm_one_shot_sequence_reset("one-shot survive drop").ok());
+
+        auto sink = +[](void* ctx, std::span<const char> b) noexcept -> nf::WriteResult {
+            static_cast<std::string*>(ctx)->append(b.data(), b.size());
+            return {b.size(), false, nf::Status::success()};
+        };
+        const std::string wt = "20261127-10:05:00.000";
+
+        // Attempt 1: send Logon(34=1, 141=Y), then TCP drops BEFORE peer Logon reply arrives!
+        CHECK(drv.connected(1000, wt).ok());
+        std::string tx1;
+        CHECK(drv.flush(sink, &tx1, 1000, 65536).ok());
+        CHECK(tx1.find("34=1\x01") != std::string::npos);
+        CHECK(tx1.find("141=Y\x01") != std::string::npos);
+        CHECK(drv.disconnected(nf::Status{nf::ErrorCode::connection_closed}, 1050).ok());
+
+        // Attempt 2: MUST re-run reset and send Logon(34=1, 141=Y) again!
+        CHECK(drv.connected(2000, wt).ok());
+        std::string tx2;
+        CHECK(drv.flush(sink, &tx2, 2000, 65536).ok());
+        CHECK(tx2.find("34=1\x01") != std::string::npos);
+        CHECK(tx2.find("141=Y\x01") != std::string::npos);
+
+        const std::string peer_logon = make_raw_fix(
+            "35=A\x01""49=SRV\x01""56=CLI\x01""34=1\x01""52=20261127-10:05:00.000\x01""98=0\x01""108=30\x01""141=Y\x01");
+        CHECK(drv.receive(peer_logon, 2010, wt).ok());
+        CHECK(drv.state() == nf::SessionState::active);
+
+        // Attempt 3 (after reaching active): one-shot flag is consumed -> 34=2 WITHOUT 141=Y!
+        CHECK(drv.disconnected(nf::Status{nf::ErrorCode::connection_closed}, 2050).ok());
+        CHECK(drv.connected(3000, wt).ok());
+        std::string tx3;
+        CHECK(drv.flush(sink, &tx3, 3000, 65536).ok());
+        CHECK(tx3.find("34=2\x01") != std::string::npos);
+        CHECK(tx3.find("141=Y\x01") == std::string::npos);
+    }
+
+    // 4e. Typed Engine/ShardedEngine 3-arg on<Message>(ctx, view, DeliveryInfo) +
+    //     ShardedEngine<FlatSchema>::ignore_message + Shard 1 remote acceptor verify_checksum=false & wire_hints!
+    {
+        TempDir dir("sharded_parity");
+
+        // Typed Engine::on<Message> with 3-arg DeliveryInfo callback.
+        auto typed_srv_cfg = make_engine_cfg(dir.path / "typed_srv");
+        auto typed_srv = nf::Engine<fix44_sample::Schema, nf::Inline>::create(typed_srv_cfg).value();
+        std::atomic<std::uint64_t> typed_seen_seq{0};
+        const auto on_nos = typed_srv.on<fix44_sample::NewOrderSingle>(
+            [&](nf::SessionContext&, const fix44_sample::NewOrderSingleView& v, const nf::DeliveryInfo& info) {
+                const auto cid = v.cl_ord_id();
+                if (cid.ok() && cid.value() == "TYPED-3ARG" && !info.is_recovery) {
+                    typed_seen_seq.store(info.msg_seq_num, std::memory_order_release);
+                }
+                return nf::Status::success();
+            });
+        CHECK(on_nos.ok());
+        CHECK(typed_srv.ignore<fix44_sample::ExecutionReport>("unused on server").ok());
+        CHECK(typed_srv.add_listener(nf::ListenerConfig{"TL", {"127.0.0.1", 0}}).ok());
+        CHECK(typed_srv.add_acceptor(nf::AcceptorConfig{"TACC", "TL", "TSRV", "TCLI"}).ok());
+        std::thread tsrv_thr([&] { (void)typed_srv.run(); });
+        nf::TcpEndpoint tep{};
+        CHECK(wait_until([&] {
+            auto r = typed_srv.listener_endpoint("TL");
+            if (r.ok()) { tep = r.value(); return true; }
+            return false;
+        }));
+
+        nf::ShardedEngineConfig typed_cli_scfg{};
+        typed_cli_scfg.base = make_engine_cfg(dir.path / "typed_cli");
+        typed_cli_scfg.shard_count = 2;
+        auto typed_cli = nf::ShardedEngine<fix44_sample::Schema, nf::Inline>::create(typed_cli_scfg).value();
+        const auto on_er = typed_cli.on<fix44_sample::ExecutionReport>(
+            [](nf::SessionContext&, fix44_sample::ExecutionReportView, const nf::DeliveryInfo&) {
+                return nf::Status::success();
+            });
+        CHECK(on_er.ok());
+        CHECK(typed_cli.ignore<fix44_sample::NewOrderSingle>("client only sends").ok());
+        auto tinit_h = typed_cli.add_initiator(nf::InitiatorConfig{"TINIT", "TCLI", "TSRV", tep}, 1);
+        CHECK(tinit_h.ok());
+        std::thread tcli_thr([&] { (void)typed_cli.run(); });
+        CHECK(wait_until([&] {
+            auto s = typed_cli.snapshot("TINIT");
+            return s.ok() && s.value().state == nf::SessionState::active;
+        }));
+        CHECK(tinit_h.value().sender<fix44_sample::Schema>().send_stream<fix44_sample::NewOrderSingle>(
+            [](auto& w) {
+                w.cl_ord_id("TYPED-3ARG").symbol("MSFT").side('1')
+                 .transact_time("20261127-10:00:00.000").order_qty(10).ord_type('1');
+            }).ok());
+        CHECK(wait_until([&] { return typed_seen_seq.load(std::memory_order_acquire) == 2; }));
+        typed_cli.request_stop();
+        typed_srv.request_stop();
+        tcli_thr.join();
+        tsrv_thr.join();
+
+        // ShardedEngine<FlatSchema>::ignore_message replicates across shards (mutually exclusive with catch-all on_message).
+        {
+            nf::ShardedEngineConfig ign_scfg{};
+            ign_scfg.base = make_engine_cfg(dir.path / "ign_sharded");
+            ign_scfg.shard_count = 2;
+            auto ign_se = nf::ShardedEngine<nf::FlatSchema, nf::Inline>::create(ign_scfg).value();
+            CHECK(ign_se.ignore_message("B", "news ignored across shards").ok());
+            CHECK(ign_se.ignore_message("B", "duplicate").code == nf::ErrorCode::duplicate_field);
+            CHECK(ign_se.validate().ok());
+        }
+
+        // ShardedEngine<FlatSchema>: Shard 1 remote acceptor with verify_checksum=false
+        // and custom binary LengthDataPair{9050, 9051} containing embedded SOH in Logon!
+        static constexpr std::array<nf::LengthDataPair, 1> custom_pairs{{{9050, 9051}}};
+        nf::ShardedEngineConfig flat_scfg{};
+        flat_scfg.base = make_engine_cfg(dir.path / "flat_sharded");
+        flat_scfg.shard_count = 2;
+        auto flat_se = nf::ShardedEngine<nf::FlatSchema, nf::Inline>::create(flat_scfg).value();
+        std::atomic<int> delivered_orders{0};
+        CHECK(flat_se.on_message([&](nf::SessionContext&, const nf::FlatMessageView& msg) {
+            auto mt = msg.find_unique(nf::tag::msg_type);
+            if (mt.ok() && mt.value().value == nf::msg_type::new_order_single) {
+                delivered_orders.fetch_add(1, std::memory_order_relaxed);
+            }
+            return nf::Status::success();
+        }).ok());
+        CHECK(flat_se.add_listener(nf::ListenerConfig{"SL", {"127.0.0.1", 0}}).ok());
+        nf::AcceptorConfig s1_acc{"S1ACC", "SL", "SSRV", "SCLI1"};
+        s1_acc.settings.verify_checksum = false;
+        s1_acc.settings.check_sending_time = false;
+        s1_acc.settings.schema_wire_hints = nf::WireHints{custom_pairs};
+        CHECK(flat_se.add_acceptor(s1_acc, 1).ok());
+
+        std::thread fse_thr([&] { (void)flat_se.run(); });
+        nf::TcpEndpoint sep{};
+        CHECK(wait_until([&] {
+            auto r = flat_se.listener_endpoint("SL");
+            if (r.ok()) { sep = r.value(); return true; }
+            return false;
+        }));
+
+        // Raw client sends Logon with 9050=5\x019051=ab\x01cd\x01 AND mismatched checksum 10=000\x01!
+        int cfd = ::socket(AF_INET, SOCK_STREAM, 0);
+        CHECK(cfd >= 0);
+        sockaddr_in caddr{};
+        caddr.sin_family = AF_INET;
+        caddr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        caddr.sin_port = htons(sep.port);
+        CHECK(::connect(cfd, reinterpret_cast<sockaddr*>(&caddr), sizeof(caddr)) == 0);
+
+        const std::string bin_payload{"ab\x01""cd", 5};
+        const std::string logon_body =
+            std::string{"35=A\x01""49=SCLI1\x01""56=SSRV\x01""34=1\x01""52=20261127-10:00:00.000\x01"
+                        "98=0\x01""108=30\x01""9050=5\x01""9051="} + bin_payload + "\x01";
+        const std::string raw_logon = "8=FIX.4.4\x01""9=" + std::to_string(logon_body.size()) +
+            "\x01" + logon_body + "10=000\x01";
+        CHECK(::send(cfd, raw_logon.data(), raw_logon.size(), 0) == static_cast<ssize_t>(raw_logon.size()));
+        CHECK(wait_until([&] {
+            auto s = flat_se.snapshot("S1ACC");
+            return s.ok() && s.value().state == nf::SessionState::active;
+        }));
+
+        // Send News (35=B, seq 2) + NewOrderSingle (35=D, seq 3) with mismatched checksum 10=000!
+        const std::string news_body = "35=B\x01""49=SCLI1\x01""56=SSRV\x01""34=2\x01""52=20261127-10:00:01.000\x01""148=HI\x01";
+        const std::string raw_news = "8=FIX.4.4\x01""9=" + std::to_string(news_body.size()) + "\x01" + news_body + "10=000\x01";
+        const std::string ord_body = "35=D\x01""49=SCLI1\x01""56=SSRV\x01""34=3\x01""52=20261127-10:00:01.000\x01""11=S1O1\x01";
+        const std::string raw_ord = "8=FIX.4.4\x01""9=" + std::to_string(ord_body.size()) + "\x01" + ord_body + "10=000\x01";
+        const std::string burst = raw_news + raw_ord;
+        CHECK(::send(cfd, burst.data(), burst.size(), 0) == static_cast<ssize_t>(burst.size()));
+        CHECK(wait_until([&] { return delivered_orders.load(std::memory_order_acquire) == 1; }));
+
+        ::close(cfd);
+        flat_se.request_stop();
+        fse_thr.join();
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -759,6 +946,15 @@ void test_socket_options_and_direct_initiator_p1() {
         nf::ListenerConfig bad_lis{"BADL", {"127.0.0.1", 0}};
         bad_lis.socket_options.local_bind_ip = "invalid-host";
         CHECK(!eng.add_listener(bad_lis).ok());
+
+        nf::DirectInitiatorConfig bad_direct{};
+        bad_direct.host = "127.0.0.1";
+        bad_direct.port = 9999;
+        bad_direct.storage_directory = (dir.path / "bad_direct_bind").string();
+        bad_direct.local_comp_id = "A";
+        bad_direct.remote_comp_id = "B";
+        bad_direct.socket_options.local_bind_ip = "not.a.numeric.ip";
+        CHECK(nf::DirectInitiator<>::open(bad_direct).status().code == nf::ErrorCode::invalid_config);
     }
 
     // 5b. Engine Initiator binds exact local source IP/port verified via getpeername()!

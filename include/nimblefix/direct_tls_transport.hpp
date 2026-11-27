@@ -27,7 +27,12 @@ public:
 
     [[nodiscard]] static Result<DirectTlsTransport> create(TlsConfig config) noexcept;
 
+    void set_socket_options(SocketOptions options) noexcept;
+    [[nodiscard]] const SocketOptions& socket_options() const noexcept;
+
     [[nodiscard]] Status connect(std::string_view host, std::uint16_t port) noexcept;
+    [[nodiscard]] Status connect(std::string_view host, std::uint16_t port,
+                                 const SocketOptions& options) noexcept;
     [[nodiscard]] Status finish_connect() noexcept;
     [[nodiscard]] TransportIoResult read(std::span<char> output) noexcept;
     [[nodiscard]] TransportIoResult write(std::span<const char> input) noexcept;

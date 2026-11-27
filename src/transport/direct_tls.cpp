@@ -41,7 +41,22 @@ Result<DirectTlsTransport> DirectTlsTransport::create(TlsConfig config) noexcept
     }
 }
 
+void DirectTlsTransport::set_socket_options(SocketOptions options) noexcept {
+    if (impl_) impl_->tcp.set_socket_options(std::move(options));
+}
+
+const SocketOptions& DirectTlsTransport::socket_options() const noexcept {
+    static const SocketOptions empty{};
+    return impl_ ? impl_->tcp.socket_options() : empty;
+}
+
 Status DirectTlsTransport::connect(std::string_view host, std::uint16_t port) noexcept {
+    if (!impl_) return Status{ErrorCode::invalid_config};
+    return connect(host, port, impl_->tcp.socket_options());
+}
+
+Status DirectTlsTransport::connect(std::string_view host, std::uint16_t port,
+                                   const SocketOptions& options) noexcept {
     if (!impl_ || !impl_->context.valid()) return Status{ErrorCode::invalid_config};
     close();
     try {
@@ -51,7 +66,7 @@ Status DirectTlsTransport::connect(std::string_view host, std::uint16_t port) no
     } catch (...) {
         return Status{ErrorCode::capacity_exceeded};
     }
-    if (const auto st = impl_->tcp.connect(host, port); !st.ok()) return st;
+    if (const auto st = impl_->tcp.connect(host, port, options); !st.ok()) return st;
     impl_->tls_handshaking = true;
     if (!impl_->tcp.is_connecting()) {
         const auto hs = finish_connect();
@@ -106,6 +121,7 @@ TransportIoResult DirectTlsTransport::read(std::span<char> output) noexcept {
         return res;
     }
     const auto io = impl_->tls.read(output);
+    if (io.bytes > 0) impl_->tcp.rearm_quickack();
     res.bytes = io.bytes;
     res.would_block = io.would_block;
     res.peer_closed = io.peer_closed;
