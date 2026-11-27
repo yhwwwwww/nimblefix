@@ -151,12 +151,12 @@ struct SchemaDescriptor {
             return version == plain || version == zero;
         };
         if (transport == FixVersion::fixt11) {
-            return (base("4.2", "4.2.0") && appl_ver_id == "4") ||
-                (base("4.3", "4.3.0") && appl_ver_id == "5") ||
-                (base("4.4", "4.4.0") && appl_ver_id == "6") ||
-                (base("5.0", "5.0.0") && appl_ver_id == "7") ||
-                (version == "5.0.1" && appl_ver_id == "8") ||
-                (version == "5.0.2" && appl_ver_id == "9");
+            return (base("4.2", "4.2.0") && appl_ver_id == appl_ver_id::fix42) ||
+                (base("4.3", "4.3.0") && appl_ver_id == appl_ver_id::fix43) ||
+                (base("4.4", "4.4.0") && appl_ver_id == appl_ver_id::fix44) ||
+                (base("5.0", "5.0.0") && appl_ver_id == appl_ver_id::fix50) ||
+                (version == "5.0.1" && appl_ver_id == appl_ver_id::fix50sp1) ||
+                (version == "5.0.2" && appl_ver_id == appl_ver_id::fix50sp2);
         }
         return (transport == FixVersion::fix42 && base("4.2", "4.2.0")) ||
             (transport == FixVersion::fix43 && base("4.3", "4.3.0")) ||
@@ -245,9 +245,12 @@ inline constexpr std::size_t max_schema_group_depth = 64;
     return no_field_tag;
 }
 
-[[nodiscard]] inline bool is_session_or_frame_tag(std::uint32_t tag) noexcept {
-    return tag == 8 || tag == 9 || tag == 10 || tag == 34 || tag == 35 ||
-        tag == 43 || tag == 49 || tag == 52 || tag == 56 || tag == 122 || tag == 369 || tag == 1128;
+[[nodiscard]] inline bool is_session_or_frame_tag(std::uint32_t t) noexcept {
+    return t == tag::begin_string || t == tag::body_length || t == tag::check_sum ||
+        t == tag::msg_seq_num || t == tag::msg_type || t == tag::poss_dup_flag ||
+        t == tag::sender_comp_id || t == tag::sending_time || t == tag::target_comp_id ||
+        t == tag::orig_sending_time || t == tag::last_msg_seq_num_processed ||
+        t == tag::appl_ver_id;
 }
 
 [[nodiscard]] inline bool parse_unsigned(std::string_view text, std::uint64_t& value) noexcept {
@@ -638,7 +641,7 @@ struct GroupScan {
             }
             continue;
         }
-        if (tag == 10 || ancestors.contains_tag(schema, tag)) break;
+        if (tag == tag::check_sum || ancestors.contains_tag(schema, tag)) break;
         // Unknown extension fields stay within this entry until a delimiter or
         // a known field owned by any ancestor level or Trailer starts.
         ++cursor;
@@ -855,7 +858,7 @@ private:
     for (std::size_t cursor = 0; cursor < fields.size();) {
         const auto tag = fields[cursor].tag;
         if (top_level && is_session_or_frame_tag(tag)) {
-            if (tag == 10u) {
+            if (tag == tag::check_sum) {
                 section = 2u;
             } else if (section != 0u && validation_level == ValidationLevel::strict && first_order_error.ok()) {
                 first_order_error = {ErrorCode::invalid_value, static_cast<int>(tag), fields[cursor].offset};
@@ -1247,9 +1250,11 @@ template <class T>
     constexpr std::uint16_t kBit10   = 1u << 11;
 
     constexpr std::uint64_t kLowSessionTagMask =
-        (std::uint64_t{1} << 8u)  | (std::uint64_t{1} << 9u)  | (std::uint64_t{1} << 10u) |
-        (std::uint64_t{1} << 34u) | (std::uint64_t{1} << 35u) | (std::uint64_t{1} << 43u) |
-        (std::uint64_t{1} << 49u) | (std::uint64_t{1} << 52u) | (std::uint64_t{1} << 56u);
+        (std::uint64_t{1} << tag::begin_string)  | (std::uint64_t{1} << tag::body_length)  |
+        (std::uint64_t{1} << tag::check_sum)     | (std::uint64_t{1} << tag::msg_seq_num)  |
+        (std::uint64_t{1} << tag::msg_type)      | (std::uint64_t{1} << tag::poss_dup_flag) |
+        (std::uint64_t{1} << tag::sender_comp_id) | (std::uint64_t{1} << tag::sending_time) |
+        (std::uint64_t{1} << tag::target_comp_id);
 
     std::uint16_t seen = 0;
     Status first_content_err{};
@@ -1259,75 +1264,76 @@ template <class T>
         const auto tag = f.tag;
         if (tag < 64u) {
             if (((kLowSessionTagMask >> tag) & 1ULL) == 0) continue;
-        } else if (tag != 122u && tag != 369u && tag != 1128u) [[likely]] {
+        } else if (tag != tag::orig_sending_time && tag != tag::last_msg_seq_num_processed &&
+                   tag != tag::appl_ver_id) [[likely]] {
             continue;
         }
         std::uint16_t bit = 0;
         switch (tag) {
-        case 8u:
+        case tag::begin_string:
             bit = kBit8;
             if (first_content_err.ok() && !detail::is_valid_text(f.value))
-                first_content_err = {ErrorCode::invalid_value, 8, f.offset};
+                first_content_err = {ErrorCode::invalid_value, tag::begin_string, f.offset};
             break;
-        case 9u: {
+        case tag::body_length: {
             bit = kBit9;
             std::uint64_t parsed{};
             if (first_content_err.ok() && !parse_unsigned(f.value, parsed))
-                first_content_err = {ErrorCode::invalid_value, 9, f.offset};
+                first_content_err = {ErrorCode::invalid_value, tag::body_length, f.offset};
             break;
         }
-        case 35u:
+        case tag::msg_type:
             bit = kBit35;
             if (first_content_err.ok() && !detail::is_valid_text(f.value))
-                first_content_err = {ErrorCode::invalid_value, 35, f.offset};
+                first_content_err = {ErrorCode::invalid_value, tag::msg_type, f.offset};
             break;
-        case 49u:
+        case tag::sender_comp_id:
             bit = kBit49;
             if (first_content_err.ok() && !detail::is_valid_text(f.value))
-                first_content_err = {ErrorCode::invalid_value, 49, f.offset};
+                first_content_err = {ErrorCode::invalid_value, tag::sender_comp_id, f.offset};
             break;
-        case 56u:
+        case tag::target_comp_id:
             bit = kBit56;
             if (first_content_err.ok() && !detail::is_valid_text(f.value))
-                first_content_err = {ErrorCode::invalid_value, 56, f.offset};
+                first_content_err = {ErrorCode::invalid_value, tag::target_comp_id, f.offset};
             break;
-        case 34u: {
+        case tag::msg_seq_num: {
             bit = kBit34;
             std::uint64_t parsed{};
             if (first_content_err.ok() && (!parse_unsigned(f.value, parsed) || parsed == 0))
-                first_content_err = {ErrorCode::invalid_value, 34, f.offset};
+                first_content_err = {ErrorCode::invalid_value, tag::msg_seq_num, f.offset};
             break;
         }
-        case 52u:
+        case tag::sending_time:
             bit = kBit52;
             if (first_content_err.ok() && !detail::is_valid_utc_timestamp(f.value))
-                first_content_err = {ErrorCode::invalid_timestamp, 52, f.offset};
+                first_content_err = {ErrorCode::invalid_timestamp, tag::sending_time, f.offset};
             break;
-        case 43u:
+        case tag::poss_dup_flag:
             bit = kBit43;
             if (first_content_err.ok() && f.value != "Y" && f.value != "N")
-                first_content_err = {ErrorCode::invalid_value, 43, f.offset};
+                first_content_err = {ErrorCode::invalid_value, tag::poss_dup_flag, f.offset};
             break;
-        case 122u:
+        case tag::orig_sending_time:
             bit = kBit122;
             if (first_content_err.ok() && !detail::is_valid_utc_timestamp(f.value))
-                first_content_err = {ErrorCode::invalid_timestamp, 122, f.offset};
+                first_content_err = {ErrorCode::invalid_timestamp, tag::orig_sending_time, f.offset};
             break;
-        case 369u: {
+        case tag::last_msg_seq_num_processed: {
             bit = kBit369;
             std::uint64_t parsed{};
             if (first_content_err.ok() && !parse_unsigned(f.value, parsed))
-                first_content_err = {ErrorCode::invalid_value, 369, f.offset};
+                first_content_err = {ErrorCode::invalid_value, tag::last_msg_seq_num_processed, f.offset};
             break;
         }
-        case 1128u: {
+        case tag::appl_ver_id: {
             bit = kBit1128;
             const MemberLevel hlevel{header.members, header.members_by_tag};
-            const auto* m = find_member_in_level(schema, hlevel, 1128u);
+            const auto* m = find_member_in_level(schema, hlevel, tag::appl_ver_id);
             if (m == nullptr) {
                 if (unexpected_policy == UnexpectedFieldPolicy::reject) {
                     if (level == ValidationLevel::strict && first_unknown_err.ok())
-                        first_unknown_err = {ErrorCode::invalid_value, 1128, f.offset};
+                        first_unknown_err = {ErrorCode::invalid_value, tag::appl_ver_id, f.offset};
                 } else if (unexpected_count != nullptr) {
                     ++(*unexpected_count);
                 }
@@ -1335,17 +1341,17 @@ template <class T>
                 const auto* fd = descriptor_field(schema, *m);
                 if (fd != nullptr) {
                     if (!valid_field_value(*fd, f.value))
-                        first_content_err = {ErrorCode::invalid_value, 1128, f.offset};
+                        first_content_err = {ErrorCode::invalid_value, tag::appl_ver_id, f.offset};
                     else if (level == ValidationLevel::strict && !enum_values_accept(*fd, f.value))
-                        first_content_err = {ErrorCode::invalid_value, 1128, f.offset};
+                        first_content_err = {ErrorCode::invalid_value, tag::appl_ver_id, f.offset};
                 }
             }
             break;
         }
-        case 10u:
+        case tag::check_sum:
             bit = kBit10;
             if (first_content_err.ok() && !detail::is_valid_text(f.value))
-                first_content_err = {ErrorCode::invalid_value, 10, f.offset};
+                first_content_err = {ErrorCode::invalid_value, tag::check_sum, f.offset};
             break;
         default:
             continue;
@@ -1368,17 +1374,17 @@ template <class T>
                 const auto tag = member_tag(schema, m);
                 std::uint16_t bit = 0;
                 switch (tag) {
-                case 8u:    bit = kBit8; break;
-                case 9u:    bit = kBit9; break;
-                case 35u:   bit = kBit35; break;
-                case 49u:   bit = kBit49; break;
-                case 56u:   bit = kBit56; break;
-                case 34u:   bit = kBit34; break;
-                case 52u:   bit = kBit52; break;
-                case 43u:   bit = kBit43; break;
-                case 122u:  bit = kBit122; break;
-                case 369u:  bit = kBit369; break;
-                case 1128u: bit = kBit1128; break;
+                case tag::begin_string:               bit = kBit8; break;
+                case tag::body_length:                bit = kBit9; break;
+                case tag::msg_type:                   bit = kBit35; break;
+                case tag::sender_comp_id:             bit = kBit49; break;
+                case tag::target_comp_id:             bit = kBit56; break;
+                case tag::msg_seq_num:                bit = kBit34; break;
+                case tag::sending_time:               bit = kBit52; break;
+                case tag::poss_dup_flag:              bit = kBit43; break;
+                case tag::orig_sending_time:          bit = kBit122; break;
+                case tag::last_msg_seq_num_processed: bit = kBit369; break;
+                case tag::appl_ver_id:                bit = kBit1128; break;
                 default: continue;
                 }
                 if ((seen & bit) == 0) {
@@ -1392,8 +1398,9 @@ template <class T>
                 : ((seen & trailer->required_session_mask) != trailer->required_session_mask);
             if (need_trl_scan) {
                 for (const auto& m : trailer->members) {
-                    if (m.required && m.kind == MemberKind::field && member_tag(schema, m) == 10u) {
-                        return {ErrorCode::required_field_missing, 10};
+                    if (m.required && m.kind == MemberKind::field &&
+                        member_tag(schema, m) == tag::check_sum) {
+                        return {ErrorCode::required_field_missing, tag::check_sum};
                     }
                 }
             }
@@ -1422,7 +1429,7 @@ namespace detail {
     std::uint64_t* unexpected_count) noexcept {
     if (out_index != nullptr) out_index->invalidate();
     const auto* descriptor = schema.find_message(msg_type);
-    if (descriptor == nullptr) return {ErrorCode::unsupported, 35, msg_type_offset};
+    if (descriptor == nullptr) return {ErrorCode::unsupported, tag::msg_type, msg_type_offset};
     detail::AncestorStack ancestors;
     ancestors.trailer = detail::find_trailer_component(schema);
     const detail::MemberLevel root_level{descriptor->members, descriptor->members_by_tag};
@@ -1454,11 +1461,11 @@ namespace detail {
     std::uint64_t* unexpected_count = nullptr) noexcept {
     const auto fields = message.fields();
     Status st{};
-    if (fields.size() >= 3 && fields[2].tag == 35) {
+    if (fields.size() >= 3 && fields[2].tag == tag::msg_type) {
         st = validate_schema_message_for_type(schema, fields[2].value, fields[2].offset,
             fields, level, message.parsed_index(), unexpected_policy, unexpected_count);
     } else {
-        const auto msg_type = message.find_unique(35);
+        const auto msg_type = message.find_unique(tag::msg_type);
         if (!msg_type.ok()) return msg_type.status();
         st = validate_schema_message_for_type(schema, msg_type.value().value, msg_type.value().offset,
             fields, level, message.parsed_index(), unexpected_policy, unexpected_count);

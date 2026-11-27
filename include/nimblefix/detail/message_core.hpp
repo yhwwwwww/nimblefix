@@ -16,6 +16,7 @@
 #include <vector>
 
 #include <nimblefix/decimal.hpp>
+#include <nimblefix/protocol.hpp>
 #include <nimblefix/status.hpp>
 
 namespace nimblefix {
@@ -98,13 +99,14 @@ struct MessageLimits {
 
 namespace detail {
 
-inline constexpr std::uint32_t maximum_fix_tag = 999999999;
-inline constexpr std::uint32_t last_msg_seq_num_processed_tag = 369;
+inline constexpr std::uint32_t maximum_fix_tag = max_fix_tag;
+inline constexpr std::uint32_t last_msg_seq_num_processed_tag = tag::last_msg_seq_num_processed;
 
-[[nodiscard]] constexpr bool is_managed_tag(std::uint32_t tag) noexcept {
-    return tag == 8 || tag == 9 || tag == 10 || tag == 34 || tag == 35 ||
-        tag == 43 || tag == 49 || tag == 52 || tag == 56 || tag == 122 ||
-        tag == last_msg_seq_num_processed_tag;
+[[nodiscard]] constexpr bool is_managed_tag(std::uint32_t t) noexcept {
+    return t == tag::begin_string || t == tag::body_length || t == tag::check_sum ||
+        t == tag::msg_seq_num || t == tag::msg_type || t == tag::poss_dup_flag ||
+        t == tag::sender_comp_id || t == tag::sending_time || t == tag::target_comp_id ||
+        t == tag::orig_sending_time || t == tag::last_msg_seq_num_processed;
 }
 
 [[nodiscard]] constexpr bool is_valid_text(std::string_view value) noexcept {
@@ -121,7 +123,8 @@ inline constexpr std::uint32_t last_msg_seq_num_processed_tag = 369;
 
 // FIX timestamps allow seconds, milliseconds, microseconds, or nanoseconds.
 [[nodiscard]] constexpr bool is_valid_utc_timestamp(std::string_view value) noexcept {
-    if (value.size() != 17 && value.size() != 21 && value.size() != 24 && value.size() != 27) return false;
+    if (value.size() != timestamp_seconds_len && value.size() != timestamp_millis_len &&
+        value.size() != timestamp_micros_len && value.size() != timestamp_nanos_len) return false;
     if (value.data() == nullptr) return false;
     for (std::size_t i = 0; i < value.size(); ++i) {
         if (i == 8) {

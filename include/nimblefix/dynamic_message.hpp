@@ -31,7 +31,7 @@ public:
         : limits_(limits) {
         if (msg_type.empty() || msg_type.size() > limits_.max_msg_type_bytes ||
             !detail::is_valid_text(msg_type)) {
-            status_ = {ErrorCode::invalid_value, 35};
+            status_ = {ErrorCode::invalid_value, tag::msg_type};
             return;
         }
         try {

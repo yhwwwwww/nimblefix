@@ -22,11 +22,17 @@ bool secret_equal(std::string_view first, std::string_view second) noexcept {
     }
     return difference == 0;
 }
-bool managed(std::uint32_t tag) noexcept {
-    if (detail::is_managed_tag(tag)) return true;
-    for (const auto value :
-         {8U, 9U, 10U, 34U, 35U, 43U, 49U, 52U, 56U, 98U, 108U, 122U, 141U, 553U, 554U, 1137U})
-        if (tag == value)
+bool managed(std::uint32_t field_tag) noexcept {
+    if (detail::is_managed_tag(field_tag)) return true;
+    for (const auto value : {
+             tag::encrypt_method,
+             tag::heart_bt_int,
+             tag::reset_seq_num_flag,
+             tag::username,
+             tag::password,
+             tag::default_appl_ver_id,
+         })
+        if (field_tag == value)
             return true;
     return false;
 }
@@ -36,10 +42,12 @@ Status validate_session_settings(const SessionSettings &settings, bool acceptor,
     if (begin_string(settings.version).empty() ||
         (settings.version == FixVersion::fixt11 && !valid_appl_ver_id(settings.default_appl_ver_id)))
         return {ErrorCode::unsupported_protocol};
-    if (!settings.schedule.validate().ok() || !plain(settings.qualifier) || settings.qualifier.size() > 64 ||
+    if (!settings.schedule.validate().ok() || !plain(settings.qualifier) ||
+        settings.qualifier.size() > max_qualifier_bytes ||
         !plain(settings.logon.username) || !plain(settings.logon.password) ||
-        settings.logon.username.size() > 256 || settings.logon.password.size() > 4096 ||
-        settings.logon.extra_fields.size() > 16 ||
+        settings.logon.username.size() > max_credential_user_bytes ||
+        settings.logon.password.size() > max_credential_secret_bytes ||
+        settings.logon.extra_fields.size() > max_logon_extra_fields ||
         (settings.logon.request_sequence_reset && !settings.allow_sequence_reset) ||
         (settings.schedule.reset_on_schedule_boundary &&
          (!settings.schedule.enabled || !settings.allow_sequence_reset)))
@@ -52,7 +60,7 @@ Status validate_session_settings(const SessionSettings &settings, bool acceptor,
         if (settings.schema->messages.empty())
             return {ErrorCode::schema_mismatch};
         if (!settings.schema->matches_session(settings.version, settings.default_appl_ver_id))
-            return {ErrorCode::unsupported_protocol, 8};
+            return {ErrorCode::unsupported_protocol, tag::begin_string};
     }
     const auto session_hints = settings.schema_wire_hints.length_data_pairs;
     for (std::size_t i = 0; i < session_hints.size(); ++i) {
@@ -71,8 +79,8 @@ Status validate_session_settings(const SessionSettings &settings, bool acceptor,
     }
     for (std::size_t i = 0; i < settings.logon.extra_fields.size(); ++i) {
         const auto &field = settings.logon.extra_fields[i];
-        if (field.tag == 0 || field.tag > 999'999'999 || managed(field.tag) || field.value.empty() ||
-            field.value.size() > 4096 || !plain(field.value))
+        if (field.tag == 0 || field.tag > max_fix_tag || managed(field.tag) || field.value.empty() ||
+            field.value.size() > max_credential_secret_bytes || !plain(field.value))
             return {ErrorCode::invalid_config, static_cast<int>(field.tag)};
         for (std::size_t j = 0; j < i; ++j)
             if (settings.logon.extra_fields[j].tag == field.tag)
@@ -82,8 +90,9 @@ Status validate_session_settings(const SessionSettings &settings, bool acceptor,
     if (auth.method != AuthenticationMethod::none && auth.method != AuthenticationMethod::credentials &&
         auth.method != AuthenticationMethod::callback)
         return {ErrorCode::invalid_config};
-    if (!plain(auth.username) || !plain(auth.password) || auth.username.size() > 256 ||
-        auth.password.size() > 4096)
+    if (!plain(auth.username) || !plain(auth.password) ||
+        auth.username.size() > max_credential_user_bytes ||
+        auth.password.size() > max_credential_secret_bytes)
         return {ErrorCode::invalid_config};
     if (auth.method != AuthenticationMethod::none && !acceptor)
         return {ErrorCode::invalid_config};
@@ -116,10 +125,11 @@ Status authenticate_logon(const AuthenticationConfig &auth, const FlatMessageVie
             return {ErrorCode::authentication_failed};
         }
     }
-    const auto username = message.find_unique(553);
-    const auto password = message.find_unique(554);
-    if (!username.ok() || !password.ok() || username.value().value.size() > 256 ||
-        password.value().value.size() > 4096)
+    const auto username = message.find_unique(tag::username);
+    const auto password = message.find_unique(tag::password);
+    if (!username.ok() || !password.ok() ||
+        username.value().value.size() > max_credential_user_bytes ||
+        password.value().value.size() > max_credential_secret_bytes)
         return {ErrorCode::authentication_failed};
     const bool valid_user = secret_equal(username.value().value, auth.username);
     const bool valid_password = secret_equal(password.value().value, auth.password);

@@ -521,18 +521,18 @@ std::string render_header(const Schema& schema, std::string_view ns_arg) {
         for (const auto& m : ms) {
             if (!m.required || m.kind != "field") continue;
             switch (schema.fields_by_name.at(m.field_name).number) {
-            case 8u:    mask |= (1u << 0); break;
-            case 9u:    mask |= (1u << 1); break;
-            case 35u:   mask |= (1u << 2); break;
-            case 49u:   mask |= (1u << 3); break;
-            case 56u:   mask |= (1u << 4); break;
-            case 34u:   mask |= (1u << 5); break;
-            case 52u:   mask |= (1u << 6); break;
-            case 43u:   mask |= (1u << 7); break;
-            case 122u:  mask |= (1u << 8); break;
-            case 369u:  mask |= (1u << 9); break;
-            case 1128u: mask |= (1u << 10); break;
-            case 10u:   mask |= (1u << 11); break;
+            case tag::begin_string:               mask |= (1u << 0); break;
+            case tag::body_length:                mask |= (1u << 1); break;
+            case tag::msg_type:                   mask |= (1u << 2); break;
+            case tag::sender_comp_id:             mask |= (1u << 3); break;
+            case tag::target_comp_id:             mask |= (1u << 4); break;
+            case tag::msg_seq_num:                mask |= (1u << 5); break;
+            case tag::sending_time:               mask |= (1u << 6); break;
+            case tag::poss_dup_flag:              mask |= (1u << 7); break;
+            case tag::orig_sending_time:          mask |= (1u << 8); break;
+            case tag::last_msg_seq_num_processed: mask |= (1u << 9); break;
+            case tag::appl_ver_id:                mask |= (1u << 10); break;
+            case tag::check_sum:                  mask |= (1u << 11); break;
             default: break;
             }
         }
@@ -587,7 +587,7 @@ std::string render_header(const Schema& schema, std::string_view ns_arg) {
         if (f->field_type == "DATA" || f->field_type == "XMLDATA") {
             const std::pair<std::uint32_t, std::uint32_t> pr{field_pair_tags.at(f->number), f->number};
             schema_pairs.push_back(pr);
-            if (!builtin_fix44_pairs().contains(pr)) builtin_only_pairs = false;
+            if (!standard_length_data_pairs().contains(pr)) builtin_only_pairs = false;
         }
     }
 

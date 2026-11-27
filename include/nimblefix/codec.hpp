@@ -28,7 +28,7 @@ struct LengthDataPair {
 };
 
 // Additional wire-level Length/Data pairs for a counterparty's extensions.
-// FIX 4.4 standard pairs are always recognized as well.
+// Standard FIX Length/Data pairs are always recognized as well.
 struct WireHints {
     std::span<const LengthDataPair> length_data_pairs{};
     bool prevalidated{false};
@@ -115,8 +115,8 @@ public:
     void bind_index(detail::ParsedFieldIndex* idx) const noexcept { parsed_index_ = idx; }
     [[nodiscard]] detail::ParsedFieldIndex* parsed_index() const noexcept { return parsed_index_; }
     [[nodiscard]] std::string_view msg_type() const noexcept {
-        if (fields_.size() >= 3 && fields_[2].tag == 35) return fields_[2].value;
-        const auto found = find_unique(35);
+        if (fields_.size() >= 3 && fields_[2].tag == tag::msg_type) return fields_[2].value;
+        const auto found = find_unique(tag::msg_type);
         return found.ok() ? found.value().value : std::string_view{};
     }
     template <class Message>

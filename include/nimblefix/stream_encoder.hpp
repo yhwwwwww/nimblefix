@@ -256,7 +256,7 @@ struct StaticSessionPrefix {
 // Zero allocations, zero intermediate SlotValue/PlanField buffers.
 class StreamBuffer {
 public:
-    static constexpr std::size_t checksum_suffix_size = 7;
+    static constexpr std::size_t checksum_suffix_size = checksum_field_bytes;
 
     // Optional spill/grow callback invoked only if the initial buffer is exhausted.
     // The callback must preserve [old_data, old_data + current_written) in the returned span.
@@ -284,25 +284,25 @@ public:
         StreamBuffer buf{out, grow_fn, grow_ctx};
         buf.body_mode_ = false;
         const auto begin = begin_string(header.version);
-        if (begin.empty()) { buf.fail(ErrorCode::invalid_header, 8); return buf; }
-        if (msg_type.empty() || !is_valid_text(msg_type)) { buf.fail(ErrorCode::invalid_value, 35); return buf; }
+        if (begin.empty()) { buf.fail(ErrorCode::invalid_header, tag::begin_string); return buf; }
+        if (msg_type.empty() || !is_valid_text(msg_type)) { buf.fail(ErrorCode::invalid_value, tag::msg_type); return buf; }
         if (!is_valid_text(header.sender_comp_id) || !is_valid_text(header.target_comp_id) ||
             header.msg_seq_num == 0) {
             buf.fail(ErrorCode::invalid_header);
             return buf;
         }
         if (!is_valid_text(header.sending_time) || !is_valid_utc_timestamp(header.sending_time)) {
-            buf.fail(ErrorCode::invalid_timestamp, 52);
+            buf.fail(ErrorCode::invalid_timestamp, tag::sending_time);
             return buf;
         }
         if (header.poss_dup && (!is_valid_text(header.orig_sending_time) ||
             !is_valid_utc_timestamp(header.orig_sending_time) ||
             compare_utc_timestamps(header.orig_sending_time, header.sending_time) > 0)) {
-            buf.fail(ErrorCode::invalid_timestamp, 122);
+            buf.fail(ErrorCode::invalid_timestamp, tag::orig_sending_time);
             return buf;
         }
         if (!header.poss_dup && !header.orig_sending_time.empty()) {
-            buf.fail(ErrorCode::invalid_header, 122);
+            buf.fail(ErrorCode::invalid_header, tag::orig_sending_time);
             return buf;
         }
 
@@ -773,35 +773,35 @@ public:
     explicit StandardHeaderWriter(StreamBuffer& buf) noexcept : buf_(buf) {}
 
     // 50=SenderSubID
-    template <class V> StandardHeaderWriter& sender_sub_id(V&& v) noexcept { return str_field<50>("50=", 3, std::forward<V>(v)); }
+    template <class V> StandardHeaderWriter& sender_sub_id(V&& v) noexcept { return str_field<tag::sender_sub_id>("50=", 3, std::forward<V>(v)); }
     // 57=TargetSubID
-    template <class V> StandardHeaderWriter& target_sub_id(V&& v) noexcept { return str_field<57>("57=", 3, std::forward<V>(v)); }
+    template <class V> StandardHeaderWriter& target_sub_id(V&& v) noexcept { return str_field<tag::target_sub_id>("57=", 3, std::forward<V>(v)); }
     // 142=SenderLocationID
-    template <class V> StandardHeaderWriter& sender_location_id(V&& v) noexcept { return str_field<142>("142=", 4, std::forward<V>(v)); }
+    template <class V> StandardHeaderWriter& sender_location_id(V&& v) noexcept { return str_field<tag::sender_location_id>("142=", 4, std::forward<V>(v)); }
     // 143=TargetLocationID
-    template <class V> StandardHeaderWriter& target_location_id(V&& v) noexcept { return str_field<143>("143=", 4, std::forward<V>(v)); }
+    template <class V> StandardHeaderWriter& target_location_id(V&& v) noexcept { return str_field<tag::target_location_id>("143=", 4, std::forward<V>(v)); }
     // 115=OnBehalfOfCompID
-    template <class V> StandardHeaderWriter& on_behalf_of_comp_id(V&& v) noexcept { return str_field<115>("115=", 4, std::forward<V>(v)); }
+    template <class V> StandardHeaderWriter& on_behalf_of_comp_id(V&& v) noexcept { return str_field<tag::on_behalf_of_comp_id>("115=", 4, std::forward<V>(v)); }
     // 116=OnBehalfOfSubID
-    template <class V> StandardHeaderWriter& on_behalf_of_sub_id(V&& v) noexcept { return str_field<116>("116=", 4, std::forward<V>(v)); }
+    template <class V> StandardHeaderWriter& on_behalf_of_sub_id(V&& v) noexcept { return str_field<tag::on_behalf_of_sub_id>("116=", 4, std::forward<V>(v)); }
     // 144=OnBehalfOfLocationID
-    template <class V> StandardHeaderWriter& on_behalf_of_location_id(V&& v) noexcept { return str_field<144>("144=", 4, std::forward<V>(v)); }
+    template <class V> StandardHeaderWriter& on_behalf_of_location_id(V&& v) noexcept { return str_field<tag::on_behalf_of_location_id>("144=", 4, std::forward<V>(v)); }
     // 128=DeliverToCompID
-    template <class V> StandardHeaderWriter& deliver_to_comp_id(V&& v) noexcept { return str_field<128>("128=", 4, std::forward<V>(v)); }
+    template <class V> StandardHeaderWriter& deliver_to_comp_id(V&& v) noexcept { return str_field<tag::deliver_to_comp_id>("128=", 4, std::forward<V>(v)); }
     // 129=DeliverToSubID
-    template <class V> StandardHeaderWriter& deliver_to_sub_id(V&& v) noexcept { return str_field<129>("129=", 4, std::forward<V>(v)); }
+    template <class V> StandardHeaderWriter& deliver_to_sub_id(V&& v) noexcept { return str_field<tag::deliver_to_sub_id>("129=", 4, std::forward<V>(v)); }
     // 145=DeliverToLocationID
-    template <class V> StandardHeaderWriter& deliver_to_location_id(V&& v) noexcept { return str_field<145>("145=", 4, std::forward<V>(v)); }
+    template <class V> StandardHeaderWriter& deliver_to_location_id(V&& v) noexcept { return str_field<tag::deliver_to_location_id>("145=", 4, std::forward<V>(v)); }
     // 97=PossResend
     StandardHeaderWriter& poss_resend(bool v) noexcept {
-        if (!buf_.enter_header_field(97)) return *this;
+        if (!buf_.enter_header_field(tag::poss_resend)) return *this;
         buf_.write_tag_char("97=", 3, v ? 'Y' : 'N');
         return *this;
     }
     // 347=MessageEncoding
-    template <class V> StandardHeaderWriter& message_encoding(V&& v) noexcept { return str_field<347>("347=", 4, std::forward<V>(v)); }
+    template <class V> StandardHeaderWriter& message_encoding(V&& v) noexcept { return str_field<tag::message_encoding>("347=", 4, std::forward<V>(v)); }
     // 1128=ApplVerID (FIXT.1.1 per-message override)
-    template <class V> StandardHeaderWriter& appl_ver_id(V&& v) noexcept { return str_field<1128>("1128=", 5, std::forward<V>(v)); }
+    template <class V> StandardHeaderWriter& appl_ver_id(V&& v) noexcept { return str_field<tag::appl_ver_id>("1128=", 5, std::forward<V>(v)); }
 
 private:
     template <std::uint32_t Tag, class V>

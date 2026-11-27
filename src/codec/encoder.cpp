@@ -13,7 +13,7 @@
 namespace nimblefix {
 namespace {
 
-constexpr std::size_t checksum_suffix_size = 7;
+constexpr std::size_t checksum_suffix_size = checksum_field_bytes;
 
 template <class Unsigned>
 [[nodiscard]] std::size_t decimal_digits(Unsigned value) noexcept {
@@ -127,7 +127,7 @@ template <class Unsigned>
             return schema_status;
     }
     if (message.msg_type.empty() || (!message.prevalidated_scalars && !valid_text(message.msg_type)))
-        return Status{ErrorCode::invalid_value, 35};
+        return Status{ErrorCode::invalid_value, tag::msg_type};
     if (message.field_count != 0 && (message.plan == nullptr || message.slots == nullptr)) {
         return Status{ErrorCode::invalid_value};
     }
@@ -425,14 +425,15 @@ void append_body_fields(const detail::MessageView& message, Writer& writer) noex
         return Status{ErrorCode::invalid_header};
     }
     if (!valid_text(header.sending_time) || !detail::is_valid_utc_timestamp(header.sending_time)) {
-        return Status{ErrorCode::invalid_timestamp, 52};
+        return Status{ErrorCode::invalid_timestamp, tag::sending_time};
     }
     if (header.poss_dup && (!valid_text(header.orig_sending_time) ||
         !detail::is_valid_utc_timestamp(header.orig_sending_time) ||
         detail::compare_utc_timestamps(header.orig_sending_time, header.sending_time) > 0)) {
-        return Status{ErrorCode::invalid_timestamp, 122};
+        return Status{ErrorCode::invalid_timestamp, tag::orig_sending_time};
     }
-    if (!header.poss_dup && !header.orig_sending_time.empty()) return Status{ErrorCode::invalid_header, 122};
+    if (!header.poss_dup && !header.orig_sending_time.empty())
+        return Status{ErrorCode::invalid_header, tag::orig_sending_time};
     (void)message;
     return Status::success();
 }
@@ -440,7 +441,7 @@ void append_body_fields(const detail::MessageView& message, Writer& writer) noex
 [[nodiscard]] Status measure_encoded_frame(detail::MessageView message, SessionHeader header,
     std::size_t& body_length, std::size_t& total_size) noexcept {
     const auto begin = begin_string(header.version);
-    if (begin.empty()) return Status{ErrorCode::invalid_header, 8};
+    if (begin.empty()) return Status{ErrorCode::invalid_header, tag::begin_string};
     if (const auto status = validate_message(message); !status.ok()) return status;
     if (const auto status = validate_header(message, header); !status.ok()) return status;
 
@@ -572,7 +573,7 @@ private:
             return schema_status;
     }
     if (message.msg_type.empty() || (!message.prevalidated_scalars && !valid_text(message.msg_type)))
-        return Status{ErrorCode::invalid_value, 35};
+        return Status{ErrorCode::invalid_value, tag::msg_type};
     if (message.field_count != 0 && (message.plan == nullptr || message.slots == nullptr))
         return Status{ErrorCode::invalid_value};
     if (message.value_byte_count != 0 && message.value_bytes == nullptr) return Status{ErrorCode::invalid_value};
@@ -754,7 +755,7 @@ Result<std::size_t> encode_fix(detail::MessageView message, SessionHeader header
             header, output);
     }
     const auto begin = begin_string(header.version);
-    if (begin.empty()) return Status{ErrorCode::invalid_header, 8};
+    if (begin.empty()) return Status{ErrorCode::invalid_header, tag::begin_string};
 
     // Never touch output before verifying basic message & header status.
     if (!message.status.ok()) return message.status;
@@ -764,7 +765,7 @@ Result<std::size_t> encode_fix(detail::MessageView message, SessionHeader header
         message.presence_validated = true;
     }
     if (message.msg_type.empty() || (!message.prevalidated_scalars && !valid_text(message.msg_type)))
-        return Status{ErrorCode::invalid_value, 35};
+        return Status{ErrorCode::invalid_value, tag::msg_type};
 
     // Validate header first on the happy path; if invalid, run full message validation
     // to preserve message-before-header error precedence without touching output.
@@ -927,7 +928,7 @@ Result<std::size_t> encode_fix_body(detail::MessageView message,
         message.presence_validated = true;
     }
     if (message.msg_type.empty() || (!message.prevalidated_scalars && !valid_text(message.msg_type)))
-        return Status{ErrorCode::invalid_value, 35};
+        return Status{ErrorCode::invalid_value, tag::msg_type};
 
     std::size_t max_body_bound = 0;
     const bool bound_ok = estimate_max_body_bytes(message, max_body_bound, 0);
@@ -950,14 +951,14 @@ Result<std::size_t> encode_fix_from_body(std::string_view msg_type,
     std::string_view prebuilt_body, SessionHeader header,
     std::span<char> output) noexcept {
     const auto begin = begin_string(header.version);
-    if (begin.empty()) return Status{ErrorCode::invalid_header, 8};
-    if (msg_type.empty() || !valid_text(msg_type)) return Status{ErrorCode::invalid_value, 35};
-    if (!valid_text(header.sender_comp_id)) return Status{ErrorCode::invalid_header, 49};
-    if (!valid_text(header.target_comp_id)) return Status{ErrorCode::invalid_header, 56};
-    if (header.msg_seq_num == 0) return Status{ErrorCode::invalid_header, 34};
-    if (!detail::is_valid_utc_timestamp(header.sending_time)) return Status{ErrorCode::invalid_timestamp, 52};
+    if (begin.empty()) return Status{ErrorCode::invalid_header, tag::begin_string};
+    if (msg_type.empty() || !valid_text(msg_type)) return Status{ErrorCode::invalid_value, tag::msg_type};
+    if (!valid_text(header.sender_comp_id)) return Status{ErrorCode::invalid_header, tag::sender_comp_id};
+    if (!valid_text(header.target_comp_id)) return Status{ErrorCode::invalid_header, tag::target_comp_id};
+    if (header.msg_seq_num == 0) return Status{ErrorCode::invalid_header, tag::msg_seq_num};
+    if (!detail::is_valid_utc_timestamp(header.sending_time)) return Status{ErrorCode::invalid_timestamp, tag::sending_time};
     if (header.poss_dup && !detail::is_valid_utc_timestamp(header.orig_sending_time))
-        return Status{ErrorCode::invalid_timestamp, 122};
+        return Status{ErrorCode::invalid_timestamp, tag::orig_sending_time};
 
     std::size_t body_length = prebuilt_body.size();
     const auto add_len = [&](std::size_t n) noexcept {
@@ -1047,15 +1048,15 @@ Result<std::size_t> encode_fix_replay(const FlatMessageView& original,
         }
         return found;
     };
-    const auto* begin_string_field = find_optional(8);
-    const auto* msg_type_field = find_optional(35);
-    const auto* seq_field = find_optional(34);
-    const auto* sending_time_field = find_optional(52);
-    const auto* original_time_field = find_optional(122);
-    const auto* poss_dup_field = find_optional(43);
-    (void)find_optional(49);
-    (void)find_optional(56);
-    (void)find_optional(369); // Reject a duplicate even though the old value is replaced.
+    const auto* begin_string_field = find_optional(tag::begin_string);
+    const auto* msg_type_field = find_optional(tag::msg_type);
+    const auto* seq_field = find_optional(tag::msg_seq_num);
+    const auto* sending_time_field = find_optional(tag::sending_time);
+    const auto* original_time_field = find_optional(tag::orig_sending_time);
+    const auto* poss_dup_field = find_optional(tag::poss_dup_flag);
+    (void)find_optional(tag::sender_comp_id);
+    (void)find_optional(tag::target_comp_id);
+    (void)find_optional(tag::last_msg_seq_num_processed); // Reject a duplicate even though the old value is replaced.
     if (duplicate_header_tag != 0)
         return Status{ErrorCode::duplicate_field, static_cast<int>(duplicate_header_tag)};
     if (begin_string_field == nullptr || msg_type_field == nullptr || seq_field == nullptr || sending_time_field == nullptr) {
@@ -1063,35 +1064,35 @@ Result<std::size_t> encode_fix_replay(const FlatMessageView& original,
     }
     const auto original_version = parse_fix_version(begin_string_field->value);
     if (!original_version.ok() || header.version != original_version.value())
-        return Status{ErrorCode::invalid_header, 8, begin_string_field->offset};
+        return Status{ErrorCode::invalid_header, tag::begin_string, begin_string_field->offset};
     const auto begin = begin_string(header.version);
-    if (begin.empty()) return Status{ErrorCode::invalid_header, 8};
+    if (begin.empty()) return Status{ErrorCode::invalid_header, tag::begin_string};
     const bool was_replay = poss_dup_field != nullptr && poss_dup_field->value == "Y";
     if (poss_dup_field != nullptr && poss_dup_field->value != "Y" && poss_dup_field->value != "N")
-        return Status{ErrorCode::invalid_value, 43};
+        return Status{ErrorCode::invalid_value, tag::poss_dup_flag};
     if (was_replay != (original_time_field != nullptr))
-        return Status{ErrorCode::invalid_header, 122};
+        return Status{ErrorCode::invalid_header, tag::orig_sending_time};
     std::uint64_t sequence{};
     const auto seq_parse = std::from_chars(seq_field->value.data(),
         seq_field->value.data() + seq_field->value.size(), sequence);
     if (seq_parse.ec != std::errc{} || seq_parse.ptr != seq_field->value.data() + seq_field->value.size() ||
         sequence == 0) {
-        return Status{ErrorCode::invalid_value, 34, seq_field->offset};
+        return Status{ErrorCode::invalid_value, tag::msg_seq_num, seq_field->offset};
     }
     if (!detail::is_valid_utc_timestamp(sending_time_field->value)) {
-        return Status{ErrorCode::invalid_timestamp, 52, sending_time_field->offset};
+        return Status{ErrorCode::invalid_timestamp, tag::sending_time, sending_time_field->offset};
     }
     const auto original_sending_time = original_time_field == nullptr
         ? sending_time_field->value : original_time_field->value;
     if (!detail::is_valid_utc_timestamp(original_sending_time)) {
-        return Status{ErrorCode::invalid_timestamp, 122,
+        return Status{ErrorCode::invalid_timestamp, tag::orig_sending_time,
             original_time_field == nullptr ? sending_time_field->offset : original_time_field->offset};
     }
-    if (!valid_text(msg_type_field->value)) return Status{ErrorCode::invalid_value, 35};
+    if (!valid_text(msg_type_field->value)) return Status{ErrorCode::invalid_value, tag::msg_type};
     if (detail::compare_utc_timestamps(original_sending_time, header.sending_time) > 0)
-        return Status{ErrorCode::invalid_timestamp, 122};
+        return Status{ErrorCode::invalid_timestamp, tag::orig_sending_time};
     if (header.msg_seq_num != 0 && header.msg_seq_num != sequence) {
-        return Status{ErrorCode::invalid_value, 34, seq_field->offset};
+        return Status{ErrorCode::invalid_value, tag::msg_seq_num, seq_field->offset};
     }
 
     const auto checksum_offset = frame.size() - checksum_suffix_size;
@@ -1120,9 +1121,7 @@ Result<std::size_t> encode_fix_replay(const FlatMessageView& original,
 
     for (std::size_t i = 0; i < fields.size(); ++i) {
         const auto& field = fields[i];
-        if (field.tag == 8 || field.tag == 9 || field.tag == 10 || field.tag == 35 ||
-            field.tag == 34 || field.tag == 43 || field.tag == 49 || field.tag == 52 ||
-            field.tag == 56 || field.tag == 122 || field.tag == 369) {
+        if (detail::is_managed_tag(field.tag)) {
             continue;
         }
         const auto start = field.offset;
@@ -1183,9 +1182,7 @@ Result<std::size_t> encode_fix_replay(const FlatMessageView& original,
     writer.append(soh);
     for (std::size_t i = 0; i < fields.size(); ++i) {
         const auto& field = fields[i];
-        if (field.tag == 8 || field.tag == 9 || field.tag == 10 || field.tag == 35 ||
-            field.tag == 34 || field.tag == 43 || field.tag == 49 || field.tag == 52 ||
-            field.tag == 56 || field.tag == 122 || field.tag == 369) {
+        if (detail::is_managed_tag(field.tag)) {
             continue;
         }
         const auto start = field.offset;

@@ -1,5 +1,7 @@
 #include "tls.hpp"
 
+#include <nimblefix/protocol.hpp>
+
 #include <algorithm>
 #include <array>
 #include <cerrno>
@@ -195,7 +197,8 @@ Result<TlsContext> TlsContext::create(const TlsConfig &config, bool server) noex
     try {
         if (!config.enabled || (config.minimum_version != 12 && config.minimum_version != 13) ||
             config.handshake_timeout_ms == 0 || config.max_certificate_bytes < 1024 ||
-            config.max_certificate_bytes > 4U * 1024U * 1024U || config.server_name.size() > 253 ||
+            config.max_certificate_bytes > 4U * 1024U * 1024U ||
+            config.server_name.size() > max_tls_hostname_bytes ||
             !safe_text(config.server_name))
             return Status{ErrorCode::invalid_config};
         if (server && (config.certificate_file.empty() || config.private_key_file.empty()))
@@ -251,7 +254,7 @@ Result<TlsContext> TlsContext::create(const TlsConfig &config, bool server) noex
 
 Result<TlsStream> TlsStream::create(const TlsContext &context, int socket,
                                     std::string_view peer_name) noexcept {
-    if (!context.impl_ || socket < 0 || peer_name.size() > 253 || !safe_text(peer_name))
+    if (!context.impl_ || socket < 0 || peer_name.size() > max_tls_hostname_bytes || !safe_text(peer_name))
         return Status{ErrorCode::invalid_config};
     try {
         auto impl = std::make_unique<Impl>();

@@ -569,8 +569,8 @@ int inspect_frame(const Arguments &args) {
             std::cerr << parsed.message() << '\n';
             return 1;
         }
-        const auto type = message.find_unique(35);
-        const bool logon = type.ok() && type.value().value == "A";
+        const auto type = message.find_unique(nf::tag::msg_type);
+        const bool logon = type.ok() && type.value().value == nf::msg_type::logon;
         if (args.json) {
             if (frames != 0)
                 json_output.push_back(',');
@@ -580,9 +580,12 @@ int inspect_frame(const Arguments &args) {
             std::cout << "frame offset=" << consumed << " bytes=" << frame.consumed << '\n';
         std::size_t index = 0;
         for (const auto &field : message.fields()) {
-            const bool hidden = logon && field.tag != 8 && field.tag != 9 && field.tag != 10 &&
-                                field.tag != 35 && field.tag != 34 && field.tag != 49 && field.tag != 56 &&
-                                field.tag != 52 && field.tag != 98 && field.tag != 108;
+            const bool hidden =
+                logon && field.tag != nf::tag::begin_string && field.tag != nf::tag::body_length &&
+                field.tag != nf::tag::check_sum && field.tag != nf::tag::msg_type &&
+                field.tag != nf::tag::msg_seq_num && field.tag != nf::tag::sender_comp_id &&
+                field.tag != nf::tag::target_comp_id && field.tag != nf::tag::sending_time &&
+                field.tag != nf::tag::encrypt_method && field.tag != nf::tag::heart_bt_int;
             const std::string_view value = hidden ? std::string_view{"<redacted>"} : field.value;
             if (args.json) {
                 if (index++ != 0)

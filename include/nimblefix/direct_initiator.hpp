@@ -58,7 +58,7 @@ struct DirectInitiatorConfig {
     JournalTestHook journal_test_hook{};
 
     FixVersion version{FixVersion::fix44};
-    std::string default_appl_ver_id{"9"};
+    std::string default_appl_ver_id{appl_ver_id::fix50sp2};
     std::string username{};
     std::string password{};
     bool request_sequence_reset{};
@@ -127,16 +127,16 @@ public:
         const unsigned ms = nsec / 1'000'000U;
         write_3(buf_.data() + 18, ms);
         if (precision == TimestampPrecision::milliseconds) {
-            return {buf_.data(), 21};
+            return {buf_.data(), timestamp_millis_len};
         }
         const unsigned rem_us = nsec - ms * 1'000'000U;
         const unsigned us = rem_us / 1'000U;
         write_3(buf_.data() + 21, us);
         if (precision == TimestampPrecision::microseconds) {
-            return {buf_.data(), 24};
+            return {buf_.data(), timestamp_micros_len};
         }
         write_3(buf_.data() + 24, rem_us - us * 1'000U);
-        return {buf_.data(), 27};
+        return {buf_.data(), timestamp_nanos_len};
     }
 
 private:
@@ -177,7 +177,7 @@ inline void direct_secure_clear(std::string& text) noexcept {
 }
 
 [[nodiscard]] inline bool direct_is_admin(std::string_view t) noexcept {
-    return t == "A" || t == "0" || t == "1" || t == "2" || t == "3" || t == "4" || t == "5";
+    return msg_type::is_session_admin(t);
 }
 
 [[nodiscard]] inline bool direct_parse_utc_ms(std::string_view value, std::int64_t& millis) noexcept {
@@ -259,7 +259,7 @@ inline void direct_format_tag(std::uint32_t tag, PlanField& field) noexcept {
     std::span<const DirectAdminField> fields, DirectAdminStorage& storage,
     std::span<char> arena) noexcept {
     if (msg_type.empty() || msg_type.size() > 32 || fields.size() > storage.plan.size())
-        return Status{ErrorCode::invalid_value, 35};
+        return Status{ErrorCode::invalid_value, tag::msg_type};
     std::size_t used = 0;
     for (std::size_t i = 0; i < fields.size(); ++i) {
         const auto& f = fields[i];
@@ -316,25 +316,25 @@ struct DirectInboundTags {
     };
     for (const auto& f : msg.fields()) {
         switch (f.tag) {
-        case 8: put(t.begin, f); break;
-        case 35: put(t.msg_type, f); break;
-        case 34: put(t.seq, f); break;
-        case 49: put(t.sender, f); break;
-        case 56: put(t.target, f); break;
-        case 52: put(t.sending_time, f); break;
-        case 43: put(t.poss_dup, f); break;
-        case 122: put(t.orig_time, f); break;
-        case 112: put(t.test_id, f); break;
-        case 369: put(t.peer_ack, f); break;
-        case 7: put(t.begin_seq, f); break;
-        case 16: put(t.end_seq, f); break;
-        case 36: put(t.new_seq, f); break;
-        case 123: put(t.gap_fill, f); break;
-        case 98: put(t.encrypt, f); break;
-        case 108: put(t.hb_int, f); break;
-        case 141: put(t.reset_flag, f); break;
-        case 1137: put(t.appl_ver, f); break;
-        case 58: put(t.text, f); break;
+        case tag::begin_string: put(t.begin, f); break;
+        case tag::msg_type: put(t.msg_type, f); break;
+        case tag::msg_seq_num: put(t.seq, f); break;
+        case tag::sender_comp_id: put(t.sender, f); break;
+        case tag::target_comp_id: put(t.target, f); break;
+        case tag::sending_time: put(t.sending_time, f); break;
+        case tag::poss_dup_flag: put(t.poss_dup, f); break;
+        case tag::orig_sending_time: put(t.orig_time, f); break;
+        case tag::test_req_id: put(t.test_id, f); break;
+        case tag::last_msg_seq_num_processed: put(t.peer_ack, f); break;
+        case tag::begin_seq_no: put(t.begin_seq, f); break;
+        case tag::end_seq_no: put(t.end_seq, f); break;
+        case tag::new_seq_no: put(t.new_seq, f); break;
+        case tag::gap_fill_flag: put(t.gap_fill, f); break;
+        case tag::encrypt_method: put(t.encrypt, f); break;
+        case tag::heart_bt_int: put(t.hb_int, f); break;
+        case tag::reset_seq_num_flag: put(t.reset_flag, f); break;
+        case tag::default_appl_ver_id: put(t.appl_ver, f); break;
+        case tag::text: put(t.text, f); break;
         default: break;
         }
     }
@@ -620,9 +620,9 @@ public:
                         std::array<detail::DirectAdminField, 1> f{};
                         std::size_t n = 0;
                         if (!lout.actions[i].text.empty()) {
-                            f[n++] = {58, FieldKind::string, 0, lout.actions[i].text};
+                            f[n++] = {tag::text, FieldKind::string, 0, lout.actions[i].text};
                         }
-                        if (!send_admin("5", {f.data(), n}, now_ms).ok()) {
+                        if (!send_admin(msg_type::logout, {f.data(), n}, now_ms).ok()) {
                             logout_ok = false;
                             break;
                         }
@@ -858,9 +858,9 @@ public:
     [[nodiscard]] Status request_sequence_reset(
         std::string_view reason = "admin sequence reset") noexcept {
         if (fatal_) return last_status_.ok() ? Status{ErrorCode::engine_stopped} : last_status_;
-        if (!config_.allow_sequence_reset) return Status{ErrorCode::sequence_reset_denied, 141};
-        if (reason.empty() || reason.size() > 200 || !detail::is_valid_text(reason))
-            return Status{ErrorCode::invalid_value, 58};
+        if (!config_.allow_sequence_reset) return Status{ErrorCode::sequence_reset_denied, tag::reset_seq_num_flag};
+        if (reason.empty() || reason.size() > max_admin_reason_bytes || !detail::is_valid_text(reason))
+            return Status{ErrorCode::invalid_value, tag::text};
         try {
             one_shot_reset_reason_.assign(reason.data(), reason.size());
             one_shot_sequence_reset_ = true;
@@ -879,13 +879,14 @@ public:
         if (fatal_) return last_status_.ok() ? Status{ErrorCode::engine_stopped} : last_status_;
         if (transport_.valid() || core_.state() != SessionState::disconnected)
             return Status{ErrorCode::not_ready};
-        if (next_inbound == 0 || next_outbound == 0) return Status{ErrorCode::invalid_value, 34};
-        if (reason.empty() || reason.size() > 200 || !detail::is_valid_text(reason))
-            return Status{ErrorCode::invalid_value, 58};
+        if (next_inbound == 0 || next_outbound == 0) return Status{ErrorCode::invalid_value, tag::msg_seq_num};
+        if (reason.empty() || reason.size() > max_admin_reason_bytes || !detail::is_valid_text(reason))
+            return Status{ErrorCode::invalid_value, tag::text};
         if (next_inbound == core_.next_inbound() && next_outbound == core_.next_outbound())
             return Status::success();
         if (next_inbound < core_.next_inbound() || next_outbound < core_.next_outbound()) {
-            if (!config_.allow_sequence_reset) return Status{ErrorCode::sequence_reset_denied, 141};
+            if (!config_.allow_sequence_reset)
+                return Status{ErrorCode::sequence_reset_denied, tag::reset_seq_num_flag};
             const auto rs = journal_.begin_epoch(reason);
             if (!rs.ok()) return rs;
             detail::CoreEvent rc{};
@@ -898,12 +899,13 @@ public:
         if (next_inbound > core_.next_inbound()) {
             const auto cur_in = core_.next_inbound();
             std::array<detail::DirectAdminField, 3> fields{
-                detail::DirectAdminField{123, FieldKind::character, static_cast<unsigned char>('N'), {}},
-                detail::DirectAdminField{36, FieldKind::unsigned_integer, next_inbound, {}},
-                detail::DirectAdminField{58, FieldKind::string, 0, reason},
+                detail::DirectAdminField{tag::gap_fill_flag, FieldKind::character, static_cast<unsigned char>('N'), {}},
+                detail::DirectAdminField{tag::new_seq_no, FieldKind::unsigned_integer, next_inbound, {}},
+                detail::DirectAdminField{tag::text, FieldKind::string, 0, reason},
             };
             detail::DirectAdminStorage stg{};
-            if (const auto st = detail::direct_build_admin("4", fields, stg, admin_arena_); !st.ok()) return st;
+            if (const auto st = detail::direct_build_admin(msg_type::sequence_reset, fields, stg, admin_arena_); !st.ok())
+                return st;
             SessionHeader hdr{config_.remote_comp_id, config_.local_comp_id, cur_in, wt};
             hdr.version = config_.version;
             const auto enc = encode_fix(stg.view, hdr, encode_buf_);
@@ -918,12 +920,13 @@ public:
         if (next_outbound > core_.next_outbound()) {
             const auto cur_out = core_.next_outbound();
             std::array<detail::DirectAdminField, 3> fields{
-                detail::DirectAdminField{123, FieldKind::character, static_cast<unsigned char>('Y'), {}},
-                detail::DirectAdminField{36, FieldKind::unsigned_integer, next_outbound, {}},
-                detail::DirectAdminField{58, FieldKind::string, 0, reason},
+                detail::DirectAdminField{tag::gap_fill_flag, FieldKind::character, static_cast<unsigned char>('Y'), {}},
+                detail::DirectAdminField{tag::new_seq_no, FieldKind::unsigned_integer, next_outbound, {}},
+                detail::DirectAdminField{tag::text, FieldKind::string, 0, reason},
             };
             detail::DirectAdminStorage stg{};
-            if (const auto st = detail::direct_build_admin("4", fields, stg, admin_arena_); !st.ok()) return st;
+            if (const auto st = detail::direct_build_admin(msg_type::sequence_reset, fields, stg, admin_arena_); !st.ok())
+                return st;
             SessionHeader hdr{config_.local_comp_id, config_.remote_comp_id, cur_out, wt, true, wt};
             hdr.version = config_.version;
             const auto enc = encode_fix(stg.view, hdr, encode_buf_);
@@ -1071,12 +1074,15 @@ private:
                     break;
                 }
                 const auto tags = detail::direct_extract_tags(msg);
-                if (tags.dup_tag == 369) { recovery_status_ = Status{ErrorCode::corrupt_store, 369}; break; }
+                if (tags.dup_tag == tag::last_msg_seq_num_processed) {
+                    recovery_status_ = Status{ErrorCode::corrupt_store, tag::last_msg_seq_num_processed};
+                    break;
+                }
                 if (tags.peer_ack != nullptr) {
                     std::uint64_t val{};
                     if (!detail::direct_parse_u64(tags.peer_ack->value, val) || val < scanned_ack ||
                         (rec.epoch == current_epoch && val > max_out)) {
-                        recovery_status_ = Status{ErrorCode::corrupt_store, 369};
+                        recovery_status_ = Status{ErrorCode::corrupt_store, tag::last_msg_seq_num_processed};
                         break;
                     }
                     scanned_ack = val;
@@ -1110,7 +1116,7 @@ private:
             return Status::success();
         }
         if (!detail::is_valid_utc_timestamp(v) || v.size() > wall_time_buf_.size())
-            return Status{ErrorCode::invalid_timestamp, 52};
+            return Status{ErrorCode::invalid_timestamp, tag::sending_time};
         std::memcpy(wall_time_buf_.data(), v.data(), v.size());
         wall_time_size_ = v.size();
         wall_time_ = {wall_time_buf_.data(), wall_time_size_};
@@ -1221,7 +1227,8 @@ private:
         last_status_ = Status::success();
         const bool want_reset = config_.request_sequence_reset || one_shot_sequence_reset_;
         if (want_reset && !local_epoch_reset_started_) {
-            if (!config_.allow_sequence_reset) return fail(Status{ErrorCode::sequence_reset_denied, 141});
+            if (!config_.allow_sequence_reset)
+                return fail(Status{ErrorCode::sequence_reset_denied, tag::reset_seq_num_flag});
             const std::string_view rs_reason = (one_shot_sequence_reset_ && !one_shot_reset_reason_.empty())
                 ? std::string_view{one_shot_reset_reason_}
                 : std::string_view{"local Logon ResetSeqNumFlag=Y"};
@@ -1286,13 +1293,16 @@ private:
             return Status{ErrorCode::corrupt_store};
         }
         const auto tags = detail::direct_extract_tags(original);
-        if (tags.dup_tag == 52 || tags.sending_time == nullptr) return Status{ErrorCode::corrupt_store, 52};
-        if (tags.dup_tag == 369) return Status{ErrorCode::corrupt_store, 369};
+        if (tags.dup_tag == tag::sending_time || tags.sending_time == nullptr)
+            return Status{ErrorCode::corrupt_store, tag::sending_time};
+        if (tags.dup_tag == tag::last_msg_seq_num_processed)
+            return Status{ErrorCode::corrupt_store, tag::last_msg_seq_num_processed};
         out = make_header(rec.seq, tags.sending_time->value);
         out.last_msg_seq_num_processed.reset();
         if (tags.peer_ack != nullptr) {
             std::uint64_t ack{};
-            if (!detail::direct_parse_u64(tags.peer_ack->value, ack)) return Status{ErrorCode::corrupt_store, 369};
+            if (!detail::direct_parse_u64(tags.peer_ack->value, ack))
+                return Status{ErrorCode::corrupt_store, tag::last_msg_seq_num_processed};
             out.last_msg_seq_num_processed = ack;
         }
         return Status::success();
@@ -1393,7 +1403,7 @@ private:
         if (fatal_) return last_status_.ok() ? Status{ErrorCode::engine_stopped} : last_status_;
         if (!is_active()) return Status{ErrorCode::not_ready};
         if (msg.msg_type.empty() || detail::direct_is_admin(msg.msg_type))
-            return Status{ErrorCode::managed_field, 35};
+            return Status{ErrorCode::managed_field, tag::msg_type};
         const RecordId dep = active_delivery_id_;
         if (dep != 0 && active_delivery_recovery_) [[unlikely]] {
             const auto reused = try_reuse_recovery_view(dep, msg);
@@ -1512,7 +1522,7 @@ private:
         if (fatal_) return last_status_.ok() ? Status{ErrorCode::engine_stopped} : last_status_;
         if (!is_active()) return Status{ErrorCode::not_ready};
         if (msg_type.empty() || detail::direct_is_admin(msg_type))
-            return Status{ErrorCode::managed_field, 35};
+            return Status{ErrorCode::managed_field, tag::msg_type};
         const RecordId dep = active_delivery_id_;
         if (dep != 0 && active_delivery_recovery_) [[unlikely]] {
             const auto reused = try_reuse_recovery_stream<Message>(dep, fn);
@@ -1657,7 +1667,7 @@ private:
                                                               std::string_view body,
                                                               std::uint64_t now_ms) noexcept {
         if (msg_type.empty() || detail::direct_is_admin(msg_type))
-            return Status{ErrorCode::managed_field, 35};
+            return Status{ErrorCode::managed_field, tag::msg_type};
         const RecordId dep = active_delivery_id_;
         if (dep != 0 && active_delivery_recovery_) [[unlikely]] {
             const auto reused = try_reuse_recovery_prebuilt(dep, msg_type, body);
@@ -1761,25 +1771,25 @@ private:
         std::array<detail::DirectAdminField, 8> wire{};
         std::size_t sc = 0;
         auto add = [&](const detail::DirectAdminField& f) { safe[sc] = f; wire[sc] = f; ++sc; };
-        add({98, FieldKind::unsigned_integer, 0, {}});
+        add({tag::encrypt_method, FieldKind::unsigned_integer, encrypt_method_none, {}});
         const auto hb_sec = std::max<std::uint64_t>(1, (static_cast<std::uint64_t>(config_.heartbeat_ms) + 999) / 1000);
-        add({108, FieldKind::unsigned_integer, hb_sec, {}});
+        add({tag::heart_bt_int, FieldKind::unsigned_integer, hb_sec, {}});
         if (config_.request_sequence_reset || one_shot_reset_active_)
-            add({141, FieldKind::character, static_cast<unsigned char>('Y'), {}});
+            add({tag::reset_seq_num_flag, FieldKind::character, static_cast<unsigned char>('Y'), {}});
         if (config_.version == FixVersion::fixt11)
-            add({1137, FieldKind::string, 0, config_.default_appl_ver_id});
+            add({tag::default_appl_ver_id, FieldKind::string, 0, config_.default_appl_ver_id});
 
         detail::DirectAdminStorage stg{};
         const auto header = make_header(seq, wall_time_);
-        if (const auto st = detail::direct_build_admin("A", {safe.data(), sc}, stg, admin_arena_); !st.ok())
+        if (const auto st = detail::direct_build_admin(msg_type::logon, {safe.data(), sc}, stg, admin_arena_); !st.ok())
             return st;
         const auto persisted = encode_fix(stg.view, header, encode_buf_);
         if (!persisted.ok()) return persisted.status();
 
         std::size_t wc = sc;
-        if (!config_.username.empty()) wire[wc++] = {553, FieldKind::string, 0, config_.username};
-        if (!config_.password.empty()) wire[wc++] = {554, FieldKind::string, 0, config_.password};
-        if (const auto st = detail::direct_build_admin("A", {wire.data(), wc}, stg, admin_arena_); !st.ok())
+        if (!config_.username.empty()) wire[wc++] = {tag::username, FieldKind::string, 0, config_.username};
+        if (!config_.password.empty()) wire[wc++] = {tag::password, FieldKind::string, 0, config_.password};
+        if (const auto st = detail::direct_build_admin(msg_type::logon, {wire.data(), wc}, stg, admin_arena_); !st.ok())
             return st;
         const auto actual = encode_fix(stg.view, header, logon_tx_buf_);
         detail::direct_secure_clear(admin_arena_);
@@ -1789,7 +1799,7 @@ private:
             std::string_view{encode_buf_.data(), persisted.value()});
         if (!appended.ok()) { detail::direct_secure_clear(logon_tx_buf_); return appended.status(); }
         logon_tx_size_ = actual.value();
-        if (const auto st = enqueue_tx(appended.value().id, actual.value(), seq, "A", true); !st.ok()) {
+        if (const auto st = enqueue_tx(appended.value().id, actual.value(), seq, msg_type::logon, true); !st.ok()) {
             detail::direct_secure_clear(logon_tx_buf_);
             logon_tx_size_ = 0;
             return st;
@@ -1801,7 +1811,7 @@ private:
         ev.kind = detail::CoreEventKind::outbound_appended;
         ev.now_ms = now_ms;
         ev.sequence = seq;
-        ev.msg_type = "A";
+        ev.msg_type = msg_type::logon;
         return core_.process(ev).status;
     }
 
@@ -1823,7 +1833,7 @@ private:
         const auto next_out = journal_.next_outbound_seq();
         const auto max_out = next_out == 0 ? 0 : next_out - 1;
         if (max_out != 0 && begin < journal_.lowest_retained_outbound_seq())
-            return fail(Status{ErrorCode::history_unavailable, 7, static_cast<std::size_t>(begin)});
+            return fail(Status{ErrorCode::history_unavailable, tag::begin_seq_no, static_cast<std::size_t>(begin)});
         if (end == 0 || end > max_out) end = max_out;
         if (max_out == 0 || begin > end) {
             if (dep != 0) {
@@ -1902,12 +1912,12 @@ private:
         if (!replay_active_ || replay_prepared_) return Status::success();
         while (replay_next_ <= replay_end_) {
             const auto* rec = journal_.find_outbound(replay_next_);
-            if (rec == nullptr || rec->payload.empty()) return Status{ErrorCode::corrupt_store, 34};
+            if (rec == nullptr || rec->payload.empty()) return Status{ErrorCode::corrupt_store, tag::msg_seq_num};
             FlatMessageView parsed{};
             if (const auto st = parse_frame_aux(rec->payload, parsed); !st.ok()) return st;
             const auto tags = detail::direct_extract_tags(parsed);
             if (tags.msg_type == nullptr || tags.sending_time == nullptr)
-                return Status{ErrorCode::corrupt_store, 35};
+                return Status{ErrorCode::corrupt_store, tag::msg_type};
             const auto orig_time = tags.orig_time ? tags.orig_time->value : tags.sending_time->value;
             if (!detail::direct_is_admin(tags.msg_type->value)) {
                 auto header = make_header(rec->seq, wall_time_, true, orig_time);
@@ -1928,21 +1938,22 @@ private:
                 rec->next_seq > rec->seq ? rec->next_seq : rec->seq + 1);
             while (gap_end <= replay_end_) {
                 const auto* nr = journal_.find_outbound(gap_end);
-                if (nr == nullptr || nr->payload.empty()) return Status{ErrorCode::corrupt_store, 34};
+                if (nr == nullptr || nr->payload.empty()) return Status{ErrorCode::corrupt_store, tag::msg_seq_num};
                 FlatMessageView np{};
                 if (const auto st = parse_frame_aux(nr->payload, np); !st.ok()) return st;
                 const auto nt = detail::direct_extract_tags(np);
-                if (nt.msg_type == nullptr) return Status{ErrorCode::corrupt_store, 35};
+                if (nt.msg_type == nullptr) return Status{ErrorCode::corrupt_store, tag::msg_type};
                 if (!detail::direct_is_admin(nt.msg_type->value)) break;
                 const auto adv = nr->next_seq > nr->seq ? nr->next_seq : nr->seq + 1;
                 gap_end = std::max(gap_end + 1, adv);
             }
             std::array<detail::DirectAdminField, 2> gf{
-                detail::DirectAdminField{123, FieldKind::character, static_cast<unsigned char>('Y'), {}},
-                detail::DirectAdminField{36, FieldKind::unsigned_integer, gap_end, {}},
+                detail::DirectAdminField{tag::gap_fill_flag, FieldKind::character, static_cast<unsigned char>('Y'), {}},
+                detail::DirectAdminField{tag::new_seq_no, FieldKind::unsigned_integer, gap_end, {}},
             };
             detail::DirectAdminStorage stg{};
-            if (const auto st = detail::direct_build_admin("4", gf, stg, admin_arena_); !st.ok()) return st;
+            if (const auto st = detail::direct_build_admin(msg_type::sequence_reset, gf, stg, admin_arena_); !st.ok())
+                return st;
             auto header = make_header(gap_begin, wall_time_, true, orig_time);
             const auto enc = encode_fix(stg.view, header, replay_buf_);
             if (!enc.ok()) return enc.status();
@@ -1950,8 +1961,8 @@ private:
             replay_offset_ = 0;
             replay_seq_ = gap_begin;
             replay_advance_ = gap_end;
-            replay_msg_type_[0] = '4';
-            replay_msg_type_size_ = 1;
+            replay_msg_type_size_ = static_cast<std::uint8_t>(msg_type::sequence_reset.size());
+            std::memcpy(replay_msg_type_.data(), msg_type::sequence_reset.data(), msg_type::sequence_reset.size());
             replay_prepared_ = true;
             return Status::success();
         }
@@ -2090,7 +2101,7 @@ private:
                 wev.msg_type = wt;
                 const auto wout = core_.process(wev);
                 if (!wout.status.ok()) return fail(wout.status);
-                if (wt == "4") {
+                if (wt == msg_type::sequence_reset) {
                     while (tx_count_ != 0) {
                         const auto& f = tx_ring_[tx_head_];
                         if (f.seq < wseq || f.seq >= wadv) break;
@@ -2226,14 +2237,17 @@ private:
             const auto ref_type = tags.msg_type ? tags.msg_type->value : std::string_view{};
             std::array<detail::DirectAdminField, 5> rfields{};
             std::size_t rc = 0;
-            rfields[rc++] = {45, FieldKind::unsigned_integer, info.msg_seq_num, {}};
-            if (valid.tag > 0) rfields[rc++] = {371, FieldKind::unsigned_integer, static_cast<std::uint64_t>(valid.tag), {}};
-            if (!ref_type.empty()) rfields[rc++] = {372, FieldKind::string, 0, ref_type};
-            rfields[rc++] = {373, FieldKind::unsigned_integer,
-                valid.code == ErrorCode::required_field_missing ? 1ULL :
-                valid.code == ErrorCode::message_unhandled ? 11ULL : 5ULL, {}};
-            rfields[rc++] = {58, FieldKind::string, 0, valid.message()};
-            if (const auto st = send_admin("3", {rfields.data(), rc}, now_ms); !st.ok()) return fail(st);
+            rfields[rc++] = {tag::ref_seq_num, FieldKind::unsigned_integer, info.msg_seq_num, {}};
+            if (valid.tag > 0)
+                rfields[rc++] = {tag::ref_tag_id, FieldKind::unsigned_integer, static_cast<std::uint64_t>(valid.tag), {}};
+            if (!ref_type.empty()) rfields[rc++] = {tag::ref_msg_type, FieldKind::string, 0, ref_type};
+            rfields[rc++] = {tag::session_reject_reason, FieldKind::unsigned_integer,
+                valid.code == ErrorCode::required_field_missing ? reject_reason::required_tag_missing :
+                valid.code == ErrorCode::message_unhandled ? reject_reason::invalid_msg_type :
+                reject_reason::value_is_incorrect, {}};
+            rfields[rc++] = {tag::text, FieldKind::string, 0, valid.message()};
+            if (const auto st = send_admin(msg_type::reject, {rfields.data(), rc}, now_ms); !st.ok())
+                return fail(st);
             if constexpr (requires { handler_.on_error(valid); }) {
                 try { handler_.on_error(valid); } catch (...) {}
             }
@@ -2287,20 +2301,21 @@ private:
             FlatMessageView msg{};
             if (const auto st = parse_frame(rec->payload, msg); !st.ok()) return fail(st);
             const auto tags = detail::direct_extract_tags(msg);
-            if (tags.msg_type == nullptr) return fail(Status{ErrorCode::corrupt_store, 35});
+            if (tags.msg_type == nullptr) return fail(Status{ErrorCode::corrupt_store, tag::msg_type});
             const auto mt = tags.msg_type->value;
             if (detail::direct_is_admin(mt)) {
-                if (mt == "2" && tags.begin_seq && tags.end_seq) {
+                if (mt == msg_type::resend_request && tags.begin_seq && tags.end_seq) {
                     std::uint64_t b{}, e{};
                     if (!detail::direct_parse_u64(tags.begin_seq->value, b) ||
                         !detail::direct_parse_u64(tags.end_seq->value, e))
-                        return fail(Status{ErrorCode::corrupt_store, 7});
+                        return fail(Status{ErrorCode::corrupt_store, tag::begin_seq_no});
                     if (const auto st = queue_replay(b, e, id); !st.ok()) return fail(st);
-                } else if (mt == "1" && tags.test_id) {
+                } else if (mt == msg_type::test_request && tags.test_id) {
                     if (!has_dependent_outbound(id)) {
                         std::array<detail::DirectAdminField, 1> f{
-                            detail::DirectAdminField{112, FieldKind::string, 0, tags.test_id->value}};
-                        if (const auto st = send_admin("0", f, now_ms, id); !st.ok()) return fail(st);
+                            detail::DirectAdminField{tag::test_req_id, FieldKind::string, 0, tags.test_id->value}};
+                        if (const auto st = send_admin(msg_type::heartbeat, f, now_ms, id); !st.ok())
+                            return fail(st);
                     }
                     if (const auto st = append_delivery(id, rec->seq); !st.ok()) return fail(st);
                 } else {
@@ -2332,28 +2347,32 @@ private:
             case detail::CoreActionKind::send_logout: {
                 std::array<detail::DirectAdminField, 1> f{};
                 std::size_t n = 0;
-                if (!a.text.empty()) f[n++] = {58, FieldKind::string, 0, a.text};
-                if (const auto st = send_admin("5", {f.data(), n}, now_ms, inbound_id); !st.ok()) return fail(st);
+                if (!a.text.empty()) f[n++] = {tag::text, FieldKind::string, 0, a.text};
+                if (const auto st = send_admin(msg_type::logout, {f.data(), n}, now_ms, inbound_id); !st.ok())
+                    return fail(st);
                 break;
             }
             case detail::CoreActionKind::send_heartbeat: {
                 std::array<detail::DirectAdminField, 1> f{};
                 std::size_t n = 0;
-                if (!a.text.empty()) f[n++] = {112, FieldKind::string, 0, a.text};
-                if (const auto st = send_admin("0", {f.data(), n}, now_ms, inbound_id); !st.ok()) return fail(st);
+                if (!a.text.empty()) f[n++] = {tag::test_req_id, FieldKind::string, 0, a.text};
+                if (const auto st = send_admin(msg_type::heartbeat, {f.data(), n}, now_ms, inbound_id); !st.ok())
+                    return fail(st);
                 break;
             }
             case detail::CoreActionKind::send_test_request: {
-                std::array<detail::DirectAdminField, 1> f{{{112, FieldKind::string, 0, a.text}}};
-                if (const auto st = send_admin("1", f, now_ms, inbound_id); !st.ok()) return fail(st);
+                std::array<detail::DirectAdminField, 1> f{{{tag::test_req_id, FieldKind::string, 0, a.text}}};
+                if (const auto st = send_admin(msg_type::test_request, f, now_ms, inbound_id); !st.ok())
+                    return fail(st);
                 break;
             }
             case detail::CoreActionKind::send_resend_request: {
                 std::array<detail::DirectAdminField, 2> f{
-                    detail::DirectAdminField{7, FieldKind::unsigned_integer, a.first, {}},
-                    detail::DirectAdminField{16, FieldKind::unsigned_integer, a.last, {}},
+                    detail::DirectAdminField{tag::begin_seq_no, FieldKind::unsigned_integer, a.first, {}},
+                    detail::DirectAdminField{tag::end_seq_no, FieldKind::unsigned_integer, a.last, {}},
                 };
-                if (const auto st = send_admin("2", f, now_ms, inbound_id); !st.ok()) return fail(st);
+                if (const auto st = send_admin(msg_type::resend_request, f, now_ms, inbound_id); !st.ok())
+                    return fail(st);
                 break;
             }
             case detail::CoreActionKind::start_replay:
@@ -2392,21 +2411,21 @@ private:
         std::size_t count = 0;
         std::uint64_t enc_val{}, hb_val{};
         if (tags.encrypt == nullptr || !detail::direct_parse_u64(tags.encrypt->value, enc_val))
-            return Status{ErrorCode::corrupt_store, 98};
+            return Status{ErrorCode::corrupt_store, tag::encrypt_method};
         if (tags.hb_int == nullptr || !detail::direct_parse_u64(tags.hb_int->value, hb_val))
-            return Status{ErrorCode::corrupt_store, 108};
-        fields[count++] = {98, FieldKind::unsigned_integer, enc_val, {}};
-        fields[count++] = {108, FieldKind::unsigned_integer, hb_val, {}};
+            return Status{ErrorCode::corrupt_store, tag::heart_bt_int};
+        fields[count++] = {tag::encrypt_method, FieldKind::unsigned_integer, enc_val, {}};
+        fields[count++] = {tag::heart_bt_int, FieldKind::unsigned_integer, hb_val, {}};
         if (tags.reset_flag != nullptr) {
-            fields[count++] = {141, FieldKind::character,
+            fields[count++] = {tag::reset_seq_num_flag, FieldKind::character,
                 static_cast<unsigned char>(tags.reset_flag->value.empty() ? 0 : tags.reset_flag->value[0]), {}};
         }
         if (config_.version == FixVersion::fixt11) {
-            if (tags.appl_ver == nullptr) return Status{ErrorCode::corrupt_store, 1137};
-            fields[count++] = {1137, FieldKind::string, 0, tags.appl_ver->value};
+            if (tags.appl_ver == nullptr) return Status{ErrorCode::corrupt_store, tag::default_appl_ver_id};
+            fields[count++] = {tag::default_appl_ver_id, FieldKind::string, 0, tags.appl_ver->value};
         }
         detail::DirectAdminStorage stg{};
-        if (const auto st = detail::direct_build_admin("A", {fields.data(), count}, stg, admin_arena_); !st.ok()) {
+        if (const auto st = detail::direct_build_admin(msg_type::logon, {fields.data(), count}, stg, admin_arena_); !st.ok()) {
             detail::direct_secure_clear(admin_arena_);
             return st;
         }
@@ -2435,41 +2454,43 @@ private:
         const auto tags = detail::direct_extract_tags(message);
         if (tags.dup_tag != 0) return fail(Status{ErrorCode::duplicate_field, static_cast<int>(tags.dup_tag)});
         if (tags.begin == nullptr || tags.begin->value != begin_string(config_.version))
-            return fail(Status{ErrorCode::unsupported_protocol, 8});
+            return fail(Status{ErrorCode::unsupported_protocol, tag::begin_string});
         if (tags.msg_type == nullptr || tags.msg_type->value.empty())
-            return fail(Status{ErrorCode::invalid_header, 35});
+            return fail(Status{ErrorCode::invalid_header, tag::msg_type});
         std::uint64_t sequence{};
         if (tags.seq == nullptr || !detail::direct_parse_u64(tags.seq->value, sequence) || sequence == 0)
-            return fail(Status{ErrorCode::invalid_header, 34});
+            return fail(Status{ErrorCode::invalid_header, tag::msg_seq_num});
         if (tags.sender == nullptr || tags.sender->value != config_.remote_comp_id)
-            return fail(Status{ErrorCode::identity_mismatch, 49});
+            return fail(Status{ErrorCode::identity_mismatch, tag::sender_comp_id});
         if (tags.target == nullptr || tags.target->value != config_.local_comp_id)
-            return fail(Status{ErrorCode::identity_mismatch, 56});
+            return fail(Status{ErrorCode::identity_mismatch, tag::target_comp_id});
         if (tags.sending_time == nullptr || !detail::is_valid_utc_timestamp(tags.sending_time->value))
-            return fail(Status{ErrorCode::invalid_timestamp, 52});
+            return fail(Status{ErrorCode::invalid_timestamp, tag::sending_time});
 
         const bool poss_dup = tags.poss_dup != nullptr && tags.poss_dup->value == "Y";
         if (tags.poss_dup != nullptr && tags.poss_dup->value != "Y" && tags.poss_dup->value != "N")
-            return fail(Status{ErrorCode::invalid_value, 43});
+            return fail(Status{ErrorCode::invalid_value, tag::poss_dup_flag});
         const bool orig_valid = tags.orig_time != nullptr && detail::is_valid_utc_timestamp(tags.orig_time->value);
         if (poss_dup && (!orig_valid || detail::compare_utc_timestamps(tags.orig_time->value, tags.sending_time->value) > 0))
-            return fail(Status{ErrorCode::invalid_timestamp, 122});
-        if (!poss_dup && tags.orig_time != nullptr) return fail(Status{ErrorCode::invalid_header, 122});
+            return fail(Status{ErrorCode::invalid_timestamp, tag::orig_sending_time});
+        if (!poss_dup && tags.orig_time != nullptr)
+            return fail(Status{ErrorCode::invalid_header, tag::orig_sending_time});
 
         const auto msg_type = tags.msg_type->value;
         std::string_view test_id{};
-        if (msg_type == "1" || msg_type == "0") {
+        if (msg_type == msg_type::test_request || msg_type == msg_type::heartbeat) {
             if (tags.test_id != nullptr) test_id = tags.test_id->value;
-            if (msg_type == "1" && tags.test_id == nullptr) return fail(Status{ErrorCode::missing_field, 112});
+            if (msg_type == msg_type::test_request && tags.test_id == nullptr)
+                return fail(Status{ErrorCode::missing_field, tag::test_req_id});
         }
 
         if (config_.check_sending_time) {
             std::int64_t sent_ms{}, cur_ms{};
             if (!detail::direct_parse_utc_ms(tags.sending_time->value, sent_ms))
-                return fail(Status{ErrorCode::invalid_timestamp, 52});
+                return fail(Status{ErrorCode::invalid_timestamp, tag::sending_time});
             if (!wall_time_ms_valid_) {
                 if (!detail::direct_parse_utc_ms(wall_time_, cached_wall_ms_))
-                    return fail(Status{ErrorCode::invalid_timestamp, 52});
+                    return fail(Status{ErrorCode::invalid_timestamp, tag::sending_time});
                 wall_time_ms_valid_ = true;
             }
             cur_ms = cached_wall_ms_;
@@ -2489,36 +2510,36 @@ private:
         bool noop_seq_reset = false, reject_seq_reset = false;
         std::string_view logout_text{};
 
-        if (msg_type == "A") {
-            if (tags.encrypt == nullptr || tags.encrypt->value != "0")
-                return fail(Status{ErrorCode::protocol_error, 98});
+        if (msg_type == msg_type::logon) {
+            if (tags.encrypt == nullptr || tags.encrypt->value != encrypt_method_none_str)
+                return fail(Status{ErrorCode::protocol_error, tag::encrypt_method});
             std::uint64_t secs{};
             if (tags.hb_int == nullptr || !detail::direct_parse_u64(tags.hb_int->value, secs) ||
                 secs == 0 || secs > std::numeric_limits<std::uint32_t>::max() / 1000U)
-                return fail(Status{ErrorCode::protocol_error, 108});
+                return fail(Status{ErrorCode::protocol_error, tag::heart_bt_int});
             peer_hb_ms = secs * 1000;
             if (config_.version == FixVersion::fixt11 &&
                 (tags.appl_ver == nullptr || tags.appl_ver->value != config_.default_appl_ver_id))
-                return fail(Status{ErrorCode::unsupported_protocol, 1137});
+                return fail(Status{ErrorCode::unsupported_protocol, tag::default_appl_ver_id});
             const bool peer_reset = tags.reset_flag != nullptr && tags.reset_flag->value == "Y";
             if (tags.reset_flag != nullptr && tags.reset_flag->value != "Y" && tags.reset_flag->value != "N")
-                return fail(Status{ErrorCode::invalid_value, 141});
+                return fail(Status{ErrorCode::invalid_value, tag::reset_seq_num_flag});
             if (peer_reset && (!config_.allow_sequence_reset || !local_epoch_reset_started_ || sequence != 1))
-                return fail(Status{ErrorCode::sequence_reset_denied, 141});
+                return fail(Status{ErrorCode::sequence_reset_denied, tag::reset_seq_num_flag});
             const bool expected_reset = config_.request_sequence_reset || one_shot_reset_active_;
             if (!peer_reset && expected_reset && core_.state() == SessionState::awaiting_logon)
-                return fail(Status{ErrorCode::sequence_reset_denied, 141});
-        } else if (msg_type == "2") {
+                return fail(Status{ErrorCode::sequence_reset_denied, tag::reset_seq_num_flag});
+        } else if (msg_type == msg_type::resend_request) {
             if (tags.begin_seq == nullptr || !detail::direct_parse_u64(tags.begin_seq->value, resend_begin) ||
                 tags.end_seq == nullptr || !detail::direct_parse_u64(tags.end_seq->value, resend_end) ||
                 resend_begin == 0 || (resend_end != 0 && resend_end < resend_begin))
-                return fail(Status{ErrorCode::protocol_error, 7});
-        } else if (msg_type == "4") {
+                return fail(Status{ErrorCode::protocol_error, tag::begin_seq_no});
+        } else if (msg_type == msg_type::sequence_reset) {
             if (tags.gap_fill != nullptr && tags.gap_fill->value != "Y" && tags.gap_fill->value != "N")
-                return fail(Status{ErrorCode::invalid_value, 123});
+                return fail(Status{ErrorCode::invalid_value, tag::gap_fill_flag});
             const bool is_gf = tags.gap_fill != nullptr && tags.gap_fill->value == "Y";
             if (tags.new_seq == nullptr || !detail::direct_parse_u64(tags.new_seq->value, next_inbound))
-                return fail(Status{ErrorCode::protocol_error, 36});
+                return fail(Status{ErrorCode::protocol_error, tag::new_seq_no});
             if (!is_gf) {
                 if (next_inbound > core_.next_inbound()) {
                     seq_reset_ev = true;
@@ -2530,14 +2551,14 @@ private:
                 }
             } else {
                 if (!poss_dup || !orig_valid || next_inbound <= sequence)
-                    return fail(Status{ErrorCode::protocol_error, 123});
+                    return fail(Status{ErrorCode::protocol_error, tag::gap_fill_flag});
                 if (next_inbound <= core_.next_inbound()) dup_gapfill = true;
                 else {
                     gapfill_ev = true;
                     if (sequence < core_.next_inbound()) effective_seq = core_.next_inbound();
                 }
             }
-        } else if (msg_type == "5") {
+        } else if (msg_type == msg_type::logout) {
             if (tags.text != nullptr) logout_text = tags.text->value;
         }
 
@@ -2545,7 +2566,7 @@ private:
         if (tags.peer_ack != nullptr) {
             std::uint64_t av{};
             if (!detail::direct_parse_u64(tags.peer_ack->value, av))
-                return fail(Status{ErrorCode::invalid_value, 369});
+                return fail(Status{ErrorCode::invalid_value, tag::last_msg_seq_num_processed});
             ack_cand = av;
         }
 
@@ -2575,18 +2596,19 @@ private:
             if (!poss_dup && ack_cand) {
                 const auto max_out = journal_.next_outbound_seq() == 0 ? 0 : journal_.next_outbound_seq() - 1;
                 if (*ack_cand < peer_ack_seq_ || *ack_cand > max_out)
-                    return fail(Status{ErrorCode::protocol_error, 369});
+                    return fail(Status{ErrorCode::protocol_error, tag::last_msg_seq_num_processed});
             }
             if (reject_seq_reset) {
-                const Status reject_err{ErrorCode::invalid_value, 36};
+                const Status reject_err{ErrorCode::invalid_value, tag::new_seq_no};
                 std::array<detail::DirectAdminField, 5> rfields{
-                    detail::DirectAdminField{45, FieldKind::unsigned_integer, sequence, {}},
-                    detail::DirectAdminField{371, FieldKind::unsigned_integer, 36ULL, {}},
-                    detail::DirectAdminField{372, FieldKind::string, 0, "4"},
-                    detail::DirectAdminField{373, FieldKind::unsigned_integer, 5ULL, {}},
-                    detail::DirectAdminField{58, FieldKind::string, 0, reject_err.message()},
+                    detail::DirectAdminField{tag::ref_seq_num, FieldKind::unsigned_integer, sequence, {}},
+                    detail::DirectAdminField{tag::ref_tag_id, FieldKind::unsigned_integer, tag::new_seq_no, {}},
+                    detail::DirectAdminField{tag::ref_msg_type, FieldKind::string, 0, msg_type::sequence_reset},
+                    detail::DirectAdminField{tag::session_reject_reason, FieldKind::unsigned_integer,
+                        reject_reason::value_is_incorrect, {}},
+                    detail::DirectAdminField{tag::text, FieldKind::string, 0, reject_err.message()},
                 };
-                if (const auto st = send_admin("3", rfields, now_ms); !st.ok()) return fail(st);
+                if (const auto st = send_admin(msg_type::reject, rfields, now_ms); !st.ok()) return fail(st);
                 if constexpr (requires { handler_.on_error(reject_err); }) {
                     try { handler_.on_error(reject_err); } catch (...) {}
                 }
@@ -2595,13 +2617,13 @@ private:
         }
 
         bool deferred_logon = is_deferred;
-        if (msg_type == "A" && !deferred_logon && core_.state() == SessionState::awaiting_logon &&
+        if (msg_type == msg_type::logon && !deferred_logon && core_.state() == SessionState::awaiting_logon &&
             sequence > core_.next_inbound()) {
             if (deferred_logon_pending_) {
                 if (sequence == deferred_logon_seq_ &&
                     fv.bytes == std::string_view{deferred_logon_buf_.data(), deferred_logon_size_})
                     return Status::success();
-                return fail(Status{ErrorCode::protocol_error, 35});
+                return fail(Status{ErrorCode::protocol_error, tag::msg_type});
             }
             if (fv.bytes.size() > deferred_logon_buf_.size()) return fail(Status{ErrorCode::too_large});
             std::memcpy(deferred_logon_buf_.data(), fv.bytes.data(), fv.bytes.size());
@@ -2619,7 +2641,7 @@ private:
             cand.orig_sending_time_valid = orig_valid;
             const auto gap_out = core_.process(cand);
             if (!gap_out.status.ok() || gap_out.inbound != detail::InboundDisposition::gap)
-                return fail(gap_out.status.ok() ? Status{ErrorCode::protocol_error, 34} : gap_out.status);
+                return fail(gap_out.status.ok() ? Status{ErrorCode::protocol_error, tag::msg_seq_num} : gap_out.status);
 
             detail::CoreEvent ooo{};
             ooo.kind = detail::CoreEventKind::out_of_order_logon;
@@ -2630,7 +2652,7 @@ private:
             if (const auto st = apply_actions(lout, nullptr, 0, 0, now_ms); !st.ok()) return st;
             return apply_actions(gap_out, nullptr, 0, 0, now_ms);
         }
-        if (msg_type == "A" && deferred_logon_pending_ && sequence == deferred_logon_seq_) {
+        if (msg_type == msg_type::logon && deferred_logon_pending_ && sequence == deferred_logon_seq_) {
             deferred_logon = true;
         }
 
@@ -2642,7 +2664,7 @@ private:
         cand.poss_dup = poss_dup;
         cand.orig_sending_time_valid = orig_valid;
         cand.is_deferred_logon = deferred_logon;
-        if (msg_type == "2") { cand.first = resend_begin; cand.last = resend_end; }
+        if (msg_type == msg_type::resend_request) { cand.first = resend_begin; cand.last = resend_end; }
         const auto disp = core_.process(cand);
         if (!disp.status.ok()) return fail(disp.status);
         if (disp.inbound == detail::InboundDisposition::duplicate) return Status::success();
@@ -2650,7 +2672,7 @@ private:
         if (ack_cand) {
             const auto max_out = journal_.next_outbound_seq() == 0 ? 0 : journal_.next_outbound_seq() - 1;
             if (*ack_cand < peer_ack_seq_ || *ack_cand > max_out)
-                return fail(Status{ErrorCode::protocol_error, 369});
+                return fail(Status{ErrorCode::protocol_error, tag::last_msg_seq_num_processed});
         }
 
         if (disp.inbound == detail::InboundDisposition::gap) {
@@ -2660,7 +2682,7 @@ private:
             return fail(Status{ErrorCode::protocol_error});
 
         std::string_view stored_payload = fv.bytes;
-        if (msg_type == "A") {
+        if (msg_type == msg_type::logon) {
             const auto safe = encode_safe_inbound_logon(tags, sequence, poss_dup, orig_valid, ack_cand);
             if (!safe.ok()) return fail(safe.status());
             stored_payload = {encode_buf_.data(), safe.value()};
@@ -2684,7 +2706,7 @@ private:
         // defer delivery to recovery_ids_ so handler sees it in order upon becoming active.
         if (!detail::direct_is_admin(msg_type) && core_.state() == SessionState::awaiting_logon) {
             recovery_ids_.push_back(inbound_id);
-        } else if (msg_type == "2") {
+        } else if (msg_type == msg_type::resend_request) {
             recovery_ids_.push_back(inbound_id);
         }
 
@@ -2700,9 +2722,10 @@ private:
         comm.sequence = effective_seq;
         comm.next_sequence = appended.value().next_seq;
         comm.msg_type = msg_type;
-        comm.first = msg_type == "2" ? resend_begin : peer_hb_ms;
+        comm.first = msg_type == msg_type::resend_request ? resend_begin : peer_hb_ms;
         comm.last = resend_end;
-        comm.text = (msg_type == "1" || msg_type == "0") ? test_id : logout_text;
+        comm.text = (msg_type == msg_type::test_request || msg_type == msg_type::heartbeat)
+            ? test_id : logout_text;
         comm.poss_dup = poss_dup;
         comm.orig_sending_time_valid = orig_valid;
         comm.is_deferred_logon = deferred_logon || merged_gf_covered_logon;
@@ -2713,10 +2736,10 @@ private:
                                           inbound_id, effective_seq, now_ms,
                                           msg_type, tags.msg_type->offset); !st.ok()) return st;
 
-        if (detail::direct_is_admin(msg_type) && msg_type != "2") {
+        if (detail::direct_is_admin(msg_type) && msg_type != msg_type::resend_request) {
             if (const auto st = append_delivery(inbound_id, effective_seq); !st.ok()) return fail(st);
         }
-        if (msg_type == "3") {
+        if (msg_type == msg_type::reject) {
             if constexpr (requires { handler_.on_error(Status{ErrorCode::peer_rejected}); }) {
                 try { handler_.on_error(Status{ErrorCode::peer_rejected}); } catch (...) {}
             }

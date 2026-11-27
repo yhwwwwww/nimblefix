@@ -186,8 +186,7 @@ struct SenderCommandView {
 };
 
 [[nodiscard]] bool session_admin_type(std::string_view type) noexcept {
-    return type == "A" || type == "0" || type == "1" || type == "2" ||
-        type == "3" || type == "4" || type == "5";
+    return msg_type::is_session_admin(type);
 }
 
 [[nodiscard]] bool add_size(std::size_t left, std::size_t right,
@@ -282,7 +281,7 @@ struct SenderCommandView {
     std::string_view remote_comp_id, FixVersion version, bool emit_last_processed) noexcept {
     if (!message.status.ok()) return message.status;
     if (message.msg_type.size() > maximum_msg_type_size || session_admin_type(message.msg_type))
-        return Status{ErrorCode::managed_field, 35};
+        return Status{ErrorCode::managed_field, tag::msg_type};
     bool size_verified = false;
     if (message.prebuilt_body && message.field_count == 0 && message.group_count == 0 &&
         !message.msg_type.empty()) {
@@ -1966,11 +1965,11 @@ struct EngineRuntime::Impl {
         std::string_view msg_type{};
         std::size_t msg_type_offset = 0;
         const auto fields = message.fields();
-        if (fields.size() >= 3 && fields[2].tag == 35) {
+        if (fields.size() >= 3 && fields[2].tag == tag::msg_type) {
             msg_type = fields[2].value;
             msg_type_offset = fields[2].offset;
         } else {
-            auto type_field = message.find_unique(35);
+            auto type_field = message.find_unique(tag::msg_type);
             if (!type_field.ok()) return type_field.status();
             msg_type = type_field.value().value;
             msg_type_offset = type_field.value().offset;
@@ -1982,12 +1981,12 @@ struct EngineRuntime::Impl {
                 });
             if (ignored_type != ignored_messages.end() &&
                 ignored_type->msg_type == msg_type) return Status::success();
-            if (!message_callback) return Status{ErrorCode::message_unhandled, 35};
+            if (!message_callback) return Status{ErrorCode::message_unhandled, tag::msg_type};
             return message_callback(context, message, info);
         }
         const auto* descriptor = schema->find_message(msg_type);
         if (descriptor == nullptr)
-            return Status{ErrorCode::message_unhandled, 35, msg_type_offset};
+            return Status{ErrorCode::message_unhandled, tag::msg_type, msg_type_offset};
         const auto handler = std::lower_bound(typed_handlers.begin(), typed_handlers.end(),
             msg_type, [](const RegisteredMessageHandler& item, std::string_view value) {
                 return item.msg_type < value;
@@ -2000,7 +1999,7 @@ struct EngineRuntime::Impl {
             });
         if (ignored_type != ignored_messages.end() && ignored_type->msg_type == msg_type)
             return Status::success();
-        return Status{ErrorCode::message_unhandled, 35, msg_type_offset};
+        return Status{ErrorCode::message_unhandled, tag::msg_type, msg_type_offset};
     }
 
     [[nodiscard]] Status enqueue_delivery(const DeliveryLease& lease,
@@ -2799,11 +2798,11 @@ struct EngineRuntime::Impl {
                     std::size_t msg_type_offset = 0;
                     if (effective_schema != nullptr) {
                         const auto fields = message.fields();
-                        if (fields.size() >= 3 && fields[2].tag == 35) {
+                        if (fields.size() >= 3 && fields[2].tag == tag::msg_type) {
                             msg_type = fields[2].value;
                             msg_type_offset = fields[2].offset;
                         } else {
-                            const auto type = message.find_unique(35);
+                            const auto type = message.find_unique(tag::msg_type);
                             if (!type.ok()) return finish(type.status());
                             msg_type = type.value().value;
                             msg_type_offset = type.value().offset;
@@ -2842,7 +2841,7 @@ struct EngineRuntime::Impl {
                                     return item.msg_type < value;
                                 });
                             const bool ignored = ig != ignored_messages.end() && ig->msg_type == msg_type;
-                            if (!ignored) return finish(Status{ErrorCode::message_unhandled, 35});
+                            if (!ignored) return finish(Status{ErrorCode::message_unhandled, tag::msg_type});
                         }
                     }
                     return finish(Status::success());
@@ -3323,10 +3322,10 @@ struct EngineRuntime::Impl {
                 wire_hints, CodecLimits{config.max_frame_bytes});
             if (!status.ok()) return status;
             std::string_view type, sender, target;
-            if (!(status = field_value(message, 35, type)).ok() ||
-                !(status = field_value(message, 49, sender)).ok() ||
-                !(status = field_value(message, 56, target)).ok()) return status;
-            if (type != "A") return {ErrorCode::protocol_error, 35};
+            if (!(status = field_value(message, tag::msg_type, type)).ok() ||
+                !(status = field_value(message, tag::sender_comp_id, sender)).ok() ||
+                !(status = field_value(message, tag::target_comp_id, target)).ok()) return status;
+            if (type != msg_type::logon) return {ErrorCode::protocol_error, tag::msg_type};
             const auto acceptor_index = match_acceptor(source.listener_index, sender, target, first_frame.version);
             if (acceptor_index == no_index) {
                 for (const auto& route : remote_routes) {
@@ -3352,7 +3351,7 @@ struct EngineRuntime::Impl {
                     }
                 }
                 identity_rejected = true;
-                return {ErrorCode::protocol_error, 49};
+                return {ErrorCode::protocol_error, tag::sender_comp_id};
             }
             auto& acceptor = acceptors[acceptor_index];
             error_name = acceptor.config.name;
@@ -3366,10 +3365,11 @@ struct EngineRuntime::Impl {
                 return {ErrorCode::not_ready};
             if (acceptor.active != nullptr && !acceptor.active->closed) {
                 identity_rejected = true;
-                return {ErrorCode::protocol_error, 49};
+                return {ErrorCode::protocol_error, tag::sender_comp_id};
             }
             std::string_view reset_flag_val{};
-            const bool peer_sent_141_y = field_value(message, 141, reset_flag_val).ok() && reset_flag_val == "Y";
+            const bool peer_sent_141_y =
+                field_value(message, tag::reset_seq_num_flag, reset_flag_val).ok() && reset_flag_val == "Y";
 
             auto peer = std::make_unique<Peer>();
             peer->name = acceptor.config.name;
@@ -4324,7 +4324,7 @@ struct EngineRuntime::Impl {
                 ? std::string_view{"admin sequence reset"} : std::string_view{cmd.reason};
             if (initiator_peer != nullptr) {
                 if (!initiator_peer->settings.allow_sequence_reset)
-                    return Status{ErrorCode::sequence_reset_denied, 141};
+                    return Status{ErrorCode::sequence_reset_denied, tag::reset_seq_num_flag};
                 initiator_peer->pending_admin_reset = true;
                 initiator_peer->pending_admin_reset_reason = std::string{reason};
                 if (initiator_peer->connection == Connection::connected && initiator_peer->driver) {
@@ -4341,7 +4341,7 @@ struct EngineRuntime::Impl {
                 return Status::success();
             }
             if (!target_acceptor->config.settings.allow_sequence_reset)
-                return Status{ErrorCode::sequence_reset_denied, 141};
+                return Status{ErrorCode::sequence_reset_denied, tag::reset_seq_num_flag};
             if (target_acceptor->active != nullptr && !target_acceptor->active->closed &&
                 target_acceptor->active->connection == Connection::connected &&
                 target_acceptor->active->driver) {
@@ -4842,11 +4842,11 @@ Status EngineRuntime::on_typed_message(std::string_view msg_type,
     if (!impl_ || impl_->has_run.load(std::memory_order_acquire) || impl_->schema == nullptr ||
         !callback || msg_type.empty() || !detail::is_valid_text(msg_type) || msg_type.size() > 32)
         return {ErrorCode::invalid_config};
-    if (impl_->schema->find_message(msg_type) == nullptr) return {ErrorCode::schema_mismatch, 35};
+    if (impl_->schema->find_message(msg_type) == nullptr) return {ErrorCode::schema_mismatch, tag::msg_type};
     for (const auto& current : impl_->typed_handlers)
-        if (current.msg_type == msg_type) return {ErrorCode::duplicate_field, 35};
+        if (current.msg_type == msg_type) return {ErrorCode::duplicate_field, tag::msg_type};
     for (const auto& current : impl_->ignored_messages)
-        if (current.msg_type == msg_type) return {ErrorCode::duplicate_field, 35};
+        if (current.msg_type == msg_type) return {ErrorCode::duplicate_field, tag::msg_type};
     try {
         impl_->typed_handlers.push_back(RegisteredMessageHandler{std::string{msg_type}, std::move(callback)});
         return Status::success();
@@ -4859,13 +4859,13 @@ Status EngineRuntime::ignore_message(std::string_view msg_type,
         msg_type.empty() || msg_type.size() > 32 || !detail::is_valid_text(msg_type) ||
         reason.empty() || !detail::is_valid_text(reason)) return {ErrorCode::invalid_config};
     if (impl_->schema == nullptr && impl_->message_callback)
-        return {ErrorCode::duplicate_field, 35};
+        return {ErrorCode::duplicate_field, tag::msg_type};
     if (impl_->schema != nullptr && impl_->schema->find_message(msg_type) == nullptr)
-        return {ErrorCode::schema_mismatch, 35};
+        return {ErrorCode::schema_mismatch, tag::msg_type};
     for (const auto& current : impl_->typed_handlers)
-        if (current.msg_type == msg_type) return {ErrorCode::duplicate_field, 35};
+        if (current.msg_type == msg_type) return {ErrorCode::duplicate_field, tag::msg_type};
     for (const auto& current : impl_->ignored_messages)
-        if (current.msg_type == msg_type) return {ErrorCode::duplicate_field, 35};
+        if (current.msg_type == msg_type) return {ErrorCode::duplicate_field, tag::msg_type};
     try {
         impl_->ignored_messages.push_back(IgnoredMessageType{std::string{msg_type}, std::string{reason}});
         return Status::success();
@@ -5188,8 +5188,8 @@ void EngineRuntime::request_stop() noexcept {
 Status EngineRuntime::request_logout(std::string_view session_name,
     std::string_view reason) noexcept {
     if (!impl_ || session_name.empty()) return Status{ErrorCode::invalid_value};
-    if (reason.size() > 200 || (!reason.empty() && !detail::is_valid_text(reason)))
-        return Status{ErrorCode::invalid_value, 58};
+    if (reason.size() > max_admin_reason_bytes || (!reason.empty() && !detail::is_valid_text(reason)))
+        return Status{ErrorCode::invalid_value, tag::text};
     const auto current_life = impl_->life->load(std::memory_order_acquire);
     if (current_life != EngineLife::running) return Status{ErrorCode::not_ready};
     bool found = false;
@@ -5248,8 +5248,8 @@ Status EngineRuntime::request_reconnect(std::string_view session_name) noexcept 
 Status EngineRuntime::request_sequence_reset(std::string_view session_name,
     std::string_view reason) noexcept {
     if (!impl_ || session_name.empty()) return Status{ErrorCode::invalid_value};
-    if (reason.empty() || reason.size() > 200 || !detail::is_valid_text(reason))
-        return Status{ErrorCode::invalid_value, 58};
+    if (reason.empty() || reason.size() > max_admin_reason_bytes || !detail::is_valid_text(reason))
+        return Status{ErrorCode::invalid_value, tag::text};
     bool found = false;
     bool allowed = false;
     std::shared_ptr<SessionControl> ctrl;
@@ -5272,7 +5272,7 @@ Status EngineRuntime::request_sequence_reset(std::string_view session_name,
         }
     }
     if (!found) return Status{ErrorCode::invalid_value};
-    if (!allowed) return Status{ErrorCode::sequence_reset_denied, 141};
+    if (!allowed) return Status{ErrorCode::sequence_reset_denied, tag::reset_seq_num_flag};
     const auto current_life = impl_->life->load(std::memory_order_acquire);
     try {
         if (current_life == EngineLife::configured) {
@@ -5306,9 +5306,10 @@ Status EngineRuntime::adjust_sequences(std::string_view session_name,
     std::uint64_t next_inbound, std::uint64_t next_outbound,
     std::string_view reason) noexcept {
     if (!impl_ || session_name.empty()) return Status{ErrorCode::invalid_value};
-    if (next_inbound == 0 || next_outbound == 0) return Status{ErrorCode::invalid_value, 34};
-    if (reason.empty() || reason.size() > 200 || !detail::is_valid_text(reason))
-        return Status{ErrorCode::invalid_value, 58};
+    if (next_inbound == 0 || next_outbound == 0)
+        return Status{ErrorCode::invalid_value, tag::msg_seq_num};
+    if (reason.empty() || reason.size() > max_admin_reason_bytes || !detail::is_valid_text(reason))
+        return Status{ErrorCode::invalid_value, tag::text};
     const auto current_life = impl_->life->load(std::memory_order_acquire);
     try {
         if (current_life == EngineLife::configured || current_life == EngineLife::stopped) {

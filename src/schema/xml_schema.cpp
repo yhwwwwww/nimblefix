@@ -55,7 +55,12 @@ struct XmlSchema::Storage {
 namespace {
 
 constexpr std::string_view codegen_version = "codegen-3";
-constexpr std::array<std::uint32_t, 11> managed_tags{{8, 9, 10, 34, 35, 43, 49, 52, 56, 122, 369}};
+constexpr std::array<std::uint32_t, 11> managed_tags{{
+    tag::begin_string, tag::body_length, tag::check_sum,
+    tag::msg_seq_num, tag::msg_type, tag::poss_dup_flag,
+    tag::sender_comp_id, tag::sending_time, tag::target_comp_id,
+    tag::orig_sending_time, tag::last_msg_seq_num_processed,
+}};
 constexpr std::size_t max_expanded_members_per_scope = 100'000;
 
 struct Location {

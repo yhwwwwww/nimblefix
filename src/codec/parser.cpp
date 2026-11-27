@@ -8,23 +8,23 @@
 namespace nimblefix {
 namespace {
 
-constexpr std::array<LengthDataPair, 16> fix44_pairs{{
-    {90, 91},   // SecureDataLen / SecureData
-    {93, 89},   // SignatureLength / Signature
-    {95, 96},   // RawDataLength / RawData
-    {212, 213}, // XmlDataLen / XmlData
-    {348, 349}, // EncodedIssuerLen / EncodedIssuer
-    {350, 351}, // EncodedSecurityDescLen / EncodedSecurityDesc
-    {352, 353}, // EncodedListExecInstLen / EncodedListExecInst
-    {354, 355}, // EncodedTextLen / EncodedText
-    {356, 357}, // EncodedSubjectLen / EncodedSubject
-    {358, 359}, // EncodedHeadlineLen / EncodedHeadline
-    {360, 361}, // EncodedAllocTextLen / EncodedAllocText
-    {362, 363}, // EncodedUnderlyingIssuerLen / EncodedUnderlyingIssuer
-    {364, 365}, // EncodedUnderlyingSecurityDescLen / EncodedUnderlyingSecurityDesc
-    {445, 446}, // EncodedListStatusTextLen / EncodedListStatusText
-    {618, 619}, // EncodedLegIssuerLen / EncodedLegIssuer
-    {621, 622}, // EncodedLegSecurityDescLen / EncodedLegSecurityDesc
+constexpr std::array<LengthDataPair, 16> standard_length_data_pairs{{
+    {tag::secure_data_len, tag::secure_data},
+    {tag::signature_length, tag::signature},
+    {tag::raw_data_length, tag::raw_data},
+    {tag::xml_data_len, tag::xml_data},
+    {tag::encoded_issuer_len, tag::encoded_issuer},
+    {tag::encoded_security_desc_len, tag::encoded_security_desc},
+    {tag::encoded_list_exec_inst_len, tag::encoded_list_exec_inst},
+    {tag::encoded_text_len, tag::encoded_text},
+    {tag::encoded_subject_len, tag::encoded_subject},
+    {tag::encoded_headline_len, tag::encoded_headline},
+    {tag::encoded_alloc_text_len, tag::encoded_alloc_text},
+    {tag::encoded_underlying_issuer_len, tag::encoded_underlying_issuer},
+    {tag::encoded_underlying_security_desc_len, tag::encoded_underlying_security_desc},
+    {tag::encoded_list_status_text_len, tag::encoded_list_status_text},
+    {tag::encoded_leg_issuer_len, tag::encoded_leg_issuer},
+    {tag::encoded_leg_security_desc_len, tag::encoded_leg_security_desc},
 }};
 
 constexpr bool is_decimal_digit(char c) noexcept { return c >= '0' && c <= '9'; }
@@ -37,7 +37,7 @@ constexpr std::size_t builtin_mask_words = 10; // covers tags 0..639
 
 constexpr std::array<std::uint64_t, builtin_mask_words> make_builtin_len_mask() noexcept {
     std::array<std::uint64_t, builtin_mask_words> m{};
-    for (const auto pair : fix44_pairs) {
+    for (const auto pair : standard_length_data_pairs) {
         m[pair.length_tag >> 6U] |= (std::uint64_t{1} << (pair.length_tag & 63U));
     }
     return m;
@@ -45,7 +45,7 @@ constexpr std::array<std::uint64_t, builtin_mask_words> make_builtin_len_mask() 
 
 constexpr std::array<std::uint64_t, builtin_mask_words> make_builtin_data_mask() noexcept {
     std::array<std::uint64_t, builtin_mask_words> m{};
-    for (const auto pair : fix44_pairs) {
+    for (const auto pair : standard_length_data_pairs) {
         m[pair.data_tag >> 6U] |= (std::uint64_t{1} << (pair.data_tag & 63U));
     }
     return m;
@@ -78,7 +78,7 @@ constexpr auto builtin_any_mask = make_builtin_any_mask();
 
 [[nodiscard]] constexpr bool is_builtin_pair(LengthDataPair p) noexcept {
     if (!is_builtin_len_tag(p.length_tag)) return false;
-    for (const auto b : fix44_pairs) {
+    for (const auto b : standard_length_data_pairs) {
         if (b.length_tag == p.length_tag && b.data_tag == p.data_tag) return true;
     }
     return false;
@@ -89,16 +89,16 @@ Status validate_hints(WireHints hints) noexcept {
     if (hints.length_data_pairs.size() > max_wire_hint_pairs)
         return {ErrorCode::capacity_exceeded, 0, max_wire_hint_pairs};
 
-    // Fast path: standard FIX schemas pass only built-in fix44_pairs (O(N) bitmask instead of O(N^2)).
+    // Fast path: standard FIX schemas pass only built-in standard_length_data_pairs (O(N) bitmask instead of O(N^2)).
     std::uint32_t seen_builtin = 0;
     bool all_builtin = true;
     for (std::size_t i = 0; i < hints.length_data_pairs.size(); ++i) {
         const auto pair = hints.length_data_pairs[i];
         int match = -1;
         if (is_builtin_len_tag(pair.length_tag)) {
-            for (std::size_t k = 0; k < fix44_pairs.size(); ++k) {
-                if (fix44_pairs[k].length_tag == pair.length_tag &&
-                    fix44_pairs[k].data_tag == pair.data_tag) {
+            for (std::size_t k = 0; k < standard_length_data_pairs.size(); ++k) {
+                if (standard_length_data_pairs[k].length_tag == pair.length_tag &&
+                    standard_length_data_pairs[k].data_tag == pair.data_tag) {
                     match = static_cast<int>(k);
                     break;
                 }
@@ -132,7 +132,7 @@ Status validate_hints(WireHints hints) noexcept {
             if (same_or_conflicting(pair, hints.length_data_pairs[j]))
                 return error(ErrorCode::invalid_value, pair.length_tag, i);
         }
-        for (const auto builtin : fix44_pairs) {
+        for (const auto builtin : standard_length_data_pairs) {
             if (pair.length_tag == builtin.length_tag && pair.data_tag == builtin.data_tag) continue;
             if (same_or_conflicting(pair, builtin))
                 return error(ErrorCode::invalid_value, pair.length_tag, i);
@@ -147,7 +147,7 @@ bool find_length_pair_fast(std::uint32_t length_tag,
                            std::uint64_t extra_len_bloom,
                            LengthDataPair& found) noexcept {
     if (is_builtin_len_tag(length_tag)) {
-        for (const auto pair : fix44_pairs) {
+        for (const auto pair : standard_length_data_pairs) {
             if (pair.length_tag == length_tag) {
                 found = pair;
                 return true;
@@ -246,18 +246,18 @@ Status read_begin_string(std::string_view input,
     for (std::size_t cursor = value_start; cursor < scan_end; ++cursor) {
         const char ch = input[cursor];
         if (ch == soh) {
-            if (cursor == value_start) return {ErrorCode::invalid_header, 8, value_start};
+            if (cursor == value_start) return {ErrorCode::invalid_header, tag::begin_string, value_start};
             const auto parsed = parse_fix_version(input.substr(value_start, cursor - value_start));
-            if (!parsed.ok()) return {ErrorCode::invalid_header, 8, value_start};
+            if (!parsed.ok()) return {ErrorCode::invalid_header, tag::begin_string, value_start};
             version = parsed.value();
             delimiter_at = cursor;
             return Status::success();
         }
         if (static_cast<unsigned char>(ch) < 0x20 || ch == 0x7f)
-            return {ErrorCode::invalid_header, 8, cursor};
+            return {ErrorCode::invalid_header, tag::begin_string, cursor};
     }
-    if (input.size() < max_frame_bytes) return {ErrorCode::need_more, 8, input.size()};
-    return {ErrorCode::too_large, 8, max_frame_bytes};
+    if (input.size() < max_frame_bytes) return {ErrorCode::need_more, tag::begin_string, input.size()};
+    return {ErrorCode::too_large, tag::begin_string, max_frame_bytes};
 }
 
 // A BodyLength is read until SOH. If the buffer ends on digits, the value may
@@ -273,16 +273,16 @@ Status read_body_length(std::string_view input,
         const char c = input[cursor];
         if (c == soh) break;
         if (!is_decimal_digit(c))
-            return {ErrorCode::invalid_body_length, 9, cursor};
+            return {ErrorCode::invalid_body_length, tag::body_length, cursor};
         const auto digit = static_cast<std::size_t>(c - '0');
         if (parsed > (std::numeric_limits<std::size_t>::max() - digit) / 10)
-            return {ErrorCode::invalid_body_length, 9, cursor};
+            return {ErrorCode::invalid_body_length, tag::body_length, cursor};
         parsed = parsed * 10 + digit;
     }
     if (cursor == input.size() || cursor == max_frame_bytes) {
         if (cursor == max_frame_bytes)
-            return {ErrorCode::too_large, 9, cursor};
-        return {ErrorCode::need_more, 9, input.size()};
+            return {ErrorCode::too_large, tag::body_length, cursor};
+        return {ErrorCode::need_more, tag::body_length, input.size()};
     }
     delimiter_at = cursor;
     body_length = parsed;
@@ -325,18 +325,17 @@ Status inspect_frame(std::string_view input,
         const Status hint_status = validate_hints(hints);
         if (!hint_status.ok()) return hint_status;
     }
-    constexpr std::size_t minimum_fix44_frame_bytes = 26;
-    if (limits.max_frame_bytes < minimum_fix44_frame_bytes)
+    if (limits.max_frame_bytes < min_fix_frame_bytes)
         return {ErrorCode::too_large, 0, 0};
 
-    std::uint32_t tag = 0;
+    std::uint32_t current_tag = 0;
     std::size_t equals_at = 0;
     FixVersion version = FixVersion::fix44;
-    if (input.empty()) return {ErrorCode::need_more, 8, 0};
+    if (input.empty()) return {ErrorCode::need_more, tag::begin_string, 0};
     if (input[0] != '8') return {ErrorCode::invalid_header, 0, 0};
-    if (input.size() == 1) return {ErrorCode::need_more, 8, 1};
+    if (input.size() == 1) return {ErrorCode::need_more, tag::begin_string, 1};
     if (input[1] != '=') return {ErrorCode::invalid_header, 0, 0};
-    tag = 8;
+    current_tag = tag::begin_string;
     equals_at = 1;
     Status status{};
     std::size_t begin_delimiter = 0;
@@ -344,11 +343,11 @@ Status inspect_frame(std::string_view input,
     if (!status.ok()) return status;
 
     const std::size_t body_length_tag_start = begin_delimiter + 1;
-    if (body_length_tag_start >= input.size()) return {ErrorCode::need_more, 9, input.size()};
+    if (body_length_tag_start >= input.size()) return {ErrorCode::need_more, tag::body_length, input.size()};
     if (input[body_length_tag_start] != '9') return {ErrorCode::invalid_header, 0, body_length_tag_start};
-    if (body_length_tag_start + 1 >= input.size()) return {ErrorCode::need_more, 9, input.size()};
+    if (body_length_tag_start + 1 >= input.size()) return {ErrorCode::need_more, tag::body_length, input.size()};
     if (input[body_length_tag_start + 1] != '=') return {ErrorCode::invalid_header, 0, body_length_tag_start};
-    tag = 9;
+    current_tag = tag::body_length;
     equals_at = body_length_tag_start + 1;
 
     std::size_t body_length_delimiter = 0;
@@ -361,32 +360,31 @@ Status inspect_frame(std::string_view input,
     if (!status.ok()) return status;
     const std::size_t body_start = body_length_delimiter + 1;
 
-    constexpr std::size_t checksum_field_bytes = 7; // 10=ddd<SOH>
     if (body_start > limits.max_frame_bytes ||
         checksum_field_bytes > limits.max_frame_bytes - body_start ||
         body_length > limits.max_frame_bytes - body_start - checksum_field_bytes)
-        return {ErrorCode::too_large, 9, body_length_tag_start};
+        return {ErrorCode::too_large, tag::body_length, body_length_tag_start};
     if (body_length > std::numeric_limits<std::size_t>::max() - body_start)
-        return {ErrorCode::invalid_body_length, 9, body_length_tag_start};
+        return {ErrorCode::invalid_body_length, tag::body_length, body_length_tag_start};
     const std::size_t checksum_offset = body_start + body_length;
     const std::size_t frame_size = checksum_offset + checksum_field_bytes;
 
     // The first body field must be MsgType (35), and its delimiter and value
     // must fit inside the declared body.
-    if (body_length < 5) return {ErrorCode::invalid_body_length, 9, body_length_tag_start};
-    status = read_body_tag(input, body_start, checksum_offset, tag, equals_at);
+    if (body_length < min_body_length_bytes) return {ErrorCode::invalid_body_length, tag::body_length, body_length_tag_start};
+    status = read_body_tag(input, body_start, checksum_offset, current_tag, equals_at);
     if (!status.ok()) return status;
-    if (tag != 35) return {ErrorCode::invalid_header, static_cast<int>(tag), body_start};
+    if (current_tag != tag::msg_type) return {ErrorCode::invalid_header, static_cast<int>(current_tag), body_start};
     std::size_t msg_type_delimiter = 0;
     status = scan_value_delimiter(input,
                                   equals_at + 1,
                                   checksum_offset,
-                                  35,
+                                  tag::msg_type,
                                   ErrorCode::invalid_body_length,
                                   msg_type_delimiter);
     if (!status.ok()) return status;
     if (msg_type_delimiter == equals_at + 1)
-        return {ErrorCode::invalid_header, 35, equals_at + 1};
+        return {ErrorCode::invalid_header, tag::msg_type, equals_at + 1};
 
     if (input.size() < checksum_offset)
         return {ErrorCode::need_more, 0, input.size()};
@@ -402,27 +400,27 @@ Status inspect_frame(std::string_view input,
         ? available_checksum : checksum_prefix.size();
     for (std::size_t i = 0; i < prefix_bytes; ++i) {
         if (input[checksum_offset + i] != checksum_prefix[i])
-            return {ErrorCode::invalid_checksum, 10, checksum_offset + i};
+            return {ErrorCode::invalid_checksum, tag::check_sum, checksum_offset + i};
     }
     if (available_checksum > 3) {
         const std::size_t digits_available = available_checksum - 3 < 3
             ? available_checksum - 3 : 3;
         for (std::size_t i = 0; i < digits_available; ++i) {
             if (!is_decimal_digit(input[checksum_offset + 3 + i]))
-                return {ErrorCode::invalid_checksum, 10, checksum_offset + 3 + i};
+                return {ErrorCode::invalid_checksum, tag::check_sum, checksum_offset + 3 + i};
         }
     }
     if (available_checksum >= checksum_field_bytes && input[checksum_offset + 6] != soh)
-        return {ErrorCode::invalid_checksum, 10, checksum_offset + 6};
-    if (input.size() < frame_size) return {ErrorCode::need_more, 10, input.size()};
+        return {ErrorCode::invalid_checksum, tag::check_sum, checksum_offset + 6};
+    if (input.size() < frame_size) return {ErrorCode::need_more, tag::check_sum, input.size()};
 
     const unsigned check_value = static_cast<unsigned>(input[checksum_offset + 3] - '0') * 100U +
                                  static_cast<unsigned>(input[checksum_offset + 4] - '0') * 10U +
                                  static_cast<unsigned>(input[checksum_offset + 5] - '0');
-    if (check_value > 255U) return {ErrorCode::invalid_checksum, 10, checksum_offset + 3};
+    if (check_value > 255U) return {ErrorCode::invalid_checksum, tag::check_sum, checksum_offset + 3};
     if (limits.verify_checksum) {
         const unsigned computed = detail::fast_checksum_bytes(input.data(), checksum_offset);
-        if (computed != check_value) return {ErrorCode::invalid_checksum, 10, checksum_offset + 3};
+        if (computed != check_value) return {ErrorCode::invalid_checksum, tag::check_sum, checksum_offset + 3};
     }
 
     output.bytes = input.substr(0, frame_size);
@@ -453,20 +451,20 @@ Status parse_flat_verified(FrameView frame,
     output.frame_ = {};
     output.fields_ = {};
     output.parsed_index_ = nullptr;
-    if (frame.bytes.size() < 26 || frame.consumed != frame.bytes.size())
+    if (frame.bytes.size() < min_fix_frame_bytes || frame.consumed != frame.bytes.size())
         return {ErrorCode::invalid_frame, 0, 0};
 
     const std::size_t checksum_offset = frame.checksum_offset != 0
         ? static_cast<std::size_t>(frame.checksum_offset)
-        : (frame.bytes.size() - 7);
+        : (frame.bytes.size() - checksum_field_bytes);
     const std::size_t first_header_delimiter = frame.bytes.find(soh);
     if (first_header_delimiter == std::string_view::npos || first_header_delimiter + 1 >= checksum_offset)
-        return {ErrorCode::invalid_header, 8, 0};
+        return {ErrorCode::invalid_header, tag::begin_string, 0};
     std::size_t body_start = frame.body_start_offset;
     if (body_start == 0) {
         const std::size_t second_header_delimiter = frame.bytes.find(soh, first_header_delimiter + 1);
         if (second_header_delimiter == std::string_view::npos || second_header_delimiter >= checksum_offset)
-            return {ErrorCode::invalid_header, 9, first_header_delimiter + 1};
+            return {ErrorCode::invalid_header, tag::body_length, first_header_delimiter + 1};
         body_start = second_header_delimiter + 1;
     }
     std::size_t cursor = 0;
@@ -504,17 +502,17 @@ Status parse_flat_verified(FrameView frame,
         if (!status.ok()) return status;
         const std::size_t value_start = equals + 1;
         if (cursor == checksum_offset) {
-            if (current_tag != 10) return {ErrorCode::invalid_checksum, 10, cursor};
+            if (current_tag != tag::check_sum) return {ErrorCode::invalid_checksum, tag::check_sum, cursor};
             status = add_field(current_tag, value_start, 3, cursor);
             if (!status.ok()) return status;
             cursor = frame_len;
             continue;
         }
-        if (cursor > checksum_offset || current_tag == 10)
-            return {ErrorCode::invalid_checksum, 10, cursor};
-        if ((current_tag == 8 && cursor != 0) ||
-            (current_tag == 9 && cursor != first_header_delimiter + 1) ||
-            (current_tag == 35 && cursor != body_start))
+        if (cursor > checksum_offset || current_tag == tag::check_sum)
+            return {ErrorCode::invalid_checksum, tag::check_sum, cursor};
+        if ((current_tag == tag::begin_string && cursor != 0) ||
+            (current_tag == tag::body_length && cursor != first_header_delimiter + 1) ||
+            (current_tag == tag::msg_type && cursor != body_start))
             return {ErrorCode::invalid_header, static_cast<int>(current_tag), cursor};
 
         if (is_builtin_len_or_data_tag(current_tag) || has_extra_hints) {

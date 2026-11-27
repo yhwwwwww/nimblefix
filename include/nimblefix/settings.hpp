@@ -43,9 +43,9 @@ struct AuthenticationConfig {
 // An overnight window belongs to the weekday on which it starts.
 struct SessionSchedule {
     bool enabled{};
-    std::uint8_t weekdays{0x7f};
+    std::uint8_t weekdays{all_weekdays_mask};
     std::uint32_t start_second_utc{};
-    std::uint32_t end_second_utc{86'400};
+    std::uint32_t end_second_utc{seconds_per_day};
     // Opt-in EOD/BOD sequence reset on schedule window transition.
     // Requires enabled == true and SessionSettings::allow_sequence_reset == true.
     bool reset_on_schedule_boundary{false};
@@ -53,8 +53,9 @@ struct SessionSchedule {
     [[nodiscard]] constexpr Status validate() const noexcept {
         if (!enabled)
             return Status::success();
-        if (weekdays == 0 || (weekdays & 0x80U) != 0 || start_second_utc >= 86'400 ||
-            end_second_utc > 86'400 || start_second_utc == end_second_utc)
+        if (weekdays == 0 || (weekdays & ~all_weekdays_mask) != 0 ||
+            start_second_utc >= seconds_per_day || end_second_utc > seconds_per_day ||
+            start_second_utc == end_second_utc)
             return {ErrorCode::invalid_config};
         return Status::success();
     }
@@ -111,7 +112,7 @@ struct FlowControlConfig {
 struct SessionSettings {
     FixVersion version{FixVersion::fix44};
     std::string qualifier;
-    std::string default_appl_ver_id{"9"};
+    std::string default_appl_ver_id{appl_ver_id::fix50sp2};
     LogonConfig logon;
     AuthenticationConfig authentication;
     SessionSchedule schedule;

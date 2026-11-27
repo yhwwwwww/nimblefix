@@ -1,6 +1,7 @@
 #pragma once
 
 #include "xml_parser.hpp"
+#include "../../include/nimblefix/protocol.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -20,26 +21,52 @@
 namespace nimblefix::codegen {
 
 inline const std::set<std::string_view>& admin_msg_types() {
-    static const std::set<std::string_view> s{"0", "1", "2", "3", "4", "5", "A"};
+    static const std::set<std::string_view> s{
+        msg_type::heartbeat, msg_type::test_request, msg_type::resend_request,
+        msg_type::reject, msg_type::sequence_reset, msg_type::logout, msg_type::logon,
+    };
     return s;
 }
 
 inline const std::set<std::uint32_t>& managed_tags() {
-    static const std::set<std::uint32_t> s{8, 9, 10, 34, 35, 43, 49, 52, 56, 122, 369};
+    static const std::set<std::uint32_t> s{
+        tag::begin_string, tag::body_length, tag::check_sum,
+        tag::msg_seq_num, tag::msg_type, tag::poss_dup_flag,
+        tag::sender_comp_id, tag::sending_time, tag::target_comp_id,
+        tag::orig_sending_time, tag::last_msg_seq_num_processed,
+    };
     return s;
 }
 
 inline const std::set<std::uint32_t>& session_or_frame_tags() {
-    static const std::set<std::uint32_t> s{8, 9, 10, 34, 35, 43, 49, 52, 56, 122, 369, 1128};
+    static const std::set<std::uint32_t> s{
+        tag::begin_string, tag::body_length, tag::check_sum,
+        tag::msg_seq_num, tag::msg_type, tag::poss_dup_flag,
+        tag::sender_comp_id, tag::sending_time, tag::target_comp_id,
+        tag::orig_sending_time, tag::last_msg_seq_num_processed,
+        tag::appl_ver_id,
+    };
     return s;
 }
 
-inline const std::set<std::pair<std::uint32_t, std::uint32_t>>& builtin_fix44_pairs() {
+inline const std::set<std::pair<std::uint32_t, std::uint32_t>>& standard_length_data_pairs() {
     static const std::set<std::pair<std::uint32_t, std::uint32_t>> s{
-        {90, 91}, {93, 89}, {95, 96}, {212, 213},
-        {348, 349}, {350, 351}, {352, 353}, {354, 355},
-        {356, 357}, {358, 359}, {360, 361}, {362, 363},
-        {364, 365}, {445, 446}, {618, 619}, {621, 622},
+        {tag::secure_data_len, tag::secure_data},
+        {tag::signature_length, tag::signature},
+        {tag::raw_data_length, tag::raw_data},
+        {tag::xml_data_len, tag::xml_data},
+        {tag::encoded_issuer_len, tag::encoded_issuer},
+        {tag::encoded_security_desc_len, tag::encoded_security_desc},
+        {tag::encoded_list_exec_inst_len, tag::encoded_list_exec_inst},
+        {tag::encoded_text_len, tag::encoded_text},
+        {tag::encoded_subject_len, tag::encoded_subject},
+        {tag::encoded_headline_len, tag::encoded_headline},
+        {tag::encoded_alloc_text_len, tag::encoded_alloc_text},
+        {tag::encoded_underlying_issuer_len, tag::encoded_underlying_issuer},
+        {tag::encoded_underlying_security_desc_len, tag::encoded_underlying_security_desc},
+        {tag::encoded_list_status_text_len, tag::encoded_list_status_text},
+        {tag::encoded_leg_issuer_len, tag::encoded_leg_issuer},
+        {tag::encoded_leg_security_desc_len, tag::encoded_leg_security_desc},
     };
     return s;
 }
@@ -112,7 +139,8 @@ inline const std::set<std::string_view>& nimblefix_root_symbols() {
         "Decimal", "ErrorCode", "Field", "FieldKind", "FieldList", "FieldWireType",
         "Fields", "FixedMessage", "FixedShapeMessage", "FixedString", "FlatMessagePolicy",
         "MessageBuilder", "MessageLimits", "Result", "StaticMessage", "Status",
-        "WireRank", "WireType", "detail", "soh",
+        "WireRank", "WireType", "appl_ver_id", "detail", "msg_type", "reject_reason",
+        "soh", "tag",
     };
     return s;
 }

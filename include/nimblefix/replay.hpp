@@ -80,9 +80,8 @@ struct ReplayStats {
 
 namespace detail {
 
-[[nodiscard]] inline bool replay_is_admin(std::string_view msg_type) noexcept {
-    return msg_type == "A" || msg_type == "0" || msg_type == "1" ||
-           msg_type == "2" || msg_type == "3" || msg_type == "4" || msg_type == "5";
+[[nodiscard]] inline bool replay_is_admin(std::string_view type) noexcept {
+    return msg_type::is_session_admin(type);
 }
 
 // Parses FIX UTC timestamp ("YYYYMMDD-HH:MM:SS[.mmm[uuu[nnn]]]") into nanoseconds since Unix epoch.
@@ -411,7 +410,7 @@ private:
                 parsed_ptr = &parsed;
 
                 if (opts.skip_admin) {
-                    const auto mt = parsed.find_unique(35);
+                    const auto mt = parsed.find_unique(tag::msg_type);
                     if (mt.ok() && detail::replay_is_admin(mt.value().value)) {
                         ++stats.skipped_records;
                         continue;
@@ -419,7 +418,7 @@ private:
                 }
 
                 if (opts.timing != ReplayTiming::full_speed) {
-                    const auto ts_field = parsed.find_unique(52);
+                    const auto ts_field = parsed.find_unique(tag::sending_time);
                     std::uint64_t ts_ns = 0;
                     if (ts_field.ok() && detail::parse_utc_timestamp_ns(ts_field.value().value, ts_ns)) {
                         if (has_prev_ts && ts_ns > prev_ts_ns) {

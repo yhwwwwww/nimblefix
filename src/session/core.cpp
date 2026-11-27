@@ -49,9 +49,8 @@ void SessionCore::write_error(Status status, CoreOutput& output) noexcept {
     output.push(CoreAction{CoreActionKind::close_transport});
 }
 
-bool SessionCore::is_admin(std::string_view msg_type) const noexcept {
-    return msg_type == "A" || msg_type == "0" || msg_type == "1" || msg_type == "2" ||
-        msg_type == "3" || msg_type == "4" || msg_type == "5";
+bool SessionCore::is_admin(std::string_view type) const noexcept {
+    return msg_type::is_session_admin(type);
 }
 
 void SessionCore::update_test_id() noexcept {
@@ -114,9 +113,10 @@ CoreOutput SessionCore::process(const CoreEvent& event) noexcept {
         // any message type other than Logon (35=A) before remote Logon is seen.
         if (state_ == SessionState::awaiting_logon && !remote_logon_seen_) {
             const bool initiator_pre_logon_allowed = role_ == SessionRole::initiator && local_logon_sent_ &&
-                (event.msg_type == "5" || event.msg_type == "2" || event.msg_type == "4");
-            if (event.msg_type != "A" && !initiator_pre_logon_allowed) {
-                write_error(Status{ErrorCode::protocol_error, 35}, output);
+                (event.msg_type == msg_type::logout || event.msg_type == msg_type::resend_request ||
+                 event.msg_type == msg_type::sequence_reset);
+            if (event.msg_type != msg_type::logon && !initiator_pre_logon_allowed) {
+                write_error(Status{ErrorCode::protocol_error, tag::msg_type}, output);
                 break;
             }
         }
@@ -125,7 +125,7 @@ CoreOutput SessionCore::process(const CoreEvent& event) noexcept {
                 output.inbound = InboundDisposition::duplicate;
                 last_rx_ms_ = event.now_ms;
             } else {
-                write_error(Status{ErrorCode::duplicate_sequence, 34}, output);
+                write_error(Status{ErrorCode::duplicate_sequence, tag::msg_seq_num}, output);
             }
             break;
         }
@@ -134,11 +134,11 @@ CoreOutput SessionCore::process(const CoreEvent& event) noexcept {
             last_rx_ms_ = event.now_ms;
             // Mutual-gap deadlock prevention: honor an authenticated peer's ResendRequest
             // even when its MsgSeqNum is higher than our expected inbound sequence.
-            if (event.msg_type == "2" && (remote_logon_seen_ ||
+            if (event.msg_type == msg_type::resend_request && (remote_logon_seen_ ||
                     (role_ == SessionRole::initiator && local_logon_sent_))) {
                 output.push(CoreAction{CoreActionKind::start_replay, event.first, event.last});
             }
-            if (event.msg_type == "A" && event.last != 0) {
+            if (event.msg_type == msg_type::logon && event.last != 0) {
                 // High-sequence Logon: request bounded gap [next_inbound_, logon_seq - 1].
                 if (!resend_pending_ || (resend_end_ != 0 && event.last > resend_end_)) {
                     resend_pending_ = true;
@@ -159,19 +159,21 @@ CoreOutput SessionCore::process(const CoreEvent& event) noexcept {
             break;
         }
         const bool replayed_business = remote_logon_seen_ && event.poss_dup && event.orig_sending_time_valid;
-        if (state_ == SessionState::awaiting_logon && event.msg_type != "A") {
+        if (state_ == SessionState::awaiting_logon && event.msg_type != msg_type::logon) {
             const bool allowed_post_remote_logon = remote_logon_seen_ &&
-                (event.msg_type == "0" || event.msg_type == "2" || event.msg_type == "4" ||
-                 event.msg_type == "5" || replayed_business);
+                (event.msg_type == msg_type::heartbeat || event.msg_type == msg_type::resend_request ||
+                 event.msg_type == msg_type::sequence_reset || event.msg_type == msg_type::logout ||
+                 replayed_business);
             const bool allowed_initiator_pre_logon = role_ == SessionRole::initiator && local_logon_sent_ &&
-                (event.msg_type == "2" || event.msg_type == "4" || event.msg_type == "5");
+                (event.msg_type == msg_type::resend_request || event.msg_type == msg_type::sequence_reset ||
+                 event.msg_type == msg_type::logout);
             if (!allowed_post_remote_logon && !allowed_initiator_pre_logon) {
-                write_error(Status{ErrorCode::protocol_error, 35}, output);
+                write_error(Status{ErrorCode::protocol_error, tag::msg_type}, output);
                 break;
             }
         }
-        if (state_ == SessionState::active && event.msg_type == "A" && !event.is_deferred_logon) {
-            write_error(Status{ErrorCode::protocol_error, 35}, output);
+        if (state_ == SessionState::active && event.msg_type == msg_type::logon && !event.is_deferred_logon) {
+            write_error(Status{ErrorCode::protocol_error, tag::msg_type}, output);
             break;
         }
         output.inbound = InboundDisposition::accept;
@@ -181,7 +183,7 @@ CoreOutput SessionCore::process(const CoreEvent& event) noexcept {
     case CoreEventKind::inbound_committed: {
         const auto next = event.next_sequence == 0 ? event.sequence + 1 : event.next_sequence;
         if (event.sequence != next_inbound_ || next <= event.sequence) {
-            write_error(Status{ErrorCode::protocol_error, 34}, output);
+            write_error(Status{ErrorCode::protocol_error, tag::msg_seq_num}, output);
             break;
         }
         next_inbound_ = next;
@@ -195,18 +197,18 @@ CoreOutput SessionCore::process(const CoreEvent& event) noexcept {
             }
         }
 
-        if (event.msg_type == "A" && event.is_deferred_logon) {
+        if (event.msg_type == msg_type::logon && event.is_deferred_logon) {
             if (state_ != SessionState::awaiting_logon || !remote_logon_seen_ || !local_logon_sent_) {
-                write_error(Status{ErrorCode::protocol_error, 35}, output);
+                write_error(Status{ErrorCode::protocol_error, tag::msg_type}, output);
             } else {
                 enter_active(output);
             }
             break;
         }
 
-        if (event.msg_type == "A") {
+        if (event.msg_type == msg_type::logon) {
             if (state_ != SessionState::awaiting_logon || remote_logon_seen_) {
-                write_error(Status{ErrorCode::protocol_error, 35}, output);
+                write_error(Status{ErrorCode::protocol_error, tag::msg_type}, output);
                 break;
             }
             remote_logon_seen_ = true;
@@ -218,7 +220,7 @@ CoreOutput SessionCore::process(const CoreEvent& event) noexcept {
             } else if (local_logon_sent_) {
                 enter_active(output);
             } else {
-                write_error(Status{ErrorCode::protocol_error, 35}, output);
+                write_error(Status{ErrorCode::protocol_error, tag::msg_type}, output);
             }
             break;
         }
@@ -226,26 +228,28 @@ CoreOutput SessionCore::process(const CoreEvent& event) noexcept {
         const bool replayed_business = remote_logon_seen_ && event.poss_dup && event.orig_sending_time_valid;
         if (state_ != SessionState::active) {
             const bool allowed_post_remote_logon = remote_logon_seen_ &&
-                (event.msg_type == "5" || event.msg_type == "2" || event.msg_type == "4" ||
-                 event.msg_type == "0" || replayed_business);
+                (event.msg_type == msg_type::logout || event.msg_type == msg_type::resend_request ||
+                 event.msg_type == msg_type::sequence_reset || event.msg_type == msg_type::heartbeat ||
+                 replayed_business);
             const bool allowed_initiator_pre_logon = role_ == SessionRole::initiator && local_logon_sent_ &&
-                (event.msg_type == "2" || event.msg_type == "4" || event.msg_type == "5");
+                (event.msg_type == msg_type::resend_request || event.msg_type == msg_type::sequence_reset ||
+                 event.msg_type == msg_type::logout);
             if (!allowed_post_remote_logon && !allowed_initiator_pre_logon) {
-                write_error(Status{ErrorCode::protocol_error, 35}, output);
+                write_error(Status{ErrorCode::protocol_error, tag::msg_type}, output);
                 break;
             }
         }
-        if (event.msg_type == "0") {
+        if (event.msg_type == msg_type::heartbeat) {
             if (test_pending_ && event.text.size() == test_id_size_ &&
                 event.text == std::string_view{test_id_buffer_.data(), test_id_size_}) {
                 test_pending_ = false;
                 test_deadline_ = 0;
             }
-        } else if (event.msg_type == "1") {
+        } else if (event.msg_type == msg_type::test_request) {
             output.push(CoreAction{CoreActionKind::send_heartbeat, 0, 0, event.text});
-        } else if (event.msg_type == "2") {
+        } else if (event.msg_type == msg_type::resend_request) {
             output.push(CoreAction{CoreActionKind::start_replay, event.first, event.last});
-        } else if (event.msg_type == "5") {
+        } else if (event.msg_type == msg_type::logout) {
             if (state_ == SessionState::logout_pending) {
                 if (local_logout_written_) {
                     state_ = SessionState::closed;
@@ -272,7 +276,7 @@ CoreOutput SessionCore::process(const CoreEvent& event) noexcept {
 
     case CoreEventKind::out_of_order_logon:
         if (!connected_ || state_ != SessionState::awaiting_logon || remote_logon_seen_ || event.first == 0) {
-            output.status = Status{ErrorCode::protocol_error, 35};
+            output.status = Status{ErrorCode::protocol_error, tag::msg_type};
             break;
         }
         remote_logon_seen_ = true;
@@ -287,26 +291,26 @@ CoreOutput SessionCore::process(const CoreEvent& event) noexcept {
 
     case CoreEventKind::outbound_appended:
         if (event.sequence != next_outbound_ || event.sequence == 0) {
-            write_error(Status{ErrorCode::protocol_error, 34}, output);
+            write_error(Status{ErrorCode::protocol_error, tag::msg_seq_num}, output);
             break;
         }
         if (next_outbound_ == std::numeric_limits<std::uint64_t>::max()) {
-            write_error(Status{ErrorCode::too_large, 34}, output);
+            write_error(Status{ErrorCode::too_large, tag::msg_seq_num}, output);
             break;
         }
         ++next_outbound_;
-        if (event.msg_type == "A") local_logon_sent_ = true;
-        if (event.msg_type == "0") heartbeat_pending_ = true;
+        if (event.msg_type == msg_type::logon) local_logon_sent_ = true;
+        if (event.msg_type == msg_type::heartbeat) heartbeat_pending_ = true;
         break;
 
     case CoreEventKind::outbound_written:
         last_tx_ms_ = event.now_ms;
-        if (event.msg_type == "0") heartbeat_pending_ = false;
-        if (event.msg_type == "1") {
+        if (event.msg_type == msg_type::heartbeat) heartbeat_pending_ = false;
+        if (event.msg_type == msg_type::test_request) {
             test_pending_ = true;
             test_deadline_ = saturating_add(event.now_ms, peer_heartbeat_ms_);
         }
-        if (event.msg_type == "5") {
+        if (event.msg_type == msg_type::logout) {
             local_logout_written_ = true;
             if (close_after_logout_) {
                 state_ = SessionState::closed;
@@ -317,17 +321,17 @@ CoreOutput SessionCore::process(const CoreEvent& event) noexcept {
         break;
 
     case CoreEventKind::outbound_skipped:
-        if (event.msg_type == "0") heartbeat_pending_ = false;
-        if (event.msg_type == "1") {
+        if (event.msg_type == msg_type::heartbeat) heartbeat_pending_ = false;
+        if (event.msg_type == msg_type::test_request) {
             test_pending_ = false;
             test_deadline_ = 0;
         }
-        if (event.msg_type == "2") {
+        if (event.msg_type == msg_type::resend_request) {
             resend_pending_ = false;
             resend_end_ = 0;
             resend_target_ = 0;
         }
-        if (event.msg_type == "5" && state_ == SessionState::logout_pending) {
+        if (event.msg_type == msg_type::logout && state_ == SessionState::logout_pending) {
             if (close_after_logout_) {
                 state_ = SessionState::closed;
                 should_close_ = true;
@@ -341,7 +345,7 @@ CoreOutput SessionCore::process(const CoreEvent& event) noexcept {
     case CoreEventKind::logon_reply_appended:
         if (role_ != SessionRole::acceptor || state_ != SessionState::awaiting_logon ||
             !remote_logon_seen_ || !logon_reply_pending_) {
-            output.status = Status{ErrorCode::protocol_error, 35};
+            output.status = Status{ErrorCode::protocol_error, tag::msg_type};
             break;
         }
         enter_active(output);
@@ -392,7 +396,7 @@ CoreOutput SessionCore::process(const CoreEvent& event) noexcept {
         // the new cursor in the same committed inbound record first.
         if (!connected_ || state_ == SessionState::closed || state_ == SessionState::failed ||
             event.next_sequence <= next_inbound_) {
-            write_error(Status{ErrorCode::protocol_error, 36}, output);
+            write_error(Status{ErrorCode::protocol_error, tag::new_seq_no}, output);
             break;
         }
         next_inbound_ = event.next_sequence;
@@ -413,7 +417,7 @@ CoreOutput SessionCore::process(const CoreEvent& event) noexcept {
 
     case CoreEventKind::reset_epoch:
         if (state_ != SessionState::disconnected && state_ != SessionState::awaiting_logon) {
-            output.status = Status{ErrorCode::sequence_reset_denied, 141};
+            output.status = Status{ErrorCode::sequence_reset_denied, tag::reset_seq_num_flag};
             break;
         }
         next_inbound_ = next_outbound_ = 1;
