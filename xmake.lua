@@ -262,14 +262,17 @@ if has_config("tests") then
         add_files("tests/initiator_probe.cpp")
         add_deps("nimblefix")
     target_end()
-    for _, name in ipairs({"parser", "message", "generated", "contract", "journal", "session", "session_boundary", "session_limits", "network", "settings", "journal_reader", "journal_rotation", "protocol_core", "protocol_session", "protocol_security", "queued_runtime", "sender_schema", "schema_codec", "dynamic_message", "engine_features", "producer_lane", "queued_shutdown", "sender_expiry", "io_backend", "backpressure", "p1_features"}) do
+    for _, name in ipairs({"parser", "message", "generated", "contract", "journal", "session", "session_boundary", "session_limits", "network", "settings", "journal_reader", "journal_rotation", "protocol_core", "protocol_session", "protocol_security", "queued_runtime", "sender_schema", "schema_codec", "dynamic_message", "engine_features", "producer_lane", "queued_shutdown", "sender_expiry", "io_backend", "backpressure", "p1_features", "doc_snippets"}) do
         target(name .. "-test")
             set_kind("binary")
             add_files("tests/" .. name .. "_test.cpp")
             add_deps("nimblefix")
-            if name == "generated" or name == "contract" or name == "sender_schema" or name == "io_backend" or name == "backpressure" or name == "p1_features" then
+            if name == "generated" or name == "contract" or name == "sender_schema" or name == "io_backend" or name == "backpressure" or name == "p1_features" or name == "doc_snippets" then
                 add_deps("fix44-sample")
                 add_includedirs(generated_dir)
+            end
+            if name == "doc_snippets" then
+                add_deps("nimblefix-core-tls")
             end
             add_tests("default", {run_timeout = 30000})
         target_end()

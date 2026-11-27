@@ -10,6 +10,7 @@
 4. [各模式下的线程模型](#4-各模式下的线程模型)
 5. [职责划分：应用程序 vs 库](#5-职责划分应用程序-vs-库)
 6. [TLS、主备切换、字典编译、旁路遥测与历史回放](#6-tls主备切换字典编译旁路遥测与历史回放)
+7. [多协议版本（FIXT 1.1）、异构网关与运行期运维控制](#7-多协议版本fixt-11异构网关与运行期运维控制)
 
 > 相关文档：[架构设计](architecture.zh-CN.md) · [支持边界矩阵](session-support.zh-CN.md) · [性能基准](benchmarks.zh-CN.md)
 
@@ -243,8 +244,8 @@ namespace fix = nimblefix::fix44;
 int main() {
     nf::EngineConfig cfg{};
     cfg.storage.directory = "./state/gateway";
-    cfg.io_backend = nf::IoBackendConfig::epoll(); // ::epoll() | ::busy_poll() | ::io_uring()
-    cfg.idle_strategy = nf::IdleStrategy::sleep;   // sleep | busy_spin | hybrid_backoff
+    cfg.io_backend = nf::IoBackendConfig::epoll();                // ::epoll() | ::busy_poll() | ::io_uring()
+    cfg.io_backend.idle_strategy = nf::IdleStrategy::sleep;       // sleep | busy_spin | hybrid_backoff
     // 使用 Queued 策略时可设置工作线程数：
     // cfg.queued.worker_threads = 4;
 
@@ -276,10 +277,9 @@ int main() {
     // 方式 1：阻塞在当前线程运行（其他线程可调用 engine.request_stop() 停止）
     return engine.run().ok() ? 0 : 1;
 
-    // 方式 2：嵌入你自己的外部事件循环（在同一线程调用 start / poll_once / stop）：
+    // 方式 2：嵌入你自己的外部事件循环（在同一线程调用 start / poll_once，退出时调用 engine.request_stop()）：
     // (void)engine.start();
-    // while (running) (void)engine.poll_once(/*max_wait_ms=*/1);
-    // (void)engine.stop();
+    // while (engine.running()) (void)engine.poll_once(/*max_wait_ms=*/1);
 }
 ```
 
@@ -300,7 +300,7 @@ int main() {
     cfg.cpu_cores = {2, 3, 4, 5}; // 将 Shard 0..3 绑定到核心 2..5
     cfg.base.storage.directory = "./state/exchange";
     cfg.base.io_backend = nf::IoBackendConfig::epoll();
-    cfg.base.idle_strategy = nf::IdleStrategy::hybrid_backoff;
+    cfg.base.io_backend.idle_strategy = nf::IdleStrategy::hybrid_backoff;
     cfg.base.telemetry_path = "/dev/shm/exchange.nfxt"; // 4 个分片共享同一份遥测文件
 
     auto engine = nf::ShardedEngine<fix::Schema, nf::Inline>::create(cfg).value();
@@ -393,7 +393,7 @@ NimbleFIX 所有运行时都遵循**单写者协议归属（Single-Writer Protoc
 ```
 
 - **库创建的线程数**：`0`（`engine.run()` 运行在调用线程）。
-- **回调执行线程**：`on<M>()`、`on_message()`、`on_session_event()`、`on_logon_auth()` 均在 `engine.run()` 线程按序执行。
+- **回调执行线程**：`on<M>()`、`on_message()`、`on_session_active()`、`on_error()`、`AuthenticationConfig::verify` 均在 `engine.run()` 线程按序执行。
 - **规则**：`Inline` 回调必须快且不阻塞；阻塞会拖慢同一 `Engine` 内全部会话的心跳与收包。
 
 ### 4.4 `Engine<Schema, Queued>`（单协议线程 + N 个工作线程）
@@ -410,7 +410,7 @@ NimbleFIX 所有运行时都遵循**单写者协议归属（Single-Writer Protoc
 - **回调执行规则**：
   - **同一会话内**：按 `MsgSeqNum` 严格串行（同时最多 1 个回调运行），前后回调即使落到不同工作线程也保证 happens-before 可见性。
   - **不同会话间**：在工作线程上**并行执行**，共享应用状态需自行同步。
-  - `on_logon_auth()` 仍在协议归属线程执行。
+  - `AuthenticationConfig::verify`（`SessionSettings::authentication`）仍在协议归属线程、打开会话日志之前执行。
 
 ### 4.5 `ShardedEngine<Schema, Policy>`（K 个绑核分片 Reactor）
 
@@ -438,9 +438,9 @@ NimbleFIX 所有运行时都遵循**单写者协议归属（Single-Writer Protoc
 | `DirectInitiator` | 非线程安全 | 仅由单个 I/O 线程调用 |
 | `DirectSendQueue` | 无锁 SPSC（最多 2 线程） | 1 个生产者（`try_push*`）+ 1 个消费者（`init.drain`） |
 | `Engine` / `ShardedEngine` 配置期方法（`on`、`add_*`） | 仅启动前调用 | 在 `run()` / `start()` 前完成配置 |
-| `Engine::request_stop()`、`snapshot()`、`receipt()` | 线程安全 | 运行期可由任意线程调用 |
-| `Sender<Schema>`（`handle.sender()`） | 线程安全（MPSC） | 可在任意多个生产者线程间共享 |
-| `ProducerLane<Schema>`（`handle.producer_lane()`） | 无锁 SPSC（单生产者） | 绑定首次调用线程；其他线程调用返回 `ErrorCode::wrong_thread` |
+| `Engine::request_stop()`、`snapshot()` 及运行期控制接口 | 线程安全 | 运行期可由任意线程调用 |
+| `Sender<Schema>`（`handle.sender()`） | 线程安全（MPSC） | 可在任意多个生产者线程间共享；通过 `Sender::receipt(id)` 查询回执 |
+| `ProducerLane<Schema>`（`handle.producer_lane()`） | 无锁 SPSC（单生产者） | 绑定首次调用线程（跨线程返回 `wrong_thread`）；通过 `ProducerLane::receipt(id)` 查询回执 |
 | `SessionContext`、`FlatMessageView`、`{Msg}View` | 仅当次回调有效 | 不可保存到回调之外；需要留存时请拷贝字段数据 |
 | `TelemetryReader` | 只读、跨进程安全 | `O_RDONLY`/`PROT_READ` 映射 `.nfxt`，零锁无干扰 |
 | `JournalTailer` | 只读、跨进程无锁 SPMC | `O_RDONLY`/`PROT_READ` 映射 `.nfxj` 分段（不抢 `LOCK_EX`），绝不阻塞交易写端；单实例单线程调用 |
@@ -456,7 +456,7 @@ NimbleFIX 所有运行时都遵循**单写者协议归属（Single-Writer Protoc
 | **事件循环与线程** | `Engine::run()` / `ShardedEngine::run()` 驱动 `IoBackend`、定时器、分片线程、绑核（`cpu_core`/`cpu_cores`）及 `Queued` 线程池。 | 使用 `DirectInitiator`（或手动 `Engine::start()` + `poll_once()`）时，持续调用 `poll_once()`、`drain()`、`reconnect_if_due()`、`poll_maintenance()`；自建/绑定业务线程；捕获 `SIGINT`/`SIGTERM` 并调用 `request_stop()`。 |
 | **回调安全与生命周期** | 单会话按 `MsgSeqNum` 严格有序投递；回调期间零拷贝视图有效。 | 回调外需要使用的 `std::string_view` 须自行拷贝；在 `Queued` / `ShardedEngine` 下同步跨会话共享状态；保证 `Inline` 回调不阻塞。 |
 | **崩溃恢复与幂等性** | 入站先落盘再投递、出站先落盘再发送；崩溃/`SIGKILL` 重启后重建序列号，重投未完成入站消息（`DeliveryInfo::is_recovery == true`）并复用已落盘的关联回复。 | 当 `info.is_recovery == true` 时保证外部副作用（下单路由、写库、风控扣减）**幂等**（跨崩溃为至少一次投递）。 |
-| **FIX 会话协议** | FIX 4.2/4.3/4.4/FIXT.1.1 的 Logon、Heartbeat、TestRequest、`MsgSeqNum`、`ResendRequest`、`GapFill`、业务 `Replay`（`43=Y`、`122=OrigSendingTime`）、`369`（`LastMsgSeqNumProcessed`）、Session Reject (`35=3`)、优雅 Logout。 | 业务订单状态机、`BusinessMessageReject (35=j)` 规则，以及 Acceptor 场景在 `on_logon_auth()` 中校验对端凭据。 |
+| **FIX 会话协议** | FIX 4.2/4.3/4.4/FIXT.1.1 的 Logon、Heartbeat、TestRequest、`MsgSeqNum`、`ResendRequest`、`GapFill`、业务 `Replay`（`43=Y`、`122=OrigSendingTime`）、`369`（`LastMsgSeqNumProcessed`）、Session Reject (`35=3`)、优雅 Logout。 | 业务订单状态机、`BusinessMessageReject (35=j)` 规则，以及 Acceptor 场景在 `SessionSettings::authentication`（固定凭据或 `AuthenticationConfig::verify` 回调）中校验对端凭据。 |
 | **TCP / TLS 与主备切换** | 非阻塞 TCP（`TCP_NODELAY`、`sendmsg` 批发送）、OpenSSL 3 TLS 1.2/1.3 + CA/SAN/mTLS + 重连复用 `TlsContext`、多节点主备切换（`ordered`/`round_robin`、指数退避、重试上限）。 | 提供数字 IPv4/IPv6 地址（如需域名解析由应用完成）、维护证书与私钥文件、配置了有限 `max_retries` 时处理 `FailoverController::exhausted()`。 |
 | **系统时钟与 `SendingTime`** | 格式化 UTC `52=SendingTime`（`ms`/`us`/`ns`）并校验对端时钟偏差（`max_sending_time_skew_ms`，默认 120 s）。 | 通过 NTP / PTP 保持宿主机时钟同步。 |
 | **存储与持久性边界** | 预分配分段 `MAP_SHARED` mmap 日志、SSE4.2 CRC32C、原子建段、段轮转、读租约保护、满容 fail-closed。 | 规划磁盘空间（`capacity_bytes`、`segment_bytes`）、监控磁盘健康，并知晓 `appended` 保障**同机进程崩溃恢复**（热路径不做逐消息 `fsync`）。 |
@@ -480,14 +480,15 @@ NimbleFIX 所有运行时都遵循**单写者协议归属（Single-Writer Protoc
   // tls.private_key_file = "/etc/certs/client.key";
 
   auto transport = nf::DirectTlsTransport::create(std::move(tls)).value();
+  transport.set_socket_options({.tcp_quickack = true}); // 或直接配置 DirectInitiatorConfig::socket_options
   auto init = nf::DirectInitiator<fix::Schema, TradingHandler, nf::DirectTlsTransport>::open(
       std::move(cfg), TradingHandler{}, std::move(transport)).value();
   ```
-- **`Engine` / `ShardedEngine`**：直接设置 `ListenerConfig::tls`（服务端）或 `InitiatorSessionConfig::tls`（客户端）。
+- **`Engine` / `ShardedEngine`**：直接设置 `ListenerConfig::tls`（服务端）或 `InitiatorConfig::tls`（客户端）。
 
 ### 6.2 多节点主备切换（`ConnectionStrategy`）
 
-`DirectInitiatorConfig` 与 `InitiatorSessionConfig` 配置方式完全一致：
+`DirectInitiatorConfig` 与 `InitiatorConfig` 配置方式完全一致：
 
 ```cpp
 cfg.endpoints = {
@@ -517,6 +518,10 @@ nimblefix-schema-gen --output generated/venue.hpp --namespace my::venue \
 # 3. 从真实 SOH / 竖线('|') / .nfxj 日志自动裁剪未用到的消息与可选字段：
 nimblefix-schema-gen --output generated/venue.hpp --namespace my::venue \
   --from-fix-log ./captures/session.log schemas/standard/FIX44.xml
+
+# 4. 联合编译 FIXT 1.1 会话层 + FIX 5.0 SP2 应用层字典：
+nimblefix-schema-gen --output generated/fix50sp2.hpp --namespace my::fix50sp2 \
+  schemas/standard/FIXT11.xml schemas/standard/FIX50SP2.xml
 ```
 
 ### 6.4 旁路 mmap 遥测（`TelemetryReader`）
@@ -528,14 +533,15 @@ nimblefix-schema-gen --output generated/venue.hpp --namespace my::venue \
 #include <nimblefix/telemetry.hpp>
 
 auto reader = nimblefix::TelemetryReader::open("/dev/shm/app.nfxt").value();
-for (const auto& s : reader.snapshot()) {
-    const auto parse_lat = s.stage_latency(nimblefix::TelemetryStage::parse);
-    std::cout << s.session_key << " rx=" << s.rx_messages
-              << " tx=" << s.tx_messages
+for (const auto& s : reader.read_all()) {
+    const auto& parse_lat = s.stages[static_cast<std::size_t>(nimblefix::TelemetryStage::parse)];
+    std::cout << s.name << " rx=" << s.inbound_frames
+              << " tx=" << s.outbound_frames
+              << " unexpected=" << s.unexpected_fields
               << " parse_p99_ns=" << parse_lat.p99_ns << '\n';
 }
 // 输出 Prometheus 文本格式：
-// std::cout << reader.to_prometheus();
+// std::cout << reader.format_prometheus();
 ```
 
 ### 6.5 跨进程实时追尾（`JournalTailer`）与历史回放（`JournalReplayer`）
@@ -546,7 +552,7 @@ for (const auto& s : reader.snapshot()) {
 #include <nimblefix/journal.hpp>
 
 nimblefix::JournalTailerConfig tcfg{};
-tcfg.path = "./state/buy/FIX.4.4_BUY_SELL.nfxj";
+tcfg.path = "./state/buy/sessions/<hex-key>/session.nfxj"; // string_view：open() 期间需保持底层字符串存活
 tcfg.start = nimblefix::JournalTailStart::beginning; // 或 ::end / ::from_id
 tcfg.verify_crc = true;
 
@@ -567,7 +573,7 @@ for (;;) {
 #include <nimblefix/replay.hpp>
 
 nimblefix::ReplayOptions opts{};
-opts.journal_path = "./state/buy/FIX.4.4_BUY_SELL.nfxj";
+opts.journal_path = "./state/buy/sessions/<hex-key>/session.nfxj";
 opts.direction = nimblefix::ReplayDirection::inbound;
 opts.timing = nimblefix::ReplayTiming::scaled;
 opts.speed_multiplier = 10.0; // 按原始 52=SendingTime 间隔 10 倍速回放
@@ -575,8 +581,8 @@ opts.skip_admin = true;
 
 // 方式 1：进程内回调接收（回测 / 复现）
 auto stats = nimblefix::JournalReplayer::replay(opts,
-    [](std::span<const char> raw_fix, const nimblefix::JournalRecordHeader& hdr) {
-        (void)raw_fix; (void)hdr;
+    [](const nimblefix::JournalRecord& rec, const nimblefix::FlatMessageView* parsed) noexcept {
+        (void)rec; (void)parsed;
         return nimblefix::Status::success();
     }).value();
 
@@ -594,6 +600,70 @@ nimblefix init --directory ./demo
 nimblefix validate --config ./demo/acceptor.toml --json
 nimblefix run --config ./demo/acceptor.toml
 nimblefix telemetry --path ./demo/telemetry.nfxt --prometheus
-nimblefix replay --path ./demo/state/.../session.nfxj --direction inbound --timing original --endpoint 127.0.0.1:9876
-nimblefix schema generate --xml schemas/standard/FIX44.xml --namespace venue --output venue.hpp
+nimblefix replay --path ./demo/state/.../session.nfxj --schema fix44 --direction inbound --timing original --endpoint 127.0.0.1:9876
+nimblefix schema generate --xml schemas/standard/FIXT11.xml --xml schemas/standard/FIX50SP2.xml --namespace venue --output venue_50sp2.hpp
 ```
+
+---
+
+## 7. 多协议版本（`FIXT 1.1`）、异构网关与运行期运维控制
+
+### 7.1 `FIXT.1.1` + `FIX 5.0 SP2` 强类型会话
+
+`FIX 5.0 SP2` 将 `FIXT.1.1` 会话传输层（`FIXT11.xml`）与应用层字典（`FIX50SP2.xml`）解耦。将两个 XML 同时传给 `nimblefix-schema-gen`（顺序不限）或直接链接内置 `fix50sp2` 目标，配置 `FixVersion::fixt11` 与 `default_appl_ver_id = nf::appl_ver_id::fix50sp2`，并可按需在单笔消息头写入 `1128=ApplVerID`：
+
+```cpp
+#include <nimblefix/direct_initiator.hpp>
+#include <nimblefix/fix50sp2.hpp>
+#include <nimblefix/protocol.hpp>
+
+namespace nf    = nimblefix;
+namespace fix50 = nimblefix::fix50sp2;
+
+nf::DirectInitiatorConfig cfg{};
+cfg.version = nf::FixVersion::fixt11;
+cfg.default_appl_ver_id = std::string{nf::appl_ver_id::fix50sp2}; // Logon 协商 1137=9
+cfg.host = "127.0.0.1";
+cfg.port = 9876;
+cfg.storage_directory = "./state/fix50";
+cfg.local_comp_id = "TRADER50";
+cfg.remote_comp_id = "VENUE50";
+
+// 单笔可选携带 1128=ApplVerID（与 DefaultApplVerID 一致时亦可省略）：
+auto write_50sp2_order = [](auto& w) {
+    w.header().appl_ver_id(nf::appl_ver_id::fix50sp2);
+    w.cl_ord_id("ORD50-1").symbol("NVDA").side('1')
+     .transact_time("20261127-09:30:00.000")
+     .order_qty(nf::Decimal{100, 0}).ord_type('1');
+};
+```
+
+### 7.2 同引擎异构多字典（`Engine<FlatSchema>`）与未知扩展 Tag 策略
+
+单个 `Engine<nf::FlatSchema, Policy>` 或 `ShardedEngine<nf::FlatSchema, Policy>` 可同时承载不同 FIX 版本与自定义柜台字典的会话，并按会话配置未登记扩展 Tag 的处理策略（`UnexpectedFieldPolicy`）：
+
+```cpp
+nf::AcceptorConfig leg42{.name = "client-42", .listener = "main", .local_comp_id = "GW", .remote_comp_id = "BUY42"};
+leg42.settings.version = nf::FixVersion::fix42;
+leg42.settings.use_schema<nf::fix42::Schema>();
+// reject（默认拒绝） | ignore_with_metric（放行并计入 TelemetrySessionSnapshot::unexpected_fields） | passthrough（静默放行）
+leg42.settings.unexpected_field_policy = nf::UnexpectedFieldPolicy::ignore_with_metric;
+
+nf::AcceptorConfig leg50{.name = "client-50", .listener = "main", .local_comp_id = "GW", .remote_comp_id = "BUY50"};
+leg50.settings.version = nf::FixVersion::fixt11;
+leg50.settings.default_appl_ver_id = std::string{nf::appl_ver_id::fix50sp2};
+leg50.settings.use_schema<nf::fix50sp2::Schema>();
+```
+
+### 7.3 运行期运维控制、日切自动重置与 `SocketOptions`
+
+- **在线/离线会话运维接口**（`Engine`、`ShardedEngine`、`SessionDriver`、`DirectInitiator` 均支持）：
+  ```cpp
+  (void)engine.request_logout("client-42", "maintenance"); // 发起优雅 35=5 Logout 握手
+  (void)engine.request_sequence_reset("client-42");        // 武装下次 Logon 一次性 141=Y（若在线则先优雅登出）
+  (void)engine.request_reconnect("venue-a");               // 立即断线重连
+  // 在会话断开状态下持久化调整下一期望入站/出站序列号（均须 >= 1）：
+  (void)engine.adjust_sequences("client-42", /*next_in=*/100, /*next_out=*/250);
+  ```
+- **交易时段边界自动重置序号（EOD/BOD）**：同时开启 `settings.allow_sequence_reset = true`、`settings.schedule.enabled = true` 与 `settings.schedule.reset_on_schedule_boundary = true`，即可在配置的 UTC 会话时间窗切换时自动推进 Epoch 并重置序列号。
+- **低延迟套接字调优（`SocketOptions`）**：在 `DirectInitiatorConfig`、`InitiatorConfig`、`ListenerConfig` 或 `DirectTlsTransport::set_socket_options(sock_opts)` 上配置数字源地址绑定（`local_bind_ip` / `local_bind_port`）、`tcp_quickack = true`（Linux 读后自动重武装）、`so_busy_poll_us` 以及 `send_buffer_bytes` / `recv_buffer_bytes`。

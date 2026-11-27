@@ -17,6 +17,8 @@ struct DirectTlsTransport::Impl {
     bool tls_handshaking{};
 };
 
+DirectTlsTransport::DirectTlsTransport() noexcept = default;
+
 DirectTlsTransport::DirectTlsTransport(std::unique_ptr<Impl> impl) noexcept
     : impl_(std::move(impl)) {}
 

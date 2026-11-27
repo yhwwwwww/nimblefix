@@ -142,9 +142,10 @@ target_link_libraries(my_trader PRIVATE NimbleFIX::nimblefix_core)
 # target_link_libraries(my_trader PRIVATE NimbleFIX::nimblefix_core_tls)
 # target_link_libraries(my_gateway PRIVATE NimbleFIX::nimblefix)
 
-# 可选：将自定义 FIX XML 字典编译为强类型 C++20 头文件：
+# 可选：将自定义或多文件联合 FIX XML 字典（如 FIXT11.xml + FIX50SP2.xml）编译为强类型 C++20 头文件：
 nimblefix_generate_schema(TARGET my_venue_schema NAMESPACE my::venue
     HEADER venue.hpp XML_FILES "${CMAKE_CURRENT_SOURCE_DIR}/venue.xml")
+# 若使用 FIXT 1.1 + FIX 5.0 SP2：XML_FILES ".../FIXT11.xml" ".../FIX50SP2.xml"
 target_link_libraries(my_trader PRIVATE my_venue_schema)
 ```
 

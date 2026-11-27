@@ -18,7 +18,7 @@ namespace nimblefix {
 // can reconnect over TLS without reconstructing the transport.
 class DirectTlsTransport {
 public:
-    DirectTlsTransport() noexcept = default;
+    DirectTlsTransport() noexcept;
     DirectTlsTransport(const DirectTlsTransport&) = delete;
     DirectTlsTransport& operator=(const DirectTlsTransport&) = delete;
     DirectTlsTransport(DirectTlsTransport&&) noexcept;

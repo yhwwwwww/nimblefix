@@ -10,6 +10,7 @@ This guide walks through building FIX clients, multi-session gateways, and multi
 4. [Threading Models](#4-threading-models)
 5. [Responsibilities: Application vs. Library](#5-responsibilities-application-vs-library)
 6. [TLS, Failover, Schema Codegen, Telemetry & Replay](#6-tls-failover-schema-codegen-telemetry--replay)
+7. [Multi-Version (FIXT 1.1), Heterogeneous Gateways & Operational Controls](#7-multi-version-fixt-11-heterogeneous-gateways--operational-controls)
 
 > Related docs: [Architecture](architecture.md) · [Support Matrix](session-support.md) · [Benchmarks](benchmarks.md)
 
@@ -245,8 +246,8 @@ namespace fix = nimblefix::fix44;
 int main() {
     nf::EngineConfig cfg{};
     cfg.storage.directory = "./state/gateway";
-    cfg.io_backend = nf::IoBackendConfig::epoll(); // ::epoll() | ::busy_poll() | ::io_uring()
-    cfg.idle_strategy = nf::IdleStrategy::sleep;   // sleep | busy_spin | hybrid_backoff
+    cfg.io_backend = nf::IoBackendConfig::epoll();                // ::epoll() | ::busy_poll() | ::io_uring()
+    cfg.io_backend.idle_strategy = nf::IdleStrategy::sleep;       // sleep | busy_spin | hybrid_backoff
     // For Queued policy:
     // cfg.queued.worker_threads = 4;
 
@@ -278,10 +279,9 @@ int main() {
     // Option 1: Blocking loop on current thread (stop from another thread with engine.request_stop()):
     return engine.run().ok() ? 0 : 1;
 
-    // Option 2: Drive inside your own event loop on the same thread:
+    // Option 2: Drive inside your own event loop on the same thread (signal shutdown via engine.request_stop()):
     // (void)engine.start();
-    // while (running) (void)engine.poll_once(/*max_wait_ms=*/1);
-    // (void)engine.stop();
+    // while (engine.running()) (void)engine.poll_once(/*max_wait_ms=*/1);
 }
 ```
 
@@ -302,7 +302,7 @@ int main() {
     cfg.cpu_cores = {2, 3, 4, 5}; // Pin Shards 0..3 to cores 2..5
     cfg.base.storage.directory = "./state/exchange";
     cfg.base.io_backend = nf::IoBackendConfig::epoll();
-    cfg.base.idle_strategy = nf::IdleStrategy::hybrid_backoff;
+    cfg.base.io_backend.idle_strategy = nf::IdleStrategy::hybrid_backoff;
     cfg.base.telemetry_path = "/dev/shm/exchange.nfxt"; // Shared telemetry across all 4 shards
 
     auto engine = nf::ShardedEngine<fix::Schema, nf::Inline>::create(cfg).value();
@@ -396,7 +396,7 @@ Every NimbleFIX runtime follows **Single-Writer Protocol Ownership**: for any FI
 ```
 
 - **Library-created threads**: `0` (`engine.run()` executes on the calling thread).
-- **Callback execution**: All callbacks (`on<M>()`, `on_message()`, `on_session_event()`, `on_logon_auth()`) run sequentially on the `engine.run()` thread.
+- **Callback execution**: All callbacks (`on<M>()`, `on_message()`, `on_session_active()`, `on_error()`, `AuthenticationConfig::verify`) run sequentially on the `engine.run()` thread.
 - **Rule**: Keep `Inline` callbacks non-blocking; sleeping or blocking on DB/RPC stalls heartbeats and other sessions on the same `Engine`.
 
 ### 4.4 `Engine<Schema, Queued>` (1 Protocol Thread + N Worker Threads)
@@ -413,7 +413,7 @@ Every NimbleFIX runtime follows **Single-Writer Protocol Ownership**: for any FI
 - **Callback execution**:
   - **Within one session**: Strictly serialized in exact `MsgSeqNum` order (at most 1 callback in flight per session), with happens-before memory visibility between consecutive callbacks even if dispatched to different workers.
   - **Across different sessions**: Run **in parallel** on worker threads; synchronize any shared application state.
-  - `on_logon_auth()` still runs on the protocol owner thread.
+  - `AuthenticationConfig::verify` (`SessionSettings::authentication`) still runs on the protocol owner thread before opening the session journal.
 
 ### 4.5 `ShardedEngine<Schema, Policy>` (K Pinned Reactor Shards)
 
@@ -441,9 +441,9 @@ Every NimbleFIX runtime follows **Single-Writer Protocol Ownership**: for any FI
 | `DirectInitiator` | Not thread-safe | Single I/O owner thread only |
 | `DirectSendQueue` | Lock-free SPSC (2 threads max) | 1 producer (`try_push*`) + 1 consumer (`init.drain`) |
 | `Engine` / `ShardedEngine` setup (`on`, `add_*`) | Pre-start only | Call before `run()` / `start()` |
-| `Engine::request_stop()`, `snapshot()`, `receipt()` | Thread-safe | Safe from any thread while running |
-| `Sender<Schema>` (`handle.sender()`) | Thread-safe (MPSC) | Safe to share across any number of producer threads |
-| `ProducerLane<Schema>` (`handle.producer_lane()`) | Lock-free SPSC (1 producer) | Bound to its first calling thread; other threads get `ErrorCode::wrong_thread` |
+| `Engine::request_stop()`, `snapshot()`, admin requests | Thread-safe | Safe from any thread while running |
+| `Sender<Schema>` (`handle.sender()`) | Thread-safe (MPSC) | Safe to share across producer threads; query `Sender::receipt(id)` |
+| `ProducerLane<Schema>` (`handle.producer_lane()`) | Lock-free SPSC (1 producer) | Bound to its first calling thread (`wrong_thread` otherwise); query `ProducerLane::receipt(id)` |
 | `SessionContext`, `FlatMessageView`, `{Msg}View` | Callback-scoped only | Do not retain past callback return; copy strings/fields if needed |
 | `TelemetryReader` | Read-only, out-of-process safe | Maps `.nfxt` `O_RDONLY`/`PROT_READ` with zero locks |
 | `JournalTailer` | Read-only, lock-free cross-process SPMC | Maps `.nfxj` segments `O_RDONLY`/`PROT_READ` (no `LOCK_EX`); never blocks the trading writer; 1 thread per tailer instance |
@@ -459,7 +459,7 @@ Every NimbleFIX runtime follows **Single-Writer Protocol Ownership**: for any FI
 | **Event Loop & Threads** | `Engine::run()` / `ShardedEngine::run()` drive `IoBackend`, timers, shard threads, CPU pinning (`cpu_core`/`cpu_cores`), and `Queued` worker pools. | For `DirectInitiator` (or manual `Engine::start()` + `poll_once()`): calling `poll_once()`, `drain()`, `reconnect_if_due()`, and `poll_maintenance()`; spawning/pinning your own threads; calling `request_stop()` on `SIGINT`/`SIGTERM`. |
 | **Callbacks & Data Lifetimes** | Per-session sequential delivery in `MsgSeqNum` order; zero-copy views valid for the callback duration. | Copying any `std::string_view` needed after callback return; synchronizing shared state across sessions (`Queued` / `ShardedEngine`); keeping `Inline` callbacks non-blocking. |
 | **Crash Recovery & Idempotency** | Persists inbound frames before delivery and outbound frames before socket write; rebuilds sequences after crash/`SIGKILL`, re-delivers unfinished inbound messages (`DeliveryInfo::is_recovery == true`), and reuses committed dependent replies. | Making external side effects (order routing, DB updates, risk updates) **idempotent** when `info.is_recovery == true` (at-least-once delivery across crashes). |
-| **FIX Session Protocol** | FIX 4.2/4.3/4.4/FIXT.1.1 Logon, Heartbeat, TestRequest, `MsgSeqNum`, `ResendRequest`, `GapFill`, business `Replay` (`43=Y`, `122=OrigSendingTime`), tag `369` (`LastMsgSeqNumProcessed`), Session Reject (`35=3`), graceful Logout. | Application order state machine, `BusinessMessageReject (35=j)` rules, and `on_logon_auth()` credential checks for Acceptors. |
+| **FIX Session Protocol** | FIX 4.2/4.3/4.4/FIXT.1.1 Logon, Heartbeat, TestRequest, `MsgSeqNum`, `ResendRequest`, `GapFill`, business `Replay` (`43=Y`, `122=OrigSendingTime`), tag `369` (`LastMsgSeqNumProcessed`), Session Reject (`35=3`), graceful Logout. | Application order state machine, `BusinessMessageReject (35=j)` rules, and `SessionSettings::authentication` (`credentials` or `AuthenticationConfig::verify` callback) on Acceptors. |
 | **TCP / TLS & Failover** | Nonblocking TCP (`TCP_NODELAY`, `sendmsg` batching), OpenSSL 3 TLS 1.2/1.3 + CA/SAN/mTLS + `TlsContext` reuse, deterministic multi-endpoint failover (`ordered` / `round_robin`, exponential backoff, retry limits). | Supplying numeric IPv4/IPv6 endpoints (performing DNS resolution if needed), maintaining valid certs/keys, and handling `FailoverController::exhausted()` if a finite `max_retries` limit is configured. |
 | **Wall Clock & `SendingTime`** | Formats UTC `52=SendingTime` (`ms`/`us`/`ns`) and validates peer clock skew (`max_sending_time_skew_ms`, default 120 s). | Keeping host OS clocks synchronized via NTP/PTP. |
 | **Storage & Durability** | Pre-allocated segmented `MAP_SHARED` mmap journal with SSE4.2 CRC32C, atomic segment creation, rotation, reader leases, and fail-closed capacity checks. | Provisioning disk capacity (`capacity_bytes`, `segment_bytes`), monitoring disk health, and understanding that `appended` covers **same-host process crashes** (no hot-path `fsync` for sudden host power loss). |
@@ -483,14 +483,15 @@ Every NimbleFIX runtime follows **Single-Writer Protocol Ownership**: for any FI
   // tls.private_key_file = "/etc/certs/client.key";
 
   auto transport = nf::DirectTlsTransport::create(std::move(tls)).value();
+  transport.set_socket_options({.tcp_quickack = true}); // or set cfg.socket_options on DirectInitiatorConfig
   auto init = nf::DirectInitiator<fix::Schema, TradingHandler, nf::DirectTlsTransport>::open(
       std::move(cfg), TradingHandler{}, std::move(transport)).value();
   ```
-- **`Engine` / `ShardedEngine`**: Configure `ListenerConfig::tls` (server) or `InitiatorSessionConfig::tls` (client).
+- **`Engine` / `ShardedEngine`**: Configure `ListenerConfig::tls` (server) or `InitiatorConfig::tls` (client).
 
 ### 6.2 Multi-Endpoint Failover (`ConnectionStrategy`)
 
-Configured identically on `DirectInitiatorConfig` and `InitiatorSessionConfig`:
+Configured identically on `DirectInitiatorConfig` and `InitiatorConfig`:
 
 ```cpp
 cfg.endpoints = {
@@ -520,6 +521,10 @@ nimblefix-schema-gen --output generated/venue.hpp --namespace my::venue \
 # 3. Log-driven pruning from recorded SOH / pipe ('|') / .nfxj logs:
 nimblefix-schema-gen --output generated/venue.hpp --namespace my::venue \
   --from-fix-log ./captures/session.log schemas/standard/FIX44.xml
+
+# 4. Combined FIXT 1.1 session transport + FIX 5.0 SP2 application dictionary:
+nimblefix-schema-gen --output generated/fix50sp2.hpp --namespace my::fix50sp2 \
+  schemas/standard/FIXT11.xml schemas/standard/FIX50SP2.xml
 ```
 
 ### 6.4 Out-of-Band mmap Telemetry (`TelemetryReader`)
@@ -531,14 +536,15 @@ Set `telemetry_path = "/dev/shm/app.nfxt"` and `telemetry_stage_probes = true` o
 #include <nimblefix/telemetry.hpp>
 
 auto reader = nimblefix::TelemetryReader::open("/dev/shm/app.nfxt").value();
-for (const auto& s : reader.snapshot()) {
-    const auto parse_lat = s.stage_latency(nimblefix::TelemetryStage::parse);
-    std::cout << s.session_key << " rx=" << s.rx_messages
-              << " tx=" << s.tx_messages
+for (const auto& s : reader.read_all()) {
+    const auto& parse_lat = s.stages[static_cast<std::size_t>(nimblefix::TelemetryStage::parse)];
+    std::cout << s.name << " rx=" << s.inbound_frames
+              << " tx=" << s.outbound_frames
+              << " unexpected=" << s.unexpected_fields
               << " parse_p99_ns=" << parse_lat.p99_ns << '\n';
 }
 // Prometheus text format export:
-// std::cout << reader.to_prometheus();
+// std::cout << reader.format_prometheus();
 ```
 
 ### 6.5 Cross-Process Live Tailing (`JournalTailer`) & Historical Replay (`JournalReplayer`)
@@ -549,7 +555,7 @@ for (const auto& s : reader.snapshot()) {
 #include <nimblefix/journal.hpp>
 
 nimblefix::JournalTailerConfig tcfg{};
-tcfg.path = "./state/buy/FIX.4.4_BUY_SELL.nfxj";
+tcfg.path = "./state/buy/sessions/<hex-key>/session.nfxj"; // string_view: keep backing string alive during open()
 tcfg.start = nimblefix::JournalTailStart::beginning; // or ::end / ::from_id
 tcfg.verify_crc = true;
 
@@ -570,7 +576,7 @@ For deterministic filtered playback (live or offline), use `JournalReplayer` (se
 #include <nimblefix/replay.hpp>
 
 nimblefix::ReplayOptions opts{};
-opts.journal_path = "./state/buy/FIX.4.4_BUY_SELL.nfxj";
+opts.journal_path = "./state/buy/sessions/<hex-key>/session.nfxj";
 opts.direction = nimblefix::ReplayDirection::inbound;
 opts.timing = nimblefix::ReplayTiming::scaled;
 opts.speed_multiplier = 10.0; // 10x faster than original 52=SendingTime spacing
@@ -578,8 +584,8 @@ opts.skip_admin = true;
 
 // Option 1: In-process callback sink (backtesting / reproduction)
 auto stats = nimblefix::JournalReplayer::replay(opts,
-    [](std::span<const char> raw_fix, const nimblefix::JournalRecordHeader& hdr) {
-        (void)raw_fix; (void)hdr;
+    [](const nimblefix::JournalRecord& rec, const nimblefix::FlatMessageView* parsed) noexcept {
+        (void)rec; (void)parsed;
         return nimblefix::Status::success();
     }).value();
 
@@ -597,6 +603,70 @@ nimblefix init --directory ./demo
 nimblefix validate --config ./demo/acceptor.toml --json
 nimblefix run --config ./demo/acceptor.toml
 nimblefix telemetry --path ./demo/telemetry.nfxt --prometheus
-nimblefix replay --path ./demo/state/.../session.nfxj --direction inbound --timing original --endpoint 127.0.0.1:9876
-nimblefix schema generate --xml schemas/standard/FIX44.xml --namespace venue --output venue.hpp
+nimblefix replay --path ./demo/state/.../session.nfxj --schema fix44 --direction inbound --timing original --endpoint 127.0.0.1:9876
+nimblefix schema generate --xml schemas/standard/FIXT11.xml --xml schemas/standard/FIX50SP2.xml --namespace venue --output venue_50sp2.hpp
 ```
+
+---
+
+## 7. Multi-Version (`FIXT 1.1`), Heterogeneous Gateways & Operational Controls
+
+### 7.1 `FIXT.1.1` + `FIX 5.0 SP2` Typed Sessions
+
+`FIX 5.0 SP2` separates the `FIXT.1.1` session transport (`FIXT11.xml`) from the application dictionary (`FIX50SP2.xml`). Pass both XML files to `nimblefix-schema-gen` (in either order) or link the built-in `fix50sp2` target, set `FixVersion::fixt11` + `default_appl_ver_id = nf::appl_ver_id::fix50sp2`, and optionally emit per-message `1128=ApplVerID` via `w.header().appl_ver_id(...)`:
+
+```cpp
+#include <nimblefix/direct_initiator.hpp>
+#include <nimblefix/fix50sp2.hpp>
+#include <nimblefix/protocol.hpp>
+
+namespace nf    = nimblefix;
+namespace fix50 = nimblefix::fix50sp2;
+
+nf::DirectInitiatorConfig cfg{};
+cfg.version = nf::FixVersion::fixt11;
+cfg.default_appl_ver_id = std::string{nf::appl_ver_id::fix50sp2}; // 1137=9 negotiated on Logon
+cfg.host = "127.0.0.1";
+cfg.port = 9876;
+cfg.storage_directory = "./state/fix50";
+cfg.local_comp_id = "TRADER50";
+cfg.remote_comp_id = "VENUE50";
+
+// Per-message 1128=ApplVerID (optional when matching DefaultApplVerID):
+auto write_50sp2_order = [](auto& w) {
+    w.header().appl_ver_id(nf::appl_ver_id::fix50sp2);
+    w.cl_ord_id("ORD50-1").symbol("NVDA").side('1')
+     .transact_time("20261127-09:30:00.000")
+     .order_qty(nf::Decimal{100, 0}).ord_type('1');
+};
+```
+
+### 7.2 Heterogeneous Multi-Schema `Engine<FlatSchema>` & `UnexpectedFieldPolicy`
+
+A single `Engine<nf::FlatSchema, Policy>` or `ShardedEngine<nf::FlatSchema, Policy>` can host sessions running different FIX versions and custom venue schemas side by side, while controlling how undocumented vendor extension tags are handled per session:
+
+```cpp
+nf::AcceptorConfig leg42{.name = "client-42", .listener = "main", .local_comp_id = "GW", .remote_comp_id = "BUY42"};
+leg42.settings.version = nf::FixVersion::fix42;
+leg42.settings.use_schema<nf::fix42::Schema>();
+// reject (default) | ignore_with_metric (counts in TelemetrySessionSnapshot::unexpected_fields) | passthrough
+leg42.settings.unexpected_field_policy = nf::UnexpectedFieldPolicy::ignore_with_metric;
+
+nf::AcceptorConfig leg50{.name = "client-50", .listener = "main", .local_comp_id = "GW", .remote_comp_id = "BUY50"};
+leg50.settings.version = nf::FixVersion::fixt11;
+leg50.settings.default_appl_ver_id = std::string{nf::appl_ver_id::fix50sp2};
+leg50.settings.use_schema<nf::fix50sp2::Schema>();
+```
+
+### 7.3 Runtime Admin Controls, Schedule Boundary Resets & `SocketOptions`
+
+- **Online/Offline Session Controls** (`Engine`, `ShardedEngine`, `SessionDriver`, `DirectInitiator`):
+  ```cpp
+  (void)engine.request_logout("client-42", "maintenance"); // Graceful 35=5 Logout handshake
+  (void)engine.request_sequence_reset("client-42");        // Arm one-shot 141=Y (and Logout if active)
+  (void)engine.request_reconnect("venue-a");               // Immediate disconnect + reconnect
+  // When disconnected, adjust persisted next_inbound_seq / next_outbound_seq (both >= 1):
+  (void)engine.adjust_sequences("client-42", /*next_in=*/100, /*next_out=*/250);
+  ```
+- **EOD/BOD Schedule Sequence Reset**: Set `settings.allow_sequence_reset = true`, `settings.schedule.enabled = true`, and `settings.schedule.reset_on_schedule_boundary = true` to automatically advance a sequence epoch at the configured UTC session window boundary.
+- **Low-Latency `SocketOptions`**: Set `socket_options` on `DirectInitiatorConfig`, `InitiatorConfig`, `ListenerConfig`, or `DirectTlsTransport::set_socket_options(sock_opts)` to configure numeric `local_bind_ip` / `local_bind_port`, `tcp_quickack = true` (re-armed after reads on Linux), `so_busy_poll_us`, and `send_buffer_bytes` / `recv_buffer_bytes`.

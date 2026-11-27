@@ -45,7 +45,7 @@ The primary outbound API streams typed FIX fields directly into the destination 
 
 | API | Mutability / Control Flow | Allocation | Reuse | Primary Use |
 | :--- | :--- | :--- | :--- | :--- |
-| **Streaming (Default)**: `send_stream<Msg>(fn)` / `encode_fix44_stream<Msg>` | Native `if`/`for`, `std::optional<T>`, nested groups, `w.header()` | 0 heap alloc | Stateless lambda | Fastest & most flexible production API (~110–150 ns) |
+| **Streaming (Default)**: `send_stream<Msg>(fn)` / `encode_stream<Msg>` | Native `if`/`for`, `std::optional<T>`, nested groups, `w.header()` | 0 heap alloc | Stateless lambda | Fastest & most flexible production API (~110–150 ns) |
 | **Fixed Template**: `NewOrderSingle::Fixed<ByteCap, fix::field::...>` | Fixed declared field set, presence bitmap | 0 heap alloc (stack buffer) | `reset()` in-place reuse | Reusable pre-populated message templates |
 | **Untyped / Runtime**: `nf::message<"D">()` / `DynamicMessage` | Arbitrary runtime `(tag, value)` pairs | SSO / heap | Mutable | Low-level admin frames & dynamic venue tags |
 

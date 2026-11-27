@@ -45,7 +45,7 @@ NimbleFIX 采用三层模块化 C++20 架构，围绕确定性的亚微秒级热
 
 | API | 可变性与控制流 | 内存分配 | 复用方式 | 主要用途 |
 | :--- | :--- | :--- | :--- | :--- |
-| **流式编码（默认）**：`send_stream<Msg>(fn)` / `encode_fix44_stream<Msg>` | 原生 `if`/`for`、`std::optional<T>`、嵌套重复组、`w.header()` | 0 堆分配 | 无状态 lambda | 最快、最灵活的生产主力接口（~110–150 ns） |
+| **流式编码（默认）**：`send_stream<Msg>(fn)` / `encode_stream<Msg>` | 原生 `if`/`for`、`std::optional<T>`、嵌套重复组、`w.header()` | 0 堆分配 | 无状态 lambda | 最快、最灵活的生产主力接口（~110–150 ns） |
 | **固定模板**：`NewOrderSingle::Fixed<ByteCap, fix::field::...>` | 固定字段集合、存在位图 | 0 堆分配（栈缓冲） | `reset()` 原地复用 | 可反复原地改写的预填充模板消息 |
 | **无字典 / 动态**：`nf::message<"D">()` / `DynamicMessage` | 任意运行期 `(tag, value)` 对 | SSO / 堆 | 可变 | 底层管理帧与运行期自定义 Tag |
 

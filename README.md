@@ -142,9 +142,10 @@ target_link_libraries(my_trader PRIVATE NimbleFIX::nimblefix_core)
 # target_link_libraries(my_trader PRIVATE NimbleFIX::nimblefix_core_tls)
 # target_link_libraries(my_gateway PRIVATE NimbleFIX::nimblefix)
 
-# Optional: compile a custom FIX XML dictionary into a typed C++20 header:
+# Optional: compile a custom or multi-file FIX XML dictionary (e.g. FIXT11.xml + FIX50SP2.xml):
 nimblefix_generate_schema(TARGET my_venue_schema NAMESPACE my::venue
     HEADER venue.hpp XML_FILES "${CMAKE_CURRENT_SOURCE_DIR}/venue.xml")
+# For FIXT 1.1 + FIX 5.0 SP2: XML_FILES ".../FIXT11.xml" ".../FIX50SP2.xml"
 target_link_libraries(my_trader PRIVATE my_venue_schema)
 ```
 
