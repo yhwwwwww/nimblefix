@@ -65,7 +65,7 @@ int main(int argc, char** argv) {
         tu::TempDir tmp("nimblefix-cli-");
         const auto root = tmp.path;
         (void)exec_cli(binary, root, {"--help"});
-        CHECK(exec_cli(binary, root, {"--version"}).stdout_text.find("0.3.0") != std::string::npos);
+        CHECK(exec_cli(binary, root, {"--version"}).stdout_text.find("0.4.0") != std::string::npos);
 
         const auto doctor = exec_cli(binary, root, {"doctor", "--json"}).stdout_text;
         CHECK(tu::json_string_field(doctor, "confirmation") == "appended");

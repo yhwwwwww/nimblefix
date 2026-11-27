@@ -19,17 +19,23 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           submodules: true
+      - name: Install optional system libraries and CMake
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libssl-dev libxml2-dev liburing-dev pkg-config cmake ninja-build
       - uses: xmake-io/github-action-setup-xmake@v1
         with:
           xmake-version: '2.9.8'
       - name: Configure
-        run: xmake f -y -m release --toolchain=${{ matrix.toolchain }} --benchmarks=y
+        run: xmake f -y -m release --toolchain=${{ matrix.toolchain }} --benchmarks=y --tls=y --xml=y --io_uring=y --quickfix=y
       - name: Build and test
         run: xmake check
       - name: Installed consumers
         run: |
-          ./build/linux/x86_64/release/install-test --root . --cxx "$CXX" --examples \
-            --endpoint-test build/linux/x86_64/release/endpoint-test
+          ./build/linux/x86_64/release/install-test --root . --cxx "$CXX" --examples --features \
+            --endpoint-test build/linux/x86_64/release/endpoint-test \
+            --xmake-schema-test build/linux/x86_64/release/xmake_schema-test
           ./build/linux/x86_64/release/install-test --root . --cxx "$CXX" --core-only
       - name: Benchmark smoke
         run: |
@@ -39,6 +45,13 @@ jobs:
           ./build/linux/x86_64/release/acceptor-bench 50 200 2 epoll
           ./build/linux/x86_64/release/initiator-burst-bench --smoke
           ./build/linux/x86_64/release/quickfix-parity-bench 50 200 schemas/standard/FIX44.xml
+      - name: CMake build and CTest
+        run: |
+          cmake -S . -B build-ci -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_COMPILER="$CXX" \
+            -DNIMBLEFIX_ENABLE_TLS=ON -DNIMBLEFIX_ENABLE_XML=ON -DNIMBLEFIX_ENABLE_IO_URING=ON
+          cmake --build build-ci
+          ctest --test-dir build-ci --output-on-failure -j4
 
   sanitizer:
     runs-on: ubuntu-24.04
@@ -53,6 +66,24 @@ jobs:
       - run: xmake check
       - name: Parser fuzz smoke
         run: xmake run parser-fuzz -runs=10000 -max_len=1024
+      - name: Schema fuzz smoke
+        run: xmake run schema-fuzz -runs=5000 -max_len=1024
+
+  tsan:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          submodules: true
+      - uses: xmake-io/github-action-setup-xmake@v1
+        with:
+          xmake-version: '2.9.8'
+      - name: Install optional system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libssl-dev libxml2-dev liburing-dev pkg-config
+      - run: xmake f -y -m debug --toolchain=clang --thread_sanitize=y --tls=y --xml=y --io_uring=y --standard_schemas=n
+      - run: xmake check
 
   rhel:
     name: rhel (${{ matrix.label }})

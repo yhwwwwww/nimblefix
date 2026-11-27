@@ -1,5 +1,5 @@
 set_project("nimblefix")
-set_version("0.3.0")
+set_version("0.4.0")
 set_xmakever("2.9.8")
 set_languages("cxx20")
 add_rules("mode.debug", "mode.release")
@@ -616,7 +616,9 @@ task("check")
         os.vrunv(project.target("compile_fail-test"):targetfile(), {"--generator", gen, "--cxx", cxx, "--root", root})
         os.vrunv(os.programfile(), {"run", "codec-demo", "--self-test"})
         os.vrunv(os.programfile(), {"run", "hello-fix", "--self-test", "--restart"})
-        os.vrunv(os.programfile(), {"run", "hello-fix", "--self-test", "--typed", "--restart"})
+        if config.get("standard_schemas") then
+            os.vrunv(os.programfile(), {"run", "hello-fix", "--self-test", "--typed", "--restart"})
+        end
         local probe = project.target("initiator-probe"):targetfile()
         local reconnect = project.target("initiator_reconnect-test"):targetfile()
         os.vrunv(reconnect, {"--binary", probe, "--mode", "inbound"})

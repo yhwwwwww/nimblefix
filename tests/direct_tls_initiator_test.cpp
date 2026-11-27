@@ -98,12 +98,11 @@ struct TlsFixPeer {
 
     void finish() {
         stop.store(true, std::memory_order_release);
+        if (worker.joinable()) worker.join();
         if (listen_fd >= 0) {
-            ::shutdown(listen_fd, SHUT_RDWR);
             ::close(listen_fd);
             listen_fd = -1;
         }
-        if (worker.joinable()) worker.join();
     }
 
     void run() {

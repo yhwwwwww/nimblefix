@@ -40,7 +40,7 @@
 extern char **environ;
 namespace nf = nimblefix;
 namespace {
-constexpr std::string_view version = "0.3.0";
+constexpr std::string_view version = "0.4.0";
 static_assert(std::atomic<int>::is_always_lock_free);
 std::atomic<int> interrupted{};
 extern "C" void signal_handler(int signal) {
@@ -1033,7 +1033,7 @@ int doctor(const Arguments &args) {
                   << ",\"xml\":" << (xml ? "true" : "false") << ",\"fix44\":" << (std_schemas ? "true" : "false")
                   << ",\"schemas\":" << (std_schemas ? "[\"fix42\",\"fix43\",\"fix44\",\"fix50sp2\"]" : "[]")
                   << ",\"benchmarks\":" << (bench ? "true" : "false")
-                  << ",\"journal_format\":2,\"configuration_version\":1,\"source_api\":\"0.3.x\""
+                  << ",\"journal_format\":2,\"configuration_version\":1,\"source_api\":\"0.4.x\""
                   << ",\"confirmation\":\"appended\",\"dispatch\":[\"inline\",\"queued\"],\"io_backends\":[\"epoll\",\"busy_poll\""
                   << (nf::io_uring_available() ? ",\"io_uring\"" : "")
                   << "],\"platform\":\"Linux\"}\n";
