@@ -104,6 +104,7 @@ int main(int argc, char** argv) {
             "role = \"initiator\"\n"
             "sender_comp_id = \"BUY\"\n"
             "target_comp_id = \"SELL\"\n"
+            "allow_sequence_reset = true\n"
             "endpoints = [\"127.0.0.1:19876\", \"127.0.0.1:19877\"]\n"
             "[sessions.connection_strategy]\n"
             "policy = \"ordered\"\n"
@@ -112,10 +113,33 @@ int main(int argc, char** argv) {
             "backoff_multiplier = 2\n"
             "max_retries = 10\n"
             "reset_to_primary_on_success = true\n"
-            "immediate_failover = true\n");
+            "immediate_failover = true\n"
+            "[sessions.socket_options]\n"
+            "local_bind_ip = \"127.0.0.1\"\n"
+            "local_bind_port = 0\n"
+            "tcp_quickack = true\n"
+            "so_busy_poll_us = 50\n"
+            "send_buffer_bytes = 65536\n"
+            "recv_buffer_bytes = 65536\n"
+            "[sessions.schedule]\n"
+            "enabled = true\n"
+            "weekdays = [1, 2, 3, 4, 5]\n"
+            "start_utc = \"00:00:00\"\n"
+            "end_utc = \"24:00:00\"\n"
+            "reset_on_schedule_boundary = true\n");
         CHECK(tu::json_bool_field(
             exec_cli(binary, root, {"validate", "--config", failover_toml.string(), "--json"}).stdout_text,
             "valid").value_or(false));
+
+        // Reject invalid local_bind_ip and acceptor-level socket_options
+        const auto bad_sock_toml = config_dir / "bad_sock.toml";
+        tu::write_file_bytes(bad_sock_toml,
+            "version = 1\n[engine.storage]\ndirectory = \"state-bs\"\n"
+            "[[sessions]]\nname = \"v\"\nrole = \"initiator\"\nsender_comp_id = \"B\"\n"
+            "target_comp_id = \"S\"\nendpoint = \"127.0.0.1:19876\"\n"
+            "[sessions.socket_options]\nlocal_bind_ip = \"not-an-ip\"\n");
+        const auto bad_sock_res = exec_cli(binary, root, {"validate", "--config", bad_sock_toml.string(), "--json"}, 2);
+        CHECK(bad_sock_res.stderr_text.find("local_bind_ip") != std::string::npos);
 
         if (has_fix44) {
             const auto typed = config_dir / "typed.toml";
@@ -281,6 +305,120 @@ int main(int argc, char** argv) {
         CHECK(tu::json_int_field(rep_done.stdout_text, "replayed_frames").value_or(0) == 1);
         CHECK(replayed_wire.find("11=CLI-ORDER\x01") != std::string::npos);
         CHECK(replayed_wire.find("35=D\x01") != std::string::npos);
+
+        // Live ShardedEngine (shards = 2) + per-session heterogeneous schemas (fix42 & fix50sp2)
+        // + unexpected_field_policy = "ignore_with_metric" + telemetry unexpected_fields + replay --schema/--xml
+        if (has_fix44) {
+            const auto sharded_cfg = config_dir / "sharded_hetero.toml";
+            const auto sharded_tel = config_dir / "sharded_telemetry.nfxt";
+            tu::write_file_bytes(sharded_cfg,
+                "version = 1\n"
+                "[engine]\n"
+                "dispatch = \"queued\"\n"
+                "shards = 2\n"
+                "telemetry_path = " + json_quote(sharded_tel.string()) + "\n"
+                "[engine.storage]\n"
+                "directory = \"state-sharded\"\n"
+                "[[listeners]]\n"
+                "name = \"shared\"\n"
+                "endpoint = \"127.0.0.1:0\"\n"
+                "[listeners.socket_options]\n"
+                "tcp_quickack = true\n"
+                "recv_buffer_bytes = 65536\n"
+                "[[sessions]]\n"
+                "name = \"acc-42\"\n"
+                "role = \"acceptor\"\n"
+                "listener = \"shared\"\n"
+                "transport = \"FIX.4.2\"\n"
+                "schema = \"fix42\"\n"
+                "unexpected_field_policy = \"ignore_with_metric\"\n"
+                "check_sending_time = false\n"
+                "local_comp_id = \"S42\"\n"
+                "remote_comp_id = \"C42\"\n"
+                "[[sessions]]\n"
+                "name = \"acc-50\"\n"
+                "role = \"acceptor\"\n"
+                "listener = \"shared\"\n"
+                "transport = \"FIXT.1.1\"\n"
+                "default_appl_ver_id = \"9\"\n"
+                "schema = \"fix50sp2\"\n"
+                "check_sending_time = false\n"
+                "local_comp_id = \"S50\"\n"
+                "remote_comp_id = \"C50\"\n");
+            (void)exec_cli(binary, root, {"validate", "--config", sharded_cfg.string(), "--json"});
+            CHECK(!std::filesystem::exists(sharded_tel));
+
+            auto sh_srv = tu::ChildProcess::spawn({binary.string(), "run", "--config", sharded_cfg.string(), "--json"}, root);
+            std::uint16_t sh_port = 0;
+            for (;;) {
+                const auto line = sh_srv.read_stdout_line(10'000);
+                CHECK(line.has_value());
+                if (!line) break;
+                if (tu::json_string_field(*line, "event") == "listening") {
+                    sh_port = static_cast<std::uint16_t>(tu::json_int_field(*line, "port").value_or(0));
+                    break;
+                }
+            }
+            CHECK(sh_port > 0);
+
+            {
+                auto p42 = tu::RawTcpSocket::connect_loopback(sh_port);
+                p42.send_all(tu::make_fix_wire("FIX.4.2", 1, "A", "C42", "S42", {{98, "0"}, {108, "30"}}));
+                auto r42 = p42.read_fix_frame(5'000);
+                CHECK(r42.has_value() && (*r42)["35"] == "A");
+
+                auto p50 = tu::RawTcpSocket::connect_loopback(sh_port);
+                p50.send_all(tu::make_fix_wire("FIXT.1.1", 1, "A", "C50", "S50", {{98, "0"}, {108, "30"}, {1137, "9"}}));
+                auto r50 = p50.read_fix_frame(5'000);
+                CHECK(r50.has_value() && (*r50)["35"] == "A" && (*r50)["1137"] == "9");
+
+                // Send FIX 4.2 NewOrderSingle WITH unknown custom field 9999=EXT (counted by ignore_with_metric!)
+                p42.send_all(tu::make_fix_wire("FIX.4.2", 2, "D", "C42", "S42",
+                    {{11, "O42"}, {21, "1"}, {55, "IBM"}, {54, "1"},
+                     {60, "20261127-12:00:00"}, {38, "10"}, {40, "1"}, {9999, "EXT"}}));
+                // Send FIXT.1.1 + FIX50SP2 NewOrderSingle (routed to Shard 1!)
+                p50.send_all(tu::make_fix_wire("FIXT.1.1", 2, "D", "C50", "S50",
+                    {{1128, "9"}, {11, "O50"}, {55, "NVDA"}, {54, "1"},
+                     {60, "20261127-12:00:00.000"}, {38, "20"}, {40, "1"}}));
+
+                bool saw_both = false;
+                for (int tries = 0; tries < 30; ++tries) {
+                    const auto line = sh_srv.read_stdout_line(5'000);
+                    if (!line) break;
+                    if (tu::json_string_field(*line, "event") == "message" &&
+                        tu::json_int_field(*line, "business_messages").value_or(0) == 2) {
+                        saw_both = true;
+                        break;
+                    }
+                }
+                CHECK(saw_both);
+
+                sh_srv.send_signal(SIGTERM);
+                auto lo42 = p42.read_fix_frame(5'000);
+                if (lo42 && (*lo42)["35"] == "5") p42.send_all(tu::make_fix_wire("FIX.4.2", 3, "5", "C42", "S42"));
+                auto lo50 = p50.read_fix_frame(5'000);
+                if (lo50 && (*lo50)["35"] == "5") p50.send_all(tu::make_fix_wire("FIXT.1.1", 3, "5", "C50", "S50"));
+            }
+            const auto sh_done = sh_srv.wait_exit(10'000);
+            CHECK(sh_done.exit_code == 128 + SIGTERM);
+
+            const auto sh_tel_json = exec_cli(binary, root, {"telemetry", "--path", sharded_tel.string(), "--json"}).stdout_text;
+            CHECK(sh_tel_json.find("\"unexpected_fields\":1") != std::string::npos);
+            const auto sh_tel_text = exec_cli(binary, root, {"telemetry", "--path", sharded_tel.string()}).stdout_text;
+            CHECK(sh_tel_text.find("unexpected_fields=1") != std::string::npos);
+
+            const auto rep_schema = exec_cli(binary, root, {
+                "replay", "--path", journals[0].string(), "--schema", "fix44",
+                "--direction", "inbound", "--skip-admin", "--json"}).stdout_text;
+            CHECK(tu::json_int_field(rep_schema, "replayed_frames").value_or(0) == 1);
+            if (has_xml) {
+                const auto rep_xml = exec_cli(binary, root, {
+                    "replay", "--path", journals[0].string(),
+                    "--xml", (root_repo / "schemas" / "standard" / "FIX44.xml").string(),
+                    "--direction", "inbound", "--skip-admin", "--json"}).stdout_text;
+                CHECK(tu::json_int_field(rep_xml, "replayed_frames").value_or(0) == 1);
+            }
+        }
     } catch (const std::exception& e) {
         std::cerr << "cli test error: " << e.what() << '\n';
         return 1;

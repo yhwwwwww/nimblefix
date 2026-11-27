@@ -2,6 +2,7 @@
 #include "config.hpp"
 #include <nimblefix/journal.hpp>
 #include <nimblefix/replay.hpp>
+#include <nimblefix/sharded_engine.hpp>
 #include <nimblefix/telemetry.hpp>
 #include <nimblefix/tls.hpp>
 
@@ -85,6 +86,7 @@ struct Arguments {
     std::uint64_t replay_seq_to{0};
     std::uint32_t replay_epoch{0};
     std::string replay_endpoint;
+    std::string schema_name{"none"};
     bool skip_admin{};
     bool json{};
     bool prometheus{};
@@ -107,7 +109,7 @@ void help() {
                  "  telemetry --path PATH [--json | --prometheus]\n"
                  "  replay --path PATH [--session-key KEY] [--direction inbound|outbound|both]\n"
                  "         [--timing full|original|scaled] [--speed FACTOR] [--seq-from N] [--seq-to M]\n"
-                 "         [--epoch N] [--skip-admin] [--endpoint HOST:PORT] [--json]\n"
+                 "         [--epoch N] [--skip-admin] [--schema NAME] [--xml PATH] [--endpoint HOST:PORT] [--json]\n"
                  "  doctor [--config PATH] [--json]\n"
                  "  bench --case encode|parse [--samples N] [--json] (optional benchmark build)\n"
                  "  --help | --version\n";
@@ -217,6 +219,8 @@ bool parse(int argc, char **argv, Arguments &args) {
         }
         else if (value == "--endpoint")
             args.replay_endpoint = next;
+        else if (value == "--schema")
+            args.schema_name = next;
         else if (value == "--case") args.bench_case = next;
         else if (value == "--samples") {
             std::uint32_t number{};
@@ -249,7 +253,7 @@ bool parse(int argc, char **argv, Arguments &args) {
     else if (args.command == "telemetry") allowed.insert({"--path", "--prometheus"});
     else if (args.command == "replay") allowed.insert({
         "--path", "--session-key", "--direction", "--timing", "--speed",
-        "--seq-from", "--seq-to", "--epoch", "--skip-admin", "--endpoint"});
+        "--seq-from", "--seq-to", "--epoch", "--skip-admin", "--schema", "--xml", "--endpoint"});
     else if (args.command == "schema") {
         allowed.insert("--xml");
         if (args.operation == "generate") allowed.insert({"--output", "--namespace", "--generator"});
@@ -307,41 +311,42 @@ int problem(const Arguments& args, nf::Status status, std::string_view explanati
     return exit_code;
 }
 
-struct ApplicationSchema {
-    std::shared_ptr<const void> owner;
+struct ResolvedSchemaBinding {
     const nf::SchemaDescriptor* descriptor{};
     nf::WireHints hints{};
 };
 
-int validate_application_versions(const nf::ConfigDocument& configuration, const Arguments& args,
-    const ApplicationSchema& schema) {
-    if (!schema.descriptor) return 0;
-    const auto valid = [&](const nf::SessionSettings& settings) {
-        return schema.descriptor->matches_session(settings.version, settings.default_appl_ver_id);
-    };
-    for (const auto& session : configuration.initiators) if (!valid(session.settings))
-        return problem(args, {nf::ErrorCode::unsupported_protocol, nf::tag::begin_string}, "dictionary version does not match initiator " + session.name);
-    for (const auto& session : configuration.acceptors) if (!valid(session.settings))
-        return problem(args, {nf::ErrorCode::unsupported_protocol, nf::tag::begin_string}, "dictionary version does not match acceptor " + session.name);
-    return 0;
-}
+struct ApplicationSchema {
+    std::vector<std::shared_ptr<const void>> owners;
+    ResolvedSchemaBinding engine_default{};
+    std::map<std::string, ResolvedSchemaBinding> session_overrides{};
+};
 
-int load_application_schema(const nf::ConfigDocument& configuration, const Arguments& args, ApplicationSchema& result) {
-    if (configuration.schema != "none") {
-        const auto builtin = nf::cli_builtin::find_standard_schema(configuration.schema);
+int resolve_single_schema(std::string_view schema_name,
+                          const std::vector<std::filesystem::path>& dictionaries,
+                          const Arguments& args,
+                          std::vector<std::shared_ptr<const void>>& owners,
+                          ResolvedSchemaBinding& result) {
+    if (schema_name != "none") {
+        if (schema_name != "fix42" && schema_name != "fix43" &&
+            schema_name != "fix44" && schema_name != "fix50sp2") {
+            return problem(args, {nf::ErrorCode::invalid_config},
+                "unsupported schema '" + std::string{schema_name} + "' (expected none, fix42, fix43, fix44 or fix50sp2)");
+        }
+        const auto builtin = nf::cli_builtin::find_standard_schema(schema_name);
         if (builtin.descriptor == nullptr) {
             return problem(args, {nf::ErrorCode::unsupported},
-                "this build does not contain the generated " + configuration.schema + " schema");
+                "this build does not contain the generated " + std::string{schema_name} + " schema");
         }
         result.descriptor = builtin.descriptor;
         result.hints = builtin.hints;
     }
-    if (configuration.dictionaries.empty()) return validate_application_versions(configuration, args, result);
+    if (dictionaries.empty()) return 0;
 #if defined(NIMBLEFIX_ENABLE_XML)
     std::vector<std::string> owned;
     std::vector<std::string_view> paths;
-    owned.reserve(configuration.dictionaries.size());
-    for (const auto& path : configuration.dictionaries) owned.push_back(path.string());
+    owned.reserve(dictionaries.size());
+    for (const auto& path : dictionaries) owned.push_back(path.string());
     for (const auto& path : owned) paths.push_back(path);
     auto schema = std::make_shared<nf::XmlSchema>();
     nf::XmlSchemaDiagnostic diagnostic;
@@ -360,11 +365,49 @@ int load_application_schema(const nf::ConfigDocument& configuration, const Argum
             std::string{result.descriptor->fingerprint} + "; regenerate the C++ binding from the same XML");
     result.descriptor = &schema->descriptor();
     result.hints = schema->wire_hints();
-    result.owner = std::move(schema);
-    return validate_application_versions(configuration, args, result);
+    owners.push_back(std::move(schema));
+    return 0;
 #else
     return problem(args, {nf::ErrorCode::unsupported}, "runtime XML requires the optional XML component");
 #endif
+}
+
+int validate_application_versions(const nf::ConfigDocument& configuration, const Arguments& args,
+    const ApplicationSchema& schema) {
+    const auto effective_desc = [&](const std::string& name) -> const nf::SchemaDescriptor* {
+        if (const auto it = schema.session_overrides.find(name); it != schema.session_overrides.end()) {
+            return it->second.descriptor;
+        }
+        return schema.engine_default.descriptor;
+    };
+    for (const auto& session : configuration.initiators) {
+        if (const auto* desc = effective_desc(session.name);
+            desc != nullptr && !desc->matches_session(session.settings.version, session.settings.default_appl_ver_id)) {
+            return problem(args, {nf::ErrorCode::unsupported_protocol, nf::tag::begin_string},
+                "dictionary version does not match initiator " + session.name);
+        }
+    }
+    for (const auto& session : configuration.acceptors) {
+        if (const auto* desc = effective_desc(session.name);
+            desc != nullptr && !desc->matches_session(session.settings.version, session.settings.default_appl_ver_id)) {
+            return problem(args, {nf::ErrorCode::unsupported_protocol, nf::tag::begin_string},
+                "dictionary version does not match acceptor " + session.name);
+        }
+    }
+    return 0;
+}
+
+int load_application_schema(const nf::ConfigDocument& configuration, const Arguments& args, ApplicationSchema& result) {
+    const int rc = resolve_single_schema(configuration.schema, configuration.dictionaries,
+                                         args, result.owners, result.engine_default);
+    if (rc != 0) return rc;
+    for (const auto& sc : configuration.session_schemas) {
+        ResolvedSchemaBinding sub{};
+        const int src = resolve_single_schema(sc.schema, sc.dictionaries, args, result.owners, sub);
+        if (src != 0) return src;
+        result.session_overrides[sc.session_name] = sub;
+    }
+    return validate_application_versions(configuration, args, result);
 }
 
 int check_schema(const Arguments& args) {
@@ -373,7 +416,7 @@ int check_schema(const Arguments& args) {
     ApplicationSchema schema;
     const auto checked = load_application_schema(configuration, args, schema);
     if (checked != 0) return checked;
-    const auto& descriptor = *schema.descriptor;
+    const auto& descriptor = *schema.engine_default.descriptor;
     if (args.json)
         std::cout << "{\"valid\":true,\"type\":" << quote(descriptor.type) << ",\"version\":" << quote(descriptor.version)
             << ",\"fingerprint\":" << quote(descriptor.fingerprint) << ",\"fields\":" << descriptor.fields.size()
@@ -636,6 +679,7 @@ int show_telemetry(const Arguments &args) {
                       << ",\"inbound_bytes\":" << s.inbound_bytes
                       << ",\"outbound_bytes\":" << s.outbound_bytes
                       << ",\"errors\":" << s.error_count
+                      << ",\"unexpected_fields\":" << s.unexpected_fields
                       << ",\"active_endpoint_index\":" << s.active_endpoint_index
                       << ",\"stages\":{";
             for (std::size_t st = 0; st < static_cast<std::size_t>(nf::TelemetryStage::count); ++st) {
@@ -663,7 +707,8 @@ int show_telemetry(const Arguments &args) {
             std::cout << "  session=" << s.name << " (" << s.local_comp_id << "->" << s.remote_comp_id
                       << ") state=" << st_name
                       << " in=" << s.inbound_frames << " out=" << s.outbound_frames
-                      << " deliveries=" << s.business_deliveries << " errors=" << s.error_count << '\n';
+                      << " deliveries=" << s.business_deliveries << " errors=" << s.error_count
+                      << " unexpected_fields=" << s.unexpected_fields << '\n';
             for (std::size_t st = 0; st < static_cast<std::size_t>(nf::TelemetryStage::count); ++st) {
                 const auto &h = s.stages[st];
                 if (h.count == 0) continue;
@@ -697,6 +742,17 @@ int replay_journal(const Arguments &args) {
     opts.seq_to = args.replay_seq_to;
     opts.epoch_filter = args.replay_epoch;
     opts.skip_admin = args.skip_admin;
+
+    std::vector<std::shared_ptr<const void>> schema_owners;
+    if (args.schema_name != "none" || !args.xml.empty()) {
+        std::vector<std::filesystem::path> abs_xml;
+        abs_xml.reserve(args.xml.size());
+        for (const auto& p : args.xml) abs_xml.push_back(std::filesystem::absolute(p));
+        ResolvedSchemaBinding binding{};
+        const int rc = resolve_single_schema(args.schema_name, abs_xml, args, schema_owners, binding);
+        if (rc != 0) return rc;
+        opts.wire_hints = binding.hints;
+    }
 
     nf::Result<nf::ReplayStats> res{nf::Status{nf::ErrorCode::invalid_config}};
     if (!args.replay_endpoint.empty()) {
@@ -778,33 +834,13 @@ int inspect_journal(const Arguments &args) {
     return 0;
 }
 
-template <class Schema, class Policy>
-int run_engine(const nf::ConfigDocument &configuration, const Arguments &args, nf::EngineConfig runtime_config) {
-    auto created = nf::Engine<Schema, Policy>::create(std::move(runtime_config));
-    if (!created.ok()) {
-        std::cerr << created.status().message() << '\n';
-        return 1;
-    }
-    auto engine = std::move(created).value();
+template <class EngineInstance>
+int run_engine_instance(EngineInstance &engine, const nf::ConfigDocument &configuration, const Arguments &args) {
     std::atomic<std::uint64_t> active{}, received{}, error_count{};
-    nf::Status message_handler;
-    if constexpr (std::is_same_v<Schema, nf::FlatSchema>) {
-        message_handler = engine.on_message([&](auto &, const nf::FlatMessageView &) {
-            received.fetch_add(1, std::memory_order_relaxed);
-            return nf::Status::success();
-        });
-    } else {
-        Schema::for_each_message([&]<class Message>() {
-            const auto* descriptor = Schema::find_message(Message::msg_type);
-            if (descriptor == nullptr || descriptor->category != "app") return;
-            const auto registered = engine.template on<Message>(
-                [&](nf::SessionContext&, typename Message::view_type) {
-                    received.fetch_add(1, std::memory_order_relaxed);
-                    return nf::Status::success();
-                });
-            if (!registered.ok() && message_handler.ok()) message_handler = registered;
-        });
-    }
+    const auto message_handler = engine.on_message([&](auto &, const nf::FlatMessageView &) {
+        received.fetch_add(1, std::memory_order_relaxed);
+        return nf::Status::success();
+    });
     auto active_handler = engine.on_session_active([&](auto &) {
         active.fetch_add(1, std::memory_order_relaxed);
         return nf::Status::success();
@@ -848,7 +884,7 @@ int run_engine(const nf::ConfigDocument &configuration, const Arguments &args, n
     });
     struct ThreadJoinGuard {
         std::thread& t;
-        nf::Engine<Schema, Policy>& eng;
+        EngineInstance& eng;
         ~ThreadJoinGuard() {
             if (t.joinable()) {
                 eng.request_stop();
@@ -926,30 +962,48 @@ int run_engine(const nf::ConfigDocument &configuration, const Arguments &args, n
     return signal != 0 ? 128 + signal : status.ok() ? 0 : 1;
 }
 
+template <class Policy>
+int run_engine(const nf::ConfigDocument &configuration, const Arguments &args, nf::EngineConfig runtime_config) {
+    if (configuration.shards > 1) {
+        nf::ShardedEngineConfig scfg{std::move(runtime_config), configuration.shards, configuration.cpu_cores};
+        auto created = nf::ShardedEngine<nf::FlatSchema, Policy>::create(std::move(scfg));
+        if (!created.ok()) {
+            std::cerr << created.status().message() << '\n';
+            return 1;
+        }
+        auto engine = std::move(created).value();
+        return run_engine_instance(engine, configuration, args);
+    }
+    auto created = nf::Engine<nf::FlatSchema, Policy>::create(std::move(runtime_config));
+    if (!created.ok()) {
+        std::cerr << created.status().message() << '\n';
+        return 1;
+    }
+    auto engine = std::move(created).value();
+    return run_engine_instance(engine, configuration, args);
+}
+
 int run(const nf::ConfigDocument &configuration, const Arguments &args) {
     ApplicationSchema application;
     const auto checked = load_application_schema(configuration, args, application);
     if (checked != 0) return checked;
     nf::ConfigDocument effective_doc = configuration;
     auto engine_config = effective_doc.engine;
-    engine_config.wire_hints = application.hints;
-    if (application.descriptor != nullptr) {
-        for (auto& s : effective_doc.initiators) {
-            if (s.settings.schema == nullptr) {
-                s.settings.schema = application.descriptor;
-                s.settings.schema_wire_hints = application.hints;
-            }
+    engine_config.wire_hints = application.engine_default.hints;
+    const auto apply_binding = [&](const std::string& name, nf::SessionSettings& settings) {
+        ResolvedSchemaBinding binding = application.engine_default;
+        if (const auto it = application.session_overrides.find(name);
+            it != application.session_overrides.end()) {
+            binding = it->second;
         }
-        for (auto& s : effective_doc.acceptors) {
-            if (s.settings.schema == nullptr) {
-                s.settings.schema = application.descriptor;
-                s.settings.schema_wire_hints = application.hints;
-            }
-        }
-    }
+        settings.schema = binding.descriptor;
+        settings.schema_wire_hints = binding.hints;
+    };
+    for (auto& s : effective_doc.initiators) apply_binding(s.name, s.settings);
+    for (auto& s : effective_doc.acceptors) apply_binding(s.name, s.settings);
     const bool queued = effective_doc.dispatch == nf::ConfigDispatch::queued_callbacks;
-    return queued ? run_engine<nf::FlatSchema, nf::Queued>(effective_doc, args, std::move(engine_config))
-                  : run_engine<nf::FlatSchema, nf::Inline>(effective_doc, args, std::move(engine_config));
+    return queued ? run_engine<nf::Queued>(effective_doc, args, std::move(engine_config))
+                  : run_engine<nf::Inline>(effective_doc, args, std::move(engine_config));
 }
 
 int doctor(const Arguments &args) {

@@ -1,5 +1,9 @@
 #include "config.hpp"
 
+#include <nimblefix/sharded_engine.hpp>
+
+#include <arpa/inet.h>
+
 #include <algorithm>
 #include <charconv>
 #include <cstdlib>
@@ -262,6 +266,72 @@ class Loader {
         return config;
     }
 
+    SocketOptions socket_options(const toml::table &parent, std::string_view prefix, bool listener) {
+        SocketOptions opts;
+        const auto *value = table(parent, "socket_options", prefix);
+        if (value == nullptr)
+            return opts;
+        const auto p = std::string{prefix} + ".socket_options";
+        if (listener) {
+            keys(*value, p, {"so_busy_poll_us", "tcp_quickack", "send_buffer_bytes", "recv_buffer_bytes"});
+        } else {
+            keys(*value, p,
+                 {"local_bind_ip", "local_bind_port", "so_busy_poll_us", "tcp_quickack",
+                  "send_buffer_bytes", "recv_buffer_bytes"});
+            opts.local_bind_ip = string(*value, "local_bind_ip", p);
+            if (!opts.local_bind_ip.empty()) {
+                in_addr v4{};
+                in6_addr v6{};
+                if (::inet_pton(AF_INET, opts.local_bind_ip.c_str(), &v4) != 1 &&
+                    ::inet_pton(AF_INET6, opts.local_bind_ip.c_str(), &v6) != 1) {
+                    error(value->get("local_bind_ip"), p + ".local_bind_ip",
+                          "a numeric IPv4 or IPv6 local source address");
+                }
+            }
+            opts.local_bind_port =
+                static_cast<std::uint16_t>(integer(*value, "local_bind_port", p, 0, 0, 65'535));
+        }
+        opts.so_busy_poll_us =
+            static_cast<std::uint32_t>(integer(*value, "so_busy_poll_us", p, 0, 0, 1'000'000));
+        opts.tcp_quickack = boolean(*value, "tcp_quickack", p, false);
+        opts.send_buffer_bytes = integer(*value, "send_buffer_bytes", p, 0, 0, 256U * 1024U * 1024U);
+        opts.recv_buffer_bytes = integer(*value, "recv_buffer_bytes", p, 0, 0, 256U * 1024U * 1024U);
+        return opts;
+    }
+
+    void session_schema(const toml::table &session, std::string_view prefix, std::string session_name,
+                        bool acceptor) {
+        if (!session.contains("schema") && !session.contains("dictionary") &&
+            !session.contains("dictionaries")) {
+            return;
+        }
+        SessionSchemaConfig sc;
+        sc.session_name = std::move(session_name);
+        sc.acceptor = acceptor;
+        sc.schema = string(session, "schema", prefix, "none");
+        if (sc.schema != "none" && sc.schema != "fix42" && sc.schema != "fix43" &&
+            sc.schema != "fix44" && sc.schema != "fix50sp2") {
+            error(session.get("schema"), std::string{prefix} + ".schema",
+                  "none, fix42, fix43, fix44 or fix50sp2");
+        }
+        if (session.contains("dictionary")) {
+            sc.dictionaries.push_back(path(string(session, "dictionary", prefix)));
+        }
+        if (const auto *files = session.get("dictionaries")) {
+            const auto *array = files->as_array();
+            if (array == nullptr || array->size() > 32)
+                error(files, std::string{prefix} + ".dictionaries", "an array of at most 32 XML paths");
+            else
+                for (const auto &file : *array) {
+                    if (const auto value = file.value<std::string>())
+                        sc.dictionaries.push_back(path(*value));
+                    else
+                        error(&file, std::string{prefix} + ".dictionaries", "XML file paths");
+                }
+        }
+        document.session_schemas.push_back(std::move(sc));
+    }
+
     SessionSettings settings(const toml::table &session, std::string_view prefix, bool acceptor) {
         SessionSettings result;
         const auto version = string(session, "transport", prefix, "FIX.4.4");
@@ -286,6 +356,17 @@ class Loader {
         else
             result.timestamp_precision = parsed_precision.value();
         result.verify_checksum = boolean(session, "verify_checksum", prefix, true);
+        const auto ufp = string(session, "unexpected_field_policy", prefix, "reject");
+        if (ufp == "reject")
+            result.unexpected_field_policy = UnexpectedFieldPolicy::reject;
+        else if (ufp == "ignore_with_metric")
+            result.unexpected_field_policy = UnexpectedFieldPolicy::ignore_with_metric;
+        else if (ufp == "passthrough")
+            result.unexpected_field_policy = UnexpectedFieldPolicy::passthrough;
+        else
+            error(session.get("unexpected_field_policy"),
+                  std::string{prefix} + ".unexpected_field_policy",
+                  "reject, ignore_with_metric or passthrough");
         if (const auto *logon = table(session, "logon", prefix)) {
             const auto p = std::string{prefix} + ".logon";
             keys(*logon, p, {"username", "password_env", "reset_sequence", "fields"});
@@ -348,8 +429,10 @@ class Loader {
         }
         if (const auto *schedule = table(session, "schedule", prefix)) {
             const auto p = std::string{prefix} + ".schedule";
-            keys(*schedule, p, {"enabled", "weekdays", "start_utc", "end_utc"});
+            keys(*schedule, p, {"enabled", "weekdays", "start_utc", "end_utc", "reset_on_schedule_boundary"});
             result.schedule.enabled = boolean(*schedule, "enabled", p, true);
+            result.schedule.reset_on_schedule_boundary =
+                boolean(*schedule, "reset_on_schedule_boundary", p, false);
             if (const auto *weekdays = schedule->get("weekdays")) {
                 const auto *array = weekdays->as_array();
                 if (array == nullptr)
@@ -597,12 +680,13 @@ class Loader {
                         error(array->get(i), p, "a listener table");
                         continue;
                     }
-                    keys(*listener, p, {"name", "endpoint", "backlog", "tls"});
+                    keys(*listener, p, {"name", "endpoint", "backlog", "tls", "socket_options"});
                     ListenerConfig value;
                     value.name = string(*listener, "name", p, {}, true);
                     value.endpoint = endpoint(*listener, "endpoint", p, true);
                     value.backlog = integer(*listener, "backlog", p, 128, 1, 65'535);
                     value.tls = tls(*listener, p);
+                    value.socket_options = socket_options(*listener, p, true);
                     document.listeners.push_back(std::move(value));
                 }
         }
@@ -629,9 +713,14 @@ class Loader {
                           "endpoint",
                           "endpoints",
                           "connection_strategy",
+                          "socket_options",
                           "transport",
                           "qualifier",
                           "default_appl_ver_id",
+                          "schema",
+                          "dictionary",
+                          "dictionaries",
+                          "unexpected_field_policy",
                           "allow_sequence_reset",
                           "check_sending_time",
                           "max_sending_time_skew_ms",
@@ -672,8 +761,10 @@ class Loader {
                             value.endpoint = endpoint(*session, "endpoint", p, false);
                         }
                         value.connection_strategy = connection_strategy(*session, p);
+                        value.socket_options = socket_options(*session, p, false);
                         value.settings = settings(*session, p, false);
                         value.tls = tls(*session, p);
+                        session_schema(*session, p, value.name, false);
                         document.initiators.push_back(std::move(value));
                     } else if (role == "acceptor") {
                         AcceptorConfig value;
@@ -687,10 +778,14 @@ class Loader {
                         if (session->contains("connection_strategy"))
                             error(session->get("connection_strategy"), p + ".connection_strategy",
                                   "connection_strategy is only valid on initiator sessions");
+                        if (session->contains("socket_options"))
+                            error(session->get("socket_options"), p + ".socket_options",
+                                  "socket_options configured on the referenced listener");
                         value.settings = settings(*session, p, true);
                         if (session->contains("tls"))
                             error(session->get("tls"), p + ".tls",
                                   "TLS configured on the referenced listener");
+                        session_schema(*session, p, value.name, true);
                         document.acceptors.push_back(std::move(value));
                     } else
                         error(session->get("role"), p + ".role", "initiator or acceptor");
@@ -773,13 +868,7 @@ std::vector<ConfigDiagnostic> validate_config(const ConfigDocument &document) no
         if (document.engine.storage.directory.empty())
             add({ErrorCode::invalid_config}, "engine.storage.directory",
                 "an explicit writable state directory");
-        const auto validate_with = [&]<class DispatchPolicy>() {
-            auto created = Engine<FlatSchema, DispatchPolicy>::create(document.engine);
-            if (!created.ok()) {
-                add(created.status(), "engine", std::string(created.status().message()));
-                return;
-            }
-            auto engine = std::move(created).value();
+        const auto validate_instance = [&](auto &engine) {
             (void)engine.on_message([](auto &, const auto &) { return Status::success(); });
             for (const auto &listener : document.listeners) {
                 const auto added = engine.add_listener(listener);
@@ -799,6 +888,27 @@ std::vector<ConfigDiagnostic> validate_config(const ConfigDocument &document) no
             const auto valid = engine.validate();
             if (!valid.ok())
                 add(valid, "engine", std::string(valid.message()));
+        };
+        const auto validate_with = [&]<class DispatchPolicy>() {
+            if (document.shards > 1) {
+                ShardedEngineConfig scfg{document.engine, document.shards, document.cpu_cores};
+                scfg.base.telemetry_path.clear(); // keep offline validation side-effect-free on disk
+                auto created = ShardedEngine<FlatSchema, DispatchPolicy>::create(std::move(scfg));
+                if (!created.ok()) {
+                    add(created.status(), "engine", std::string(created.status().message()));
+                    return;
+                }
+                auto engine = std::move(created).value();
+                validate_instance(engine);
+            } else {
+                auto created = Engine<FlatSchema, DispatchPolicy>::create(document.engine);
+                if (!created.ok()) {
+                    add(created.status(), "engine", std::string(created.status().message()));
+                    return;
+                }
+                auto engine = std::move(created).value();
+                validate_instance(engine);
+            }
         };
         if (document.dispatch == ConfigDispatch::queued_callbacks) {
             validate_with.template operator()<Queued>();

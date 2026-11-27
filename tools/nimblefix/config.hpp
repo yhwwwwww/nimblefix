@@ -25,12 +25,20 @@ struct ConfigDiagnostic {
     std::string fix;
 };
 
+struct SessionSchemaConfig {
+    std::string session_name;
+    bool acceptor{};
+    std::string schema{"none"};
+    std::vector<std::filesystem::path> dictionaries;
+};
+
 struct ConfigDocument {
     std::uint32_t version{1};
     EngineConfig engine;
     ConfigDispatch dispatch{ConfigDispatch::inline_callbacks};
     std::string schema{"none"};
     std::vector<std::filesystem::path> dictionaries;
+    std::vector<SessionSchemaConfig> session_schemas;
     std::vector<ListenerConfig> listeners;
     std::vector<InitiatorConfig> initiators;
     std::vector<AcceptorConfig> acceptors;
