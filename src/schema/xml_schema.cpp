@@ -584,11 +584,87 @@ void validate_scope(const std::vector<MemberDef>& members, const std::map<std::s
 
 [[nodiscard]] NormalizedSchema normalize(std::vector<Document> documents, const XmlSchemaLimits& limits) {
     if (documents.empty()) throw XmlFailure{{ErrorCode::invalid_value}, {}, "at least one XML input is required"};
+
+    auto id_attr = [](const std::map<std::string, std::string>& id, std::string_view key) -> std::string_view {
+        const auto it = id.find(std::string{key});
+        return it == id.end() ? std::string_view{} : std::string_view{it->second};
+    };
+    auto is_fixt11_id = [&](const std::map<std::string, std::string>& id) -> bool {
+        return id_attr(id, "type") == "FIXT" &&
+               id_attr(id, "major") == "1" &&
+               id_attr(id, "minor") == "1";
+    };
+    auto is_fix5_app_id = [&](const std::map<std::string, std::string>& id) -> bool {
+        const auto maj = id_attr(id, "major");
+        return id_attr(id, "type") == "FIX" && !maj.empty() &&
+               (maj.size() > 1 || maj[0] >= '5');
+    };
+
     NormalizedSchema result;
     result.identity = documents.front().identity;
-    for (const auto& document : documents) {
-        if (document.identity != result.identity)
-            throw XmlFailure{{ErrorCode::schema_mismatch}, document.location, "conflicting FIX schema identity/version across XML inputs"};
+    bool all_same_id = true;
+    for (std::size_t i = 1; i < documents.size(); ++i) {
+        if (documents[i].identity != result.identity) {
+            all_same_id = false;
+            break;
+        }
+    }
+
+    bool is_fixt_app_combo = false;
+    std::vector<const Document*> ordered_docs;
+    ordered_docs.reserve(documents.size());
+    if (all_same_id) {
+        for (const auto& d : documents) ordered_docs.push_back(&d);
+    } else {
+        const std::map<std::string, std::string>* fixt_id = nullptr;
+        const std::map<std::string, std::string>* app_id = nullptr;
+        const Location* conflict_loc = &documents.back().location;
+        bool valid_combo = true;
+        for (const auto& d : documents) {
+            if (is_fixt11_id(d.identity)) {
+                if (fixt_id == nullptr) fixt_id = &d.identity;
+                else if (*fixt_id != d.identity) { conflict_loc = &d.location; valid_combo = false; break; }
+            } else if (is_fix5_app_id(d.identity)) {
+                if (app_id == nullptr) app_id = &d.identity;
+                else if (*app_id != d.identity) { conflict_loc = &d.location; valid_combo = false; break; }
+            } else {
+                conflict_loc = &d.location;
+                valid_combo = false;
+                break;
+            }
+        }
+        if (!valid_combo || fixt_id == nullptr || app_id == nullptr) {
+            throw XmlFailure{{ErrorCode::schema_mismatch}, *conflict_loc,
+                "conflicting FIX schema identity/version across XML inputs"};
+        }
+        is_fixt_app_combo = true;
+        result.identity = *app_id;
+        for (const auto& d : documents) {
+            if (!is_fixt11_id(d.identity)) ordered_docs.push_back(&d);
+        }
+        for (const auto& d : documents) {
+            if (is_fixt11_id(d.identity)) ordered_docs.push_back(&d);
+        }
+    }
+
+    auto compatible_fixt_field = [](const FieldDef& app_f, const FieldDef& fixt_f) -> bool {
+        if (app_f.tag != fixt_f.tag || app_f.name != fixt_f.name) return false;
+        const bool same_or_data = app_f.type == fixt_f.type ||
+            ((app_f.type == "DATA" || app_f.type == "XMLDATA") &&
+             (fixt_f.type == "DATA" || fixt_f.type == "XMLDATA"));
+        if (!same_or_data) return false;
+        for (const auto& [ev, _desc] : fixt_f.enums) {
+            const bool found = std::any_of(app_f.enums.begin(), app_f.enums.end(),
+                [&ev](const auto& item) { return item.first == ev; });
+            if (!found) return false;
+        }
+        return true;
+    };
+
+    std::set<std::string> app_field_names;
+    for (const Document* doc_ptr : ordered_docs) {
+        const auto& document = *doc_ptr;
+        const bool from_fixt = is_fixt_app_combo && is_fixt11_id(document.identity);
         for (const auto& field : document.fields) {
             auto by_name = result.fields.find(field.name);
             auto by_tag = std::find_if(result.fields.begin(), result.fields.end(), [&](const auto& item) {
@@ -597,19 +673,31 @@ void validate_scope(const std::vector<MemberDef>& members, const std::map<std::s
             const FieldDef* previous = by_name != result.fields.end() ? &by_name->second :
                 by_tag != result.fields.end() ? &by_tag->second : nullptr;
             if (previous != nullptr) {
+                if (from_fixt && app_field_names.contains(previous->name)) {
+                    if (!compatible_fixt_field(*previous, field))
+                        throw XmlFailure{{ErrorCode::schema_mismatch}, field.location,
+                            "conflicting field definition; previous definition at " + location_text(previous->location)};
+                    continue;
+                }
                 if (!equal_field(*previous, field))
                     throw XmlFailure{{ErrorCode::schema_mismatch}, field.location,
                         "conflicting field definition; previous definition at " + location_text(previous->location)};
             } else {
                 result.fields.emplace(field.name, field);
+                if (!from_fixt) app_field_names.insert(field.name);
             }
         }
         for (const auto& component : document.components) {
             const auto found = result.components.find(component.name);
             if (found != result.components.end()) {
-                if (!identical_member_definitions(found->second.members, component.members))
+                if (is_fixt_app_combo && found->second.members.empty() && !component.members.empty()) {
+                    found->second = component;
+                } else if (is_fixt_app_combo && !found->second.members.empty() && component.members.empty()) {
+                    continue;
+                } else if (!identical_member_definitions(found->second.members, component.members)) {
                     throw XmlFailure{{ErrorCode::schema_mismatch}, component.location,
                         "conflicting component '" + component.name + "'; previous definition at " + location_text(found->second.location)};
+                }
             } else {
                 result.components.emplace(component.name, component);
             }

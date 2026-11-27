@@ -506,8 +506,10 @@ class Loader {
             document.engine.telemetry_stage_probes =
                 boolean(*engine, "telemetry_stage_probes", "engine", false);
             document.schema = string(*engine, "schema", "engine", "none");
-            if (document.schema != "none" && document.schema != "fix44")
-                error(engine->get("schema"), "engine.schema", "none or fix44");
+            if (document.schema != "none" && document.schema != "fix42" &&
+                document.schema != "fix43" && document.schema != "fix44" &&
+                document.schema != "fix50sp2")
+                error(engine->get("schema"), "engine.schema", "none, fix42, fix43, fix44 or fix50sp2");
             if (engine->contains("dictionary"))
                 document.dictionaries.push_back(path(string(*engine, "dictionary", "engine")));
             if (const auto *files = engine->get("dictionaries")) {

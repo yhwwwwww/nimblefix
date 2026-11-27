@@ -220,6 +220,23 @@ int main(int argc, char** argv) {
                 CHECK(cnt == 1);
             }
         }
+
+        // Combined FIXT11.xml + FIX50SP2.xml order-independent merge
+        const auto fixt11 = std_dir / "FIXT11.xml";
+        const auto fix50sp2 = std_dir / "FIX50SP2.xml";
+        const auto combo_a = cg::load_schema({fixt11, fix50sp2});
+        const auto combo_b = cg::load_schema({fix50sp2, fixt11});
+        CHECK(combo_a.identity == combo_b.identity);
+        CHECK(combo_a.fields_by_name.size() == combo_b.fields_by_name.size());
+        CHECK(combo_a.messages_by_name.contains("Logon"));
+        CHECK(combo_a.messages_by_name.contains("NewOrderSingle"));
+        CHECK(combo_a.components_by_name.contains("Header") && !combo_a.components_by_name.at("Header").members.empty());
+        CHECK(combo_a.components_by_name.contains("Trailer") && !combo_a.components_by_name.at("Trailer").members.empty());
+        CHECK(combo_a.components_by_name.contains("MsgTypeGrp") && !combo_a.components_by_name.at("MsgTypeGrp").members.empty());
+
+        // Incompatible version combinations (e.g. FIX42 + FIX44, FIXT11 + FIX44) still fail
+        EXPECT_ERROR(cg::load_schema({std_dir / "FIX42.xml", std_dir / "FIX44.xml"}), "conflicting FIX schema identity");
+        EXPECT_ERROR(cg::load_schema({fixt11, std_dir / "FIX44.xml"}), "conflicting FIX schema identity");
     }
 
     // 5. Log-driven schema pruning (--from-fix-log and --keep-all-fields)

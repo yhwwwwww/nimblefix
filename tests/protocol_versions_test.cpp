@@ -25,13 +25,16 @@ std::string wait_event(tu::ChildProcess& proc, std::string_view kind) {
 }
 
 void exchange(const std::filesystem::path& binary, const std::filesystem::path& parent,
-              std::string_view version, std::string_view role, std::string_view dispatch) {
-    const auto dir = parent / (std::string{version} + "-" + std::string{role} + "-" + std::string{dispatch});
+              std::string_view version, std::string_view role, std::string_view dispatch,
+              std::string_view schema_name = "none") {
+    const auto dir = parent / (std::string{version} + "-" + std::string{role} + "-" +
+                               std::string{dispatch} + "-" + std::string{schema_name});
     std::filesystem::create_directories(dir);
     auto [listener, lport] = tu::RawTcpSocket::listen_loopback();
     const auto cfg_path = dir / "session.toml";
     std::string cfg =
-        "version = 1\n[engine]\ndispatch = \"" + std::string{dispatch} + "\"\nschema = \"none\"\n"
+        "version = 1\n[engine]\ndispatch = \"" + std::string{dispatch} + "\"\nschema = \"" +
+        std::string{schema_name} + "\"\n"
         "logout_timeout_ms = 1000\n[engine.storage]\ndirectory = \"./state\"\nconfirmation = \"appended\"\n";
     if (role == "acceptor") {
         cfg += "[[listeners]]\nname = \"main\"\nendpoint = \"127.0.0.1:0\"\n"
@@ -63,7 +66,18 @@ void exchange(const std::filesystem::path& binary, const std::filesystem::path& 
         if (role == "initiator") peer.send_all(tu::make_fix_wire(version, 1, "A", "BUY", "SELL", lf));
         (void)wait_event(proc, "active");
 
-        peer.send_all(tu::make_fix_wire(version, 2, "D", "BUY", "SELL", {{11, "VERSION-ORDER"}, {55, "AAPL"}}));
+        std::vector<std::pair<int, std::string>> ord_fields{
+            {11, "VERSION-ORDER"},
+            {55, "AAPL"},
+            {54, "1"},
+            {60, "20261127-12:00:00.000"},
+            {38, "100"},
+            {40, "1"},
+        };
+        if (version == "FIX.4.2" || version == "FIX.4.3") {
+            ord_fields.emplace_back(21, "1");
+        }
+        peer.send_all(tu::make_fix_wire(version, 2, "D", "BUY", "SELL", ord_fields));
         const auto m = wait_event(proc, "message");
         CHECK(tu::json_int_field(m, "business_messages").value_or(0) == 1);
 
@@ -109,6 +123,14 @@ int main(int argc, char** argv) {
                     exchange(binary, tmp.path, v, role, disp);
                 }
             }
+        }
+        const auto doc = tu::run_command({binary.string(), "doctor", "--json"}, tmp.path, {}, {}, false, 10'000);
+        if (doc.stdout_text.find("\"fix50sp2\"") != std::string::npos) {
+            exchange(binary, tmp.path, "FIX.4.2", "acceptor", "inline", "fix42");
+            exchange(binary, tmp.path, "FIX.4.3", "acceptor", "queued", "fix43");
+            exchange(binary, tmp.path, "FIX.4.4", "acceptor", "inline", "fix44");
+            exchange(binary, tmp.path, "FIXT.1.1", "acceptor", "inline", "fix50sp2");
+            exchange(binary, tmp.path, "FIXT.1.1", "initiator", "queued", "fix50sp2");
         }
     } catch (const std::exception& e) {
         std::cerr << "protocol_versions test error: " << e.what() << '\n';

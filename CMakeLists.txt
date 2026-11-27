@@ -110,8 +110,16 @@ endif()
 if(NIMBLEFIX_BUILD_STANDARD_SCHEMAS)
     foreach(standard fix42 fix43 fix44 fixt11 fix50sp2)
         string(TOUPPER "${standard}" standard_xml)
+        if(standard STREQUAL "fix50sp2")
+            set(standard_xml_files
+                "${CMAKE_CURRENT_SOURCE_DIR}/schemas/standard/FIXT11.xml"
+                "${CMAKE_CURRENT_SOURCE_DIR}/schemas/standard/FIX50SP2.xml")
+        else()
+            set(standard_xml_files
+                "${CMAKE_CURRENT_SOURCE_DIR}/schemas/standard/${standard_xml}.xml")
+        endif()
         nimblefix_generate_schema(TARGET ${standard} NAMESPACE nimblefix::${standard}
-            HEADER nimblefix/${standard}.hpp XML_FILES "${CMAKE_CURRENT_SOURCE_DIR}/schemas/standard/${standard_xml}.xml")
+            HEADER nimblefix/${standard}.hpp XML_FILES ${standard_xml_files})
         add_library(NimbleFIX::${standard} ALIAS ${standard})
         install(TARGETS ${standard} EXPORT NimbleFIXTargets)
         install(FILES "${${standard}_HEADER}" DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/nimblefix")
@@ -129,7 +137,11 @@ endif()
 if(NIMBLEFIX_BUILD_CLI)
     add_executable(nimblefix-cli
         tools/nimblefix/main.cpp
-        tools/nimblefix/config.cpp)
+        tools/nimblefix/config.cpp
+        tools/nimblefix/builtin_fix42.cpp
+        tools/nimblefix/builtin_fix43.cpp
+        tools/nimblefix/builtin_fix44.cpp
+        tools/nimblefix/builtin_fix50sp2.cpp)
     target_include_directories(nimblefix-cli PRIVATE tools/nimblefix third_party/tomlplusplus)
     set_target_properties(nimblefix-cli PROPERTIES OUTPUT_NAME nimblefix)
     if(NIMBLEFIX_BUILD_BENCHMARKS)
@@ -137,8 +149,8 @@ if(NIMBLEFIX_BUILD_CLI)
     endif()
     target_link_libraries(nimblefix-cli PRIVATE nimblefix)
     if(NIMBLEFIX_BUILD_STANDARD_SCHEMAS)
-        target_link_libraries(nimblefix-cli PRIVATE fix44)
-        target_compile_definitions(nimblefix-cli PRIVATE NIMBLEFIX_BUILTIN_FIX44=1)
+        target_link_libraries(nimblefix-cli PRIVATE fix42 fix43 fix44 fix50sp2)
+        target_compile_definitions(nimblefix-cli PRIVATE NIMBLEFIX_BUILTIN_STANDARD_SCHEMAS=1)
     endif()
     if(NIMBLEFIX_ENABLE_XML)
         target_link_libraries(nimblefix-cli PRIVATE nimblefix_xml)
@@ -206,6 +218,15 @@ if(NIMBLEFIX_BUILD_TESTS)
         add_executable(schema_nested_group-test tests/schema_nested_group_test.cpp)
         target_link_libraries(schema_nested_group-test PRIVATE nimblefix fix44)
         add_test(NAME schema_nested_group COMMAND schema_nested_group-test)
+
+        add_executable(multi_version_typed-test tests/multi_version_typed_test.cpp)
+        target_link_libraries(multi_version_typed-test PRIVATE nimblefix fix42 fix43 fix44 fix50sp2)
+        if(NIMBLEFIX_ENABLE_XML)
+            target_link_libraries(multi_version_typed-test PRIVATE nimblefix_xml)
+            target_compile_definitions(multi_version_typed-test PRIVATE NIMBLEFIX_ENABLE_XML=1)
+        endif()
+        add_test(NAME multi_version_typed COMMAND multi_version_typed-test "${CMAKE_CURRENT_SOURCE_DIR}/schemas/standard")
+        set_tests_properties(multi_version_typed PROPERTIES TIMEOUT 60)
     endif()
     if(NIMBLEFIX_BUILD_SAMPLE_SCHEMA)
         add_executable(direct_initiator-test tests/direct_initiator_test.cpp)

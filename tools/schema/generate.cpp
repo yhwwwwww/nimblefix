@@ -805,8 +805,112 @@ std::string render_header(const Schema& schema, std::string_view ns_arg) {
     };
 
     emit("namespace detail_validate {");
+    const std::vector<MemberDef> empty_ms;
+    const auto& header_members = schema.expanded_components.contains("Header") ? schema.expanded_components.at("Header") : empty_ms;
+    const auto& trailer_members = schema.expanded_components.contains("Trailer") ? schema.expanded_components.at("Trailer") : empty_ms;
+    std::set<std::uint32_t> header_scalar_tags, header_all_tags, trailer_scalar_tags, trailer_all_tags;
+    std::vector<std::tuple<std::uint32_t, std::size_t, bool>> header_groups, trailer_groups;
+    std::vector<const FieldDef*> env_scalars;
+    std::vector<bool> env_scalar_required;
+    std::set<std::uint32_t> env_scalar_seen;
+    std::vector<MemberDef> env_all_members;
+    for (const auto& m : header_members) {
+        const auto& fd = schema.fields_by_name.at(m.field_name);
+        const std::uint32_t t = fd.number;
+        header_all_tags.insert(t);
+        env_all_members.push_back(m);
+        if (m.kind == "field") {
+            header_scalar_tags.insert(t);
+            if (!session_or_frame_tags().contains(t) && env_scalar_seen.insert(t).second) {
+                env_scalars.push_back(&fd);
+                env_scalar_required.push_back(m.required);
+            }
+        } else {
+            header_groups.emplace_back(t, group_indexes.at(make_group_key(make_group_key, m)), m.required);
+        }
+    }
+    for (const auto& m : trailer_members) {
+        const auto& fd = schema.fields_by_name.at(m.field_name);
+        const std::uint32_t t = fd.number;
+        trailer_all_tags.insert(t);
+        env_all_members.push_back(m);
+        if (m.kind == "field") {
+            trailer_scalar_tags.insert(t);
+            if (!session_or_frame_tags().contains(t) && env_scalar_seen.insert(t).second) {
+                env_scalars.push_back(&fd);
+                env_scalar_required.push_back(m.required);
+            }
+        } else {
+            trailer_groups.emplace_back(t, group_indexes.at(make_group_key(make_group_key, m)), m.required);
+        }
+    }
+
+    // For mega-dictionaries (>128 distinct repeating group trees, e.g. full unpruned FIX 5.0 SP2),
+    // generate dedicated single-pass fast validators for all session/admin messages and latency-critical
+    // trading, quoting, and market-data messages, while delegating rare post-trade/reference-data
+    // messages to the table-driven descriptor validator (validate_schema_message_for_type_slow).
+    static const std::set<std::string_view> kCoreFastAppMsgTypes{
+        "D", "8", "F", "G", "9", "H", "q", "r", "s", "AB", "AC",
+        "S", "R", "Z", "i", "b", "V", "W", "X", "Y",
+    };
+    const bool selective_fast_validate = group_keys.size() > 128;
+    std::vector<bool> fast_msg_enabled(messages.size(), true);
+    bool has_slow_messages = false;
+    if (selective_fast_validate) {
+        for (std::size_t idx = 0; idx < messages.size(); ++idx) {
+            const MessageDef* m = messages[idx];
+            const bool keep = (m->category == "admin") || kCoreFastAppMsgTypes.contains(m->msg_type);
+            fast_msg_enabled[idx] = keep;
+            if (!keep) has_slow_messages = true;
+        }
+    }
+
+    std::vector<bool> fast_group_enabled(group_keys.size(), !selective_fast_validate);
+    if (selective_fast_validate) {
+        auto mark_group_tree = [&](auto&& self, std::size_t gi) -> void {
+            if (fast_group_enabled[gi]) return;
+            fast_group_enabled[gi] = true;
+            for (const auto& m : group_by_key.at(group_keys[gi])->members) {
+                if (m.kind == "group") {
+                    self(self, group_indexes.at(make_group_key(make_group_key, m)));
+                }
+            }
+        };
+        for (const auto& [_t, gi, _req] : header_groups) mark_group_tree(mark_group_tree, gi);
+        for (const auto& [_t, gi, _req] : trailer_groups) mark_group_tree(mark_group_tree, gi);
+        for (std::size_t idx = 0; idx < messages.size(); ++idx) {
+            if (!fast_msg_enabled[idx]) continue;
+            for (const auto& m : schema.expanded_messages.at(messages[idx]->name)) {
+                if (m.kind == "group") {
+                    mark_group_tree(mark_group_tree, group_indexes.at(make_group_key(make_group_key, m)));
+                }
+            }
+        }
+    }
+
+    std::set<std::uint32_t> fast_enum_tags;
+    for (const FieldDef* ef : env_scalars) {
+        if (!ef->enum_values.empty()) fast_enum_tags.insert(ef->number);
+    }
+    for (std::size_t gi = 0; gi < group_keys.size(); ++gi) {
+        if (!fast_group_enabled[gi]) continue;
+        for (const auto& m : group_by_key.at(group_keys[gi])->members) {
+            if (m.kind != "field") continue;
+            const auto& fd = schema.fields_by_name.at(m.field_name);
+            if (!fd.enum_values.empty()) fast_enum_tags.insert(fd.number);
+        }
+    }
+    for (std::size_t idx = 0; idx < messages.size(); ++idx) {
+        if (!fast_msg_enabled[idx]) continue;
+        for (const auto& m : schema.expanded_messages.at(messages[idx]->name)) {
+            if (m.kind != "field") continue;
+            const auto& fd = schema.fields_by_name.at(m.field_name);
+            if (!fd.enum_values.empty()) fast_enum_tags.insert(fd.number);
+        }
+    }
+
     for (const FieldDef* f : fields) {
-        if (f->enum_values.empty()) continue;
+        if (f->enum_values.empty() || !fast_enum_tags.contains(f->number)) continue;
         const std::string& fc = fix_field_classes().at(f->field_type);
         std::vector<unsigned char> e1;
         std::vector<unsigned> e2;
@@ -891,45 +995,6 @@ std::string render_header(const Schema& schema, std::string_view ns_arg) {
         emit("[[nodiscard]] inline bool " + fn_name + "(std::uint32_t tag) noexcept { switch (tag) { " + cases + " return true; default: return false; } }");
     };
 
-    const std::vector<MemberDef> empty_ms;
-    const auto& header_members = schema.expanded_components.contains("Header") ? schema.expanded_components.at("Header") : empty_ms;
-    const auto& trailer_members = schema.expanded_components.contains("Trailer") ? schema.expanded_components.at("Trailer") : empty_ms;
-    std::set<std::uint32_t> header_scalar_tags, header_all_tags, trailer_scalar_tags, trailer_all_tags;
-    std::vector<std::tuple<std::uint32_t, std::size_t, bool>> header_groups, trailer_groups;
-    std::vector<const FieldDef*> env_scalars;
-    std::vector<bool> env_scalar_required;
-    std::set<std::uint32_t> env_scalar_seen;
-    std::vector<MemberDef> env_all_members;
-    for (const auto& m : header_members) {
-        const auto& fd = schema.fields_by_name.at(m.field_name);
-        const std::uint32_t t = fd.number;
-        header_all_tags.insert(t);
-        env_all_members.push_back(m);
-        if (m.kind == "field") {
-            header_scalar_tags.insert(t);
-            if (!session_or_frame_tags().contains(t) && env_scalar_seen.insert(t).second) {
-                env_scalars.push_back(&fd);
-                env_scalar_required.push_back(m.required);
-            }
-        } else {
-            header_groups.emplace_back(t, group_indexes.at(make_group_key(make_group_key, m)), m.required);
-        }
-    }
-    for (const auto& m : trailer_members) {
-        const auto& fd = schema.fields_by_name.at(m.field_name);
-        const std::uint32_t t = fd.number;
-        trailer_all_tags.insert(t);
-        env_all_members.push_back(m);
-        if (m.kind == "field") {
-            trailer_scalar_tags.insert(t);
-            if (!session_or_frame_tags().contains(t) && env_scalar_seen.insert(t).second) {
-                env_scalars.push_back(&fd);
-                env_scalar_required.push_back(m.required);
-            }
-        } else {
-            trailer_groups.emplace_back(t, group_indexes.at(make_group_key(make_group_key, m)), m.required);
-        }
-    }
     emit_tag_pred("is_header_scalar_tag", header_scalar_tags);
     emit_tag_pred("is_header_tag", header_all_tags);
     emit_tag_pred("is_trailer_scalar_tag", trailer_scalar_tags);
@@ -986,6 +1051,7 @@ std::string render_header(const Schema& schema, std::string_view ns_arg) {
 
     // Leaf-first group validators
     for (std::size_t g_idx : group_emit_order) {
+        if (!fast_group_enabled[g_idx]) continue;
         const MemberDef* g = group_by_key.at(group_keys[g_idx]);
         const auto& gm = g->members;
         const std::uint32_t count_tag = schema.fields_by_name.at(g->field_name).number;
@@ -1006,7 +1072,8 @@ std::string render_header(const Schema& schema, std::string_view ns_arg) {
             }
         }
 
-        emit("[[nodiscard]] inline ::nimblefix::Status validate_group_" + std::to_string(g_idx) + "(");
+        const std::string grp_attr = gm.size() > 8 ? "[[gnu::noinline]] [[nodiscard]]" : "[[nodiscard]]";
+        emit(grp_attr + " inline ::nimblefix::Status validate_group_" + std::to_string(g_idx) + "(");
         emit("    std::span<const ::nimblefix::FieldView> fields,");
         emit("    std::size_t& cursor,");
         emit("    ::nimblefix::ValidationLevel level,");
@@ -1128,6 +1195,7 @@ std::string render_header(const Schema& schema, std::string_view ns_arg) {
 
     // Per-message single-pass validators
     for (std::size_t msg_idx = 0; msg_idx < messages.size(); ++msg_idx) {
+        if (!fast_msg_enabled[msg_idx]) continue;
         const MessageDef* msg = messages[msg_idx];
         const auto& mm = schema.expanded_messages.at(msg->name);
         bool msg_has_groups = false;
@@ -1170,7 +1238,7 @@ std::string render_header(const Schema& schema, std::string_view ns_arg) {
             }
         }
 
-        emit("[[nodiscard]] inline ::nimblefix::Status validate_msg_" + std::to_string(msg_idx) + "(");
+        emit("[[gnu::noinline]] [[nodiscard]] inline ::nimblefix::Status validate_msg_" + std::to_string(msg_idx) + "(");
         emit("    std::span<const ::nimblefix::FieldView> fields,");
         emit("    ::nimblefix::ValidationLevel level,");
         emit("    ::nimblefix::detail::ParsedFieldIndex* out_index) noexcept {");
@@ -1376,6 +1444,7 @@ std::string render_header(const Schema& schema, std::string_view ns_arg) {
     std::vector<std::pair<unsigned, std::size_t>> m2;
     std::vector<std::pair<std::string, std::size_t>> m_other;
     for (std::size_t idx = 0; idx < messages.size(); ++idx) {
+        if (!fast_msg_enabled[idx]) continue;
         const auto& mt = messages[idx]->msg_type;
         if (mt.size() == 1) m1.emplace_back(static_cast<unsigned char>(mt[0]), idx);
         else if (mt.size() == 2) m2.emplace_back((static_cast<unsigned>(static_cast<unsigned char>(mt[0])) << 8U) | static_cast<unsigned char>(mt[1]), idx);
@@ -1405,8 +1474,14 @@ std::string render_header(const Schema& schema, std::string_view ns_arg) {
     for (const auto& [mt, idx] : m_other) {
         emit("    if (msg_type == " + cpp_string(mt) + ") return validate_msg_" + std::to_string(idx) + "(fields, level, out_index);");
     }
-    emit("    if (out_index != nullptr) out_index->invalidate();");
-    emit("    return {::nimblefix::ErrorCode::unsupported, 35, msg_type_offset};");
+    if (has_slow_messages) {
+        emit("    return ::nimblefix::detail::validate_schema_message_for_type_slow(");
+        emit("        schema_descriptor, msg_type, msg_type_offset, fields, level, out_index,");
+        emit("        ::nimblefix::UnexpectedFieldPolicy::reject, nullptr);");
+    } else {
+        emit("    if (out_index != nullptr) out_index->invalidate();");
+        emit("    return {::nimblefix::ErrorCode::unsupported, ::nimblefix::tag::msg_type, msg_type_offset};");
+    }
     emit("}");
     emit("} // namespace detail_validate");
     emit("");

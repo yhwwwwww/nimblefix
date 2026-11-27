@@ -52,8 +52,10 @@ constexpr std::string_view unpaired_data_document =
 
 } // namespace
 
-int main() {
+int main(int argc, char** argv) {
     using namespace nimblefix;
+    std::filesystem::path schemas_root = std::filesystem::current_path() / "schemas";
+    if (argc >= 2) schemas_root = std::filesystem::path{argv[1]};
     const auto directory = std::filesystem::temp_directory_path() / "nimblefix-xml-schema-test";
     std::error_code ignored;
     std::filesystem::remove_all(directory, ignored);
@@ -127,6 +129,27 @@ int main() {
     CHECK(load_xml_schema(complete_paths, preserved, diagnostic, tiny).code == ErrorCode::capacity_exceeded);
     CHECK(diagnostic.source == complete_name);
     CHECK(preserved.fingerprint() == original_fingerprint);
+
+    // Combined FIXT11.xml + FIX50SP2.xml runtime load & order-independent fingerprint
+    const auto fixt11_path = (schemas_root / "standard" / "FIXT11.xml").string();
+    const auto fix50sp2_path = (schemas_root / "standard" / "FIX50SP2.xml").string();
+    if (std::filesystem::is_regular_file(fixt11_path) && std::filesystem::is_regular_file(fix50sp2_path)) {
+        XmlSchema fixt_app_a{};
+        XmlSchema fixt_app_b{};
+        const std::array<std::string_view, 2> order_ab{fixt11_path, fix50sp2_path};
+        const std::array<std::string_view, 2> order_ba{fix50sp2_path, fixt11_path};
+        CHECK(load_xml_schema(order_ab, fixt_app_a, diagnostic).ok());
+        CHECK(load_xml_schema(order_ba, fixt_app_b, diagnostic).ok());
+        CHECK(fixt_app_a.fingerprint() == fixt_app_b.fingerprint());
+        CHECK(fixt_app_a.descriptor().type == "FIX");
+        CHECK(fixt_app_a.descriptor().version == "5.0.2");
+        CHECK(fixt_app_a.descriptor().matches_session(FixVersion::fixt11, appl_ver_id::fix50sp2));
+        CHECK(!fixt_app_a.descriptor().matches_session(FixVersion::fix44, {}));
+        CHECK(fixt_app_a.find_message(msg_type::logon) != nullptr);
+        CHECK(fixt_app_a.find_message(msg_type::new_order_single) != nullptr);
+        CHECK(fixt_app_a.descriptor().header() != nullptr && !fixt_app_a.descriptor().header()->members.empty());
+        CHECK(fixt_app_a.descriptor().trailer() != nullptr && !fixt_app_a.descriptor().trailer()->members.empty());
+    }
 
     std::filesystem::remove_all(directory, ignored);
     return failures == 0 ? 0 : 1;

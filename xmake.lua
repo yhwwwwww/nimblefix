@@ -142,10 +142,18 @@ if has_config("standard_schemas") then
                 import("core.project.project")
                 local gen = project.target("nimblefix-schema-gen"):targetfile()
                 local output = path.join(generated_dir, "nimblefix", schema .. ".hpp")
-                local xml = path.join("schemas", "standard", schema:upper() .. ".xml")
+                local xmls = {}
+                if schema == "fix50sp2" then
+                    xmls = {path.join("schemas", "standard", "FIXT11.xml"),
+                            path.join("schemas", "standard", "FIX50SP2.xml")}
+                else
+                    xmls = {path.join("schemas", "standard", schema:upper() .. ".xml")}
+                end
+                local dep_files = table.join(xmls, {gen})
+                local argv = table.join({"--output", output, "--namespace", "nimblefix::" .. schema}, xmls)
                 depend.on_changed(function ()
-                    os.vrunv(gen, {"--output", output, "--namespace", "nimblefix::" .. schema, xml})
-                end, {files = {xml, gen}, values = {output},
+                    os.vrunv(gen, argv)
+                end, {files = dep_files, values = {output},
                       changed = not os.isfile(output)})
             end)
         target_end()
@@ -173,14 +181,16 @@ if has_config("cli") then
         set_kind("binary")
         set_basename("nimblefix")
         set_rundir("$(projectdir)")
-        add_files("tools/nimblefix/main.cpp", "tools/nimblefix/config.cpp")
+        add_files("tools/nimblefix/main.cpp", "tools/nimblefix/config.cpp",
+                  "tools/nimblefix/builtin_fix42.cpp", "tools/nimblefix/builtin_fix43.cpp",
+                  "tools/nimblefix/builtin_fix44.cpp", "tools/nimblefix/builtin_fix50sp2.cpp")
         add_includedirs("tools/nimblefix", "third_party/tomlplusplus")
         if has_config("benchmarks") then add_defines("NIMBLEFIX_ENABLE_BENCH=1") end
         add_deps("nimblefix")
         if has_config("standard_schemas") then
-            add_deps("fix44-schema")
+            add_deps("fix42-schema", "fix43-schema", "fix44-schema", "fix50sp2-schema")
             add_includedirs(generated_dir)
-            add_defines("NIMBLEFIX_BUILTIN_FIX44=1")
+            add_defines("NIMBLEFIX_BUILTIN_STANDARD_SCHEMAS=1")
         end
         if has_config("xml") then
             add_deps("nimblefix-xml")
@@ -271,6 +281,19 @@ if has_config("tests") then
             add_deps("nimblefix", "fix44-schema")
             add_includedirs(generated_dir)
             add_tests("default", {run_timeout = 30000})
+        target_end()
+
+        target("multi_version_typed-test")
+            set_kind("binary")
+            set_rundir("$(projectdir)")
+            add_files("tests/multi_version_typed_test.cpp")
+            add_deps("nimblefix", "fix42-schema", "fix43-schema", "fix44-schema", "fix50sp2-schema")
+            if has_config("xml") then
+                add_deps("nimblefix-xml")
+                add_defines("NIMBLEFIX_ENABLE_XML=1")
+            end
+            add_includedirs(generated_dir)
+            add_tests("default", {runargs = {"schemas/standard"}, run_timeout = 60000})
         target_end()
     end
     if has_config("xml") then

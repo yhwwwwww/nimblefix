@@ -643,39 +643,125 @@ inline Schema load_schema(const std::vector<std::filesystem::path>& paths) {
         docs.push_back(parse_document(data, path.string()));
     }
 
-    const auto& first_id = docs.front().identity;
+    auto id_attr = [](const std::vector<std::pair<std::string, std::string>>& id,
+                      std::string_view key) -> std::string_view {
+        for (const auto& [k, v] : id) {
+            if (k == key) return v;
+        }
+        return {};
+    };
+    auto is_fixt11_id = [&](const std::vector<std::pair<std::string, std::string>>& id) -> bool {
+        return id_attr(id, "type") == "FIXT" &&
+               id_attr(id, "major") == "1" &&
+               id_attr(id, "minor") == "1";
+    };
+    auto is_fix5_app_id = [&](const std::vector<std::pair<std::string, std::string>>& id) -> bool {
+        const auto maj = id_attr(id, "major");
+        return id_attr(id, "type") == "FIX" && !maj.empty() &&
+               (maj.size() > 1 || maj[0] >= '5');
+    };
+
+    std::vector<std::pair<std::string, std::string>> merged_id = docs.front().identity;
+    bool all_same_id = true;
     for (std::size_t i = 1; i < docs.size(); ++i) {
-        if (docs[i].identity != first_id) {
+        if (docs[i].identity != merged_id) {
+            all_same_id = false;
+            break;
+        }
+    }
+
+    bool is_fixt_app_combo = false;
+    std::vector<const ParsedDocument*> ordered_docs;
+    ordered_docs.reserve(docs.size());
+    if (all_same_id) {
+        for (const auto& d : docs) ordered_docs.push_back(&d);
+    } else {
+        const std::vector<std::pair<std::string, std::string>>* fixt_id = nullptr;
+        const std::vector<std::pair<std::string, std::string>>* app_id = nullptr;
+        bool valid_combo = true;
+        for (const auto& d : docs) {
+            if (is_fixt11_id(d.identity)) {
+                if (fixt_id == nullptr) fixt_id = &d.identity;
+                else if (*fixt_id != d.identity) { valid_combo = false; break; }
+            } else if (is_fix5_app_id(d.identity)) {
+                if (app_id == nullptr) app_id = &d.identity;
+                else if (*app_id != d.identity) { valid_combo = false; break; }
+            } else {
+                valid_combo = false;
+                break;
+            }
+        }
+        if (!valid_combo || fixt_id == nullptr || app_id == nullptr) {
             std::vector<Location> locs;
             for (const auto& d : docs) locs.push_back(d.root_location);
             throw SchemaError("conflicting FIX schema identity/version across XML inputs: " + format_locations(std::move(locs)));
         }
+        is_fixt_app_combo = true;
+        merged_id = *app_id;
+        for (const auto& d : docs) {
+            if (!is_fixt11_id(d.identity)) ordered_docs.push_back(&d);
+        }
+        for (const auto& d : docs) {
+            if (is_fixt11_id(d.identity)) ordered_docs.push_back(&d);
+        }
     }
+
+    auto compatible_fixt_field = [](const FieldDef& app_f, const FieldDef& fixt_f) -> bool {
+        if (app_f.number != fixt_f.number || app_f.name != fixt_f.name) return false;
+        const bool same_or_data = app_f.field_type == fixt_f.field_type ||
+            ((app_f.field_type == "DATA" || app_f.field_type == "XMLDATA") &&
+             (fixt_f.field_type == "DATA" || fixt_f.field_type == "XMLDATA"));
+        if (!same_or_data) return false;
+        for (const auto& [ev, _desc] : fixt_f.enum_values) {
+            const bool found = std::any_of(app_f.enum_values.begin(), app_f.enum_values.end(),
+                [&ev](const auto& item) { return item.first == ev; });
+            if (!found) return false;
+        }
+        return true;
+    };
 
     std::map<std::string, FieldDef> fields_by_name;
     std::map<std::uint32_t, std::string> name_by_number;
-    for (const auto& doc : docs) {
+    std::set<std::string> app_field_names;
+    for (const ParsedDocument* doc_ptr : ordered_docs) {
+        const auto& doc = *doc_ptr;
+        const bool from_fixt = is_fixt_app_combo && is_fixt11_id(doc.identity);
         for (const auto& f : doc.fields) {
             const FieldDef* prev = nullptr;
             if (const auto it = fields_by_name.find(f.name); it != fields_by_name.end()) prev = &it->second;
             else if (const auto nit = name_by_number.find(f.number); nit != name_by_number.end()) prev = &fields_by_name.at(nit->second);
-            if (prev != nullptr && !prev->same_signature(f)) {
-                throw SchemaError(
-                    "conflicting field definition for '" + f.name + "' (tag " + std::to_string(f.number) +
-                    "); definitions at " + format_locations({prev->location, f.location}));
-            }
-            if (prev == nullptr) {
+            if (prev != nullptr) {
+                if (from_fixt && app_field_names.contains(prev->name)) {
+                    if (!compatible_fixt_field(*prev, f)) {
+                        throw SchemaError(
+                            "conflicting field definition for '" + f.name + "' (tag " + std::to_string(f.number) +
+                            "); definitions at " + format_locations({prev->location, f.location}));
+                    }
+                    continue;
+                }
+                if (!prev->same_signature(f)) {
+                    throw SchemaError(
+                        "conflicting field definition for '" + f.name + "' (tag " + std::to_string(f.number) +
+                        "); definitions at " + format_locations({prev->location, f.location}));
+                }
+            } else {
                 fields_by_name.emplace(f.name, f);
                 name_by_number.emplace(f.number, f.name);
+                if (!from_fixt) app_field_names.insert(f.name);
             }
         }
     }
 
     std::map<std::string, ComponentDef> components_by_name;
-    for (const auto& doc : docs) {
+    for (const ParsedDocument* doc_ptr : ordered_docs) {
+        const auto& doc = *doc_ptr;
         for (const auto& c : doc.components) {
             if (const auto it = components_by_name.find(c.name); it != components_by_name.end()) {
-                if (!it->second.same_signature(c)) {
+                if (is_fixt_app_combo && it->second.members.empty() && !c.members.empty()) {
+                    it->second = c;
+                } else if (is_fixt_app_combo && !it->second.members.empty() && c.members.empty()) {
+                    continue;
+                } else if (!it->second.same_signature(c)) {
                     throw SchemaError(
                         "conflicting component definition for '" + c.name + "'; definitions at " +
                         format_locations({it->second.location, c.location}));
@@ -688,7 +774,8 @@ inline Schema load_schema(const std::vector<std::filesystem::path>& paths) {
 
     std::map<std::string, MessageDef> messages_by_name;
     std::map<std::string, std::string> name_by_msg_type;
-    for (const auto& doc : docs) {
+    for (const ParsedDocument* doc_ptr : ordered_docs) {
+        const auto& doc = *doc_ptr;
         for (const auto& m : doc.messages) {
             const MessageDef* prev = nullptr;
             if (const auto it = messages_by_name.find(m.name); it != messages_by_name.end()) prev = &it->second;
@@ -763,7 +850,7 @@ inline Schema load_schema(const std::vector<std::filesystem::path>& paths) {
     }
 
     Schema schema{};
-    schema.identity = first_id;
+    schema.identity = std::move(merged_id);
     schema.fields_by_name = std::move(fields_by_name);
     schema.messages_by_name = std::move(messages_by_name);
     schema.components_by_name = std::move(components_by_name);

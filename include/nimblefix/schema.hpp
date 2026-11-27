@@ -195,6 +195,25 @@ struct SchemaDescriptor {
         for (const auto& message : messages) if (message.name == name) return &message;
         return nullptr;
     }
+
+    [[nodiscard]] constexpr const ComponentDescriptor* find_component(std::string_view name) const noexcept {
+        for (const auto& comp : components) if (comp.name == name) return &comp;
+        return nullptr;
+    }
+
+    [[nodiscard]] constexpr const ComponentDescriptor* header() const noexcept {
+        return (header_component_index >= 0 &&
+                static_cast<std::size_t>(header_component_index) < components.size())
+            ? &components[static_cast<std::size_t>(header_component_index)]
+            : find_component("Header");
+    }
+
+    [[nodiscard]] constexpr const ComponentDescriptor* trailer() const noexcept {
+        return (trailer_component_index >= 0 &&
+                static_cast<std::size_t>(trailer_component_index) < components.size())
+            ? &components[static_cast<std::size_t>(trailer_component_index)]
+            : find_component("Trailer");
+    }
 };
 
 template <class Schema, std::uint32_t Tag>

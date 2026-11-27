@@ -1,12 +1,10 @@
+#include "builtin_schemas.hpp"
 #include "config.hpp"
 #include <nimblefix/journal.hpp>
 #include <nimblefix/replay.hpp>
 #include <nimblefix/telemetry.hpp>
 #include <nimblefix/tls.hpp>
 
-#if defined(NIMBLEFIX_BUILTIN_FIX44)
-#include <nimblefix/fix44.hpp>
-#endif
 #if defined(NIMBLEFIX_ENABLE_XML)
 #include <nimblefix/xml_schema.hpp>
 #endif
@@ -322,21 +320,21 @@ int validate_application_versions(const nf::ConfigDocument& configuration, const
         return schema.descriptor->matches_session(settings.version, settings.default_appl_ver_id);
     };
     for (const auto& session : configuration.initiators) if (!valid(session.settings))
-        return problem(args, {nf::ErrorCode::unsupported_protocol, 8}, "dictionary version does not match initiator " + session.name);
+        return problem(args, {nf::ErrorCode::unsupported_protocol, nf::tag::begin_string}, "dictionary version does not match initiator " + session.name);
     for (const auto& session : configuration.acceptors) if (!valid(session.settings))
-        return problem(args, {nf::ErrorCode::unsupported_protocol, 8}, "dictionary version does not match acceptor " + session.name);
+        return problem(args, {nf::ErrorCode::unsupported_protocol, nf::tag::begin_string}, "dictionary version does not match acceptor " + session.name);
     return 0;
 }
 
 int load_application_schema(const nf::ConfigDocument& configuration, const Arguments& args, ApplicationSchema& result) {
-    (void)result;
-    if (configuration.schema == "fix44") {
-#if defined(NIMBLEFIX_BUILTIN_FIX44)
-        result.descriptor = &nf::fix44::Schema::descriptor();
-        result.hints = nf::fix44::Schema::wire_hints();
-#else
-        return problem(args, {nf::ErrorCode::unsupported}, "this build does not contain the complete FIX44 schema");
-#endif
+    if (configuration.schema != "none") {
+        const auto builtin = nf::cli_builtin::find_standard_schema(configuration.schema);
+        if (builtin.descriptor == nullptr) {
+            return problem(args, {nf::ErrorCode::unsupported},
+                "this build does not contain the generated " + configuration.schema + " schema");
+        }
+        result.descriptor = builtin.descriptor;
+        result.hints = builtin.hints;
     }
     if (configuration.dictionaries.empty()) return validate_application_versions(configuration, args, result);
 #if defined(NIMBLEFIX_ENABLE_XML)
@@ -932,26 +930,26 @@ int run(const nf::ConfigDocument &configuration, const Arguments &args) {
     ApplicationSchema application;
     const auto checked = load_application_schema(configuration, args, application);
     if (checked != 0) return checked;
-    auto engine_config = configuration.engine;
+    nf::ConfigDocument effective_doc = configuration;
+    auto engine_config = effective_doc.engine;
     engine_config.wire_hints = application.hints;
-#if defined(NIMBLEFIX_ENABLE_XML)
-    if (application.descriptor != nullptr && configuration.schema == "none")
-        engine_config.message_validator = [application](const nf::FlatMessageView& message) {
-            return nf::validate_schema_message(*application.descriptor, message, nf::ValidationLevel::strict);
-        };
-#endif
-    const bool queued = configuration.dispatch == nf::ConfigDispatch::queued_callbacks;
-    if (configuration.schema == "fix44") {
-#if defined(NIMBLEFIX_BUILTIN_FIX44)
-        return queued ? run_engine<nf::fix44::Schema, nf::Queued>(configuration, args, std::move(engine_config))
-                      : run_engine<nf::fix44::Schema, nf::Inline>(configuration, args, std::move(engine_config));
-#else
-        std::cerr << "this build does not include the FIX44 generated schema\n";
-        return 2;
-#endif
+    if (application.descriptor != nullptr) {
+        for (auto& s : effective_doc.initiators) {
+            if (s.settings.schema == nullptr) {
+                s.settings.schema = application.descriptor;
+                s.settings.schema_wire_hints = application.hints;
+            }
+        }
+        for (auto& s : effective_doc.acceptors) {
+            if (s.settings.schema == nullptr) {
+                s.settings.schema = application.descriptor;
+                s.settings.schema_wire_hints = application.hints;
+            }
+        }
     }
-    return queued ? run_engine<nf::FlatSchema, nf::Queued>(configuration, args, std::move(engine_config))
-                  : run_engine<nf::FlatSchema, nf::Inline>(configuration, args, std::move(engine_config));
+    const bool queued = effective_doc.dispatch == nf::ConfigDispatch::queued_callbacks;
+    return queued ? run_engine<nf::FlatSchema, nf::Queued>(effective_doc, args, std::move(engine_config))
+                  : run_engine<nf::FlatSchema, nf::Inline>(effective_doc, args, std::move(engine_config));
 }
 
 int doctor(const Arguments &args) {
@@ -960,11 +958,7 @@ int doctor(const Arguments &args) {
 #else
     constexpr bool xml = false;
 #endif
-#if defined(NIMBLEFIX_BUILTIN_FIX44)
-    constexpr bool fix44 = true;
-#else
-    constexpr bool fix44 = false;
-#endif
+    const bool std_schemas = nf::cli_builtin::has_standard_schemas();
 #if defined(NIMBLEFIX_ENABLE_BENCH)
     constexpr bool bench = true;
 #else
@@ -982,7 +976,8 @@ int doctor(const Arguments &args) {
         std::cout << "{\"version\":" << quote(version)
                   << ",\"tls\":" << (nf::tls_available() ? "true" : "false")
                   << ",\"io_uring\":" << (nf::io_uring_available() ? "true" : "false")
-                  << ",\"xml\":" << (xml ? "true" : "false") << ",\"fix44\":" << (fix44 ? "true" : "false")
+                  << ",\"xml\":" << (xml ? "true" : "false") << ",\"fix44\":" << (std_schemas ? "true" : "false")
+                  << ",\"schemas\":" << (std_schemas ? "[\"fix42\",\"fix43\",\"fix44\",\"fix50sp2\"]" : "[]")
                   << ",\"benchmarks\":" << (bench ? "true" : "false")
                   << ",\"journal_format\":2,\"configuration_version\":1,\"source_api\":\"0.3.x\""
                   << ",\"confirmation\":\"appended\",\"dispatch\":[\"inline\",\"queued\"],\"io_backends\":[\"epoll\",\"busy_poll\""
@@ -991,7 +986,8 @@ int doctor(const Arguments &args) {
     else
         std::cout << "NimbleFIX " << version << "\nTLS: " << (nf::tls_available() ? "OpenSSL" : "not built")
                   << "\nio_uring: " << (nf::io_uring_available() ? "liburing" : "not built")
-                  << "\nXML: " << (xml ? "libxml2" : "not built") << "\nFIX44: " << (fix44 ? "complete" : "not built")
+                  << "\nXML: " << (xml ? "libxml2" : "not built")
+                  << "\nSchemas: " << (std_schemas ? "fix42, fix43, fix44, fix50sp2" : "not built")
                   << "\nBenchmarks: " << (bench ? "built" : "not built") << "\nDispatch: inline, queued\nStore: mmap appended, v2\n";
     return 0;
 }
